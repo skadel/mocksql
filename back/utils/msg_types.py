@@ -1,0 +1,25 @@
+from enum import Enum
+
+
+class MsgType(str, Enum):
+    SQL = "sql"
+    QUERY = "query"
+    PROVIDED_SQL = "provided_sql"
+    SQL_UPDATE = "sql_update"
+    USER_SQL = "user_sql"
+    USER_EXAMPLES = "user_examples"
+    EXAMPLES = "examples"
+    EXAMPLES_INSTRUCTION = "examples_instruction"
+    REASONING = "reasoning"
+    RESULTS = "results"
+    DATA_RESULTS = "data_results"
+    OTHER = "other"
+    ERROR = "error"
+    ERROR_SQL = "error_sql"
+    SQL_ERROR = "sql_error"
+    ROUTE = "route"
+    EXPLANATION = "explanation"
+    EXPLANATION_REQUEST = "explanation_request"
+    PROFILE_QUERY = "profile_query"
+    PROFILE_RESULT = "profile_result"
+    EVALUATION = "evaluation"
