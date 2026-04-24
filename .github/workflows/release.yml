@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write
+  id-token: write  # PyPI trusted publishing
+
+jobs:
+  # ── Tests ──────────────────────────────────────────────────────────────────
+  backend-tests:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: back
+    env:
+      DB_CONNECTION_TYPE: duckdb
+      DUCKDB_PATH: ":memory:"
+      PROJECT_ID: ci-project
+      BQ_TEST_PROJECT_ID: ci-project
+      BQ_EXEC_PROJECT_ID: ci-project
+      BQ_REGION: US
+      BQ_SANDBOX_MODE: "true"
+      DEFAULT_MODEL_NAME: gemini-2.0-flash-lite
+      RETRIEVAL_MODE: bm25
+      LITERALS_TABLE_NAME: lit
+      RES_DATASET: res_dataset
+      FRONT_URL: http://localhost:3000
+      LOG_LEVEL: WARNING
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+      - uses: actions/cache@v4
+        with:
+          path: back/.venv
+          key: poetry-${{ hashFiles('back/poetry.lock') }}
+      - run: poetry install --no-root
+      - run: poetry run pytest tests/ -v --tb=short
+
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - run: npm ci
+      - name: Build
+        env:
+          CI: "false"
+          REACT_APP_BACKEND_URL: ""
+        run: npm run build
+      - name: Package frontend
+        run: tar -czf ../frontend-dist.tar.gz build/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist.tar.gz
+
+  # ── Build Python package ───────────────────────────────────────────────────
+  build-python:
+    name: Build Python package
+    needs: backend-tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: back
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+      - uses: actions/cache@v4
+        with:
+          path: back/.venv
+          key: poetry-${{ hashFiles('back/poetry.lock') }}
+      - run: poetry install --no-root
+      - name: Extract version
+        id: meta
+        run: echo "version=$(poetry version -s)" >> "$GITHUB_OUTPUT"
+      - name: Build wheel + sdist
+        run: poetry build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: back/dist/
+
+  # ── Publish to PyPI ────────────────────────────────────────────────────────
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build-python
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/mocksql/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
+
+  # ── GitHub Release ─────────────────────────────────────────────────────────
+  github-release:
+    name: Create GitHub Release
+    needs: [build-python, publish-pypi, frontend-build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist/python/
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist/frontend/
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/python/*
+            dist/frontend/*
+          generate_release_notes: true
+          make_latest: true

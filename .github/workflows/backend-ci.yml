@@ -1,0 +1,84 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "back/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "back/**"
+      - ".github/workflows/backend-ci.yml"
+
+defaults:
+  run:
+    working-directory: back
+
+jobs:
+  lint:
+    name: Lint (ruff + vulture)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Cache Poetry venv
+        uses: actions/cache@v4
+        with:
+          path: back/.venv
+          key: poetry-${{ hashFiles('back/poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-root
+
+      - name: Run style checks
+        run: poetry run make style
+
+  test:
+    name: Tests (pytest)
+    runs-on: ubuntu-latest
+    env:
+      DB_CONNECTION_TYPE: duckdb
+      DUCKDB_PATH: ":memory:"
+      PROJECT_ID: ci-project
+      BQ_TEST_PROJECT_ID: ci-project
+      BQ_EXEC_PROJECT_ID: ci-project
+      BQ_REGION: US
+      BQ_SANDBOX_MODE: "true"
+      DEFAULT_MODEL_NAME: gemini-2.0-flash-lite
+      RETRIEVAL_MODE: bm25
+      LITERALS_TABLE_NAME: lit
+      RES_DATASET: res_dataset
+      FRONT_URL: http://localhost:3000
+      LOG_LEVEL: WARNING
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        run: pip install poetry
+
+      - name: Cache Poetry venv
+        uses: actions/cache@v4
+        with:
+          path: back/.venv
+          key: poetry-${{ hashFiles('back/poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-root
+
+      - name: Run tests
+        run: poetry run pytest tests/ -v --tb=short
