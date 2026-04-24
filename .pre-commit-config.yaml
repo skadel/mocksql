@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: backend-style
+        name: backend style (ruff + vulture)
+        entry: bash -c 'cd back && make style'
+        language: system
+        pass_filenames: false
+        types: [python]

@@ -1,0 +1,57 @@
+{
+  "welcome": "Welcome to MockSQL!",
+  "description": "Ask questions about your data and validate the results on generated data.",
+  "examples": "I have generated sample data based on your information. I will run the query on these samples.",
+  "after_examples": "You can modify this examples and upload them back.",
+  "sql": "SQL code generated and compiled.",
+  "steps": "Steps :",
+  "result": "Here are the results on the generated examples.",
+  "empty_results": "No results.",
+  "empty_table": "No items found in the current table.",
+  "queries": {
+    "example1": "Show me the total sales for last month.",
+    "example2": "List all orders that were delivered this week.",
+    "example3": "What are the top 5 products by revenue?",
+    "example4": "Give me a breakdown of sales by category.",
+    "example5": "How many new customers did we acquire last quarter?"
+  },
+  "loading": {
+    "generating_query": "Generating query",
+    "generating_examples": "Generating examples",
+    "fixing_query": "Query compilation failed, trying to fix query",
+    "executing_query": "Executing query",
+    "executing_query_examples": "Executing query on examples",
+    "validate_query": "Compiling generated query.",
+    "failed_step": "Failed in step",
+    "empty_results": "Query returned 0 result, trying to add new examples ..."
+  },
+  "action": {
+    "download": "Download from bigquery",
+    "create": "Create table in BigQuery",
+    "download_examples": "Download",
+    "send": "Send",
+    "fix": "Fix",
+    "cancel": "Cancel"
+  },
+  "errors": {
+    "failed_to_fetch_messages": "failed to load messages",
+    "session_expired": "session expired"
+  },
+  "search_models": "Search Models",
+  "confirm_delete": "Confirm Delete",
+  "delete_confirmation_text": "Are you sure you want to delete this Model?",
+  "cancel": "Cancel",
+  "confirm": "Confirm",
+  "delete": "Delete",
+  "rename": "Rename",
+  "share": "Share",
+  "logout": "Logout",
+  "sign_in_with_google": "Sign in with Google",
+  "no_tables": "No tables added yet. Use the uploader or add tables manually.",
+  "no_output_results": "No output results.",
+  "mark_source_short": "Mark source",
+  "unmark_source_short": "Remove source",
+  "mark_source_full": "Add this model as a source",
+  "unmark_source_full": "No longer consider this model as a source",
+  "rows_per_page": "rows per page"
+}

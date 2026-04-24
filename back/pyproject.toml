@@ -1,0 +1,92 @@
+[tool.poetry]
+name = "mocksql"
+version = "0.1.0"
+description = "TDD engine for Analytics Engineering — generate unit test data for SQL queries"
+authors = ["Adel Skhiri <skhiriadel92@gmail.com>"]
+license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/skadel/mocksql"
+repository = "https://github.com/skadel/mocksql"
+keywords = ["sql", "testing", "analytics", "bigquery", "duckdb", "langgraph"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Testing",
+]
+packages = [
+  { include = "app" },
+  { include = "cli" },
+  { include = "build_query" },
+  { include = "models" },
+  { include = "init" },
+  { include = "sql_functions" },
+  { include = "utils" },
+  { include = "storage" },
+]
+include = [
+  { path = "common_vars.py", format = ["sdist", "wheel"] },
+  { path = "server.py", format = ["sdist", "wheel"] },
+  { path = "fetch_secrets.py", format = ["sdist", "wheel"] },
+]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+typer = {extras = ["all"], version = "^0.24.2"}
+uvicorn = "^0.44.0"
+langchain = "^1.2.0"
+langchain-classic = "1.0.3"
+pydantic = ">=2.0.0,<3.0.0"
+itsdangerous = "^2.2.0"
+pyjwt = "^2.8.0"
+python-dotenv = "^1.0.1"
+duckdb = "^1.5.0"
+sqlglot = {version = "^30.4.0", extras = ["c"]}
+pandas = "^2.2.2"
+db-dtypes = "^1.2.0"
+pyarrow = "^22"
+# dépendances Google / cloud
+google-cloud-bigquery = "^3.41.0"
+langgraph = "^1.1.0"
+langchain-google-genai = "^4.0.0"
+google-cloud-secret-manager = "^2.20.1"
+google-cloud-bigquery-storage = "^2.25.0"
+
+# sécurité et hashing
+passlib = "^1.7.4"
+bcrypt = "^4.2.0"
+
+# SQL mesh
+sqlmesh = "^0.234.0"
+fastapi = ">=0.115.0,<1.0.0"
+pyyaml = ">=6.0"
+
+
+[tool.poetry.group.dev.dependencies]
+pyinstaller = "^6.14.0"
+ruff = "^0.15.10"
+vulture = "^2.14"
+pytest = "^8.0"
+pytest-cov = "^7.1.0"
+pytest-asyncio = "^0.24"
+pytest-mock = "^3.14"
+httpx = "^0.28"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.poetry.scripts]
+mocksql     = "cli.main:main"
+load         = "init.load_categorical_fields:main"
+init_db      = "init.init_db:cli_main"
+alter_table  = "init.alter_table:cli_main"
+grant        = "init.grant_access_to_db:main"
+create_user  = "init.create_user:main"
+add_column  = "init.add_column:main"
+add_table   = "init.add_table:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
