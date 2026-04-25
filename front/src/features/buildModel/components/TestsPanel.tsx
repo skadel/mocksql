@@ -747,7 +747,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
-  const storedQuery: string = useAppSelector((state) => state.buildModel.query ?? '');
 
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [editedDescriptions, setEditedDescriptions] = useState<Record<number, string>>({});
