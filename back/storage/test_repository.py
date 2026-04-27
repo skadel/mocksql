@@ -1,11 +1,17 @@
 import json
+import os
 import re
 import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from storage.config import get_mocksql_dir, get_models_path
+from storage.config import (
+    get_mocksql_dir,
+    get_models_path,
+    get_preprocessor_fn,
+    load_preprocessor_fn,
+)
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -109,7 +115,12 @@ def read_model_sql(model_name: str) -> Optional[str]:
     sql_file = get_models_path() / f"{model_name}.sql"
     if not sql_file.exists():
         return None
-    return sql_file.read_text(encoding="utf-8")
+    raw_sql = sql_file.read_text(encoding="utf-8")
+    fn_ref = get_preprocessor_fn()
+    if not fn_ref:
+        return raw_sql
+    fn = load_preprocessor_fn(fn_ref, Path(os.getcwd()))
+    return fn(raw_sql)
 
 
 def get_model_file_git_sha(model_name: str) -> Optional[str]:

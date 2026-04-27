@@ -10,6 +10,7 @@ from typing import Any
 import yaml
 
 from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
+from storage.config import load_preprocessor_fn
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
 from utils.sql_code import extract_real_table_refs
 
@@ -29,36 +30,13 @@ def load_config(config_path: Path) -> dict:
 # ── SQL reading ───────────────────────────────────────────────────────────────
 
 
-def _load_preprocessor_fn(fn_ref: str, config_dir: Path):
-    import importlib
-    import sys
-
-    if ":" not in fn_ref:
-        raise ValueError(
-            f"preprocessor_fn must be in 'module:function' format, got: {fn_ref!r}"
-        )
-    module_name, func_name = fn_ref.split(":", 1)
-
-    config_dir_str = str(config_dir.resolve())
-    if config_dir_str not in sys.path:
-        sys.path.insert(0, config_dir_str)
-
-    module = importlib.import_module(module_name)
-    fn = getattr(module, func_name, None)
-    if fn is None:
-        raise AttributeError(
-            f"Function '{func_name}' not found in module '{module_name}'"
-        )
-    return fn
-
-
 def read_sql(model_path: Path, preprocessor_fn: str | None, config_dir: Path) -> str:
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
     raw_sql = model_path.read_text(encoding="utf-8")
     if not preprocessor_fn:
         return raw_sql
-    fn = _load_preprocessor_fn(preprocessor_fn, config_dir)
+    fn = load_preprocessor_fn(preprocessor_fn, config_dir)
     return fn(raw_sql)
 
 
