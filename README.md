@@ -5,11 +5,24 @@
 [![PyPI version](https://img.shields.io/pypi/v/mocksql)](https://pypi.org/project/mocksql/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-TDD engine for Analytics Engineering — génère automatiquement des données de test unitaires pour des requêtes SQL.
+**Couche de tests unitaires native pour les data engineers.** MockSQL choisit un fichier `.sql`, génère automatiquement des jeux de données de test cohérents via LLM, les exécute localement sur DuckDB (0 € facturé sur BigQuery), attribue un verdict argumenté à chaque test, et suggère les cas limites non couverts.
+
+### Ce qui distingue MockSQL des bibliothèques de mocking SQL
+
+Les bibliothèques de mocking SQL existantes vous demandent d'**écrire les données de test à la main** dans du code Python. MockSQL prend le contrepied :
+
+| | Bibliothèques de mocking SQL | MockSQL |
+|---|---|---|
+| Données de test | Écrites manuellement par l'ingé | **Générées automatiquement** par LLM |
+| Couverture | Aucune détection — l'ingé doit y penser | **6 axes** (NULL, vide, ex æquo…) + suggestions |
+| Qualité du test | Pas d'évaluation | **Verdict LLM** (bon / insuffisant / incorrect) |
+| Interface | Bibliothèque Python dans du code de test | **UI dédiée** (GenerateView → TestsView) |
+| Dérive | Inexistante | Roadmap : alerte si le SQL prod a changé |
+| Moteur SQL | Un connecteur par DB | **DuckDB unifié** — aucun coût BigQuery |
 
 MockSQL se décline en deux modes :
-- **CLI** — usage standalone directement sur tes fichiers `.sql` locaux
-- **Web Hub** — interface complète avec historique, profiling et collaboration
+- **CLI** (`mocksql`) — usage standalone directement sur tes fichiers `.sql` locaux
+- **Web Hub** — interface complète avec historique, verdicts, couverture et collaboration
 
 ---
 
