@@ -44,10 +44,35 @@ jobs:
       - run: poetry install --no-root
       - run: poetry run pytest tests/ -v --tb=short
 
+  # ── Build frontend ─────────────────────────────────────────────────────────
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - run: npm ci
+      - name: Build
+        env:
+          CI: "false"
+          REACT_APP_BACKEND_URL: ""
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: front/build/
+
   # ── Build Python package ───────────────────────────────────────────────────
   build-python:
     name: Build Python package
-    needs: backend-tests
+    needs: [backend-tests, frontend-build]
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -65,6 +90,12 @@ jobs:
           path: back/.venv
           key: poetry-${{ hashFiles('back/poetry.lock') }}
       - run: poetry install --no-root
+
+      - name: Inject frontend into back/static
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: back/static/
 
       - name: Extract version
         id: meta

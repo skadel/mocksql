@@ -271,17 +271,8 @@ def ui(
 
     import uvicorn
 
-    try:
-        import mocksql_ui as _ui_pkg
-    except ImportError:
-        _ui_pkg = None
-
-    if _ui_pkg is not None:
-        static_dir = Path(_ui_pkg.__file__).parent / "static"
-        server_module = "mocksql_ui.server:app"
-    else:
-        static_dir = Path(__file__).parent.parent / "static"
-        server_module = "server:app"
+    static_dir = Path(__file__).parent.parent / "static"
+    server_module = "server:app"
 
     if not (static_dir / "index.html").exists():
         typer.echo(

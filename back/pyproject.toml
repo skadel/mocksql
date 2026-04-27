@@ -29,6 +29,7 @@ include = [
   { path = "common_vars.py", format = ["sdist", "wheel"] },
   { path = "server.py", format = ["sdist", "wheel"] },
   { path = "fetch_secrets.py", format = ["sdist", "wheel"] },
+  { path = "static/**/*", format = ["sdist", "wheel"] },
 ]
 
 [tool.poetry.dependencies]
