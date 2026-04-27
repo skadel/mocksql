@@ -44,35 +44,62 @@ npx eslint src/
 
 ## Releasing a new version (maintainers only)
 
-Releases are fully automated via GitHub Actions. To cut a release:
+Les deux packages se releasent indépendamment via deux workflows distincts.
+
+### Releaser `mocksql` (backend + CLI)
 
 ```bash
-# 1. Bump the version in back/pyproject.toml
-cd back && poetry version patch   # or minor / major
+# 1. Bump la version dans back/pyproject.toml
+cd back && poetry version patch   # ou minor / major
 
-# 2. Commit and tag
+# 2. Commit et tag — le workflow se déclenche sur v*.*.*
 git add back/pyproject.toml
 git commit -m "chore: release v$(cd back && poetry version -s)"
 git tag "v$(cd back && poetry version -s)"
 git push origin main --tags
 ```
 
-The [release workflow](.github/workflows/release.yml) will then:
-- Run all tests
-- Build the Python wheel + sdist
-- Publish to [PyPI](https://pypi.org/project/mocksql/)
-- Build the frontend bundle
-- Create a GitHub Release with all artifacts
+Le [release workflow](.github/workflows/release.yml) :
+- Lance les tests backend
+- Build et publie `mocksql` sur PyPI
+- Crée une GitHub Release avec le wheel
+
+### Releaser `mocksql-ui` (web UI)
+
+```bash
+# Choisir le numéro de version souhaité pour mocksql-ui
+# Le tag ui-v*.*.* déclenche le workflow — pas besoin de modifier pyproject.toml
+git tag "ui-v0.1.2"
+git push origin "ui-v0.1.2"
+```
+
+Le [release-ui workflow](.github/workflows/release-ui.yml) :
+- Build le frontend React
+- Injecte les fichiers statiques dans `mocksql_ui/static/`
+- Build et publie `mocksql-ui` sur PyPI (version = tag sans le préfixe `ui-`)
+
+### Installation utilisateur
+
+```bash
+pip install mocksql              # CLI + backend seul (CI/CD, headless)
+pip install mocksql mocksql-ui   # CLI + web UI
+```
 
 ### PyPI trusted publishing setup (one-time)
 
-1. Create an account on [pypi.org](https://pypi.org) and reserve the project name `mocksql`.
-2. Go to **Account settings → Publishing → Add a new pending publisher** and fill in:
-   - Repository owner: your GitHub username / org
-   - Repository name: `mocksql`
-   - Workflow name: `release.yml`
-   - Environment name: `pypi`
-3. In your GitHub repo, create an environment named `pypi` (**Settings → Environments**).
+**Pour `mocksql`** — workflow `release.yml`, environnement `pypi` :
+1. Réserver le projet `mocksql` sur [pypi.org](https://pypi.org).
+2. **Account settings → Publishing → Add a new pending publisher** :
+   - Repository owner / name : `skadel / mocksql`
+   - Workflow : `release.yml` · Environment : `pypi`
+3. Créer l'environnement `pypi` dans **GitHub → Settings → Environments**.
+
+**Pour `mocksql-ui`** — workflow `release-ui.yml`, environnement `pypi-ui` :
+1. Réserver le projet `mocksql-ui` sur [pypi.org](https://pypi.org).
+2. Ajouter un second publisher :
+   - Repository owner / name : `skadel / mocksql`
+   - Workflow : `release-ui.yml` · Environment : `pypi-ui`
+3. Créer l'environnement `pypi-ui` dans **GitHub → Settings → Environments**.
 
 No API token needed — PyPI and GitHub exchange credentials via OIDC.
 

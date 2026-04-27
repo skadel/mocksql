@@ -1,4 +1,4 @@
-/* Design tokens — single source of truth for PipeTalk brand colours. */
+/* Design tokens — single source of truth for MockSQL brand colours. */
 
 // Brand
 export const TEAL = '#1ca8a4';

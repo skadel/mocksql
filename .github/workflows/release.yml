@@ -44,32 +44,6 @@ jobs:
       - run: poetry install --no-root
       - run: poetry run pytest tests/ -v --tb=short
 
-  frontend-build:
-    name: Frontend build
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: front
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "18"
-          cache: npm
-          cache-dependency-path: front/package-lock.json
-      - run: npm ci
-      - name: Build
-        env:
-          CI: "false"
-          REACT_APP_BACKEND_URL: ""
-        run: npm run build
-      - name: Package frontend
-        run: tar -czf ../frontend-dist.tar.gz build/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: frontend-dist
-          path: frontend-dist.tar.gz
-
   # ── Build Python package ───────────────────────────────────────────────────
   build-python:
     name: Build Python package
@@ -91,18 +65,17 @@ jobs:
           path: back/.venv
           key: poetry-${{ hashFiles('back/poetry.lock') }}
       - run: poetry install --no-root
-      
+
       - name: Extract version
         id: meta
         run: echo "version=$(poetry version -s)" >> "$GITHUB_OUTPUT"
-        
-      # NOUVELLE ÉTAPE : Vérification stricte que le tag Git correspond à la version Poetry
+
       - name: Check version match
         run: |
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           POETRY_VERSION="${{ steps.meta.outputs.version }}"
           if [ "$TAG_VERSION" != "$POETRY_VERSION" ]; then
-            echo "::error::Erreur : Le tag Git (v$TAG_VERSION) ne correspond pas à la version dans pyproject.toml ($POETRY_VERSION) !"
+            echo "::error::Le tag Git (v$TAG_VERSION) ne correspond pas à la version dans pyproject.toml ($POETRY_VERSION) !"
             exit 1
           fi
 
@@ -134,7 +107,7 @@ jobs:
   # ── GitHub Release ─────────────────────────────────────────────────────────
   github-release:
     name: Create GitHub Release
-    needs: [build-python, publish-pypi, frontend-build]
+    needs: [build-python, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -144,15 +117,9 @@ jobs:
         with:
           name: python-dist
           path: dist/python/
-      - uses: actions/download-artifact@v4
-        with:
-          name: frontend-dist
-          path: dist/frontend/
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/python/*
-            dist/frontend/*
+          files: dist/python/*
           generate_release_notes: true
           make_latest: true

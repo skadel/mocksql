@@ -1,0 +1,92 @@
+name: Release UI
+
+on:
+  push:
+    tags:
+      - 'ui-v*.*.*'
+
+permissions:
+  id-token: write  # PyPI trusted publishing
+
+jobs:
+  # ── Build frontend ─────────────────────────────────────────────────────────
+  frontend-build:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+      - run: npm ci
+      - name: Build
+        env:
+          CI: "false"
+          REACT_APP_BACKEND_URL: ""
+        run: npm run build
+      - name: Package frontend
+        run: tar -czf ../frontend-dist.tar.gz build/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist.tar.gz
+
+  # ── Build mocksql-ui ───────────────────────────────────────────────────────
+  build-ui:
+    name: Build mocksql-ui package
+    needs: frontend-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist/
+
+      - name: Inject static files into mocksql-ui
+        run: |
+          tar -xzf frontend-dist/frontend-dist.tar.gz -C frontend-dist/
+          rm -rf back/ui/mocksql_ui/static
+          cp -r frontend-dist/build back/ui/mocksql_ui/static
+
+      - name: Sync version with git tag
+        working-directory: back/ui
+        run: poetry version "${GITHUB_REF_NAME#ui-v}"
+
+      - name: Build wheel + sdist
+        working-directory: back/ui
+        run: poetry build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: back/ui/dist/
+
+  # ── Publish mocksql-ui to PyPI ─────────────────────────────────────────────
+  publish-ui:
+    name: Publish mocksql-ui to PyPI
+    needs: build-ui
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-ui
+      url: https://pypi.org/project/mocksql-ui/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
