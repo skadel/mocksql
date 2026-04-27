@@ -9,22 +9,12 @@ import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { resetContext } from '../../buildModel/buildModelSlice';
 import { setCurrentId } from '../appBarSlice';
 import { Model } from '../../../utils/types';
+import { relativeDate } from '../../../utils/dates';
 
 const TEAL  = '#2BB0A8';
 const MUTED = '#6b8287';
 const INK   = '#0f272a';
 const LINE  = '#c9d3d6';
-
-function relativeDate(iso: string | undefined, t: (key: string, opts?: any) => string): string {
-  if (!iso) return '';
-  const diff = Date.now() - new Date(iso).getTime();
-  const m = Math.floor(diff / 60000);
-  if (m < 1)  return t('relative_date.just_now');
-  if (m < 60) return t('relative_date.minutes_ago', { count: m });
-  const h = Math.floor(m / 60);
-  if (h < 24) return t('relative_date.hours_ago', { count: h });
-  return t('relative_date.days_ago', { count: Math.floor(h / 24) });
-}
 
 /* ── Tree data structures ─────────────────────────────────────── */
 
