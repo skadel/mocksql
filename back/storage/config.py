@@ -45,3 +45,30 @@ def get_langchain_tracing() -> bool:
 def is_initialized() -> bool:
     """Return True if mocksql.yml exists in the current working directory."""
     return (Path(os.getcwd()) / "mocksql.yml").exists()
+
+
+def get_preprocessor_fn() -> str | None:
+    return load_config().get("preprocessor_fn")
+
+
+def load_preprocessor_fn(fn_ref: str, config_dir: Path):
+    import importlib
+    import sys
+
+    if ":" not in fn_ref:
+        raise ValueError(
+            f"preprocessor_fn must be in 'module:function' format, got: {fn_ref!r}"
+        )
+    module_name, func_name = fn_ref.split(":", 1)
+
+    config_dir_str = str(config_dir.resolve())
+    if config_dir_str not in sys.path:
+        sys.path.insert(0, config_dir_str)
+
+    module = importlib.import_module(module_name)
+    fn = getattr(module, func_name, None)
+    if fn is None:
+        raise AttributeError(
+            f"Function '{func_name}' not found in module '{module_name}'"
+        )
+    return fn
