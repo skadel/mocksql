@@ -35,7 +35,8 @@ _REQUIRED: list[tuple[str, str]] = [
 _missing = [
     f"  • {name}  — {desc}"
     for name, desc in _REQUIRED
-    if not os.getenv(name) and not (name == "VERTEX_PROJECT" and os.getenv("GOOGLE_CLOUD_PROJECT"))
+    if not os.getenv(name)
+    and not (name == "VERTEX_PROJECT" and os.getenv("GOOGLE_CLOUD_PROJECT"))
 ]
 
 if _missing:

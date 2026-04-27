@@ -299,7 +299,11 @@ async def run_generate(model: Path, config: Path, output_dir: Path) -> None:
 
     if missing:
         typer.echo(f"Fetching schema for: {missing}")
-        billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT") or cfg.get("billing_project")
+        billing_project = (
+            os.getenv("BQ_TEST_PROJECT")
+            or os.getenv("VERTEX_PROJECT")
+            or cfg.get("billing_project")
+        )
         if not billing_project:
             typer.echo(
                 "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
