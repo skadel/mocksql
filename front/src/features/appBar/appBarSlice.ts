@@ -136,12 +136,19 @@ export const buildAppBarSlice = createSlice({
             })
             .addCase(fetchModels.fulfilled, (state, action) => {
                 state.loadingAppBar = false;
-                state.models = action.payload.map((f: any) => ({
-                    session_id: f.session_id ?? f.name,
-                    name: f.test_name || f.name,
-                    updateDate: f.updated_at,
-                    isTested: !!f.session_id,
-                }));
+                state.models = action.payload.map((f: any) => {
+                    const fullName: string = f.test_name || f.name || '';
+                    const lastSlash = fullName.lastIndexOf('/');
+                    const folder = lastSlash >= 0 ? fullName.slice(0, lastSlash) : undefined;
+                    const displayName = lastSlash >= 0 ? fullName.slice(lastSlash + 1) : fullName;
+                    return {
+                        session_id: f.session_id ?? f.name,
+                        name: displayName,
+                        folder,
+                        updateDate: f.updated_at,
+                        isTested: !!f.session_id,
+                    };
+                });
                 state.currentModel = state.models.find(model => model.session_id === state.currentModelId);
                 state.error = null;
             })

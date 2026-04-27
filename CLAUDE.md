@@ -84,7 +84,6 @@ Le flow actuel lit les fichiers `.sql` directement depuis `models_path` (dossier
 | SQL parse  | `sqlglot`                                                |
 | Base       | PostgreSQL (Cloud SQL)                                   |
 | Frontend   | React 18 · TypeScript · Redux Toolkit · MUI              |
-| Infra      | Google Cloud Run · Terraform                             |
 | Connecteurs (roadmap) | dbt (`manifest.json`) · GitHub API (SHA tracking) |
 
 ---
@@ -279,6 +278,92 @@ Le fallback (lignes 276-293 du slice) reconstruit `testResults` et `query` depui
 ### `queryComponentGraph` — structure Redux
 
 Dictionnaire plat `Record<string, Message>` stocké dans `buildModelState`. Les relations parent/enfant sont portées par `Message.children[]` (ids). Pour afficher l'arbre, partir de la racine (messages sans `parent`) et suivre les `children`, en utilisant `selectedChildIndices[parentId]` pour choisir la branche active quand un nœud a plusieurs enfants.
+
+---
+
+## Workflow utilisateur — Implémentation frontend
+
+### Vue d'ensemble des composants
+
+```
+App
+└── DrawerComponent (sidebar — appBarSlice)
+│     ├── SqlFileList  → liste des modèles SQL
+│     └── ProjectSelector
+└── QueryChatComponent  (composant principal — buildModelSlice)
+      ├── SQLQueryBar         → éditeur SQL + historique
+      ├── MessageDisplay      → thread de conversation
+      │     └── MessageBody   → rendu par type (examples, results, error, profile_query…)
+      │           └── DisplayTable  → tableau paginé (résultats DuckDB)
+      ├── MissingTablesAlert  → import de tables manquantes (ImportView)
+      └── TestsPanel          → liste des tests générés + verdicts
+```
+
+### Flux étape par étape
+
+#### 1. Sélection du modèle
+- Sidebar (`SqlFileList`) appelle `GET /api/models` → `fetchModels` → `appBarSlice`
+- Clic sur un modèle → `setCurrentId` dans appBarSlice → URL `/models/{modelId}`
+- `QueryChatComponent` détecte le changement → `dispatch(getMessages({ modelId, t }))`
+- `getMessages.fulfilled` → remplit `queryComponentGraph`, `testResults`, `sqlHistory`, `query`, `optimizedQuery`
+- `setDefaultBranchSelection` configure la branche active dans `selectedChildIndices`
+
+#### 2. Generate tests (première génération)
+- L'utilisateur saisit un message dans `DroppableTextField` → `handleSubmit()`
+- Validation optionnelle : `validateQueryApi` → retourne `valid` / erreur
+- `dispatch(chatQuery(params))` → SSE stream vers `POST /api/query/build/stream_events`
+- Événements SSE reçus dans l'ordre :
+  - `on_chain_start` → `setLoadingMessage(loadingMap[step])` (ex: "Génération des données…")
+  - `on_chain_stream` → `formatMessage(m)` → `appendQueryComponentMessage(msg)` ou `appendComponentToLastMessage(msg)` (tokens)
+  - Messages `examples` (contentType) → pre-populate `testResults` avec status `pending`
+  - Messages `results` → merge dans `testResults` par `test_index`
+  - Messages `evaluation` → attache `verdict` au test correspondant
+- `chatQuery.fulfilled` → `loading = false`, `streamingReasoning = undefined`
+- Auto-save : `patchModelSql({ sql, optimizedSql, testResults })`
+
+#### 3. Tables manquantes (ImportView)
+- Si DuckDB ne connaît pas une table référencée dans le SQL → backend retourne une erreur avec `missing_tables`
+- `MissingTablesAlert` s'affiche avec la liste des tables
+- Clic "Importer" → `importMissingTablesApi` → `pendingSessionRef` conserve les params pour retry
+- Import terminé → re-déclenche `chatQuery` avec les mêmes paramètres
+
+#### 4. Modifier via le chat
+- L'utilisateur envoie un message ancré sur un test (`selectedTestIndex`) ou global
+- Même flux SSE que §2 — `parentMessageId` pointe vers le message existant
+- Si plusieurs réponses pour un même message-parent → `children[]` crée une branche
+- `MessageGroupComponent` rend la navigation branches (1/3, 2/3…)
+- `selectedChildIndices[parentId]` mémorise la branche affichée
+
+#### 5. Modifier le SQL directement
+- `SQLQueryBar` : l'utilisateur édite le SQL → clique "Mettre à jour" → `onUpdate(editedSql)`
+- `QueryChatComponent` reçoit le nouveau SQL → `pushSqlHistory(entry)` (dédup automatique)
+- `setOptimizedQuery('')` → re-dispatch `chatQuery` avec `context: 'sql_update'`
+- `sql_update` context → tous les tests existants passent en `pending` avant régénération
+
+#### 6. Retry automatique (boucle executor)
+- Backend : si `status == "empty_results"` et `gen_retries > 0` → `generator` re-tourne (max 2 fois)
+- `failing_cte` identifie la première CTE vide → le générateur cible uniquement cette CTE
+- Côté front : transparent — les messages SSE continuent d'arriver normalement
+
+#### 7. Restauration depuis l'historique SQL
+- `SQLQueryBar` affiche un popover historique (`sqlHistory[]`)
+- Clic sur une entrée → `onHistorySelect(entry)` → `setRestoredMessageId(entry.parentMessageId)`
+- `historyRestoreTrigger` incrémenté → `SQLQueryBar` ré-ouvre l'accordéon et affiche le SQL restauré
+- `skipValidationRef = true` → évite une re-validation inutile
+
+#### 8. État Redux — champs actifs (après nettoyage)
+
+| Champ | Rôle |
+|---|---|
+| `queryComponentGraph` | Arbre de messages (id → Message) — source de vérité |
+| `testResults` | Tests avec status, verdict, données — synced depuis SSE |
+| `selectedChildIndices` | Branche active par parent (navigation multi-tour) |
+| `sqlHistory` | Versions SQL dédupliquées |
+| `streamingReasoning` | Reasoning LLM accumulé pendant le stream |
+| `loading` / `loading_message` | État de chargement + texte affiché |
+| `query` / `optimizedQuery` | SQL persisté (sync depuis messages, utilisé au chargement) |
+| `restoredMessageId` | Message à highlighter après restauration historique |
+| `lastError` | Dernière erreur backend (affiché dans UI) |
 
 ---
 
