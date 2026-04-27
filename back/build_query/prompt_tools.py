@@ -554,8 +554,7 @@ def make_routing_prompt(
 ) -> ChatPromptTemplate:
     """
     'coarse' → JSON: {"title","route","reasoning"} with route in {"query","analysis","other"}
-    'fine'   → JSON: {"reasoning","route"} with route in
-               {"tests_update","query_explanation","query_update","another_unrelated_query","analysis","other"}
+    'fine'   → JSON: {"reasoning","route"} with route in {"generator","other"}
     """
     history_parsed = format_history(
         history,
@@ -576,7 +575,7 @@ def make_routing_prompt(
 
 Définitions strictes :
 - `query` : la demande peut être satisfaite par **une seule requête SQL** (éventuellement avec agrégats, joins, fenêtres, filtres, seuils) SANS nécessiter d’interpréter un résultat pour décider d’une requête suivante.
-- `analysis` : besoin d’un **raisonnement multi-étapes** avec **itération ou branchement** après inspection des résultats (ex. diagnostic de causes, segmentation exploratoire, boucles “voir résultat → ajuster la stratégie/filtre → refaire”, formulation d’hypothèses, choix de plusieurs vues/visualisations). Si une seule requête suffit, **ne classez PAS** en analysis.
+- `analysis` : besoin d’un **raisonnement multi-étapes** avec **itération ou branchement** après inspection des résultats (ex. diagnostic de causes, segmentation exploratoire, boucles "voir résultat → ajuster la stratégie/filtre → refaire", formulation d’hypothèses, choix de plusieurs vues/visualisations). Si une seule requête suffit, **ne classez PAS** en analysis.
 - `other` : le reste.
 
 Règles de décision (top-down) :
@@ -584,8 +583,8 @@ Règles de décision (top-down) :
 2) Sinon, la demande requiert-elle d’**interpréter** des résultats pour **choisir** des requêtes suivantes OU de **tester des hypothèses**/**segmentations multiples** ? → `analysis`.
 3) Sinon → `other`.
 
-Signaux forts de `query` : verbes “liste/compte/compare/vérifie/filtre”, seuils simples (ex. “> 10%”), périodes précises, métriques nettes.
-Signaux forts de `analysis` : “pourquoi/expliquer les causes/proposer axes d’analyse/identifier segments contributeurs”, “itérer jusqu’à trouver…”, “explorer”.
+Signaux forts de `query` : verbes "liste/compte/compare/vérifie/filtre", seuils simples (ex. "> 10%"), périodes précises, métriques nettes.
+Signaux forts de `analysis` : "pourquoi/expliquer les causes/proposer axes d’analyse/identifier segments contributeurs", "itérer jusqu’à trouver…", "explorer".
 
 Sortie JSON (un seul objet) :
 - Toujours : "title" (2–3 mots, concrets), "route", "reasoning" (≤35 mots, expliquant la règle activée).
@@ -645,32 +644,16 @@ N’affichez rien d’autre.
     prompt_messages = [
         (
             "system",
-            """**Routeur SQL — Guide concis (granularité fine)**
+            """Tu es un routeur pour MockSQL, un outil de génération et de test de requêtes SQL.
 
 Étiquettes :
-- tests_update, query_update, analysis, another_unrelated_query, query_explanation, other
+- `generator` : le message concerne la génération, la modification ou l’évaluation de tests SQL (données de test, assertions, scénarios, cas limites, verdicts).
+- `other` : le message est hors-sujet (salutation, question générale sans lien avec les tests SQL, etc.).
 
-Décision (top-down) :
-1) Le message demande d’ajouter/modifier des **tests unitaires** (règles d’assertion, datasets de test, seuils de non-régression) → `tests_update`.
-2) Il y a du **SQL fourni** à expliquer/corriger/optimiser/adapter (même partiel) → `query_update`.
-3) La demande est résoluble par **une seule requête SQL nouvelle** (sans interprétation itérative) → `another_unrelated_query`.
-4) La demande vise l’**explication/debug** d’une requête (quoi fait la requête ? pourquoi tel résultat ?) → `query_explanation`.
-5) La demande implique un **raisonnement multi-étapes** avec **interprétation** des résultats pour décider d’étapes suivantes (diagnostic de causes, segmentation exploratoire, itérations) → `analysis`.
-6) Sinon → `other`.
-
-Frontière stricte `analysis` vs `query` :
-- Si une requête unique (même complexe : JOINs, fenêtres, seuils, périodes) répond, **restez** côté `query` (`another_unrelated_query` s’il n’y a pas de SQL fourni / `query_update` s’il y en a).
-- `analysis` uniquement si le plan implique au moins **une boucle** “voir résultat → décider la prochaine requête” OU des **hypothèses**/**segments** à tester successivement OU des **recommandations** nécessitant comparaison de plusieurs vues.
-
-Exemples canoniques :
-- “Modifie cette requête pour filtrer 2025-09” → `query_update`
-- “Explique cette CTE et pourquoi elle double les lignes” → `query_explanation`
-- “Top 20 pays par marge” → `another_unrelated_query`
-- “Pourquoi la marge a chuté ? propose les 3 segments racines” → `analysis`
-- “Vérifie que sur la dernière partition_date pas de baisse >10% du nb contrats” → `another_unrelated_query`
+Règle unique : si le message, même de près ou de loin, porte sur les tests SQL ou la requête en cours → `generator`. Sinon → `other`.
 
 Sortie JSON (unique) :
-{ "reasoning": "<≤60 mots sur la règle activée et les signaux>", "route": <étiquette> }
+{ "reasoning": "<≤30 mots>", "route": "generator" | "other" }
 N’affichez rien d’autre.
 """,
         ),
@@ -678,7 +661,6 @@ N’affichez rien d’autre.
             "human",
             history_block
             + "Nouvelle question :\n<question>\n{{input}}\n</question>\n\n"
-            + (format_instructions or "")
             + "\n\nSortie JSON :",
         ),
     ]

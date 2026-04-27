@@ -17,7 +17,9 @@ from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
 
-llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+llm = ChatGoogleGenerativeAI(
+    model=GENERATOR_MODEL, vertexai=True, temperature=0, streaming=False
+)
 
 
 def _convert_datetime_fields(data):
