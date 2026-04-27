@@ -91,9 +91,21 @@ jobs:
           path: back/.venv
           key: poetry-${{ hashFiles('back/poetry.lock') }}
       - run: poetry install --no-root
+      
       - name: Extract version
         id: meta
         run: echo "version=$(poetry version -s)" >> "$GITHUB_OUTPUT"
+        
+      # NOUVELLE ÉTAPE : Vérification stricte que le tag Git correspond à la version Poetry
+      - name: Check version match
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          POETRY_VERSION="${{ steps.meta.outputs.version }}"
+          if [ "$TAG_VERSION" != "$POETRY_VERSION" ]; then
+            echo "::error::Erreur : Le tag Git (v$TAG_VERSION) ne correspond pas à la version dans pyproject.toml ($POETRY_VERSION) !"
+            exit 1
+          fi
+
       - name: Build wheel + sdist
         run: poetry build
       - uses: actions/upload-artifact@v4
@@ -118,8 +130,6 @@ jobs:
           path: dist/
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          skip-existing: true
 
   # ── GitHub Release ─────────────────────────────────────────────────────────
   github-release:
