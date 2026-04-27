@@ -48,6 +48,7 @@ Releases are fully automated via GitHub Actions. To cut a release:
 
 ```bash
 # 1. Bump the version in back/pyproject.toml
+#    (mocksql-ui version is synced automatically from the git tag)
 cd back && poetry version patch   # or minor / major
 
 # 2. Commit and tag
@@ -59,20 +60,38 @@ git push origin main --tags
 
 The [release workflow](.github/workflows/release.yml) will then:
 - Run all tests
-- Build the Python wheel + sdist
-- Publish to [PyPI](https://pypi.org/project/mocksql/)
 - Build the frontend bundle
+- Build and publish `mocksql` (wheel + sdist) to PyPI
+- Build and publish `mocksql-ui` (wheel + sdist) to PyPI — static files injected from the frontend build
 - Create a GitHub Release with all artifacts
+
+Users install with:
+```bash
+pip install mocksql          # CLI + backend only (CI/CD, headless)
+pip install mocksql mocksql-ui  # CLI + web UI
+```
 
 ### PyPI trusted publishing setup (one-time)
 
-1. Create an account on [pypi.org](https://pypi.org) and reserve the project name `mocksql`.
-2. Go to **Account settings → Publishing → Add a new pending publisher** and fill in:
+Two packages need to be configured — `mocksql` and `mocksql-ui`.
+
+**For `mocksql`:**
+1. Reserve the project name `mocksql` on [pypi.org](https://pypi.org).
+2. Go to **Account settings → Publishing → Add a new pending publisher**:
    - Repository owner: your GitHub username / org
    - Repository name: `mocksql`
    - Workflow name: `release.yml`
    - Environment name: `pypi`
 3. In your GitHub repo, create an environment named `pypi` (**Settings → Environments**).
+
+**For `mocksql-ui`:**
+1. Reserve the project name `mocksql-ui` on [pypi.org](https://pypi.org).
+2. Add a second pending publisher:
+   - Repository owner: your GitHub username / org
+   - Repository name: `mocksql`
+   - Workflow name: `release.yml`
+   - Environment name: `pypi-ui`
+3. In your GitHub repo, create an environment named `pypi-ui` (**Settings → Environments**).
 
 No API token needed — PyPI and GitHub exchange credentials via OIDC.
 
