@@ -299,8 +299,6 @@ examples/   # Exemples de projets MockSQL
 docs/       # Documentation du workflow
 ```
 
-Voir [back/README.md](back/README.md) pour le déploiement Cloud Run et Terraform.
-
 ---
 
 ## How to contribute

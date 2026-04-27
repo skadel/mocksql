@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { Box, Button, CircularProgress, Typography } from '@mui/material';
 import AddIcon from '@mui/icons-material/Add';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -10,20 +11,21 @@ import { useAppSelector } from '../../../app/hooks';
 const TEAL = '#1ca8a4';
 const INK = '#0f272a';
 
-function relativeDate(iso?: string): string {
+function relativeDate(iso: string | undefined, t: (key: string, opts?: any) => string): string {
   if (!iso) return '';
   const diff = Date.now() - new Date(iso).getTime();
   const m = Math.floor(diff / 60000);
-  if (m < 1) return "à l'instant";
-  if (m < 60) return `il y a ${m} min`;
+  if (m < 1) return t('relative_date.just_now');
+  if (m < 60) return t('relative_date.minutes_ago', { count: m });
   const h = Math.floor(m / 60);
-  if (h < 24) return `il y a ${h} h`;
-  return `il y a ${Math.floor(h / 24)} j`;
+  if (h < 24) return t('relative_date.hours_ago', { count: h });
+  return t('relative_date.days_ago', { count: Math.floor(h / 24) });
 }
 
 const ModelTestsPage: React.FC = () => {
   const { modelName } = useParams<{ modelName: string }>();
   const navigate = useNavigate();
+  const { t } = useTranslation();
   const drawerOpen = useAppSelector(s => s.appBarModel.drawerOpen);
   const [tests, setTests] = useState<TestSession[]>([]);
   const [loading, setLoading] = useState(true);
@@ -57,13 +59,13 @@ const ModelTestsPage: React.FC = () => {
         <Box sx={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', mb: 4 }}>
           <Box>
             <Typography sx={{ fontSize: 11.5, color: '#6b8287', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.6px', mb: 0.5 }}>
-              Modèle SQL
+              {t('model.sql_model')}
             </Typography>
             <Typography sx={{ fontSize: 22, fontWeight: 700, color: INK, fontFamily: 'monospace' }}>
               {decodedName}.sql
             </Typography>
             <Typography sx={{ fontSize: 13, color: '#6b8287', mt: 0.5 }}>
-              {loading ? '…' : `${tests.length} session${tests.length !== 1 ? 's' : ''} de test`}
+              {loading ? '…' : t('model.test_sessions', { count: tests.length })}
             </Typography>
           </Box>
           <Button
@@ -80,7 +82,7 @@ const ModelTestsPage: React.FC = () => {
               flexShrink: 0,
             }}
           >
-            Nouveau test
+            {t('model.new_test')}
           </Button>
         </Box>
 
@@ -92,7 +94,7 @@ const ModelTestsPage: React.FC = () => {
         ) : tests.length === 0 ? (
           <Box sx={{ textAlign: 'center', mt: 8 }}>
             <Typography sx={{ fontSize: 14, color: '#6b8287' }}>
-              Aucune session de test pour ce modèle.
+              {t('model.no_sessions')}
             </Typography>
           </Box>
         ) : (
@@ -137,7 +139,7 @@ const ModelTestsPage: React.FC = () => {
                     {test.test_cases?.[0]?.test_name || `Session ${test.test_id.slice(0, 8)}…`}
                   </Typography>
                   <Typography sx={{ fontSize: 11.5, color: '#6b8287', mt: 0.25 }}>
-                    {relativeDate(test.updated_at || test.created_at)} · {test.test_cases?.length ?? 0} test{(test.test_cases?.length ?? 0) !== 1 ? 's' : ''}
+                    {relativeDate(test.updated_at || test.created_at, t)} · {t('model.tests_count', { count: test.test_cases?.length ?? 0 })}
                   </Typography>
                 </Box>
                 <ArrowForwardIcon sx={{ fontSize: 16, color: '#c0c8ca', flexShrink: 0 }} />

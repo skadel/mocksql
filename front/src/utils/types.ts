@@ -158,6 +158,7 @@ export interface Model {
   source?: boolean;
   source_project?: string;
   source_database?: string;
+  folder?: string;
 }
 
 export interface Project {

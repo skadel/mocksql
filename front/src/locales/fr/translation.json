@@ -6,8 +6,8 @@
   "sql": "Le code SQL a été compilé avec succès.",
   "steps": "Etapes :",
   "output_data": "Résultat observé\n",
-  "result_explanation": "En exécutant la requête sur l’échantillon ci-dessus, nous obtenons le tableau suivant :\n\n",
-  "validation_demand": "Veuillez vérifier :\n1. Que la requête répond à votre besoin.\n2. Que vous comprenez et validez son fonctionnement.\n3. Que les résultats vous semblent cohérents avec l’exemple proposé.",
+  "result_explanation": "En exécutant la requête sur l'échantillon ci-dessus, nous obtenons le tableau suivant :\n\n",
+  "validation_demand": "Veuillez vérifier :\n1. Que la requête répond à votre besoin.\n2. Que vous comprenez et validez son fonctionnement.\n3. Que les résultats vous semblent cohérents avec l'exemple proposé.",
   "empty_results": "L'exécution de la requête sur les examples ne donne aucun résultat.",
   "empty_table": "Table vide",
   "select_project": "Veuillez séléctionner un projet",
@@ -27,7 +27,16 @@
     "executing_query_examples": "Exécution de la requête SQL sur les exemples en cours",
     "validate_query": "Compilation de la requête générée",
     "failed_step": "Échec de l'étape.",
-    "empty_results": "La requête ne retourne aucun résultat. Géneration de nouveaux examples"
+    "empty_results": "La requête ne retourne aucun résultat. Géneration de nouveaux examples",
+    "loading_sql": "Chargement du fichier SQL…",
+    "validating_sql": "Validation de la requête SQL…",
+    "checking_profiling": "Vérification du profiling…",
+    "generating_tests": "Génération des tests…",
+    "creating_model": "Création du modèle…",
+    "reasoning": "Raisonnement",
+    "validating_query": "Validation de la requête",
+    "profiling": "Profiling en cours…",
+    "profiling_short": "Profiling…"
   },
   "action": {
     "download": "Télécharger",
@@ -35,12 +44,66 @@
     "download_examples": "Télécharger les exemples",
     "send": "Envoyer",
     "fix": "Corriger",
-    "cancel": "Annuler"
+    "cancel": "Annuler",
+    "skip": "Passer",
+    "run_profiling": "Lancer le profiling"
   },
   "errors": {
     "failed_to_fetch_messages": "Erreur lors du chargement des messages, problème d'accès ou modèle inexistant",
     "session_expired": "session expired",
-    "selectProjectError": "Veuillez séléctionner un projet"
+    "selectProjectError": "Veuillez séléctionner un projet",
+    "model_creation_failed": "Création du modèle échouée.",
+    "model_not_found": "Modèle introuvable",
+    "test_creation_failed": "Erreur lors de la création du test.",
+    "validation_error": "Erreur lors de la validation.",
+    "invalid_query": "Requête invalide.",
+    "unqualified_tables": "Tables non qualifiées : configurez-les manuellement.",
+    "import_error": "Erreur lors de l'import des tables."
+  },
+  "generate": {
+    "choose_sql_file": "Choisissez un fichier SQL",
+    "sql_file_label": "Fichier SQL",
+    "generate_tests": "Générer les tests",
+    "query_valid": "✓ Requête valide"
+  },
+  "chat": {
+    "regenerate_test": "Régénère ce test",
+    "modify_test": "Test #{{index}} — Modifier avec MockSQL",
+    "global_instruction": "Instruction globale",
+    "modify_test_chip": "Modifier le test #{{index}}",
+    "sending": "Envoi en cours…",
+    "describe_modification": "Décrire la modification souhaitée…",
+    "add_constraints": "Demander une modification, ajouter des contraintes…"
+  },
+  "profiling": {
+    "title": "Profiling optionnel",
+    "query_validated": "Requête validée avec succès",
+    "description": "MockSQL peut lancer automatiquement le profiling de vos colonnes. Cela <bold>améliore la précision des tests générés</bold> en permettant de mieux comprendre la distribution réelle des données.",
+    "billing_info": "Cette opération va scanner environ <bold>{{tb}} To</bold> de données"
+  },
+  "notifications": {
+    "generation_failed": "La génération a échoué.",
+    "generation_success": "Tests générés avec succès !"
+  },
+  "model": {
+    "sql_model": "Modèle SQL",
+    "test_sessions_one": "{{count}} session de test",
+    "test_sessions_other": "{{count}} sessions de test",
+    "tests_count_one": "{{count}} test",
+    "tests_count_other": "{{count}} tests",
+    "new_test": "Nouveau test",
+    "no_sessions": "Aucune session de test pour ce modèle.",
+    "not_tested": "Non testé"
+  },
+  "search": {
+    "no_results": "Aucun résultat",
+    "no_models": "Aucun modèle pour l'instant"
+  },
+  "relative_date": {
+    "just_now": "à l'instant",
+    "minutes_ago": "il y a {{count}} min",
+    "hours_ago": "il y a {{count}} h",
+    "days_ago": "il y a {{count}} j"
   },
   "search_models": "Rechercher",
   "confirm_delete": "Confirmer la suppression",
