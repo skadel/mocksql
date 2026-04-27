@@ -109,7 +109,7 @@ FROM (
         session_id="",
         dialect="bigquery",
         test_dataset="test_dataset",
-        test_project="pipetalk-493612",
+        test_project="mocksql-493612",
     )
     assert "test_dataset_test_dataset_" not in result
     assert "cms_medicare_outpatient_charges_2014" in result
