@@ -1,8 +1,11 @@
 [tool.poetry]
 name = "mocksql-ui"
-version = "0.1.0"
+version = "0.1.1"
 description = "Web UI for MockSQL"
 authors = ["Adel Skhiri <skhiriadel92@gmail.com>"]
+license = "MIT"
+homepage = "https://github.com/skadel/mocksql"
+repository = "https://github.com/skadel/mocksql"
 packages = [{ include = "mocksql_ui" }]
 include = [
     { path = "mocksql_ui/static/**/*", format = ["sdist", "wheel"] },
@@ -10,10 +13,10 @@ include = [
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
-mocksql = ">=0.1.0"
-fastapi = ">=0.100.0"
-langserve = ">=0.3.0"
-sse-starlette = ">=1.6.1"
+mocksql = ">=0.1.1"
+fastapi = ">=0.115.0,<1.0.0"
+uvicorn = ">=0.44.0"
+python-dotenv = ">=1.0.0"
 
 [build-system]
 requires = ["poetry-core"]

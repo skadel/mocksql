@@ -131,10 +131,65 @@ jobs:
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  # ── Build mocksql-ui ───────────────────────────────────────────────────────
+  build-ui:
+    name: Build mocksql-ui package
+    needs: [frontend-build, backend-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install poetry
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend-dist/
+
+      - name: Inject static files into mocksql-ui
+        run: |
+          tar -xzf frontend-dist/frontend-dist.tar.gz -C frontend-dist/
+          rm -rf back/ui/mocksql_ui/static
+          cp -r frontend-dist/build back/ui/mocksql_ui/static
+
+      - name: Sync version with git tag
+        working-directory: back/ui
+        run: poetry version "${GITHUB_REF_NAME#v}"
+
+      - name: Build wheel + sdist
+        working-directory: back/ui
+        run: poetry build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: back/ui/dist/
+
+  # ── Publish mocksql-ui to PyPI ─────────────────────────────────────────────
+  publish-ui:
+    name: Publish mocksql-ui to PyPI
+    needs: build-ui
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-ui
+      url: https://pypi.org/project/mocksql-ui/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: dist/
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
   # ── GitHub Release ─────────────────────────────────────────────────────────
   github-release:
     name: Create GitHub Release
-    needs: [build-python, publish-pypi, frontend-build]
+    needs: [build-python, publish-pypi, publish-ui, frontend-build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -146,6 +201,10 @@ jobs:
           path: dist/python/
       - uses: actions/download-artifact@v4
         with:
+          name: ui-dist
+          path: dist/ui/
+      - uses: actions/download-artifact@v4
+        with:
           name: frontend-dist
           path: dist/frontend/
       - name: Create Release
@@ -153,6 +212,7 @@ jobs:
         with:
           files: |
             dist/python/*
+            dist/ui/*
             dist/frontend/*
           generate_release_notes: true
           make_latest: true
