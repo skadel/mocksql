@@ -41,6 +41,14 @@ Les deux valeurs différenciantes à ne jamais sacrifier lors de l'implémentati
 
 `models_path` est un chemin local configuré une fois via `mocksql init` (stocké dans `.mocksql/config.yaml`). `GET /models` scanne ce dossier et retourne la liste des fichiers `.sql` — c'est l'unique source de vérité pour le choix de fichier.
 
+**Préprocesseur SQL (`preprocessor_fn`)** : quand les fichiers `.sql` contiennent des variables non-parsables (`@start_date`, `{{ ds }}`, macros dbt…), l'utilisateur peut déclarer dans `mocksql.yml` une fonction Python qui transforme le SQL brut avant que MockSQL ne l'analyse :
+
+```yaml
+preprocessor_fn: "preprocessors:replace_vars"  # module:fonction, résolu depuis le dossier mocksql.yml
+```
+
+La fonction reçoit le SQL brut (`str`) et retourne le SQL transformé (`str`). Elle est appelée à chaque lecture de fichier (CLI `generate` et `GET /models`). Voir `storage/config.py:load_preprocessor_fn` pour l'implémentation.
+
 ### Tests et verdicts
 
 Chaque test généré porte :

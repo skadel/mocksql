@@ -2,11 +2,10 @@ import json
 import uuid
 
 from langchain_core.messages import AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from build_query.state import QueryState
-from models.env_variables import GENERATOR_MODEL
 from utils.llm_errors import is_vertex_permission_error, normalize_llm_content
+from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
 
@@ -89,7 +88,7 @@ Format strict : `**Verdict** — <ce que le test couvre> + <données/résultat v
 Verdicts possibles : **Excellent**, **Bon**, **Insuffisant**.
 Exemple : `**Bon** — Couvre la jointure sur clé manquante. Données et résultat valides.`"""
 
-    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    llm = make_llm()
 
     try:
         result = await llm.ainvoke(prompt)

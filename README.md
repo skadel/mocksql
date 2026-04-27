@@ -148,7 +148,7 @@ GOOGLE_CLOUD_LOCATION=us-central1
 BQ_SCHEMA_BILLING_PROJECT=<votre-projet-gcp>
 BQ_REGION=US
 
-# LLM
+# LLM (peut être overridé dans mocksql.yml via llm.model)
 DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
 
 # Base de données locale
@@ -220,8 +220,18 @@ dialect: bigquery          # bigquery | postgres
 models_path: ./models
 llm:
   provider: vertexai       # vertexai | openai
+  model: gemini-2.0-flash  # override du modèle par défaut (optionnel)
+  streaming: false         # désactive le streaming LLM (optionnel)
 schema_cache: .mocksql/schema_cache.json
 ```
+
+**Clés de la section `llm`** :
+
+| Clé | Défaut | Description |
+|---|---|---|
+| `provider` | `vertexai` | Backend LLM (`vertexai` ou `openai`) |
+| `model` | `gemini-2.0-flash-lite` | Nom du modèle — prioritaire sur `DEFAULT_MODEL_NAME` |
+| `streaming` | `false` | Active ou désactive le streaming token par token |
 
 ### `mocksql generate`
 

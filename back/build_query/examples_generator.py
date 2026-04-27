@@ -5,21 +5,19 @@ from typing import List, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.messages import AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from models.schemas import get_schemas
 from pydantic import Field, create_model
 
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
 from build_query.state import QueryState
-from models.env_variables import GENERATOR_MODEL
 from utils.examples import create_pydantic_models, filter_columns
+from utils.llm_factory import make_llm
+from storage.config import get_llm_model
 from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
 
-llm = ChatGoogleGenerativeAI(
-    model=GENERATOR_MODEL, vertexai=True, temperature=0, streaming=False
-)
+llm = make_llm()
 
 
 def _convert_datetime_fields(data):
@@ -208,7 +206,7 @@ async def generate_examples(state: QueryState):
         )
     except Exception as exc:
         if is_vertex_permission_error(exc):
-            error_msg = format_vertex_permission_message(GENERATOR_MODEL)
+            error_msg = format_vertex_permission_message(get_llm_model())
             return {
                 "messages": [
                     AIMessage(

@@ -8,9 +8,8 @@ from langchain_core.messages import AIMessage
 from pandas import DataFrame
 from sqlglot import exp
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from models.env_variables import GENERATOR_MODEL
 from utils.llm_errors import normalize_llm_content
+from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from build_query.state import QueryState
 from utils.examples import (
@@ -489,7 +488,7 @@ Est-ce que ce résultat vide est **intentionnel** (le test vérifie justement qu
 
 Réponds UNIQUEMENT par `true` ou `false`."""
 
-    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    llm = make_llm()
     try:
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content).strip().lower()
@@ -759,7 +758,7 @@ Réponds UNIQUEMENT avec un tableau JSON (aucun texte autour) :
   ...
 ]"""
 
-    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    llm = make_llm()
     try:
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content)
@@ -852,7 +851,7 @@ Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requ�
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
 {{"description": "...", "sql": "SELECT ..."}}"""
 
-    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    llm = make_llm()
     try:
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content)

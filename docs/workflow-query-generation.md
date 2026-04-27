@@ -170,6 +170,7 @@ Si l'exécution précédente a identifié une CTE dont le résultat est vide (`f
 
 ### Chemin standard
 1. Extrait les contraintes globales (JOINs, filtres WHERE, etc.) via `constraint_simplifier`
+   → voir [docs/constraint-simplifier.md](constraint-simplifier.md) pour le détail complet
 2. Extrait les contraintes par CTE (`per_cte`)
 3. Choisit le prompt approprié :
    - **Premier test** → `generate_data_prompt`

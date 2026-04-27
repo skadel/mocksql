@@ -47,6 +47,21 @@ def is_initialized() -> bool:
     return (Path(os.getcwd()) / "mocksql.yml").exists()
 
 
+def get_llm_model() -> str:
+    cfg = load_config()
+    return cfg.get("llm", {}).get("model") or os.getenv(
+        "DEFAULT_MODEL_NAME", "gemini-2.0-flash-lite"
+    )
+
+
+def get_llm_streaming() -> bool:
+    cfg = load_config()
+    llm_cfg = cfg.get("llm", {})
+    if "streaming" in llm_cfg:
+        return bool(llm_cfg["streaming"])
+    return os.getenv("LLM_STREAMING", "false").lower() == "true"
+
+
 def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 

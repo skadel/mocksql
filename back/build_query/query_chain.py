@@ -2,7 +2,6 @@ import json
 import uuid
 
 from langchain_core.messages import AIMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
@@ -10,8 +9,9 @@ from build_query.test_evaluator import evaluate_tests
 from build_query.profile_checker import _normalize_profile
 from build_query.routing import routing
 from build_query.state import QueryState
-from models.env_variables import GENERATOR_MODEL
 from models.message_service import get_messages_history
+from utils.llm_factory import make_llm
+from storage.config import get_llm_model
 from storage.test_repository import get_test
 from utils.msg_types import MsgType
 from utils.saver import history_saver, get_history_from_state
@@ -67,7 +67,7 @@ async def _handle_other(state: QueryState):
         format_vertex_permission_message,
     )
 
-    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    llm = make_llm()
     history = get_history_from_state(
         state,
         msg_type=[
@@ -89,7 +89,7 @@ async def _handle_other(state: QueryState):
         result = await chain.ainvoke({"descriptions": descriptions})
     except Exception as exc:
         if is_vertex_permission_error(exc):
-            error_msg = format_vertex_permission_message(GENERATOR_MODEL)
+            error_msg = format_vertex_permission_message(get_llm_model())
             return {
                 "messages": [
                     AIMessage(

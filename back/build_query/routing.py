@@ -1,14 +1,13 @@
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from build_query.prompt_tools import make_routing_prompt
 from build_query.state import QueryState
-from models.env_variables import GENERATOR_MODEL
+from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_history_from_state, common_history_retriever
 
-_llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+_llm = make_llm()
 
 
 async def routing(state: QueryState):

@@ -3,16 +3,15 @@ import uuid
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from build_query.prompt_tools import build_other_prompt
 from build_query.state import QueryState
 from common_vars import get_table_details
-from models.env_variables import OTHER_MODEL
+from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_history_from_state
 
-llm = ChatGoogleGenerativeAI(model=OTHER_MODEL, vertexai=True, temperature=0)
+llm = make_llm()
 
 
 async def other(state: QueryState):

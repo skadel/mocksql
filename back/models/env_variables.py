@@ -7,6 +7,7 @@ from storage.config import (
     get_bq_test_dataset,
     get_langchain_api_key,
     get_langchain_tracing,
+    get_llm_model,
 )
 
 load_dotenv()
@@ -60,7 +61,7 @@ DB_MODE = "duckdb"
 DUCKDB_PATH = os.getenv("DUCKDB_PATH", "data/mocksql.duckdb")
 BIGQUERY_LOCATION = os.getenv("BIGQUERY_LOCATION")
 EMBEDDING = os.getenv("EMBEDDING_MODEL", "text-multilingual-embedding-002")
-DEFAULT_MODEL_NAME = os.getenv("DEFAULT_MODEL_NAME", "gemini-2.0-flash-lite")
+DEFAULT_MODEL_NAME = get_llm_model()
 ROUTING_MODEL = os.getenv("ROUTING_MODEL", DEFAULT_MODEL_NAME)
 SOLVER_MODEL = os.getenv("SOLVER_MODEL", DEFAULT_MODEL_NAME)
 ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", DEFAULT_MODEL_NAME)
