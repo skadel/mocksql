@@ -11,7 +11,7 @@ from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from build_query.state import QueryState
 from common_vars import get_tables_mapping
-from models.env_variables import DUCKDB_PATH, PROJECT_ID
+from models.env_variables import DUCKDB_PATH, BQ_TEST_PROJECT
 from utils.errors import handle_compile_phase_exceptions, handle_post_compile_exceptions
 from utils.saver import get_message_type
 
@@ -21,7 +21,7 @@ _bq_client: bigquery.Client | None = None
 def _get_bq_client() -> bigquery.Client:
     global _bq_client
     if _bq_client is None:
-        _bq_client = bigquery.Client(project=PROJECT_ID)
+        _bq_client = bigquery.Client(project=BQ_TEST_PROJECT)
     return _bq_client
 
 

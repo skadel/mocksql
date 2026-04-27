@@ -2,7 +2,7 @@ import os
 
 from google.cloud import secretmanager
 
-PROJECT_ID = os.environ["PROJECT_ID"]
+PROJECT_ID = os.environ.get("VERTEX_PROJECT") or os.environ["GOOGLE_CLOUD_PROJECT"]
 VERSION_ID = "latest"
 
 secret_id = os.getenv("SECRET_MANAGER_SECRET_ID", "mocksql-env")

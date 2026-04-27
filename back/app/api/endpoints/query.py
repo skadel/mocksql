@@ -18,9 +18,7 @@ from models.env_variables import (
 from storage.test_repository import get_test, get_model_file_git_sha, update_test
 from utils.sql_code import extract_real_table_refs
 
-# Chargement .env
 dotenv.load_dotenv()
-PROJECT_ID = os.getenv("PROJECT_ID")
 
 router = APIRouter()
 
@@ -83,7 +81,7 @@ def _qualify_two_part_refs(
 async def validate_query_route(body: ValidateQueryRequest):
     from build_query.validator import validate_query as _validate_query
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT or os.getenv("PROJECT_ID")
+    billing_project = BQ_SCHEMA_BILLING_PROJECT
 
     # Cache check: if the session already has a validated result for the same SQL,
     # return it immediately without recompiling.
@@ -275,7 +273,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         _save_model_profile,
     )
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT or os.getenv("PROJECT_ID")
+    billing_project = BQ_SCHEMA_BILLING_PROJECT
 
     try:
         client = _bq.Client(project=billing_project)
@@ -323,7 +321,7 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
             },
         )
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT or os.getenv("PROJECT_ID")
+    billing_project = BQ_SCHEMA_BILLING_PROJECT
     schema_data, failed = await fetch_tables_schema(
         body.tables_to_import, billing_project
     )

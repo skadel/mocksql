@@ -9,7 +9,7 @@ from sqlglot import expressions as exp
 from sqlglot.optimizer import traverse_scope, find_all_in_scope
 
 from common_vars import type_mapping
-from models.env_variables import PROJECT_ID as BQ_TEST_PROJECT
+from models.env_variables import BQ_TEST_PROJECT
 
 # Initialize DuckDB connection
 DB_PATH = ":memory:"

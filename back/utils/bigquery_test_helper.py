@@ -300,7 +300,7 @@ class BigQueryTestHelper:
                 f"  1. Dans la console GCP → BigQuery → sélectionnez le projet '{self.project_id}'\n"
                 f"  2. Cliquez sur '+ Créer un dataset', nommez-le '{self.dataset_id}'\n"
                 f"  3. Ou via CLI : bq mk --dataset {self.project_id}:{self.dataset_id}\n"
-                f"Vérifiez aussi que BQ_TEST_PROJECT_ID dans votre .env correspond bien à ce projet."
+                f"Vérifiez aussi que BQ_TEST_PROJECT dans votre .env correspond bien à ce projet."
             )
 
         expiration_ms = 59 * 24 * 60 * 60 * 1000  # 59 days in ms

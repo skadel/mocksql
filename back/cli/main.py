@@ -128,8 +128,8 @@ def init(
 
     typer.echo(
         "\nRequired environment variables:\n"
-        "  PROJECT_ID=<your-gcp-project>\n"
-        "  GOOGLE_CLOUD_PROJECT=<your-gcp-project>\n"
+        "  VERTEX_PROJECT=<gcp-project-for-vertex-ai>\n"
+        "  BQ_TEST_PROJECT=<gcp-project-for-bigquery>  # defaults to VERTEX_PROJECT if not set\n"
         "  GOOGLE_CLOUD_LOCATION=us-central1\n"
         f"  DUCKDB_PATH={duckdb_path}\n"
         "\nNext step: mocksql generate <your_model.sql>"
