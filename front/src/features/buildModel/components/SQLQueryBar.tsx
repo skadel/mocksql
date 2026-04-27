@@ -57,7 +57,6 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   // Collapse only when the request completes (disabled: true → false) without errors
   useEffect(() => {
     if (prevDisabled.current && !disabled && !hasError) {
-      console.log("setting expanded to false")
       setExpanded(false);
     }
     prevDisabled.current = disabled;
@@ -74,7 +73,6 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
       prevTrigger.current = historyRestoreTrigger;
       setEditedSql(sqlQuery);
       setViewMode('raw');
-      console.log("setting expanded to true")
       setExpanded(true);
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -133,7 +131,7 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
           '&:before': { display: 'none' },
           bgcolor: expanded ? '#fafafa' : '#f0fafa',
         }}
-      >aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      >
         <AccordionSummary
           expandIcon={<ExpandMoreIcon sx={{ color: '#1ca8a4' }} />}
           sx={{ minHeight: 40, px: 2, py: 0 }}
