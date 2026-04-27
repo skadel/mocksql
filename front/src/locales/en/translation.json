@@ -23,7 +23,16 @@
     "executing_query_examples": "Executing query on examples",
     "validate_query": "Compiling generated query.",
     "failed_step": "Failed in step",
-    "empty_results": "Query returned 0 result, trying to add new examples ..."
+    "empty_results": "Query returned 0 result, trying to add new examples ...",
+    "loading_sql": "Loading SQL file…",
+    "validating_sql": "Validating SQL query…",
+    "checking_profiling": "Checking profiling…",
+    "generating_tests": "Generating tests…",
+    "creating_model": "Creating model…",
+    "reasoning": "Reasoning",
+    "validating_query": "Validating query",
+    "profiling": "Profiling in progress…",
+    "profiling_short": "Profiling…"
   },
   "action": {
     "download": "Download from bigquery",
@@ -31,11 +40,65 @@
     "download_examples": "Download",
     "send": "Send",
     "fix": "Fix",
-    "cancel": "Cancel"
+    "cancel": "Cancel",
+    "skip": "Skip",
+    "run_profiling": "Run profiling"
   },
   "errors": {
     "failed_to_fetch_messages": "failed to load messages",
-    "session_expired": "session expired"
+    "session_expired": "session expired",
+    "model_creation_failed": "Model creation failed.",
+    "model_not_found": "Model not found",
+    "test_creation_failed": "Error creating test.",
+    "validation_error": "Validation error.",
+    "invalid_query": "Invalid query.",
+    "unqualified_tables": "Unqualified tables: configure them manually.",
+    "import_error": "Error importing tables."
+  },
+  "generate": {
+    "choose_sql_file": "Choose a SQL file",
+    "sql_file_label": "SQL file",
+    "generate_tests": "Generate tests",
+    "query_valid": "✓ Valid query"
+  },
+  "chat": {
+    "regenerate_test": "Regenerate this test",
+    "modify_test": "Test #{{index}} — Modify with MockSQL",
+    "global_instruction": "Global instruction",
+    "modify_test_chip": "Modify test #{{index}}",
+    "sending": "Sending…",
+    "describe_modification": "Describe the desired modification…",
+    "add_constraints": "Request a modification, add constraints…"
+  },
+  "profiling": {
+    "title": "Optional profiling",
+    "query_validated": "Query validated successfully",
+    "description": "MockSQL can automatically run profiling on your columns. This <bold>improves the accuracy of generated tests</bold> by providing a better understanding of the actual data distribution.",
+    "billing_info": "This operation will scan approximately <bold>{{tb}} TB</bold> of data"
+  },
+  "notifications": {
+    "generation_failed": "Generation failed.",
+    "generation_success": "Tests generated successfully!"
+  },
+  "model": {
+    "sql_model": "SQL Model",
+    "test_sessions_one": "{{count}} test session",
+    "test_sessions_other": "{{count}} test sessions",
+    "tests_count_one": "{{count}} test",
+    "tests_count_other": "{{count}} tests",
+    "new_test": "New test",
+    "no_sessions": "No test sessions for this model.",
+    "not_tested": "Not tested"
+  },
+  "search": {
+    "no_results": "No results",
+    "no_models": "No models yet"
+  },
+  "relative_date": {
+    "just_now": "just now",
+    "minutes_ago": "{{count}} min ago",
+    "hours_ago": "{{count}} h ago",
+    "days_ago": "{{count}} d ago"
   },
   "search_models": "Search Models",
   "confirm_delete": "Confirm Delete",

@@ -242,17 +242,14 @@ def _patch_db_calls() -> None:
 # ── Output extraction ─────────────────────────────────────────────────────────
 
 
-def _extract_results(final_state: dict) -> tuple[list | None, list | None]:
-    """Return (test_tables, exec_results) from the final state messages.
+def _extract_test_cases(final_state: dict) -> list | None:
+    """Return the full list of test-case result dicts from the executor message.
 
-    The executor emits a RESULTS message in state["messages"] whose content is a
-    JSON-serialised list of test-result dicts.  Each dict contains:
-      - "data":         {table_name: [rows]}  — the generated test input data
-      - "results_json": JSON string           — the SQL execution output rows
+    The executor emits an AIMessage whose content is a JSON-serialised list where
+    each element is a test-case dict containing at minimum:
+      - "data":             {table_name: [rows]}
+      - "assertion_results": [{sql, description, ...}]
     """
-    tables = None
-    results = None
-
     for msg in reversed(final_state.get("messages", [])):
         try:
             content = json.loads(msg.content)
@@ -262,34 +259,29 @@ def _extract_results(final_state: dict) -> tuple[list | None, list | None]:
         if not isinstance(content, list) or not content:
             continue
 
-        first = content[0]
-        if tables is None and first.get("data"):
-            tables = first["data"]
-        if results is None and first.get("results_json") is not None:
-            try:
-                results = json.loads(first["results_json"])
-            except Exception:
-                results = first["results_json"]
+        if content[0].get("data") is not None:
+            return content
 
-        if tables is not None and results is not None:
-            break
-
-    return tables, results
+    return None
 
 
-def _write_outputs(
-    model: Path, output_dir: Path, tables: list | None, results: list | None
-) -> None:
+def _write_test_file(
+    model: Path,
+    output_dir: Path,
+    sql: str,
+    used_columns: list[str],
+    test_cases: list,
+) -> Path:
+    """Write a single {stem}.json test file in the format expected by test_runner."""
     output_dir.mkdir(parents=True, exist_ok=True)
-    stem = model.stem
-
-    if tables:
-        tables_path = output_dir / f"{stem}_data.json"
-        tables_path.write_text(json.dumps(tables, indent=2, default=str))
-
-    if results:
-        results_path = output_dir / f"{stem}_results.json"
-        results_path.write_text(json.dumps(results, indent=2, default=str))
+    out_path = output_dir / f"{model.stem}.json"
+    doc = {
+        "sql": sql,
+        "used_columns": used_columns,
+        "test_cases": test_cases,
+    }
+    out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+    return out_path
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -379,10 +371,11 @@ async def run_generate(model: Path, config: Path, output_dir: Path) -> None:
         raise typer.Exit(1)
 
     # Step 6 — write outputs
-    tables, results = _extract_results(final_state)
-    _write_outputs(model, output_dir, tables, results)
-
-    if tables or results:
-        typer.echo(f"[OK] Outputs written to {output_dir}/")
+    test_cases = _extract_test_cases(final_state)
+    if test_cases:
+        out_path = _write_test_file(
+            model, output_dir, sql, state["used_columns"], test_cases
+        )
+        typer.echo(f"[OK] {len(test_cases)} test case(s) written to {out_path}")
     else:
         typer.echo("[WARN] No output produced — check the SQL and schemas.")

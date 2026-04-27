@@ -468,6 +468,36 @@ async def _run_cte_trace(
     return trace
 
 
+async def _is_empty_result_expected(
+    test_description: str,
+    duckdb_sql: str,
+) -> bool:
+    """
+    Demande au LLM si un résultat vide est intentionnel pour ce test.
+    Retourne True si vide attendu (ex : cas "plage vide", filtre qui exclut tout),
+    False si le résultat vide est probablement une erreur de génération de données.
+    """
+    prompt = f"""Description du test : {test_description}
+
+Requête SQL :
+```sql
+{duckdb_sql}
+```
+
+L'exécution de cette requête sur les données de test a produit 0 ligne.
+Est-ce que ce résultat vide est **intentionnel** (le test vérifie justement qu'aucune ligne ne ressort) ?
+
+Réponds UNIQUEMENT par `true` ou `false`."""
+
+    llm = ChatGoogleGenerativeAI(model=GENERATOR_MODEL, vertexai=True, temperature=0)
+    try:
+        result = await llm.ainvoke(prompt)
+        content = normalize_llm_content(result.content).strip().lower()
+        return content.startswith("true")
+    except Exception:
+        return False
+
+
 async def _run_single_test_case(
     state: QueryState,
     test_case: Dict[str, Any],
@@ -535,13 +565,35 @@ async def _run_single_test_case(
                 (name for name, info in cte_trace.items() if info["row_count"] == 0),
                 None,
             )
+            empty_intended = await _is_empty_result_expected(
+                test_description=test_case.get("unit_test_description", ""),
+                duckdb_sql=final_duckdb_sql,
+            )
+            if not empty_intended:
+                return {
+                    **base,
+                    "status": "empty_results",
+                    "results_json": await format_result(final_res_df),
+                    "cte_trace": cte_trace,
+                    "failing_cte": failing_cte,
+                    "assertion_results": [],
+                }
+            # Résultat vide intentionnel : on pose une assertion count = 0
+            assertion_results = [
+                {
+                    "description": "Le résultat doit être vide (0 ligne attendue)",
+                    "sql": "SELECT * FROM (SELECT COUNT(*) AS cnt FROM __result__) WHERE cnt > 0",
+                    "passed": True,
+                    "failing_rows": [],
+                }
+            ]
             return {
                 **base,
-                "status": "empty_results",
+                "status": "complete",
                 "results_json": await format_result(final_res_df),
                 "cte_trace": cte_trace,
                 "failing_cte": failing_cte,
-                "assertion_results": [],
+                "assertion_results": assertion_results,
             }
 
         view_name = f"__result__{suffix}"
@@ -678,7 +730,7 @@ async def _generate_assertions_from_result(
     prompt = f"""Tu es un expert en tests SQL avec Duckdb dbt-style.
 Description du test : {test_description}
 
-Données de tests input : 
+Données de tests input :
 {test_data}
 
 Requête SQL testée :

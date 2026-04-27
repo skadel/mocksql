@@ -96,22 +96,18 @@ export interface BuildModelState {
     error: string | null;
     executionError?: string;
     success?: boolean;
-    step?: string;
     loading_message?: string;
     loading: boolean | null;
     testData?: TableData[];
     validateTestSuccess: boolean;
     validateTestLoading: boolean;
-    queryComponentMessages: Message[];
     queryComponentGraph: Record<string, Message>;
     uniqueColumns: string[];
     query?: string;
     optimizedQuery?: string;
     testResults?: any[];
     name?: string;
-    modelId?: string;
     lastUserInput: string;
-    reasoning?: string;
     streamingReasoning?: string;
     sqlHistory: SqlHistoryEntry[];
 
@@ -158,6 +154,7 @@ export interface Model {
   source?: boolean;
   source_project?: string;
   source_database?: string;
+  folder?: string;
 }
 
 export interface Project {
