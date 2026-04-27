@@ -32,24 +32,26 @@ _REQUIRED: list[tuple[str, str]] = [
     ("VERTEX_PROJECT", "Projet GCP pour Vertex AI / LLM (ou GOOGLE_CLOUD_PROJECT)"),
 ]
 
-_missing = [
-    f"  • {name}  — {desc}"
-    for name, desc in _REQUIRED
-    if not os.getenv(name)
-    and not (name == "VERTEX_PROJECT" and os.getenv("GOOGLE_CLOUD_PROJECT"))
-]
 
-if _missing:
-    print(
-        "\n[MockSQL] Variables d'environnement obligatoires manquantes :\n"
-        + "\n".join(_missing)
-        + "\n\nDéfinissez-les dans votre .env ou via l'environnement shell, puis relancez.\n"
-        "Exemple minimal :\n"
-        "  VERTEX_PROJECT=my-gcp-project          # projet Vertex AI\n"
-        "  BQ_TEST_PROJECT=my-bq-project           # optionnel — défaut : VERTEX_PROJECT\n",
-        file=sys.stderr,
-    )
-    sys.exit(1)
+def validate_required_env() -> None:
+    missing = [
+        f"  • {name}  — {desc}"
+        for name, desc in _REQUIRED
+        if not os.getenv(name)
+        and not (name == "VERTEX_PROJECT" and os.getenv("GOOGLE_CLOUD_PROJECT"))
+    ]
+    if missing:
+        print(
+            "\n[MockSQL] Variables d'environnement obligatoires manquantes :\n"
+            + "\n".join(missing)
+            + "\n\nDéfinissez-les dans votre .env ou via l'environnement shell, puis relancez.\n"
+            "Exemple minimal :\n"
+            "  VERTEX_PROJECT=my-gcp-project          # projet Vertex AI\n"
+            "  BQ_TEST_PROJECT=my-bq-project           # optionnel — défaut : VERTEX_PROJECT\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 
 # ---------------------------------------------------------------------------
 # Variables optionnelles

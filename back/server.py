@@ -11,9 +11,11 @@ from starlette.middleware.cors import CORSMiddleware
 
 from app.api.endpoints import query, messages, models, projects, users
 from models.database import db_pool
+from models.env_variables import validate_required_env
 
 # ─── 1) Chargement .env ──────────────────────────────
 load_dotenv()
+validate_required_env()
 
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO").upper())
 
