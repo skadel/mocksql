@@ -84,7 +84,6 @@ Le flow actuel lit les fichiers `.sql` directement depuis `models_path` (dossier
 | SQL parse  | `sqlglot`                                                |
 | Base       | PostgreSQL (Cloud SQL)                                   |
 | Frontend   | React 18 · TypeScript · Redux Toolkit · MUI              |
-| Infra      | Google Cloud Run · Terraform                             |
 | Connecteurs (roadmap) | dbt (`manifest.json`) · GitHub API (SHA tracking) |
 
 ---
