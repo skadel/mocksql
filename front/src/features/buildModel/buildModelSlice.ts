@@ -14,7 +14,6 @@ const initialState: BuildModelState = {
   name: '',
   validateTestSuccess: false,
   validateTestLoading: false,
-  queryComponentMessages: [],
   queryComponentGraph: {},
   testResults: [],
   lastUserInput: '',
@@ -223,9 +222,6 @@ export const buildModelSlice = createSlice({
     resetContext: (state) => {
       return initialState;
     },
-    setStep: (state, action: PayloadAction<string>) => {
-      state.step = action.payload;
-    },
     setLoading: (state, action: PayloadAction<boolean>) => {
       state.loading = action.payload;
     },
@@ -250,7 +246,6 @@ export const buildModelSlice = createSlice({
       }
     },
     resetMessages(state, content: PayloadAction) {
-      state.queryComponentMessages = [];
       state.queryComponentGraph = {};
     },
     setLoadingMessage: (state, action: PayloadAction<string | undefined>) => {
@@ -369,7 +364,6 @@ export const buildModelSlice = createSlice({
         state.streamingReasoning = undefined;
       })
       .addCase(chatQuery.fulfilled, (state) => {
-        console.log("chatquery fulfilled")
         state.loading = false;
         state.loading_message = undefined;
         state.streamingReasoning = undefined;
@@ -515,7 +509,7 @@ export const buildModelSlice = createSlice({
 export const { setError, resetMessages, setLoadingMessage, appendComponentToLastMessage,
   appendQueryComponentMessage, setTransformationName, setQueryComponentGraph,
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
-  setStep, setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
+  setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
   setTestResults, pushSqlHistory, setRestoredMessageId,
   appendStreamingReasoning, clearStreamingReasoning } = buildModelSlice.actions;
 

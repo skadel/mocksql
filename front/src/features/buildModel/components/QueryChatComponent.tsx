@@ -16,8 +16,11 @@ import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
-import { createModel, fetchSqlFiles, createTestApi } from '../../../api/models';
+import { createModel, createTestApi } from '../../../api/models';
 import { chatQuery, stopStream, validateQueryApi, checkProfileApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
+import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
+import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
+import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
 import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, resetContext } from '../buildModelSlice';
@@ -63,16 +66,9 @@ const ChatComponent: React.FC = () => {
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
   const [validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
   const [submissionStep, setSubmissionStep] = useState<string | null>(null);
-  const [alwaysFix, setAlwaysFix] = useState(() => localStorage.getItem('alwaysFix') === 'true');
+  const [alwaysFix, setAlwaysFix] = useLocalStorageState('alwaysFix', false);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
-  const [sqlFileNames, setSqlFileNames] = useState<string[]>([]);
-
-  useEffect(() => {
-    const load = () => fetchSqlFiles().then(files => setSqlFileNames(files.map(f => f.name)));
-    load();
-    const id = setInterval(load, 10 * 60 * 1000);
-    return () => clearInterval(id);
-  }, []);
+  const sqlFileNames = useSqlFileLoader();
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const skipValidationRef = useRef(false);
@@ -301,6 +297,103 @@ const ChatComponent: React.FC = () => {
     [sqlFileNames]
   );
 
+  // -------- Shared validate → profile → generate flow
+  const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
+    setSubmissionStep(t('loading.validating_sql'));
+    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
+    try {
+      validateResult = await validateQueryApi({ sql, project: '', dialect: DIALECT, session: sessionId, parent_message_id: '' });
+    } catch {
+      setValidationStatus('error');
+      setSubmissionStep(null);
+      setSubmitError(t('errors.validation_error'));
+      setIsSending(false);
+      return;
+    }
+
+    if (!validateResult?.valid) {
+      setValidationStatus('error');
+      setSubmissionStep(null);
+      if (validateResult?.missing_tables?.length) {
+        setMissingTables(validateResult.missing_tables);
+        if (validateResult.auto_import_available && validateResult.tables_to_import?.length) {
+          setTablesToImport(validateResult.tables_to_import);
+        }
+      } else {
+        pendingSessionRef.current = null;
+        setSubmitError(validateResult?.error || t('errors.invalid_query'));
+      }
+      setIsSending(false);
+      return;
+    }
+
+    setOptimizedSql(validateResult.optimized_sql ?? '');
+    dispatch(pushSqlHistory({ id: uuidv4(), sql, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
+
+    setSubmissionStep(t('loading.checking_profiling'));
+    const usedColumns = validateResult.used_columns ?? [];
+    try {
+      const profileResult = await checkProfileApi({ sql, project: '', dialect: DIALECT, session: sessionId, used_columns: usedColumns });
+      if (!profileResult.profile_complete && profileResult.profile_request) {
+        if (profileResult.auto_profile_available && profileResult.profile_request.profile_query) {
+          setValidationStatus('valid');
+          navigate(`/models/${sessionId}`);
+          dispatch(setCurrentId(sessionId));
+          const req = profileResult.profile_request;
+          const doStream = () => {
+            setPendingFirstLoad(true);
+            isGeneratingRef.current = true;
+            dispatch(chatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' }));
+          };
+          setPendingAutoProfile({
+            profileRequest: req,
+            onConfirm: async () => {
+              setIsAutoProfileRunning(true);
+              try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: sessionId }); } catch {}
+              setIsAutoProfileRunning(false);
+              setPendingAutoProfile(null);
+              doStream();
+            },
+            onSkip: async () => {
+              setPendingAutoProfile(null);
+              try { await skipProfilingApi({ session: sessionId }); } catch {}
+              doStream();
+            },
+          });
+          pendingSessionRef.current = null;
+          setIsSending(false);
+          return;
+        } else {
+          try { await skipProfilingApi({ session: sessionId }); } catch {}
+        }
+      }
+    } catch {}
+
+    setSubmissionStep(t('loading.generating_tests'));
+    setValidationStatus('valid');
+    navigate(`/models/${sessionId}`);
+    dispatch(setCurrentId(sessionId));
+    setPendingFirstLoad(true);
+
+    try {
+      isGeneratingRef.current = true;
+      await dispatch(chatQuery({
+        userInput: '',
+        sessionId,
+        project: '',
+        dialect: DIALECT,
+        query: sql,
+        ChangedMessageId: '',
+        t,
+        parentMessageId: validateResult?.sql_message_id ?? '',
+      })).unwrap?.();
+    } catch {}
+
+    pendingSessionRef.current = null;
+    setSubmissionStep(null);
+    setIsSending(false);
+  }, [dispatch, navigate, t]);
+
   // -------- Submission from SQL file selector
   const handleFileSubmit = useCallback(async () => {
     if (!selectedModelName || isSending) return;
@@ -334,117 +427,12 @@ const ChatComponent: React.FC = () => {
     }
 
     forceNewRef.current = false;
-
     setSqlQuery(fileSql);
     setModelName(selectedModelName);
     pendingSessionRef.current = testId;
 
-    setSubmissionStep(t('loading.validating_sql'));
-    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
-    try {
-      validateResult = await validateQueryApi({
-        sql: fileSql,
-        project: '',
-        dialect: DIALECT,
-        session: testId,
-        parent_message_id: '',
-      });
-    } catch {
-      setValidationStatus('error');
-      setSubmissionStep(null);
-      setSubmitError(t('errors.validation_error'));
-      setIsSending(false);
-      return;
-    }
-
-    if (!validateResult?.valid) {
-      setValidationStatus('error');
-      setSubmissionStep(null);
-      if (validateResult?.missing_tables?.length) {
-        setMissingTables(validateResult.missing_tables);
-        if (validateResult.auto_import_available && validateResult.tables_to_import?.length) {
-          setTablesToImport(validateResult.tables_to_import);
-        }
-      } else {
-        pendingSessionRef.current = null;
-        setSubmitError(validateResult?.error || t('errors.invalid_query'));
-      }
-      setIsSending(false);
-      return;
-    }
-
-    setOptimizedSql(validateResult.optimized_sql ?? '');
-    dispatch(pushSqlHistory({ id: uuidv4(), sql: fileSql, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
-
-    setSubmissionStep(t('loading.checking_profiling'));
-    const usedColumns = validateResult.used_columns ?? [];
-    try {
-      const profileResult = await checkProfileApi({
-        sql: fileSql,
-        project: '',
-        dialect: DIALECT,
-        session: testId,
-        used_columns: usedColumns,
-      });
-      if (!profileResult.profile_complete && profileResult.profile_request) {
-        if (profileResult.auto_profile_available && profileResult.profile_request.profile_query) {
-          setValidationStatus('valid');
-          navigate(`/models/${testId}`);
-          dispatch(setCurrentId(testId));
-          const req = profileResult.profile_request;
-          const doStream = () => {
-            setPendingFirstLoad(true);
-            isGeneratingRef.current = true;
-            dispatch(chatQuery({ userInput: '', sessionId: testId, project: '', dialect: DIALECT, query: fileSql, ChangedMessageId: '', t, parentMessageId: '' }));
-          };
-          setPendingAutoProfile({
-            profileRequest: req,
-            onConfirm: async () => {
-              setIsAutoProfileRunning(true);
-              try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: testId }); } catch {}
-              setIsAutoProfileRunning(false);
-              setPendingAutoProfile(null);
-              doStream();
-            },
-            onSkip: async () => {
-              setPendingAutoProfile(null);
-              try { await skipProfilingApi({ session: testId }); } catch {}
-              doStream();
-            },
-          });
-          pendingSessionRef.current = null;
-          setIsSending(false);
-          return;
-        } else {
-          try { await skipProfilingApi({ session: testId }); } catch {}
-        }
-      }
-    } catch {}
-
-    setSubmissionStep(t('loading.generating_tests'));
-    setValidationStatus('valid');
-    navigate(`/models/${testId}`);
-    dispatch(setCurrentId(testId));
-    setPendingFirstLoad(true);
-
-    try {
-      isGeneratingRef.current = true;
-      await dispatch(chatQuery({
-        userInput: '',
-        sessionId: testId,
-        project: '',
-        dialect: DIALECT,
-        query: fileSql,
-        ChangedMessageId: '',
-        t,
-        parentMessageId: validateResult?.sql_message_id ?? '',
-      })).unwrap?.();
-    } catch {}
-
-    pendingSessionRef.current = null;
-    setSubmissionStep(null);
-    setIsSending(false);
-  }, [selectedModelName, isSending, dispatch, navigate, t]);
+    await runSqlSubmissionFlow(fileSql, testId);
+  }, [selectedModelName, isSending, navigate, t, runSqlSubmissionFlow]);
 
   // -------- First message (SQL required)
   const handleNewChatSubmit = useCallback(async () => {
@@ -458,10 +446,7 @@ const ChatComponent: React.FC = () => {
     if (!pendingSessionRef.current) {
       setSubmissionStep(t('loading.creating_model'));
       try {
-        await dispatch(createModel({
-          name: modelName.trim() || 'nouveau_script',
-          session_id: newSession,
-        })).unwrap?.();
+        await dispatch(createModel({ name: modelName.trim() || 'nouveau_script', session_id: newSession })).unwrap?.();
         pendingSessionRef.current = newSession;
       } catch {
         dispatch(setError(t('errors.model_creation_failed')));
@@ -472,120 +457,8 @@ const ChatComponent: React.FC = () => {
       }
     }
 
-    setSubmissionStep(t('loading.validating_sql'));
-    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
-    try {
-      validateResult = await validateQueryApi({
-        sql: sqlQuery,
-        project: '',
-        dialect: DIALECT,
-        session: newSession,
-        parent_message_id: '',
-      });
-    } catch {
-      setValidationStatus('error');
-      setSubmissionStep(null);
-      setSubmitError(t('errors.validation_error'));
-      setIsSending(false);
-      return;
-    }
-
-    if (!validateResult?.valid) {
-      setValidationStatus('error');
-      setSubmissionStep(null);
-      if (validateResult?.missing_tables?.length) {
-        setMissingTables(validateResult.missing_tables);
-        if (validateResult.auto_import_available && validateResult.tables_to_import?.length) {
-          setTablesToImport(validateResult.tables_to_import);
-        }
-      } else {
-        pendingSessionRef.current = null;
-        setSubmitError(validateResult?.error || t('errors.invalid_query'));
-      }
-      setIsSending(false);
-      return;
-    }
-
-    setOptimizedSql(validateResult.optimized_sql ?? '');
-    dispatch(pushSqlHistory({ id: uuidv4(), sql: sqlQuery, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
-
-    setSubmissionStep(t('loading.checking_profiling'));
-    const usedColumns = validateResult.used_columns ?? [];
-    try {
-      const profileResult = await checkProfileApi({
-        sql: sqlQuery,
-        project: '',
-        dialect: DIALECT,
-        session: newSession,
-        used_columns: usedColumns,
-      });
-      if (!profileResult.profile_complete && profileResult.profile_request) {
-        if (profileResult.auto_profile_available && profileResult.profile_request.profile_query) {
-          setValidationStatus('valid');
-          navigate(`/models/${newSession}`);
-          dispatch(setCurrentId(newSession));
-          const req = profileResult.profile_request;
-          const capturedSql = sqlQuery;
-          const doStreamNew = () => {
-            setPendingFirstLoad(true);
-            dispatch(chatQuery({
-              userInput: '',
-              sessionId: newSession,
-              project: '',
-              dialect: DIALECT,
-              query: capturedSql,
-              ChangedMessageId: '',
-              t,
-              parentMessageId: '',
-            }));
-          };
-          setPendingAutoProfile({
-            profileRequest: req,
-            onConfirm: async () => {
-              setIsAutoProfileRunning(true);
-              try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: newSession }); } catch {}
-              setIsAutoProfileRunning(false);
-              setPendingAutoProfile(null);
-              doStreamNew();
-            },
-            onSkip: async () => {
-              setPendingAutoProfile(null);
-              try { await skipProfilingApi({ session: newSession }); } catch {}
-              doStreamNew();
-            },
-          });
-          pendingSessionRef.current = null;
-          setIsSending(false);
-          return;
-        } else {
-          try { await skipProfilingApi({ session: newSession }); } catch {}
-        }
-      }
-    } catch {}
-
-    setSubmissionStep(t('loading.generating_tests'));
-    setValidationStatus('valid');
-    navigate(`/models/${newSession}`);
-    dispatch(setCurrentId(newSession));
-    setPendingFirstLoad(true);
-
-    try {
-      await dispatch(chatQuery({
-        userInput: '',
-        sessionId: newSession,
-        project: '',
-        dialect: DIALECT,
-        query: sqlQuery,
-        ChangedMessageId: '',
-        t,
-        parentMessageId: validateResult?.sql_message_id ?? '',
-      })).unwrap?.();
-    } catch {}
-
-    pendingSessionRef.current = null;
-    setSubmissionStep(null);
-    setIsSending(false);
-  }, [sqlQuery, modelName, dispatch, navigate, t, isSending]);
+    await runSqlSubmissionFlow(sqlQuery, newSession);
+  }, [sqlQuery, modelName, dispatch, t, isSending, runSqlSubmissionFlow]);
 
   // -------- Auto-import missing tables then retry submit
   const handleAutoImport = useCallback(async () => {
@@ -741,8 +614,7 @@ const ChatComponent: React.FC = () => {
 
   const handleAlwaysFixChange = useCallback((value: boolean) => {
     setAlwaysFix(value);
-    localStorage.setItem('alwaysFix', String(value));
-  }, []);
+  }, [setAlwaysFix]);
 
   // Auto-fix
   useEffect(() => {
@@ -753,7 +625,7 @@ const ChatComponent: React.FC = () => {
     if (!msg.contents?.error) return;
     if (autoFixedIds.current.has(msg.id)) return;
     autoFixedIds.current.add(msg.id);
-    sendMessage('__fix_error__', sqlQuery, '', msg.parent ?? msg.id, undefined, false);
+    sendMessage(FIX_ERROR_COMMAND, sqlQuery, '', msg.parent ?? msg.id, undefined, false);
   }, [renderMessages, alwaysFix, loading, isSending, sqlQuery, sendMessage]);
 
   // -------- Browser notification on generation complete
@@ -923,15 +795,17 @@ const ChatComponent: React.FC = () => {
               onSelectForModification={handleSelectTestForModification}
               onRerunTest={handleRerunTest}
               selectedTestIndex={selectedTestIndex}
-              sql={sqlQuery}
-              onSqlUpdate={handleSQLUpdate}
-              optimizedSql={optimizedSql}
-              sqlHistory={sqlHistory}
-              onHistorySelect={handleHistorySelect}
-              historyRestoreTrigger={historyRestoreTrigger}
-              sqlDisabled={isSending}
-              sqlLoading={isSending}
-              sqlHasError={lastMsgHasError}
+              sqlProps={{
+                sql: sqlQuery,
+                onUpdate: handleSQLUpdate,
+                optimizedSql,
+                sqlHistory,
+                onHistorySelect: handleHistorySelect,
+                historyRestoreTrigger,
+                disabled: isSending,
+                loading: isSending,
+                hasError: lastMsgHasError,
+              }}
               onSuggestionFill={(text) => { setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
               onUpload={(uploadedData) => {
                 const lastMsg = renderMessages[renderMessages.length - 1] as any;
