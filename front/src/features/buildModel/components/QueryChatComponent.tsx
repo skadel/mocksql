@@ -16,7 +16,10 @@ import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
-import { createModel, createTestApi } from '../../../api/models';
+import { createModel, createTestApi, fetchModelSql } from '../../../api/models';
+import { highlight, languages } from 'prismjs';
+import 'prismjs/components/prism-sql';
+import Editor from 'react-simple-code-editor';
 import { chatQuery, stopStream, validateQueryApi, checkProfileApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
 import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
@@ -68,11 +71,24 @@ const ChatComponent: React.FC = () => {
   const [submissionStep, setSubmissionStep] = useState<string | null>(null);
   const [alwaysFix, setAlwaysFix] = useLocalStorageState('alwaysFix', false);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
+  const [previewSql, setPreviewSql] = useState<string | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
   const sqlFileNames = useSqlFileLoader();
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
+
+  // Fetch SQL preview when a model is selected in the entry phase
+  useEffect(() => {
+    if (!selectedModelName) { setPreviewSql(null); return; }
+    let cancelled = false;
+    setPreviewLoading(true);
+    fetchModelSql(selectedModelName).then((sql) => {
+      if (!cancelled) { setPreviewSql(sql); setPreviewLoading(false); }
+    });
+    return () => { cancelled = true; };
+  }, [selectedModelName]);
 
   // Pre-fill model selector from URL params (?model=xxx&forceNew=1)
   useEffect(() => {
@@ -741,6 +757,37 @@ const ChatComponent: React.FC = () => {
                     value={selectedModelName || ''}
                   />
                 </Box>
+                {/* SQL preview — shown once a file is selected */}
+                {selectedModelName && (
+                  <Box sx={{ width: '100%', mt: 1 }}>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
+                      <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#1f948d', letterSpacing: 0.5, fontFamily: 'monospace' }}>SQL</Typography>
+                      <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>· {selectedModelName}</Typography>
+                      <Box sx={{ ml: 'auto', fontSize: 11, px: '8px', py: '2px', borderRadius: 999, bgcolor: '#f4f7f7', border: '1px solid #e4eaec', color: '#6b8287', fontWeight: 500 }}>
+                        Lecture seule
+                      </Box>
+                    </Box>
+                    <Box sx={{ border: '1px solid #e4eaec', borderRadius: '10px', overflow: 'hidden', bgcolor: '#f4f7f7', opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
+                      {previewSql !== null ? (
+                        <Box sx={{ maxHeight: 260, overflow: 'auto', '& .npm__react-simple-code-editor__textarea': { outline: 'none !important' } }}>
+                          <Editor
+                            value={previewSql}
+                            onValueChange={() => {}}
+                            highlight={(code) => highlight(code, languages.sql, 'sql')}
+                            padding={14}
+                            readOnly
+                            style={{ fontFamily: '"Fira Mono","Fira Code",monospace', fontSize: 12.5, background: 'transparent', minHeight: 60 }}
+                          />
+                        </Box>
+                      ) : (
+                        <Box sx={{ p: '14px', display: 'flex', alignItems: 'center', gap: 1 }}>
+                          <LinearProgress sx={{ flex: 1, height: 4, borderRadius: 2, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }} />
+                        </Box>
+                      )}
+                    </Box>
+                  </Box>
+                )}
+
                 <Button
                   variant="contained"
                   size="large"
@@ -754,6 +801,7 @@ const ChatComponent: React.FC = () => {
                     textTransform: 'none',
                     borderRadius: 2,
                     px: 4,
+                    mt: selectedModelName ? 1 : 0,
                   }}
                 >
                   {t('generate.generate_tests')}

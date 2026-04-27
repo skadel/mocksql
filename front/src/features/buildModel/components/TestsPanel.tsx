@@ -6,6 +6,7 @@ import EditIcon from '@mui/icons-material/Edit';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import HistoryIcon from '@mui/icons-material/History';
+import LinkIcon from '@mui/icons-material/Link';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ReplayIcon from '@mui/icons-material/Replay';
@@ -145,7 +146,7 @@ function CoverageBar({ tests }: { tests: any[] }) {
   const partial   = bucketData.filter((b) => b.n > 0 && b.comp < 85);
 
   return (
-    <Box sx={{ bgcolor: '#fff', border: `1px solid ${BORDER}`, borderRadius: '12px', p: '14px 16px', mb: 1.5 }}>
+    <Box sx={{ bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '12px', p: '14px 16px', mb: 1.5 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           <CoverageRing score={score} fg={toneFg} />
@@ -329,9 +330,10 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
   const tags: string[] = test.tags ?? [];
   return (
     <Box
+      id={`test-${idx + 1}`}
       onClick={onExpand}
       sx={{
-        bgcolor: '#fff', border: `1px solid ${BORDER}`, borderLeft: `3px solid ${border}`,
+        bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderLeft: `3px solid ${border}`,
         borderRadius: '10px', display: 'grid',
         gridTemplateColumns: '22px 108px 1fr auto',
         alignItems: 'center', gap: 1, p: '9px 12px', cursor: 'pointer',
@@ -453,7 +455,7 @@ function FilterChip({ label, count, active, color, onClick }: { label: string; c
         display: 'inline-flex', alignItems: 'center', gap: '6px',
         px: '10px', py: '5px', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit',
         border: `1.2px solid ${active ? color : BORDER}`,
-        bgcolor: '#fff', color: INK, borderRadius: 999, fontWeight: active ? 700 : 500,
+        bgcolor: SURFACE, color: INK, borderRadius: 999, fontWeight: active ? 700 : 500,
         '&:hover': { borderColor: color },
       }}
     >
@@ -533,7 +535,7 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
 
   return (
     <>
-      <Box sx={{ bgcolor: '#fff', borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
+      <Box sx={{ bgcolor: SURFACE, borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
         <Box
           onClick={handleToggle}
           sx={{ display: 'flex', alignItems: 'center', gap: 1.5, px: 2, py: '9px', cursor: 'pointer', '&:hover': { bgcolor: '#fafcfc' } }}
@@ -713,6 +715,17 @@ function TestCard({
   const tags: string[] = test.tags ?? [];
   const description = editedDescription ?? test.unit_test_description ?? '';
   const testKey = `${idx}`;
+  const [copied, setCopied] = useState(false);
+
+  const handleCopyLink = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const url = new URL(window.location.href);
+    url.hash = `test-${idx + 1}`;
+    navigator.clipboard.writeText(url.toString());
+    window.location.hash = `test-${idx + 1}`;
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   const inputData: Record<string, any[]> = test.data ?? test.test_data ?? {};
   const outputData: any[] = test.results_json
@@ -721,8 +734,9 @@ function TestCard({
 
   return (
     <Box
+      id={`test-${idx + 1}`}
       sx={{
-        bgcolor: selectedTestIndex === idx ? '#f0fafa' : '#fff',
+        bgcolor: selectedTestIndex === idx ? '#f0fafa' : SURFACE,
         border: `1px solid ${BORDER}`,
         borderLeft: `3px solid ${border}`,
         borderRadius: '12px',
@@ -803,6 +817,12 @@ function TestCard({
             )}
           </>
         )}
+        <Tooltip title={copied ? 'Copié !' : 'Copier le lien vers ce test'}>
+          <MutedIconButton size="small" onClick={handleCopyLink}>
+            <LinkIcon sx={{ fontSize: 14, color: copied ? TEAL : undefined }} />
+          </MutedIconButton>
+        </Tooltip>
+
         <Tooltip title="Commentaires d'équipe">
           <Box
             component="button"
@@ -961,6 +981,42 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     if (newDesc === undefined) return;
     persist(testResults.map((t, i) => i === idx ? { ...t, unit_test_description: newDesc } : t));
   };
+
+  const prevTestCountRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (testResults.length === 0) {
+      prevTestCountRef.current = 0;
+      return;
+    }
+
+    // First time tests appear: navigate to hash if present
+    if (prevTestCountRef.current === null) {
+      prevTestCountRef.current = testResults.length;
+      const hash = window.location.hash.slice(1);
+      if (hash) {
+        setTimeout(() => {
+          document.getElementById(hash)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 0);
+      }
+      return;
+    }
+
+    // Auto-scroll to newly added test
+    const prev = prevTestCountRef.current;
+    const curr = testResults.length;
+    if (curr > prev) {
+      const targetId = `test-${curr}`;
+      setTimeout(() => {
+        const el = document.getElementById(targetId);
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+          window.location.hash = targetId;
+        }
+      }, 0);
+    }
+    prevTestCountRef.current = curr;
+  }, [testResults.length]);
 
   const execSummary = useMemo(() => ({
     pass:    testResults.filter((t) => testExecStatus(t) === 'pass').length,
@@ -1147,7 +1203,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
             })}
 
             {filteredTests.length === 0 && (
-              <Box sx={{ textAlign: 'center', p: '36px 12px', color: PLACEHOLDER, fontSize: 13, bgcolor: '#fff', border: `1px dashed ${BORDER}`, borderRadius: '12px' }}>
+              <Box sx={{ textAlign: 'center', p: '36px 12px', color: PLACEHOLDER, fontSize: 13, bgcolor: SURFACE, border: `1px dashed ${BORDER}`, borderRadius: '12px' }}>
                 Aucun test ne correspond à ce filtre.
               </Box>
             )}
@@ -1155,7 +1211,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
 
           {/* Suggestions */}
           {allSuggestions.length > 0 && (
-            <Box sx={{ mt: 2, bgcolor: '#fff', border: `1px solid ${BORDER}`, borderRadius: '14px', p: '14px 16px' }}>
+            <Box sx={{ mt: 2, bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '14px', p: '14px 16px' }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.25 }}>
                 <AutoAwesomeIcon sx={{ fontSize: 14, color: '#2BB0A8' }} />
                 <Typography sx={{ fontSize: 13, fontWeight: 700, color: INK }}>Cas suggérés par MockSQL</Typography>

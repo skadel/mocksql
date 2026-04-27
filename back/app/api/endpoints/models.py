@@ -9,6 +9,7 @@ from storage.test_repository import (
     get_test,
     create_test,
     delete_test,
+    read_model_sql,
     _test_path,
     _read_json,
 )
@@ -92,6 +93,15 @@ async def get_test_route(session_id: str, model_name: str = None):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/{model_name:path}/sql")
+async def get_model_sql(model_name: str):
+    """Retourne le contenu SQL preprocessé d'un fichier .sql."""
+    sql = read_model_sql(model_name)
+    if sql is None:
+        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
+    return {"sql": sql, "name": model_name}
 
 
 @router.post("/tests")

@@ -28,6 +28,15 @@ export const fetchSqlFiles = async (): Promise<SqlFile[]> => {
   return response.json();
 };
 
+export const fetchModelSql = async (modelName: string): Promise<string | null> => {
+  const response = await fetch(
+    `${process.env.REACT_APP_BACKEND_URL}/api/models/${encodeURIComponent(modelName)}/sql`,
+  );
+  if (!response.ok) return null;
+  const data = await response.json();
+  return data.sql ?? null;
+};
+
 export const createTestApi = async (modelName: string): Promise<TestSession> => {
   const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/tests`, {
     method: 'POST',

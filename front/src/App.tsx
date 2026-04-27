@@ -8,7 +8,11 @@ import DrawerComponent from './features/appBar/components/DrawerComponent';
 import ChatComponent from './features/buildModel/components/QueryChatComponent';
 import ModelTestsPage from './features/buildModel/components/ModelTestsPage';
 const theme = createTheme({
-  // personnalisation de votre thème ici…
+  palette: {
+    background: {
+      default: '#dde3e6',
+    },
+  },
 });
 
 

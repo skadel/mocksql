@@ -20,10 +20,11 @@ import {
 import React from "react";
 import { useTranslation } from "react-i18next";
 
-const PRIMARY = "rgba(28, 168, 164)";
-const PRIMARY_DARK = "#157a76";
-const PRIMARY_BG = "rgba(28, 168, 164, 0.08)";
-const PRIMARY_BORDER = "rgba(28, 168, 164, 0.25)";
+const PRIMARY = "#1ca8a4";
+const PRIMARY_BG = "rgba(28, 168, 164, 0.06)";
+const BORDER_COLOR = "#dce4e6";
+const HEADER_BG = "#edf1f2";
+const HEADER_FG = "#3b5357";
 
 /**
  * Métadonnées renvoyées par l'API pour gérer la pagination serveur.
@@ -181,9 +182,9 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
             label={tableName}
             size="small"
             sx={{
-              backgroundColor: PRIMARY_BG,
-              color: PRIMARY_DARK,
-              border: `1px solid ${PRIMARY_BORDER}`,
+              backgroundColor: HEADER_BG,
+              color: HEADER_FG,
+              border: `1px solid ${BORDER_COLOR}`,
               fontWeight: 600,
               fontSize: "0.75rem",
               letterSpacing: "0.03em",
@@ -215,7 +216,7 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
           severity="info"
           sx={{
             borderRadius: "8px",
-            border: `1px solid ${PRIMARY_BORDER}`,
+            border: `1px solid ${BORDER_COLOR}`,
             "& .MuiAlert-icon": { color: PRIMARY },
           }}
         >
@@ -230,7 +231,7 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
           elevation={0}
           sx={{
             borderRadius: "10px",
-            border: `1px solid ${PRIMARY_BORDER}`,
+            border: `1px solid ${BORDER_COLOR}`,
             overflowX: "auto",
             backgroundColor: "#fff",
           }}
@@ -246,15 +247,15 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
                   <TableCell
                     key={h}
                     sx={{
-                      backgroundColor: PRIMARY,
-                      color: "#fff",
+                      backgroundColor: HEADER_BG,
+                      color: HEADER_FG,
                       fontWeight: 700,
                       fontSize: "0.68rem",
                       letterSpacing: "0.04em",
                       textTransform: "uppercase",
                       py: 1,
                       px: 1.5,
-                      borderRight: i < headers.length - 1 ? "1px solid rgba(255,255,255,0.2)" : "none",
+                      borderRight: i < headers.length - 1 ? `1px solid ${BORDER_COLOR}` : "none",
                       whiteSpace: "nowrap",
                     }}
                   >
@@ -268,8 +269,8 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
                 <TableRow
                   key={rowIdx}
                   sx={{
-                    backgroundColor: rowIdx % 2 === 0 ? "#fff" : "rgba(28, 168, 164, 0.03)",
-                    "&:hover": { backgroundColor: "rgba(28, 168, 164, 0.07)" },
+                    backgroundColor: rowIdx % 2 === 0 ? "#fff" : "#f9fafb",
+                    "&:hover": { backgroundColor: "#f1f5f6" },
                     transition: "background-color 0.15s ease",
                   }}
                 >
@@ -286,10 +287,10 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
                       <TableCell
                         key={cellKey}
                         sx={{
-                          borderBottom: `1px solid ${PRIMARY_BORDER}`,
+                          borderBottom: `1px solid ${BORDER_COLOR}`,
                           borderRight:
                             cellIdx < headers.length - 1
-                              ? `1px solid ${PRIMARY_BORDER}`
+                              ? `1px solid ${BORDER_COLOR}`
                               : "none",
                           py: 0.75,
                           px: 1.5,
@@ -336,8 +337,8 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
           {meta && (
             <Box
               sx={{
-                borderTop: `1px solid ${PRIMARY_BORDER}`,
-                backgroundColor: "rgba(28, 168, 164, 0.03)",
+                borderTop: `1px solid ${BORDER_COLOR}`,
+                backgroundColor: "#f9fafb",
               }}
             >
               <TablePagination
