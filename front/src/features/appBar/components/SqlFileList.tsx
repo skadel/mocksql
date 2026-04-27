@@ -286,11 +286,12 @@ interface Props {
 
 const SqlFileList: React.FC<Props> = ({ search }) => {
   const { t } = useTranslation();
-  const models         = useAppSelector(s => s.appBarModel.models);
+  const allModels      = useAppSelector(s => s.appBarModel.models);
   const currentModelId = useAppSelector(s => s.appBarModel.currentModelId);
 
-  const q    = search.toLowerCase().trim();
-  const tree = useMemo(() => buildTree(models), [models]);
+  const models = useMemo(() => allModels.filter(m => m.isTested), [allModels]);
+  const q      = search.toLowerCase().trim();
+  const tree   = useMemo(() => buildTree(models), [models]);
 
   const hasResults = q
     ? models.some(m => (m.name ?? m.session_id ?? '').toLowerCase().includes(q))

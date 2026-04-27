@@ -39,8 +39,8 @@ const DrawerComponent: React.FC = () => {
   const [language, setLanguage] = useState(i18n.language);
   const [search, setSearch]     = useState('');
 
-  const drawerOpen = useAppSelector(s => s.appBarModel.drawerOpen);
-  const models     = useAppSelector(s => s.appBarModel.models);
+  const drawerOpen  = useAppSelector(s => s.appBarModel.drawerOpen);
+  const testedCount = useAppSelector(s => s.appBarModel.models.filter(m => m.isTested).length);
 
   useEffect(() => {
     dispatch(fetchModels());
@@ -155,7 +155,7 @@ const DrawerComponent: React.FC = () => {
         {/* ── Section label ────────────────────────────────────────── */}
         <Box sx={{ px: '16px', mb: '8px' }}>
           <Typography sx={{ fontSize: 11, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.6px' }}>
-            Models{models.length > 0 && ` · ${models.length}`}
+            Models{testedCount > 0 && ` · ${testedCount}`}
           </Typography>
         </Box>
 
