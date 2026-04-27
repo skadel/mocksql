@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
-import { useTranslation } from 'react-i18next';
+import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
@@ -26,6 +26,13 @@ import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 
 const DIALECT = 'bigquery';
+
+function extractReasoningText(raw: string): string {
+  if (!raw || !raw.trim().startsWith('{')) return raw;
+  const match = raw.match(/"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)/);
+  if (!match) return '';
+  return match[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
+}
 
 const ChatComponent: React.FC = () => {
   const { t } = useTranslation();
@@ -83,7 +90,7 @@ const ChatComponent: React.FC = () => {
   const awaitingGetMessagesRef = useRef(false);
   const pendingSessionRef = useRef<string | null>(null);
   const prevLoadingRef = useRef<boolean | null>(null);
-  const wasHistoryLoadRef = useRef(false);
+  const isGeneratingRef = useRef(false);
 
   const {
     queryComponentGraph: messages,
@@ -257,14 +264,15 @@ const ChatComponent: React.FC = () => {
           })).unwrap?.();
           session = newSession;
         } catch {
-          dispatch(setError('Création du modèle échouée.'));
+          dispatch(setError(t('errors.model_creation_failed')));
           return false;
         }
       }
 
-      if (!session) { dispatch(setError('Model introuvable')); return false; }
+      if (!session) { dispatch(setError(t('errors.model_not_found'))); return false; }
 
       try {
+        isGeneratingRef.current = true;
         await dispatch(chatQuery({
           userInput: text,
           sessionId: session,
@@ -300,7 +308,7 @@ const ChatComponent: React.FC = () => {
     setIsSending(true);
     setSubmitError(null);
     setValidationStatus('validating');
-    setSubmissionStep('Chargement du fichier SQL…');
+    setSubmissionStep(t('loading.loading_sql'));
 
     let testId: string;
     let fileSql: string;
@@ -318,7 +326,7 @@ const ChatComponent: React.FC = () => {
         return;
       }
     } catch {
-      setSubmitError('Erreur lors de la création du test.');
+      setSubmitError(t('errors.test_creation_failed'));
       setValidationStatus('idle');
       setSubmissionStep(null);
       setIsSending(false);
@@ -331,7 +339,7 @@ const ChatComponent: React.FC = () => {
     setModelName(selectedModelName);
     pendingSessionRef.current = testId;
 
-    setSubmissionStep(t('Validation de la requête SQL…'));
+    setSubmissionStep(t('loading.validating_sql'));
     let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
     try {
       validateResult = await validateQueryApi({
@@ -344,7 +352,7 @@ const ChatComponent: React.FC = () => {
     } catch {
       setValidationStatus('error');
       setSubmissionStep(null);
-      setSubmitError(t('Erreur lors de la validation.'));
+      setSubmitError(t('errors.validation_error'));
       setIsSending(false);
       return;
     }
@@ -359,7 +367,7 @@ const ChatComponent: React.FC = () => {
         }
       } else {
         pendingSessionRef.current = null;
-        setSubmitError(validateResult?.error || t('Requête invalide.'));
+        setSubmitError(validateResult?.error || t('errors.invalid_query'));
       }
       setIsSending(false);
       return;
@@ -368,7 +376,7 @@ const ChatComponent: React.FC = () => {
     setOptimizedSql(validateResult.optimized_sql ?? '');
     dispatch(pushSqlHistory({ id: uuidv4(), sql: fileSql, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
 
-    setSubmissionStep(t('Vérification du profiling…'));
+    setSubmissionStep(t('loading.checking_profiling'));
     const usedColumns = validateResult.used_columns ?? [];
     try {
       const profileResult = await checkProfileApi({
@@ -386,6 +394,7 @@ const ChatComponent: React.FC = () => {
           const req = profileResult.profile_request;
           const doStream = () => {
             setPendingFirstLoad(true);
+            isGeneratingRef.current = true;
             dispatch(chatQuery({ userInput: '', sessionId: testId, project: '', dialect: DIALECT, query: fileSql, ChangedMessageId: '', t, parentMessageId: '' }));
           };
           setPendingAutoProfile({
@@ -412,13 +421,14 @@ const ChatComponent: React.FC = () => {
       }
     } catch {}
 
-    setSubmissionStep(t('Génération des tests…'));
+    setSubmissionStep(t('loading.generating_tests'));
     setValidationStatus('valid');
     navigate(`/models/${testId}`);
     dispatch(setCurrentId(testId));
     setPendingFirstLoad(true);
 
     try {
+      isGeneratingRef.current = true;
       await dispatch(chatQuery({
         userInput: '',
         sessionId: testId,
@@ -446,7 +456,7 @@ const ChatComponent: React.FC = () => {
 
     const newSession: string = pendingSessionRef.current ?? uuidv4();
     if (!pendingSessionRef.current) {
-      setSubmissionStep(t('Création du modèle…'));
+      setSubmissionStep(t('loading.creating_model'));
       try {
         await dispatch(createModel({
           name: modelName.trim() || 'nouveau_script',
@@ -454,7 +464,7 @@ const ChatComponent: React.FC = () => {
         })).unwrap?.();
         pendingSessionRef.current = newSession;
       } catch {
-        dispatch(setError('Création du modèle échouée.'));
+        dispatch(setError(t('errors.model_creation_failed')));
         setValidationStatus('idle');
         setSubmissionStep(null);
         setIsSending(false);
@@ -462,7 +472,7 @@ const ChatComponent: React.FC = () => {
       }
     }
 
-    setSubmissionStep(t('Validation de la requête SQL…'));
+    setSubmissionStep(t('loading.validating_sql'));
     let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
     try {
       validateResult = await validateQueryApi({
@@ -475,7 +485,7 @@ const ChatComponent: React.FC = () => {
     } catch {
       setValidationStatus('error');
       setSubmissionStep(null);
-      setSubmitError(t('Erreur lors de la validation.'));
+      setSubmitError(t('errors.validation_error'));
       setIsSending(false);
       return;
     }
@@ -490,7 +500,7 @@ const ChatComponent: React.FC = () => {
         }
       } else {
         pendingSessionRef.current = null;
-        setSubmitError(validateResult?.error || t('Requête invalide.'));
+        setSubmitError(validateResult?.error || t('errors.invalid_query'));
       }
       setIsSending(false);
       return;
@@ -499,7 +509,7 @@ const ChatComponent: React.FC = () => {
     setOptimizedSql(validateResult.optimized_sql ?? '');
     dispatch(pushSqlHistory({ id: uuidv4(), sql: sqlQuery, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
 
-    setSubmissionStep(t('Vérification du profiling…'));
+    setSubmissionStep(t('loading.checking_profiling'));
     const usedColumns = validateResult.used_columns ?? [];
     try {
       const profileResult = await checkProfileApi({
@@ -553,7 +563,7 @@ const ChatComponent: React.FC = () => {
       }
     } catch {}
 
-    setSubmissionStep(t('Génération des tests…'));
+    setSubmissionStep(t('loading.generating_tests'));
     setValidationStatus('valid');
     navigate(`/models/${newSession}`);
     dispatch(setCurrentId(newSession));
@@ -593,9 +603,9 @@ const ChatComponent: React.FC = () => {
     } catch (err: any) {
       const detail = err?.detail;
       if (detail && typeof detail === 'object' && detail.needs_manual_config) {
-        setSubmitError(detail.message || 'Tables non qualifiées : configurez-les manuellement.');
+        setSubmitError(detail.message || t('errors.unqualified_tables'));
       } else {
-        setSubmitError(typeof detail === 'string' ? detail : 'Erreur lors de l\'import des tables.');
+        setSubmitError(typeof detail === 'string' ? detail : t('errors.import_error'));
       }
     } finally {
       setIsImporting(false);
@@ -671,7 +681,7 @@ const ChatComponent: React.FC = () => {
                 setTablesToImport(validateResult.tables_to_import);
               }
             } else {
-              setSubmitError(validateResult?.error || t('Requête invalide.'));
+              setSubmitError(validateResult?.error || t('errors.invalid_query'));
             }
             setIsSending(false);
             return;
@@ -679,7 +689,7 @@ const ChatComponent: React.FC = () => {
           resolvedOptimizedSql = validateResult.optimized_sql ?? '';
           setOptimizedSql(resolvedOptimizedSql);
         } catch {
-          setSubmitError(t('Erreur lors de la validation.'));
+          setSubmitError(t('errors.validation_error'));
           setIsSending(false);
           return;
         }
@@ -748,15 +758,13 @@ const ChatComponent: React.FC = () => {
 
   // -------- Browser notification on generation complete
   useEffect(() => {
-    if (loading === true) {
-      wasHistoryLoadRef.current = awaitingGetMessagesRef.current;
-      if (Notification.permission === 'default') {
-        Notification.requestPermission();
-      }
+    if (loading === true && Notification.permission === 'default') {
+      Notification.requestPermission();
     }
-    if (prevLoadingRef.current === true && loading === false && !wasHistoryLoadRef.current) {
+    if (prevLoadingRef.current === true && loading === false && isGeneratingRef.current) {
+      isGeneratingRef.current = false;
       if (Notification.permission === 'granted') {
-        const body = error ? 'La génération a échoué.' : 'Tests générés avec succès !';
+        const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
         new Notification('MockSQL', { body, icon: '/favicon.ico' });
       }
     }
@@ -774,7 +782,7 @@ const ChatComponent: React.FC = () => {
   }, []);
 
   const handleRerunTest = useCallback((idx: number) => {
-    handleSendMessage('Régénère ce test', idx);
+    handleSendMessage(t('chat.regenerate_test'), idx);
   }, [handleSendMessage]);
 
 
@@ -830,7 +838,7 @@ const ChatComponent: React.FC = () => {
               )}
               {validationStatus === 'valid' && (
                 <Alert severity="success" icon={false} sx={{ borderRadius: '12px', mt: 2 }}>
-                  ✓ Requête valide
+                  {t('generate.query_valid')}
                 </Alert>
               )}
               {submitError && (
@@ -850,11 +858,11 @@ const ChatComponent: React.FC = () => {
               )}
               <Box sx={{ mt: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2.5 }}>
                 <Typography variant="h6" sx={{ color: '#0f272a', fontWeight: 700 }}>
-                  Choisissez un fichier SQL
+                  {t('generate.choose_sql_file')}
                 </Typography>
                 <Box sx={{ width: '100%' }}>
                   <AutocompleteInput
-                    labelName="Fichier SQL"
+                    labelName={t('generate.sql_file_label')}
                     fetchSuggestions={fetchSqlSuggestions}
                     onSelectSuggestion={(name) => setSelectedModelName(name)}
                     setValue={(val) => setSelectedModelName(val || null)}
@@ -876,7 +884,7 @@ const ChatComponent: React.FC = () => {
                     px: 4,
                   }}
                 >
-                  Générer les tests
+                  {t('generate.generate_tests')}
                 </Button>
               </Box>
             </Grid>
@@ -891,9 +899,9 @@ const ChatComponent: React.FC = () => {
             <Box sx={{ flexShrink: 0, px: 2, pt: 0.75, pb: 0.5 }}>
               <LinearProgress variant="indeterminate" sx={{ height: 5, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
               <Typography variant="caption" sx={{ color: '#6b8287', mt: 0.4, display: 'block', textAlign: 'center' }}>
-                {loading ? (loading_message || 'Raisonnement') : 'Validation de la requête'}…
+                {loading ? (loading_message || t('loading.reasoning')) : t('loading.validating_query')}…
               </Typography>
-              {streamingReasoning && (
+              {streamingReasoning && extractReasoningText(streamingReasoning) && (
                 <Typography variant="caption" sx={{
                   color: '#8fa8ad',
                   display: '-webkit-box',
@@ -904,7 +912,7 @@ const ChatComponent: React.FC = () => {
                   lineHeight: 1.5,
                   mt: 0.5,
                 }}>
-                  {streamingReasoning}
+                  {extractReasoningText(streamingReasoning)}
                 </Typography>
               )}
             </Box>
@@ -956,8 +964,8 @@ const ChatComponent: React.FC = () => {
                     <Typography sx={{ fontWeight: 700, color: '#0f272a', fontSize: 14, lineHeight: 1.2 }}>MockSQL</Typography>
                     <Typography sx={{ fontSize: 11.5, color: '#6b8287', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                       {selectedTestIndex !== null
-                        ? `Test #${selectedTestIndex + 1} — Modifier avec MockSQL`
-                        : 'Instruction globale'}
+                        ? t('chat.modify_test', { index: selectedTestIndex + 1 })
+                        : t('chat.global_instruction')}
                     </Typography>
                   </Box>
                   <IconButton size="small" onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); }}>
@@ -995,7 +1003,7 @@ const ChatComponent: React.FC = () => {
                   {selectedTestIndex !== null && (
                     <Box sx={{ mb: 0.75 }}>
                       <Chip
-                        label={`Modifier le test #${selectedTestIndex + 1}`}
+                        label={t('chat.modify_test_chip', { index: selectedTestIndex + 1 })}
                         onDelete={() => setSelectedTestIndex(null)}
                         size="small"
                         sx={{ bgcolor: '#e8f5f5', color: '#1ca8a4', border: '1px solid #1ca8a444', fontWeight: 600, fontSize: 11 }}
@@ -1010,10 +1018,10 @@ const ChatComponent: React.FC = () => {
                     disabled={isSending}
                     placeholder={
                       isSending
-                        ? t('Envoi en cours…')
+                        ? t('chat.sending')
                         : selectedTestIndex !== null
-                          ? t('Décrire la modification souhaitée…')
-                          : t('Demander une modification, ajouter des contraintes…')
+                          ? t('chat.describe_modification')
+                          : t('chat.add_constraints')
                     }
                   />
                 </Box>
@@ -1027,7 +1035,7 @@ const ChatComponent: React.FC = () => {
       {/* ── Auto-profiling confirmation dialog ── */}
       {pendingAutoProfile && (
         <Dialog open maxWidth="sm" fullWidth>
-          <DialogTitle sx={{ fontWeight: 700 }}>Profiling optionnel</DialogTitle>
+          <DialogTitle sx={{ fontWeight: 700 }}>{t('profiling.title')}</DialogTitle>
           <DialogContent>
             <Box
               sx={{
@@ -1044,13 +1052,11 @@ const ChatComponent: React.FC = () => {
             >
               <CheckCircleOutlineIcon sx={{ color: '#2e7d52', fontSize: 22, flexShrink: 0 }} />
               <Typography variant="body2" sx={{ color: '#1e5c38', fontWeight: 600 }}>
-                Requête validée avec succès
+                {t('profiling.query_validated')}
               </Typography>
             </Box>
             <Typography variant="body2" sx={{ mb: 2 }}>
-              MockSQL peut lancer automatiquement le profiling de vos colonnes.
-              Cela <strong>améliore la précision des tests générés</strong> en permettant
-              de mieux comprendre la distribution réelle des données.
+              <Trans i18nKey="profiling.description" components={{ bold: <strong /> }} />
             </Typography>
             {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
               <Box
@@ -1067,14 +1073,15 @@ const ChatComponent: React.FC = () => {
                 }}
               >
                 <Typography variant="body2" sx={{ color: '#7a5f00', flex: 1 }}>
-                  Cette opération va scanner environ{' '}
-                  <strong>
-                    {pendingAutoProfile.profileRequest.billing_tb < 0.001
-                      ? '< 0,001'
-                      : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)}{' '}
-                    To
-                  </strong>{' '}
-                  de données
+                  <Trans
+                    i18nKey="profiling.billing_info"
+                    values={{
+                      tb: pendingAutoProfile.profileRequest.billing_tb < 0.001
+                        ? '< 0,001'
+                        : pendingAutoProfile.profileRequest.billing_tb.toFixed(3),
+                    }}
+                    components={{ bold: <strong /> }}
+                  />
                 </Typography>
                 <Chip
                   label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
@@ -1092,7 +1099,7 @@ const ChatComponent: React.FC = () => {
                   sx={{ height: 6, borderRadius: 3, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }}
                 />
                 <Typography variant="caption" sx={{ color: '#555', mt: 0.5, display: 'block' }}>
-                  Profiling en cours…
+                  {t('loading.profiling')}
                 </Typography>
               </Box>
             )}
@@ -1104,7 +1111,7 @@ const ChatComponent: React.FC = () => {
               disabled={isAutoProfileRunning}
               sx={{ textTransform: 'none', color: '#999', borderColor: '#ddd', '&:hover': { borderColor: '#aaa', bgcolor: 'transparent' } }}
             >
-              Passer
+              {t('action.skip')}
             </Button>
             <Button
               variant="contained"
@@ -1112,7 +1119,7 @@ const ChatComponent: React.FC = () => {
               disabled={isAutoProfileRunning}
               sx={{ textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' } }}
             >
-              {isAutoProfileRunning ? 'Profiling…' : 'Lancer le profiling'}
+              {isAutoProfileRunning ? t('loading.profiling_short') : t('action.run_profiling')}
             </Button>
           </DialogActions>
         </Dialog>

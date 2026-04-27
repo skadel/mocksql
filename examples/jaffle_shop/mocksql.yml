@@ -1,6 +1,0 @@
-version: "2"
-dialect: bigquery
-models_path: ./models
-llm:
-  provider: vertexai
-schema_cache: .mocksql/schema_cache.json
