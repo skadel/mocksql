@@ -25,13 +25,14 @@ export function formatMessage(message: any): Message {
     message?.additional_kwargs?.type ||
     message?.additional_kwargs?.additional_kwargs?.type;
 
+  const USER_CONTENT_TYPES = ['query', 'examples_update', 'sql_update', 'user_examples', 'provided_sql'];
+
   const messageType: 'user' | 'bot' =
-    message?.type === 'human' ? 'user'
-    : message?.type === 'ai' ? 'bot'
-    : (['query', 'examples_update', 'sql_update', 'user_examples', 'provided_sql']
-        .includes(messageContentType)
+    USER_CONTENT_TYPES.includes(messageContentType)
+      ? 'user'
+      : message?.type === 'human'
         ? 'user'
-        : 'bot');
+        : 'bot';
 
   const newMessage: Message = {
     id: message.id || '',
@@ -83,7 +84,7 @@ export function formatMessage(message: any): Message {
       break;
 
     case 'results':
-      newMessage.contents.res = JSON.parse(message.content);
+      try { newMessage.contents.res = JSON.parse(message.content); } catch { /* non-JSON content */ }
       if (message.additional_kwargs?.sql) {
         newMessage.contents.sql = message.additional_kwargs.sql;
       }
