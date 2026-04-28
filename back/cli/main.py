@@ -22,6 +22,63 @@ CONFIG_FILE = "mocksql.yml"
 DIALECTS = ["bigquery", "postgres"]
 LLM_PROVIDERS = ["vertexai", "openai"]
 
+_SKIP_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".tox"}
+_SQL_HINTS = {"models", "jobs", "target"}
+
+
+def _contains_sql(folder: Path) -> bool:
+    try:
+        return any(folder.rglob("*.sql"))
+    except PermissionError:
+        return False
+
+
+def _find_models_candidates(root: Path) -> list[Path]:
+    candidates: list[Path] = []
+    try:
+        for entry in sorted(root.iterdir()):
+            if (
+                not entry.is_dir()
+                or entry.name.startswith(".")
+                or entry.name in _SKIP_DIRS
+            ):
+                continue
+            if entry.name in _SQL_HINTS:
+                if _contains_sql(entry):
+                    candidates.append(entry)
+            else:
+                for hint in _SQL_HINTS:
+                    nested = entry / hint
+                    if nested.is_dir() and _contains_sql(nested):
+                        candidates.append(nested)
+    except PermissionError:
+        pass
+    return candidates
+
+
+def _prompt_models_path(root: Path) -> str:
+    candidates = _find_models_candidates(root)
+    if not candidates:
+        return typer.prompt("Path to your SQL models folder", default="./models")
+
+    typer.echo("\nSQL model folders found:")
+    for i, c in enumerate(candidates, 1):
+        typer.echo(f"  [{i}] {c}")
+    typer.echo("  [0] Enter a custom path")
+
+    default_display = str(candidates[0])
+    raw = typer.prompt(
+        "Pick a folder (number or path)",
+        default=default_display,
+    )
+    try:
+        idx = int(raw)
+        if idx == 0:
+            return typer.prompt("Custom path", default="./models")
+        return str(candidates[idx - 1])
+    except (ValueError, IndexError):
+        return raw
+
 
 @app.command()
 def init(
@@ -53,18 +110,7 @@ def init(
             f"SQL dialect ({'/'.join(DIALECTS)})", default="bigquery"
         )
 
-    models_path = typer.prompt(
-        "Path to your SQL models folder",
-        default="./models",
-    )
-
-    dbt_project = typer.confirm("Is this a dbt project?", default=False)
-    compiled_path: str | None = None
-    if dbt_project:
-        compiled_path = typer.prompt(
-            "Path to dbt compiled folder",
-            default="./target/compiled",
-        )
+    models_path = _prompt_models_path(path)
 
     llm_provider = typer.prompt(
         f"LLM provider ({'/'.join(LLM_PROVIDERS)})",
@@ -103,9 +149,6 @@ def init(
         "test_dataset": test_dataset,
         "langchain_tracing": bool(langchain_api_key),
     }
-
-    if compiled_path:
-        config["compiled_path"] = compiled_path
 
     if langchain_api_key:
         config["langchain_api_key"] = langchain_api_key
