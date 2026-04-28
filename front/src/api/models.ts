@@ -30,7 +30,7 @@ export const fetchSqlFiles = async (): Promise<SqlFile[]> => {
 
 export const fetchModelSql = async (modelName: string): Promise<string | null> => {
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/models/${encodeURIComponent(modelName)}/sql`,
+    `${process.env.REACT_APP_BACKEND_URL}/api/models/sql?name=${encodeURIComponent(modelName)}`,
   );
   if (!response.ok) return null;
   const data = await response.json();

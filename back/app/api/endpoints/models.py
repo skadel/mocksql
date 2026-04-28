@@ -95,13 +95,13 @@ async def get_test_route(session_id: str, model_name: str = None):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/models/{model_name:path}/sql")
-async def get_model_sql(model_name: str):
+@router.get("/models/sql")
+async def get_model_sql(name: str):
     """Retourne le contenu SQL preprocessé d'un fichier .sql."""
-    sql = read_model_sql(model_name)
+    sql = read_model_sql(name)
     if sql is None:
-        raise HTTPException(status_code=404, detail=f"Model '{model_name}' not found")
-    return {"sql": sql, "name": model_name}
+        raise HTTPException(status_code=404, detail=f"Model '{name}' not found")
+    return {"sql": sql, "name": name}
 
 
 @router.post("/tests")
