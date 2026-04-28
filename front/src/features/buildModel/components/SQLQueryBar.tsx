@@ -18,10 +18,8 @@ import {
   Typography,
 } from '@mui/material';
 import { PrimaryButton, TealIconButton } from '../../../style/AppButtons';
-import { highlight, languages } from 'prismjs';
-import 'prismjs/components/prism-sql';
 import React, { useEffect, useRef, useState } from 'react';
-import Editor from 'react-simple-code-editor';
+import SqlEditor from '../../../shared/SqlEditor';
 import { SqlHistoryEntry } from '../../../utils/types';
 
 interface SQLQueryBarProps {
@@ -216,23 +214,15 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
             </Box>
           )}
 
-          <Box
+          <SqlEditor
+            value={editorValue}
+            onChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
+            disabled={disabled || isOptimizedView}
+            maxHeight={360}
+            fontSize={13}
+            minHeight={100}
             onKeyDown={handleKeyDown}
-            sx={{
-              maxHeight: 360,
-              overflowY: 'auto',
-              '& .npm__react-simple-code-editor__textarea': { outline: 'none !important' },
-            }}
-          >
-            <Editor
-              value={editorValue}
-              onValueChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
-              highlight={(code) => highlight(code, languages.sql, 'sql')}
-              padding={14}
-              style={{ fontFamily: '"Fira Mono", "Fira Code", monospace', fontSize: 13, minHeight: 100 }}
-              disabled={disabled || isOptimizedView}
-            />
-          </Box>
+          />
 
           {!isOptimizedView && (
             <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, py: 1, borderTop: '1px solid #e8f5f4' }}>

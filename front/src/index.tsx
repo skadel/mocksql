@@ -5,6 +5,7 @@ import { store } from './app/store';
 import { I18nextProvider } from 'react-i18next';
 import App from './App';
 import i18n from './i18n';
+import 'prismjs/themes/prism.css';
 
 // Get the root container
 const container = document.getElementById('root');

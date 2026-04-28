@@ -35,9 +35,7 @@ import {
 import { DangerIconButton, MutedIconButton, OutlinedPrimaryButton, PrimaryButton, TealIconButton } from '../../../style/AppButtons';
 import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
-import { highlight, languages } from 'prismjs';
-import 'prismjs/components/prism-sql';
-import Editor from 'react-simple-code-editor';
+import SqlEditor from '../../../shared/SqlEditor';
 import { patchModelTests } from '../../../api/messages';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import ExcelDownloader from '../../../shared/ExcelDownloader';
@@ -600,19 +598,15 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
               </Box>
             )}
 
-            <Box
+            <SqlEditor
+              value={editorValue}
+              onChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
+              disabled={disabled || isOptimizedView}
+              maxHeight={240}
+              fontSize={12.5}
+              minHeight={80}
               onKeyDown={handleKeyDown}
-              sx={{ maxHeight: 240, overflowY: 'auto', '& .npm__react-simple-code-editor__textarea': { outline: 'none !important' } }}
-            >
-              <Editor
-                value={editorValue}
-                onValueChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
-                highlight={(code) => highlight(code, languages.sql, 'sql')}
-                padding={14}
-                style={{ fontFamily: '"Fira Mono", "Fira Code", monospace', fontSize: 12.5, minHeight: 80 }}
-                disabled={disabled || isOptimizedView}
-              />
-            </Box>
+            />
 
             {!isOptimizedView && (
               <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, py: 1, borderTop: '1px solid #e8f5f4' }}>

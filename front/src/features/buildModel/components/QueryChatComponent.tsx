@@ -17,9 +17,7 @@ import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql } from '../../../api/models';
-import { highlight, languages } from 'prismjs';
-import 'prismjs/components/prism-sql';
-import Editor from 'react-simple-code-editor';
+import SqlEditor from '../../../shared/SqlEditor';
 import { chatQuery, stopStream, validateQueryApi, checkProfileApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
 import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
@@ -769,16 +767,14 @@ const ChatComponent: React.FC = () => {
                     </Box>
                     <Box sx={{ border: '1px solid #e4eaec', borderRadius: '10px', overflow: 'hidden', bgcolor: '#f4f7f7', opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
                       {previewSql !== null ? (
-                        <Box sx={{ maxHeight: 260, overflow: 'auto', '& .npm__react-simple-code-editor__textarea': { outline: 'none !important' } }}>
-                          <Editor
-                            value={previewSql}
-                            onValueChange={() => {}}
-                            highlight={(code) => highlight(code, languages.sql, 'sql')}
-                            padding={14}
-                            readOnly
-                            style={{ fontFamily: '"Fira Mono","Fira Code",monospace', fontSize: 12.5, background: 'transparent', minHeight: 60 }}
-                          />
-                        </Box>
+                        <SqlEditor
+                          value={previewSql}
+                          readOnly
+                          maxHeight={260}
+                          fontSize={12.5}
+                          minHeight={60}
+                          background="transparent"
+                        />
                       ) : (
                         <Box sx={{ p: '14px', display: 'flex', alignItems: 'center', gap: 1 }}>
                           <LinearProgress sx={{ flex: 1, height: 4, borderRadius: 2, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }} />
