@@ -3,11 +3,12 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, IconButton, LinearProgress, Slide, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, IconButton, InputAdornment, LinearProgress, Slide, TextField, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
-import AutocompleteInput from '../../../shared/AutoComplete/AutocompleteInput';
+import SearchIcon from '@mui/icons-material/Search';
+import ScienceIcon from '@mui/icons-material/Science';
 import DroppableTextField from '../../../shared/DroppableTextField';
 import { Container } from '../../../style/StyledComponents';
 import { getLastMessage } from '../../../utils/messages';
@@ -28,6 +29,7 @@ import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestR
 import { getMessages, patchModelSql } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
+import { relativeDate } from '../../../utils/dates';
 
 const DIALECT = 'bigquery';
 
@@ -71,7 +73,8 @@ const ChatComponent: React.FC = () => {
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
   const [previewSql, setPreviewSql] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const sqlFileNames = useSqlFileLoader();
+  const sqlFiles = useSqlFileLoader();
+  const [fileSearch, setFileSearch] = useState('');
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const skipValidationRef = useRef(false);
@@ -117,7 +120,15 @@ const ChatComponent: React.FC = () => {
   } = useAppSelector((state) => state.buildModel);
 
   const messagesRef = useRef(messages);
-  const { currentModelId, drawerOpen } = useAppSelector((state) => state.appBarModel);
+  const { currentModelId, drawerOpen, models: allModels } = useAppSelector((state) => state.appBarModel);
+  const currentModel = useMemo(
+    () => allModels.find(m => m.session_id === currentModelId),
+    [allModels, currentModelId],
+  );
+  const currentModelName = currentModel?.name ?? '';
+  const currentModelPath = currentModel
+    ? (currentModel.folder ? `${currentModel.folder}/${currentModel.name}` : currentModel.name)
+    : '';
 
   messagesRef.current = messages;
 
@@ -302,13 +313,6 @@ const ChatComponent: React.FC = () => {
       }
     },
     [currentModelId, modelName, dispatch, t]
-  );
-
-  // -------- Autocomplete suggestions (filtre local sur la liste chargée au mount)
-  const fetchSqlSuggestions = useCallback(
-    async (inputValue: string) =>
-      sqlFileNames.filter(n => !inputValue || n.toLowerCase().includes(inputValue.toLowerCase())),
-    [sqlFileNames]
   );
 
   // -------- Shared validate → profile → generate flow
@@ -711,100 +715,227 @@ const ChatComponent: React.FC = () => {
         </Box>
       )}
 
-      {/* ── STEP 1: SQL file selector ── */}
+      {/* ── STEP 1: GenerateView (file selector) ── */}
       {uiPhase === 'entry' && (
-        <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0 }} ref={containerRef}>
-          <Grid container justifyContent="center">
-            <Grid item xs={12} sm={10} md={7} lg={5}>
-              {isSending && submissionStep && (
-                <Box sx={{ mt: 3, mb: 1 }}>
-                  <LinearProgress variant="indeterminate" sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
-                  <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>{submissionStep}</Typography>
-                </Box>
-              )}
-              {validationStatus === 'valid' && (
-                <Alert severity="success" icon={false} sx={{ borderRadius: '12px', mt: 2 }}>
-                  {t('generate.query_valid')}
-                </Alert>
-              )}
-              {submitError && (
-                <Alert severity="error" sx={{ borderRadius: '12px', mt: 2 }} onClose={() => setSubmitError(null)}>
-                  {submitError}
-                </Alert>
-              )}
-              {missingTables && (
-                <Box sx={{ mt: 2 }}>
-                  <MissingTablesAlert
-                    missingTables={missingTables}
-                    projectId=""
-                    onImport={tablesToImport ? handleAutoImport : undefined}
-                    importing={isImporting}
-                  />
-                </Box>
-              )}
-              <Box sx={{ mt: 8, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2.5 }}>
-                <Typography variant="h6" sx={{ color: '#0f272a', fontWeight: 700 }}>
-                  {t('generate.choose_sql_file')}
-                </Typography>
-                <Box sx={{ width: '100%' }}>
-                  <AutocompleteInput
-                    labelName={t('generate.sql_file_label')}
-                    fetchSuggestions={fetchSqlSuggestions}
-                    onSelectSuggestion={(name) => setSelectedModelName(name)}
-                    setValue={(val) => setSelectedModelName(val || null)}
-                    value={selectedModelName || ''}
-                  />
-                </Box>
-                {/* SQL preview — shown once a file is selected */}
-                {selectedModelName && (
-                  <Box sx={{ width: '100%', mt: 1 }}>
-                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
-                      <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#1f948d', letterSpacing: 0.5, fontFamily: 'monospace' }}>SQL</Typography>
-                      <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>· {selectedModelName}</Typography>
-                      <Box sx={{ ml: 'auto', fontSize: 11, px: '8px', py: '2px', borderRadius: 999, bgcolor: '#f4f7f7', border: '1px solid #e4eaec', color: '#6b8287', fontWeight: 500 }}>
-                        Lecture seule
-                      </Box>
-                    </Box>
-                    <Box sx={{ border: '1px solid #e4eaec', borderRadius: '10px', overflow: 'hidden', bgcolor: '#f4f7f7', opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
-                      {previewSql !== null ? (
-                        <SqlEditor
-                          value={previewSql}
-                          readOnly
-                          maxHeight={260}
-                          fontSize={12.5}
-                          minHeight={60}
-                          background="transparent"
-                        />
-                      ) : (
-                        <Box sx={{ p: '14px', display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <LinearProgress sx={{ flex: 1, height: 4, borderRadius: 2, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }} />
-                        </Box>
-                      )}
-                    </Box>
-                  </Box>
-                )}
+        <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, bgcolor: '#dde3e6' }} ref={containerRef}>
+          <Box sx={{ maxWidth: 920, mx: 'auto', px: '28px', pt: '32px', pb: '60px' }}>
 
-                <Button
-                  variant="contained"
-                  size="large"
-                  disabled={!selectedModelName || isSending}
-                  onClick={handleFileSubmit}
-                  startIcon={<AutoAwesomeIcon />}
-                  sx={{
-                    bgcolor: '#1ca8a4',
-                    '&:hover': { bgcolor: '#159e9a' },
-                    '&:disabled': { bgcolor: '#ccc' },
-                    textTransform: 'none',
-                    borderRadius: 2,
-                    px: 4,
-                    mt: selectedModelName ? 1 : 0,
-                  }}
-                >
-                  {t('generate.generate_tests')}
-                </Button>
+            {/* Alerts */}
+            {isSending && submissionStep && (
+              <Box sx={{ mb: 2 }}>
+                <LinearProgress variant="indeterminate" sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
+                <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>{submissionStep}</Typography>
               </Box>
-            </Grid>
-          </Grid>
+            )}
+            {submitError && (
+              <Alert severity="error" sx={{ borderRadius: '12px', mb: 2 }} onClose={() => setSubmitError(null)}>
+                {submitError}
+              </Alert>
+            )}
+            {missingTables && (
+              <Box sx={{ mb: 2 }}>
+                <MissingTablesAlert
+                  missingTables={missingTables}
+                  projectId=""
+                  onImport={tablesToImport ? handleAutoImport : undefined}
+                  importing={isImporting}
+                />
+              </Box>
+            )}
+
+            {/* Page header */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: '14px', mb: '24px' }}>
+              <Box sx={{ width: 44, height: 44, borderRadius: '12px', bgcolor: '#ecf7f6', color: '#2BB0A8', display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+                <ScienceIcon sx={{ fontSize: 24 }} />
+              </Box>
+              <Box>
+                <Typography sx={{ fontSize: 22, fontWeight: 700, letterSpacing: -0.3, color: '#0f272a', lineHeight: 1.2 }}>
+                  {t('generate.page_title')}
+                </Typography>
+                <Typography sx={{ fontSize: 13.5, color: '#6b8287', mt: '3px' }}>
+                  {t('generate.page_subtitle')}
+                </Typography>
+              </Box>
+            </Box>
+
+            {/* Step 1 — File list */}
+            <Box sx={{ mb: '24px' }}>
+              {/* Step label row */}
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: '10px', mb: '10px' }}>
+                <Box sx={{ width: 22, height: 22, borderRadius: '50%', bgcolor: '#2BB0A8', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>1</Box>
+                <Typography sx={{ fontSize: 14.5, fontWeight: 600, color: '#0f272a' }}>{t('generate.choose_sql_file')}</Typography>
+                <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
+                  <Box component="span" sx={{ fontSize: 11.5 }}>📁</Box>
+                  <Typography component="code" sx={{ fontSize: 11, color: '#6b8287', fontFamily: 'monospace' }}>
+                    {sqlFiles[0]?.path ? sqlFiles[0].path.replace(/\/[^/]+$/, '') : t('generate.models_path')}
+                  </Typography>
+                </Box>
+              </Box>
+
+              {/* File list panel */}
+              <Box sx={{ border: '1px solid #c9d3d6', borderRadius: '12px', bgcolor: '#f3f6f7', overflow: 'hidden' }}>
+                {/* Search bar */}
+                <Box sx={{ px: '12px', py: '9px', borderBottom: '1px solid #dae2e4', bgcolor: '#dde3e6', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    placeholder={t('generate.search_model')}
+                    value={fileSearch}
+                    onChange={e => setFileSearch(e.target.value)}
+                    InputProps={{
+                      startAdornment: (
+                        <InputAdornment position="start">
+                          <SearchIcon sx={{ fontSize: 16, color: '#6b8287' }} />
+                        </InputAdornment>
+                      ),
+                      sx: {
+                        fontSize: 12.5,
+                        bgcolor: '#f3f6f7',
+                        borderRadius: '8px',
+                        '& fieldset': { borderColor: '#c9d3d6' },
+                        '&:hover fieldset': { borderColor: '#2BB0A8' },
+                        '&.Mui-focused fieldset': { borderColor: '#2BB0A8' },
+                      },
+                    }}
+                    inputProps={{ sx: { py: '7px', px: '4px' } }}
+                  />
+                  <Typography sx={{ fontSize: 11, color: '#6b8287', whiteSpace: 'nowrap', flexShrink: 0 }}>
+                    {(() => {
+                      const count = fileSearch
+                        ? sqlFiles.filter(f => (f.name + ' ' + (f.path ?? '')).toLowerCase().includes(fileSearch.toLowerCase())).length
+                        : sqlFiles.length;
+                      return `${count} fichier${count !== 1 ? 's' : ''}`;
+                    })()}
+                  </Typography>
+                </Box>
+
+                {/* File rows */}
+                <Box sx={{ maxHeight: 280, overflow: 'auto' }}>
+                  {sqlFiles
+                    .filter(f => !fileSearch || (f.name + ' ' + (f.path ?? '')).toLowerCase().includes(fileSearch.toLowerCase()))
+                    .map(f => {
+                      const isActive = selectedModelName === f.name;
+                      return (
+                        <Box
+                          key={f.name}
+                          onClick={() => setSelectedModelName(f.name)}
+                          sx={{
+                            display: 'grid',
+                            gridTemplateColumns: '18px 1fr auto auto',
+                            gap: '10px',
+                            alignItems: 'center',
+                            px: '14px',
+                            py: '9px',
+                            cursor: 'pointer',
+                            borderBottom: '1px solid #dae2e4',
+                            bgcolor: isActive ? '#ecf7f6' : 'transparent',
+                            transition: 'background .1s',
+                            '&:hover': { bgcolor: isActive ? '#ecf7f6' : '#eef2f3' },
+                            '&:last-child': { borderBottom: 'none' },
+                          }}
+                        >
+                          {/* SQL icon */}
+                          <Box sx={{ color: isActive ? '#2BB0A8' : '#6b8287', display: 'flex', alignItems: 'center' }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                              <path d="M8 9l-3 3 3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                              <path d="M16 9l3 3-3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                            </svg>
+                          </Box>
+                          {/* Name + path */}
+                          <Box sx={{ minWidth: 0 }}>
+                            <Typography sx={{ fontSize: 13, fontWeight: isActive ? 600 : 500, color: '#0f272a', lineHeight: 1.3 }} noWrap>
+                              {f.name}
+                            </Typography>
+                            <Typography sx={{ fontSize: 10.5, color: '#6b8287', mt: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {f.path ?? f.name}
+                            </Typography>
+                          </Box>
+                          {/* Last modified */}
+                          <Typography sx={{ fontSize: 11, color: '#6b8287', textAlign: 'right', minWidth: 90, flexShrink: 0 }}>
+                            {f.updated_at ? `modifié ${relativeDate(f.updated_at, t)}` : ''}
+                          </Typography>
+                        </Box>
+                      );
+                    })}
+                  {sqlFiles.filter(f => !fileSearch || (f.name + ' ' + (f.path ?? '')).toLowerCase().includes(fileSearch.toLowerCase())).length === 0 && (
+                    <Box sx={{ p: '24px 14px', textAlign: 'center' }}>
+                      <Typography sx={{ fontSize: 12.5, color: '#6b8287' }}>{t('search.no_results')}</Typography>
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            </Box>
+
+            {/* Step 2 — SQL preview */}
+            {selectedModelName && (
+              <Box sx={{ mb: '24px' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: '10px', mb: '10px' }}>
+                  <Box sx={{ width: 22, height: 22, borderRadius: '50%', bgcolor: '#2BB0A8', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>2</Box>
+                  <Typography sx={{ fontSize: 14.5, fontWeight: 600, color: '#0f272a' }}>Aperçu du SQL</Typography>
+                  <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>
+                    · <Box component="code" sx={{ fontSize: 11.5, color: '#3b5357', fontFamily: 'monospace' }}>{selectedModelName}</Box>
+                  </Typography>
+                  <Box sx={{ ml: 'auto', fontSize: 10.5, px: '8px', py: '2px', borderRadius: 999, bgcolor: '#dde3e6', border: '1px solid #c9d3d6', color: '#6b8287', fontWeight: 500 }}>
+                    Lecture seule
+                  </Box>
+                </Box>
+                <Box sx={{ border: '1px solid #c9d3d6', borderRadius: '12px', overflow: 'hidden', bgcolor: '#f3f6f7' }}>
+                  {/* SQL header bar */}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: '8px', px: '13px', py: '9px', bgcolor: '#eef5f4', borderBottom: '1px solid #c9d3d6' }}>
+                    <Box sx={{ color: '#16746e', display: 'flex' }}>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
+                        <path d="M8 9l-3 3 3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                        <path d="M16 9l3 3-3 3" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"/>
+                      </svg>
+                    </Box>
+                    <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#16746e', letterSpacing: 0.6, fontFamily: 'monospace' }}>SQL</Typography>
+                    <Typography sx={{ ml: 'auto', fontSize: 11.5, color: '#6b8287' }}>
+                      BigQuery · {previewSql ? `${previewSql.split('\n').length} lignes` : '…'}
+                    </Typography>
+                  </Box>
+                  <Box sx={{ opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
+                    {previewSql !== null ? (
+                      <SqlEditor value={previewSql} readOnly maxHeight={300} fontSize={12.5} minHeight={60} background="transparent" />
+                    ) : (
+                      <Box sx={{ p: '14px', display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <LinearProgress sx={{ flex: 1, height: 4, borderRadius: 2, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }} />
+                      </Box>
+                    )}
+                  </Box>
+                </Box>
+              </Box>
+            )}
+
+            {/* Action bar */}
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', mt: selectedModelName ? 0 : '18px' }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
+                <Box component="span" sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#f7c948', display: 'inline-block', mr: '2px' }} />
+                <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>Exécuté sur DuckDB en local — zéro coût BigQuery</Typography>
+              </Box>
+              <Button
+                variant="contained"
+                disabled={!selectedModelName || isSending}
+                onClick={handleFileSubmit}
+                startIcon={isSending ? undefined : <AutoAwesomeIcon sx={{ fontSize: 15 }} />}
+                sx={{
+                  bgcolor: !selectedModelName || isSending ? '#cbd9da' : '#2BB0A8',
+                  '&:hover': { bgcolor: '#1f948d' },
+                  '&:disabled': { bgcolor: '#cbd9da', color: '#fff' },
+                  textTransform: 'none',
+                  borderRadius: '10px',
+                  px: '22px',
+                  py: '11px',
+                  fontSize: 14,
+                  fontWeight: 600,
+                  minWidth: 180,
+                  boxShadow: '0 2px 0 rgba(22,116,110,.2)',
+                }}
+              >
+                {isSending ? t('generate.generating') : t('generate.generate_tests')}
+              </Button>
+            </Box>
+
+          </Box>
         </Box>
       )}
 
@@ -849,6 +980,13 @@ const ChatComponent: React.FC = () => {
                 disabled: isSending,
                 loading: isSending,
                 hasError: lastMsgHasError,
+                sqlFileName: currentModelName || undefined,
+                onReloadFile: currentModelPath
+                  ? async () => {
+                      try { return await fetchModelSql(currentModelPath); }
+                      catch { return null; }
+                    }
+                  : undefined,
               }}
               onSuggestionFill={(text) => { setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
               onUpload={(uploadedData) => {

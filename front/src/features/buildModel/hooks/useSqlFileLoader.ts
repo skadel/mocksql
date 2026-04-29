@@ -1,17 +1,17 @@
 import { useState, useEffect } from 'react';
-import { fetchSqlFiles } from '../../../api/models';
+import { fetchSqlFiles, SqlFile } from '../../../api/models';
 
 const REFRESH_INTERVAL_MS = 10 * 60 * 1000;
 
-export function useSqlFileLoader(): string[] {
-  const [fileNames, setFileNames] = useState<string[]>([]);
+export function useSqlFileLoader(): SqlFile[] {
+  const [files, setFiles] = useState<SqlFile[]>([]);
 
   useEffect(() => {
-    const load = () => fetchSqlFiles().then(files => setFileNames(files.map(f => f.name)));
+    const load = () => fetchSqlFiles().then(setFiles);
     load();
     const id = setInterval(load, REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
 
-  return fileNames;
+  return files;
 }

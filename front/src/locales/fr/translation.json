@@ -61,9 +61,14 @@
     "import_error": "Erreur lors de l'import des tables."
   },
   "generate": {
-    "choose_sql_file": "Choisissez un fichier SQL",
+    "page_title": "Générer des tests à partir d'une requête SQL",
+    "page_subtitle": "Choisissez une requête parmi vos modèles locaux.",
+    "choose_sql_file": "Choisir un fichier SQL",
     "sql_file_label": "Fichier SQL",
+    "search_model": "Rechercher un modèle…",
+    "models_path": "~/models",
     "generate_tests": "Générer les tests",
+    "generating": "Génération…",
     "query_valid": "✓ Requête valide"
   },
   "chat": {
