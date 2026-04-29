@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, APIRouter, Request, HTTPException
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
 from app.api.endpoints import query, messages, models, projects, users
@@ -30,11 +31,28 @@ def get_static_dir() -> Path:
     return Path(__file__).parent / "static"
 
 
+# ─── 4) Middleware : /static/ et /static/index.html → / (301) ─────────────
+# Doit être déclaré AVANT app.mount() pour que le middleware intercepte ces
+# chemins avant que StaticFiles ne les serve directement.  Le middleware
+# s’exécute toujours avant tout handler/mount, ce qui garantit l’absence de
+# boucle : / est un FileResponse pur, jamais un redirect.
+_SPA_HOME_PATHS = frozenset({"/static/", "/static/index.html"})
+
+
+class _SpaHomeRedirectMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.url.path in _SPA_HOME_PATHS:
+            return RedirectResponse(url="/", status_code=301)
+        return await call_next(request)
+
+
+app.add_middleware(_SpaHomeRedirectMiddleware)
+
 app.mount(
     "/static", StaticFiles(directory=str(get_static_dir()), html=True), name="static"
 )
 
-# ─── 4) CORS ──────────────────────────────────────────
+# ─── 5) CORS ──────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[os.getenv("FRONT_URL")],
@@ -44,7 +62,7 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# ─── 5) Regroupement des routes API sous /api ─────────
+# ─── 6) Regroupement des routes API sous /api ─────────
 api_router = APIRouter(prefix="/api")
 
 api_router.include_router(query.router)
@@ -56,7 +74,7 @@ api_router.include_router(users.router)
 app.include_router(api_router)
 
 
-# ─── 6) Startup / Shutdown DB ─────────────────────────
+# ─── 7) Startup / Shutdown DB ─────────────────────────
 @app.on_event("startup")
 async def on_startup():
     logging.info("Démarrage de l'application…")
@@ -72,10 +90,11 @@ async def on_shutdown():
     await db_pool.close()
 
 
-# ─── 7) Catch-all SPA (React Router) ──────────────────
+# ─── 8) Catch-all SPA (React Router) ──────────────────
+# GET / : FileResponse direct, jamais un redirect — brise toute boucle possible.
 @app.get("/")
 async def root():
-    return RedirectResponse(url="/static/index.html", status_code=301)
+    return FileResponse(str(get_static_dir() / "index.html"))
 
 
 @app.get("/{full_path:path}")
@@ -90,7 +109,7 @@ async def serve_spa(full_path: str, request: Request):
     return FileResponse(str(get_static_dir() / "index.html"))
 
 
-# ─── 8) Uvicorn – exécution directe ─────────────────
+# ─── 9) Uvicorn – exécution directe ─────────────────
 if __name__ == "__main__":
     import uvicorn
 

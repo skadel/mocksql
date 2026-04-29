@@ -1,15 +1,22 @@
 import FolderIcon from '@mui/icons-material/Folder';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import KeyboardArrowRightIcon from '@mui/icons-material/KeyboardArrowRight';
-import { Box, Chip, Typography } from '@mui/material';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import WarningAmberIcon from '@mui/icons-material/WarningAmber';
+import CancelIcon from '@mui/icons-material/Cancel';
+import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
+import ScienceIcon from '@mui/icons-material/Science';
+import { Box, Chip, IconButton, Tooltip, Typography } from '@mui/material';
 import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
-import { resetContext } from '../../buildModel/buildModelSlice';
+import { resetContext, setTestResults } from '../../buildModel/buildModelSlice';
+import { patchModelTests } from '../../../api/messages';
 import { setCurrentId } from '../appBarSlice';
 import { Model } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
+import { getVerdictInfo } from '../../../utils/verdict';
 
 const TEAL  = '#2BB0A8';
 const MUTED = '#6b8287';
@@ -90,6 +97,77 @@ function SqlIcon({ color }: { color: string }) {
   );
 }
 
+/* ── Sidebar test list (shown under active model) ─────────────── */
+
+function VerdictDot({ test }: { test: any }) {
+  const { verdict } = getVerdictInfo(test);
+  if (verdict === 'good')    return <CheckCircleIcon sx={{ fontSize: 11, color: '#23a26d', flexShrink: 0 }} />;
+  if (verdict === 'bad')     return <CancelIcon sx={{ fontSize: 11, color: '#d0503f', flexShrink: 0 }} />;
+  if (verdict === 'warn')    return <WarningAmberIcon sx={{ fontSize: 11, color: '#d89323', flexShrink: 0 }} />;
+  return <Box sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#ccc', flexShrink: 0 }} />;
+}
+
+interface SidebarTestListProps {
+  modelId: string;
+  depth: number;
+}
+
+const SidebarTestList: React.FC<SidebarTestListProps> = ({ modelId, depth }) => {
+  const dispatch = useAppDispatch();
+  const testResults: any[] = useAppSelector(s => s.buildModel.testResults ?? []);
+
+  if (!testResults.length) return null;
+
+  const handleDelete = (idx: number) => {
+    const updated = testResults.filter((_, i) => i !== idx);
+    dispatch(setTestResults(updated));
+    dispatch(patchModelTests({ sessionId: modelId, tests: updated }));
+  };
+
+  return (
+    <Box sx={{ pl: `${depth * 16 + 28}px`, pr: '6px', pb: '4px' }}>
+      {testResults.map((test: any, idx: number) => {
+        const desc: string = test.unit_test_description ?? `Test ${idx + 1}`;
+        return (
+          <Box
+            key={idx}
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '6px',
+              py: '4px',
+              px: '8px',
+              mx: '0',
+              borderRadius: '6px',
+              '&:hover': { bgcolor: '#edf0f1' },
+              '&:hover .delete-btn': { opacity: 1 },
+            }}
+          >
+            <VerdictDot test={test} />
+            <Typography
+              noWrap
+              sx={{ fontSize: 11.5, color: '#3b4f52', flex: 1, minWidth: 0 }}
+              title={desc}
+            >
+              {desc}
+            </Typography>
+            <Tooltip title="Supprimer ce test">
+              <IconButton
+                className="delete-btn"
+                size="small"
+                onClick={(e) => { e.stopPropagation(); handleDelete(idx); }}
+                sx={{ p: '2px', opacity: 0, transition: 'opacity .12s', color: '#8a9ba0', '&:hover': { color: '#d0503f' } }}
+              >
+                <DeleteOutlineIcon sx={{ fontSize: 13 }} />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
 /* ── File row ─────────────────────────────────────────────────── */
 
 interface FileRowProps {
@@ -115,42 +193,56 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
     }
   };
 
+  const testResults: any[] = useAppSelector(s => s.buildModel.testResults ?? []);
+  const testCount = isActive ? testResults.length : 0;
+
   return (
-    <Box
-      onClick={handleClick}
-      sx={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '7px',
-        pl: `${16 + depth * 16}px`,
-        pr: '12px',
-        py: '6px',
-        mx: '6px',
-        borderRadius: '7px',
-        cursor: 'pointer',
-        bgcolor: isActive ? '#e6f4f3' : 'transparent',
-        '&:hover': { bgcolor: isActive ? '#e6f4f3' : '#edf0f1' },
-        transition: 'background .12s',
-      }}
-    >
-      <SqlIcon color={isActive ? TEAL : isTested ? '#23a26d' : LINE} />
-      <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Typography
-          noWrap
-          sx={{
-            fontSize: 12.5,
-            fontWeight: isActive ? 600 : 400,
-            color: isActive ? TEAL : INK,
-            lineHeight: 1.3,
-          }}
-        >
-          {model.name || model.session_id}
-        </Typography>
-        <Typography sx={{ fontSize: 10.5, color: '#a0adb0', whiteSpace: 'nowrap', mt: '1px' }}>
-          {isTested ? relativeDate(model.updateDate, t) : t('model.not_tested')}
-        </Typography>
+    <>
+      <Box
+        onClick={handleClick}
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '7px',
+          pl: `${16 + depth * 16}px`,
+          pr: '12px',
+          py: '6px',
+          mx: '6px',
+          borderRadius: '7px',
+          cursor: 'pointer',
+          bgcolor: isActive ? '#e6f4f3' : 'transparent',
+          '&:hover': { bgcolor: isActive ? '#e6f4f3' : '#edf0f1' },
+          transition: 'background .12s',
+        }}
+      >
+        <SqlIcon color={isActive ? TEAL : isTested ? '#23a26d' : LINE} />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography
+            noWrap
+            sx={{
+              fontSize: 12.5,
+              fontWeight: isActive ? 600 : 400,
+              color: isActive ? TEAL : INK,
+              lineHeight: 1.3,
+            }}
+          >
+            {model.name || model.session_id}
+          </Typography>
+          <Typography sx={{ fontSize: 10.5, color: '#a0adb0', whiteSpace: 'nowrap', mt: '1px' }}>
+            {isTested ? relativeDate(model.updateDate, t) : t('model.not_tested')}
+          </Typography>
+        </Box>
+        {isActive && testCount > 0 && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: '3px', flexShrink: 0 }}>
+            <ScienceIcon sx={{ fontSize: 11, color: TEAL }} />
+            <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: TEAL }}>{testCount}</Typography>
+          </Box>
+        )}
       </Box>
-    </Box>
+      {isActive && testCount > 0 && (
+        <SidebarTestList modelId={model.session_id} depth={depth} />
+      )}
+    </>
   );
 };
 

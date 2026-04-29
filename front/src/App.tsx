@@ -2,7 +2,7 @@ import React from 'react';
 import Box from '@mui/material/Box';
 import CssBaseline from '@mui/material/CssBaseline';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 
 import DrawerComponent from './features/appBar/components/DrawerComponent';
 import ChatComponent from './features/buildModel/components/QueryChatComponent';
@@ -29,7 +29,7 @@ function App() {
               <Route path="/models" element={<ChatComponent />} />
               <Route path="/models/sql/:modelName" element={<ModelTestsPage />} />
               <Route path="/models/:modelID" element={<ChatComponent />} />
-
+              <Route path="/static/*" element={<Navigate to="/" replace />} />
             </Routes>
           </Box>
         </Box>

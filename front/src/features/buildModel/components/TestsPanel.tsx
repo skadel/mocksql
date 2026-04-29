@@ -15,6 +15,8 @@ import CommentIcon from '@mui/icons-material/Comment';
 import ViewListIcon from '@mui/icons-material/ViewList';
 import ViewAgendaIcon from '@mui/icons-material/ViewAgenda';
 import FilterListIcon from '@mui/icons-material/FilterList';
+import SyncIcon from '@mui/icons-material/Sync';
+import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import {
   Alert,
   Box,
@@ -372,49 +374,177 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
   );
 }
 
-/* ─── AssertionsPanel ────────────────────────────────────────────── */
-function AssertionsPanel({ assertions }: { assertions: any[] }) {
-  if (!assertions || assertions.length === 0) return null;
-  const passCount = assertions.filter((a) => a.passed).length;
-  const allPass = passCount === assertions.length;
+/* ─── ResultWithAssertions ───────────────────────────────────────── */
+interface AssertionItem {
+  description: string;
+  sql?: string;
+  passed: boolean;
+  failing_rows?: any[];
+  error?: string;
+}
+
+function AssertionRow({ a, expanded, onToggle, onDelete }: {
+  a: AssertionItem;
+  expanded: boolean;
+  onToggle: () => void;
+  onDelete: () => void;
+}) {
+  const statusColor = a.passed ? '#23a26d' : '#d0503f';
+  const statusBg    = a.passed ? '#eaf5f0' : '#fbeceb';
+  const failCount   = a.failing_rows?.length ?? 0;
   return (
-    <Box sx={{ px: 2, pb: 1.5, pt: 1 }}>
-      <Typography sx={{ fontSize: 11, fontWeight: 700, color: BODY, letterSpacing: 0.5, textTransform: 'uppercase', mb: 0.75 }}>
-        Assertions · {passCount}/{assertions.length} {allPass ? '✓' : 'passées'}
-      </Typography>
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-        {assertions.map((a: any, i: number) => (
-          <Box
-            key={i}
-            sx={{
-              display: 'flex', alignItems: 'flex-start', gap: 1,
-              p: '7px 10px', borderRadius: '8px',
-              bgcolor: a.passed ? '#e9f7f0' : '#fbeceb',
-              border: `1px solid ${a.passed ? '#b2e0ce' : '#f3c4be'}`,
-            }}
-          >
-            {a.passed
-              ? <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d', mt: '1px', flexShrink: 0 }} />
-              : <CancelIcon sx={{ fontSize: 14, color: '#d0503f', mt: '1px', flexShrink: 0 }} />
-            }
-            <Box sx={{ flex: 1, minWidth: 0 }}>
-              <Typography sx={{ fontSize: 12, color: INK, fontWeight: 500 }}>
-                {a.description}
-              </Typography>
-              {!a.passed && a.failing_rows && a.failing_rows.length > 0 && (
-                <Typography sx={{ fontSize: 11, color: '#d0503f', mt: 0.25 }}>
-                  {a.failing_rows.length} ligne{a.failing_rows.length > 1 ? 's' : ''} en échec
-                </Typography>
-              )}
-              {!a.passed && a.error && (
-                <Typography sx={{ fontSize: 11, color: '#d0503f', mt: 0.25, fontFamily: 'monospace' }}>
-                  {a.error}
-                </Typography>
-              )}
-            </Box>
-          </Box>
-        ))}
+    <Box sx={{ borderTop: '1px solid #eff3f4', '&:first-of-type': { borderTop: 'none' } }}>
+      <Box onClick={onToggle} sx={{ p: '8px 12px', display: 'flex', alignItems: 'center', gap: 1.25, cursor: 'pointer', '&:hover': { bgcolor: '#fafcfc' } }}>
+        <Box sx={{ width: 18, height: 18, borderRadius: '50%', bgcolor: statusBg, color: statusColor, display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+          {a.passed ? <CheckCircleIcon sx={{ fontSize: 11 }} /> : <CancelIcon sx={{ fontSize: 11 }} />}
+        </Box>
+        <Typography sx={{ flex: 1, fontSize: 12.5, color: INK, lineHeight: 1.45, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: expanded ? 'normal' : 'nowrap' }}>
+          {a.description}
+        </Typography>
+        {!a.passed && failCount > 0 && !expanded && (
+          <Typography sx={{ fontSize: 11, color: statusColor, fontWeight: 600, flexShrink: 0 }}>
+            {failCount} ligne{failCount > 1 ? 's' : ''} en échec
+          </Typography>
+        )}
+        <Box sx={{ transform: expanded ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', display: 'inline-flex', color: MUTED, flexShrink: 0 }}>
+          <ExpandMoreIcon sx={{ fontSize: 14 }} />
+        </Box>
       </Box>
+      {expanded && (
+        <Box sx={{ px: '12px', pb: '10px', pl: '42px', bgcolor: '#fafbfc' }}>
+          {a.error && (
+            <Typography sx={{ fontSize: 11.5, color: '#d0503f', fontFamily: 'monospace', mb: 0.75 }}>{a.error}</Typography>
+          )}
+          {!a.passed && failCount > 0 && (
+            <Typography sx={{ fontSize: 11.5, color: '#d0503f', mb: 0.75 }}>
+              {failCount} ligne{failCount > 1 ? 's' : ''} en échec
+            </Typography>
+          )}
+          {a.sql && (
+            <Box component="pre" sx={{ m: 0, mb: 1, p: '8px 10px', fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#eef2f3', borderRadius: '7px', overflowX: 'auto', color: '#2b3b3e', lineHeight: 1.5, border: '1px solid #dce4e6' }}>
+              {a.sql}
+            </Box>
+          )}
+          <Box component="button" onClick={onDelete}
+            sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '9px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: '#d0503f', cursor: 'pointer', fontFamily: 'inherit', '&:hover': { bgcolor: '#fbeceb', borderColor: '#d0503f' } }}>
+            <DeleteIcon sx={{ fontSize: 12 }} /> Supprimer
+          </Box>
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+function ResultWithAssertions({ inputData, outputData, assertionResults }: {
+  inputData: Record<string, any[]>;
+  outputData: any[];
+  assertionResults: AssertionItem[];
+}) {
+  const [expandedSet, setExpandedSet] = useState<Set<number>>(() => {
+    const s = new Set<number>();
+    assertionResults.forEach((a, i) => { if (!a.passed) s.add(i); });
+    return s;
+  });
+  const [localAssertions, setLocalAssertions] = useState<AssertionItem[]>(assertionResults);
+
+  useEffect(() => {
+    setLocalAssertions(assertionResults);
+    setExpandedSet(() => {
+      const s = new Set<number>();
+      assertionResults.forEach((a, i) => { if (!a.passed) s.add(i); });
+      return s;
+    });
+  }, [assertionResults]);
+
+  function toggle(i: number) {
+    setExpandedSet(prev => { const n = new Set(prev); if (n.has(i)) n.delete(i); else n.add(i); return n; });
+  }
+
+  function deleteAssertion(i: number) {
+    setLocalAssertions(prev => prev.filter((_, j) => j !== i));
+  }
+
+  const passCount = localAssertions.filter(a => a.passed).length;
+  const failCount = localAssertions.filter(a => !a.passed).length;
+  const hasInput = Object.keys(inputData).length > 0;
+  const hasOutput = outputData.length > 0;
+  const hasAssertions = localAssertions.length > 0;
+
+  if (!hasInput && !hasOutput && !hasAssertions) return null;
+
+  return (
+    <Box sx={{ borderTop: '1px solid #eff3f4' }}>
+      {/* Header */}
+      {hasAssertions && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 2, py: '8px', bgcolor: '#f0f3f4', borderBottom: '1px solid #eff3f4' }}>
+          <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, letterSpacing: 0.6, textTransform: 'uppercase' }}>
+            Scénario du test
+          </Typography>
+          <Typography sx={{ fontSize: 11.5, color: failCount > 0 ? '#d0503f' : '#23a26d', fontWeight: 600 }}>
+            {passCount}/{localAssertions.length} assertion{localAssertions.length > 1 ? 's' : ''} passe{passCount !== 1 ? 'nt' : ''}
+            {failCount > 0 && <Box component="span" sx={{ ml: 1 }}>· {failCount} échoue{failCount > 1 ? 'nt' : ''}</Box>}
+          </Typography>
+        </Box>
+      )}
+
+      {/* 1. Input data */}
+      {hasInput && (
+        <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
+          <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
+            {hasAssertions ? '1 · ' : ''}Données d'entrée
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
+            {Object.entries(inputData).map(([key, val]) => (
+              <DisplayTable key={key} jsonData={val as any[]} tableName={key} />
+            ))}
+          </Box>
+        </Box>
+      )}
+
+      {/* Arrow */}
+      {hasInput && (hasOutput || hasAssertions) && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', py: '2px', color: MUTED }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
+        </Box>
+      )}
+
+      {/* 2. Query result */}
+      {hasOutput && (
+        <Box sx={{ px: 2, pb: 1 }}>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
+            <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              {hasAssertions ? '2 · ' : ''}Résultat de la requête
+            </Typography>
+            <Typography sx={{ fontSize: 11, color: MUTED, ml: 'auto' }}>
+              {outputData.length} ligne{outputData.length > 1 ? 's' : ''}
+            </Typography>
+          </Box>
+          <Box sx={{ overflowX: 'auto' }}>
+            <DisplayTable jsonData={outputData} tableName="Résultat" />
+          </Box>
+        </Box>
+      )}
+
+      {/* Arrow */}
+      {hasAssertions && (hasInput || hasOutput) && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', py: '2px', color: MUTED }}>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
+        </Box>
+      )}
+
+      {/* 3. Assertions */}
+      {hasAssertions && (
+        <Box sx={{ px: 2, pb: 1.5 }}>
+          <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
+            3 · Assertions sur ce résultat
+          </Typography>
+          <Box sx={{ border: `1px solid ${BORDER}`, borderRadius: '8px', overflow: 'hidden' }}>
+            {localAssertions.map((a, i) => (
+              <AssertionRow key={i} a={a} expanded={expandedSet.has(i)} onToggle={() => toggle(i)} onDelete={() => deleteAssertion(i)} />
+            ))}
+          </Box>
+        </Box>
+      )}
     </Box>
   );
 }
@@ -477,15 +607,38 @@ export interface SqlStripProps {
   sqlHistory?: SqlHistoryEntry[];
   onHistorySelect?: (entry: SqlHistoryEntry) => void;
   historyRestoreTrigger?: number;
+  /** File name shown in the reload banner (e.g. "peak_growth.sql") */
+  sqlFileName?: string;
+  /** Fetches the latest SQL from the source file; returns null on failure */
+  onReloadFile?: () => Promise<string | null>;
 }
 
-function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger }: SqlStripProps) {
+type ReloadStatus = 'idle' | 'loading' | 'changed' | 'same';
+
+function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName, onReloadFile }: SqlStripProps) {
   const [open, setOpen] = useState(true);
   const [editedSql, setEditedSql] = useState(sql);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
+  const [reloadStatus, setReloadStatus] = useState<ReloadStatus>('idle');
   const prevDisabled = useRef(disabled);
   const prevTrigger = useRef(historyRestoreTrigger);
+
+  async function handleReloadFile() {
+    if (!onReloadFile || reloadStatus === 'loading') return;
+    setReloadStatus('loading');
+    const newSql = await onReloadFile();
+    if (newSql === null) { setReloadStatus('idle'); return; }
+    if (newSql.trim() !== sql.trim()) {
+      setReloadStatus('changed');
+      setEditedSql(newSql);
+      onUpdate?.(newSql);
+      setTimeout(() => setReloadStatus('idle'), 3000);
+    } else {
+      setReloadStatus('same');
+      setTimeout(() => setReloadStatus('idle'), 2000);
+    }
+  }
 
   useEffect(() => {
     if (prevDisabled.current && !disabled && !hasError) setOpen(false);
@@ -533,6 +686,24 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
 
   return (
     <>
+      {/* Reload banner — shown when file changed */}
+      {reloadStatus === 'changed' && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: '6px', bgcolor: '#e9f7f0', borderBottom: '1px solid #b2e0ce' }}>
+          <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d' }} />
+          <Typography sx={{ fontSize: 11.5, color: '#23a26d', fontWeight: 600 }}>
+            Fichier rechargé — tests relancés
+          </Typography>
+        </Box>
+      )}
+      {reloadStatus === 'same' && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: '6px', bgcolor: '#e9f7f0', borderBottom: '1px solid #b2e0ce' }}>
+          <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d' }} />
+          <Typography sx={{ fontSize: 11.5, color: '#23a26d', fontWeight: 600 }}>
+            Fichier synchronisé — aucun changement détecté
+          </Typography>
+        </Box>
+      )}
+
       <Box sx={{ bgcolor: SURFACE, borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
         <Box
           onClick={handleToggle}
@@ -541,12 +712,42 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
           <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#1f948d', letterSpacing: 0.5, fontFamily: 'monospace', flexShrink: 0 }}>
             SQL
           </Typography>
+          {sqlFileName && (
+            <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', flexShrink: 0 }}>
+              <FolderOpenIcon sx={{ fontSize: 12, color: MUTED }} />
+              <Typography sx={{ fontSize: 11, color: MUTED, fontFamily: 'monospace' }}>{sqlFileName}</Typography>
+            </Box>
+          )}
           {!open && (
             <Typography sx={{ fontSize: 12, color: '#3b4f52', fontFamily: 'monospace', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, minWidth: 0 }}>
               {truncated}
             </Typography>
           )}
           {open && <Box sx={{ flex: 1 }} />}
+          {onReloadFile && (
+            <Tooltip title="Recharger le fichier SQL et relancer les tests">
+              <Box
+                component="button"
+                onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleReloadFile(); }}
+                disabled={reloadStatus === 'loading' || disabled}
+                sx={{
+                  display: 'inline-flex', alignItems: 'center', gap: '4px',
+                  px: '9px', py: '4px', fontSize: 11.5, fontWeight: 600,
+                  border: `1px solid ${BORDER}`, borderRadius: '7px',
+                  bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+                  '&:hover': { borderColor: '#2BB0A8', color: '#2BB0A8', bgcolor: '#f0fafa' },
+                  '&:disabled': { opacity: 0.5, cursor: 'not-allowed' },
+                }}
+              >
+                <SyncIcon sx={{
+                  fontSize: 13,
+                  '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+                  animation: reloadStatus === 'loading' ? 'spin 0.8s linear infinite' : 'none',
+                }} />
+                Recharger
+              </Box>
+            </Tooltip>
+          )}
           {hasHistory && (
             <Tooltip title={`Historique (${sqlHistory!.length})`}>
               <TealIconButton
@@ -865,50 +1066,27 @@ function TestCard({
 
       {/* Data section */}
       {!isCollapsed && (
-        <Box sx={{ borderTop: '1px solid #eff3f4' }}>
-          <AssertionsPanel assertions={test.assertion_results ?? []} />
-          <Box sx={{ px: 2, pb: 2, pt: test.assertion_results?.length ? 0 : 1.5, display: 'flex', flexDirection: 'column', gap: 2 }}>
-            <Box>
-              <Typography variant="caption" sx={{ fontWeight: 700, color: BODY, display: 'block', mb: 0.75 }}>
-                Données d'entrée
-              </Typography>
-              {Object.keys(inputData).length > 0 ? (
-                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
-                  {Object.entries(inputData).map(([key, val]) => (
-                    <DisplayTable key={key} jsonData={val as any[]} tableName={key} />
-                  ))}
-                </Box>
-              ) : (
-                <Alert severity="info" sx={{ py: 0 }}>Pas de données d'entrée</Alert>
-              )}
-              {test.status !== 'pending' && (
-                <Box sx={{ display: 'flex', gap: 1, mt: 1 }}>
-                  <ExcelDownloader data={inputData} fileName={`test_${idx + 1}.xlsx`} />
-                  {onUpload && <ExcelUploader onUpload={onUpload} />}
-                </Box>
-              )}
-            </Box>
-
-            <Box>
-              <Typography variant="caption" sx={{ fontWeight: 700, color: BODY, display: 'block', mb: 0.75 }}>
-                Résultats
-              </Typography>
-              {test.status === 'pending' ? (
-                <Box>
-                  <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
-                  <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
-                  <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1 }} />
-                </Box>
-              ) : Array.isArray(outputData) && outputData.length > 0 ? (
-                <Box sx={{ overflowX: 'auto' }}>
-                  <DisplayTable jsonData={outputData} tableName={`Résultats test #${idx + 1}`} />
-                </Box>
-              ) : (
-                <Alert severity="info" sx={{ py: 0 }}>Pas de résultats</Alert>
-              )}
-            </Box>
+        test.status === 'pending' ? (
+          <Box sx={{ borderTop: '1px solid #eff3f4', px: 2, py: 2 }}>
+            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
+            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
+            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1 }} />
           </Box>
-        </Box>
+        ) : (
+          <>
+            <ResultWithAssertions
+              inputData={inputData}
+              outputData={outputData}
+              assertionResults={test.assertion_results ?? []}
+            />
+            {test.status !== 'pending' && Object.keys(inputData).length > 0 && (
+              <Box sx={{ px: 2, pb: 1.5, display: 'flex', gap: 1 }}>
+                <ExcelDownloader data={inputData} fileName={`test_${idx + 1}.xlsx`} />
+                {onUpload && <ExcelUploader onUpload={onUpload} />}
+              </Box>
+            )}
+          </>
+        )
       )}
     </Box>
   );
