@@ -112,17 +112,17 @@ export async function streamThunk(
     });
   } catch (error: any) {
       if (controller.signal.aborted) {
-        dispatch(setError("Flux interrompu par l’utilisateur."));
+        dispatch(setError("Flux interrompu par l'utilisateur."));
       } else {
         const sseError: string | undefined = error?.error;
-        if (sseError?.includes(‘Reauthentication’) || sseError?.includes(‘application-default’)) {
+        if (sseError?.includes('Reauthentication') || sseError?.includes('application-default')) {
           dispatch(setError(
-            ‘Session Google Cloud expirée. Relancez gcloud auth application-default login dans votre terminal, puis réessayez.’
+            "Session Google Cloud expirée. Relancez gcloud auth application-default login dans votre terminal, puis réessayez."
           ));
         } else {
-          dispatch(setError("Une erreur est survenue lors de l’exécution"));
+          dispatch(setError("Une erreur est survenue lors de l'exécution"));
         }
-        console.error(‘Stream error:’, error);
+        console.error('Stream error:', error);
       }
   } finally {
     dispatch(setLoading(false));
