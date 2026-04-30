@@ -120,3 +120,24 @@ def save_profile(profile: Dict[str, Any]) -> None:
     raw["profile"] = profile
     _save_raw(raw)
     _profile_cache = profile
+
+
+# ---------------------------------------------------------------------------
+# Sample values cache (LLM-generated values for unconstrained columns)
+# Stored as {"table.col": ["val1", "val2", ...]} under "sample_values" key.
+# No in-memory cache — reads are infrequent and values are stable.
+# ---------------------------------------------------------------------------
+
+
+def get_sample_values() -> Dict[str, List[Any]]:
+    """Return the stored sample_values dict from schema_cache."""
+    return _load_raw().get("sample_values") or {}
+
+
+def save_sample_values(key: str, values: List[Any]) -> None:
+    """Persist sample values for one column key (format: 'table.col')."""
+    raw = _load_raw()
+    existing = raw.get("sample_values") or {}
+    existing[key] = values
+    raw["sample_values"] = existing
+    _save_raw(raw)

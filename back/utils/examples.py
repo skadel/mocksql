@@ -65,6 +65,65 @@ def filter_columns(schemas, used_columns):
     return filtered_tables
 
 
+def filter_columns_mandatory(
+    schemas: list,
+    used_columns: list,
+    mandatory: dict[str, set[str]],
+) -> list:
+    """Like filter_columns() but further restricts to columns in the mandatory set.
+
+    mandatory: {table_name_short: {col1, col2, ...}} built from SimplificationResult.source_columns.
+    Falls back to all used columns for a table when it has no mandatory entry.
+    """
+    filtered_tables = []
+    for table in schemas:
+        parts = table["table_name"].split(".")
+        if len(parts) < 2:
+            continue
+
+        db_name_from_schema = parts[-2]
+        table_name_from_schema = parts[-1]
+        qualified_under_name = "_".join(parts[-2:])
+
+        used_table_entry = next(
+            (
+                item
+                for item in used_columns
+                if item.get("database") == db_name_from_schema
+                and item.get("table") == table_name_from_schema
+            ),
+            None,
+        )
+
+        if not used_table_entry:
+            continue
+
+        mandatory_cols = mandatory.get(table_name_from_schema)
+        if mandatory_cols:
+            filtered_columns = [
+                col
+                for col in table["columns"]
+                if col["name"].lower() in mandatory_cols
+                and col["name"].lower()
+                in [uc.lower() for uc in used_table_entry["used_columns"]]
+            ]
+        else:
+            # No mandatory entry for this table → keep all used columns (safe fallback)
+            filtered_columns = [
+                col
+                for col in table["columns"]
+                if col["name"].lower()
+                in [uc.lower() for uc in used_table_entry["used_columns"]]
+            ]
+
+        if filtered_columns:
+            filtered_tables.append(
+                {"table_name": qualified_under_name, "columns": filtered_columns}
+            )
+
+    return filtered_tables
+
+
 def parse_field_type(field_type_str: str) -> Type | List | Dict:
     """
     Parses a BigQuery field type string into a Python type.

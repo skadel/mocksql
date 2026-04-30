@@ -1061,6 +1061,4 @@ def simplify(
         expr_str = f"{fc.func}({fc.source})"
         result.derived_columns[fc.derived] = (fc.source, expr_str)
 
-    print(">>>>>>><result")
-    print(result)
     return result

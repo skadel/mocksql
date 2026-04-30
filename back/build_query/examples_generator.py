@@ -10,7 +10,7 @@ from pydantic import Field, create_model
 
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
 from build_query.state import QueryState
-from utils.examples import create_pydantic_models, filter_columns
+from utils.examples import create_pydantic_models, filter_columns, filter_columns_mandatory
 from utils.llm_factory import make_llm
 from storage.config import get_llm_model
 from utils.msg_types import MsgType
@@ -47,40 +47,46 @@ def _should_regenerate(state, existing_tests: list) -> bool:
     return False
 
 
-def _extract_constraints_hint(
+_OP_LABELS = {
+    "eq": "=",
+    "neq": "!=",
+    "gt": ">",
+    "gte": ">=",
+    "lt": "<",
+    "lte": "<=",
+    "like": "LIKE",
+    "not_like": "NOT LIKE",
+    "in": "IN",
+    "not_in": "NOT IN",
+    "between": "BETWEEN",
+    "is_null": "IS NULL",
+    "is_not_null": "IS NOT NULL",
+}
+
+
+def _run_simplify(
     sql_query: str, schema: list[dict] | None = None, dialect: str = "bigquery"
-) -> str:
-    """Extract SQL constraints and return them as a structured JSON string."""
+):
+    """Call constraint_simplifier.simplify() and return the result, or None on failure."""
     if not sql_query:
-        return ""
+        return None
     try:
         from build_query.constraint_simplifier import simplify as _simplify_sql
 
-        result = _simplify_sql(sql_query, schema=schema, dialect=dialect)
+        return _simplify_sql(sql_query, schema=schema, dialect=dialect)
     except Exception:
-        return ""
+        return None
 
-    _OP_LABELS = {
-        "eq": "=",
-        "neq": "!=",
-        "gt": ">",
-        "gte": ">=",
-        "lt": "<",
-        "lte": "<=",
-        "like": "LIKE",
-        "not_like": "NOT LIKE",
-        "in": "IN",
-        "not_in": "NOT IN",
-        "between": "BETWEEN",
-        "is_null": "IS NULL",
-        "is_not_null": "IS NOT NULL",
-    }
+
+def _simplification_to_hint(result) -> str:
+    """Convert a SimplificationResult to a JSON constraints hint string."""
+    if result is None:
+        return ""
 
     joins = [
         " = ".join(sorted(str(c) for c in group))
         for group in result.equivalence_classes
     ]
-
     anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
 
     filters = []
@@ -121,16 +127,108 @@ def _extract_constraints_hint(
     return json.dumps(structured, ensure_ascii=False, indent=2)
 
 
+def _build_mandatory_set(result) -> dict[str, set[str]]:
+    """Build {table_name_short: {col, ...}} from SimplificationResult.source_columns."""
+    mandatory: dict[str, set[str]] = {}
+    for col_ref in result.source_columns:
+        table = (col_ref.real_table or col_ref.table).split(".")[-1].lower()
+        mandatory.setdefault(table, set()).add(col_ref.column.lower())
+    # Also include columns that appear in derived_columns as sources
+    for col_ref in result.derived_columns:
+        table = (col_ref.real_table or col_ref.table).split(".")[-1].lower()
+        mandatory.setdefault(table, set()).add(col_ref.column.lower())
+    return mandatory
+
+
+def _get_unconstrained_cols(
+    used_columns: list[dict],
+    schemas: list[dict],
+    mandatory: dict[str, set[str]],
+) -> list[dict]:
+    """Return [{table, col_name, col_type}] for columns absent from the mandatory set."""
+    schema_types: dict[str, dict[str, str]] = {}
+    for tbl in schemas:
+        short = tbl["table_name"].split(".")[-1].lower()
+        schema_types[short] = {
+            col["name"].lower(): col.get("type", "STRING")
+            for col in tbl.get("columns", [])
+        }
+
+    unconstrained = []
+    for entry in used_columns:
+        if isinstance(entry, str):
+            entry = json.loads(entry)
+        table = entry.get("table", "").lower()
+        mandatory_cols = mandatory.get(table, set())
+        col_types = schema_types.get(table, {})
+        for col in entry.get("used_columns", []):
+            col_lower = col.lower()
+            if col_lower not in mandatory_cols:
+                unconstrained.append(
+                    {
+                        "table": table,
+                        "col_name": col_lower,
+                        "col_type": col_types.get(col_lower, "STRING"),
+                    }
+                )
+    return unconstrained
+
+
+def _strip_unconstrained_from_sql(
+    sql: str, excluded_col_names: list[str], dialect: str = "bigquery"
+) -> str:
+    """Remove unconstrained columns from SELECT lists in SQL (LLM context only)."""
+    if not sql or not excluded_col_names:
+        return sql
+
+    excluded_pairs: set[tuple[str, str]] = set()
+    for entry in excluded_col_names:
+        if "." in entry:
+            tbl, col = entry.rsplit(".", 1)
+            excluded_pairs.add((tbl.lower(), col.lower()))
+
+    if not excluded_pairs:
+        return sql
+
+    try:
+        import sqlglot.expressions as exp
+        from sqlglot import parse_one
+
+        tree = parse_one(sql, dialect=dialect)
+
+        for select in tree.find_all(exp.Select):
+            new_exprs = []
+            for expr in select.expressions:
+                col_node = expr.this if isinstance(expr, exp.Alias) else expr
+                if not isinstance(col_node, exp.Column):
+                    new_exprs.append(expr)
+                    continue
+                col_name = col_node.name.lower()
+                table_qualifier = (col_node.table or "").lower().split(".")[-1]
+                should_exclude = any(
+                    col == col_name and (not table_qualifier or table_qualifier == tbl)
+                    for tbl, col in excluded_pairs
+                )
+                if not should_exclude:
+                    new_exprs.append(expr)
+            select.set("expressions", new_exprs)
+
+        return tree.sql(dialect=dialect)
+    except Exception:
+        return sql
+
+
 def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
     """Returns {cte_name: parsed_constraints_dict} for each non-final CTE."""
-    result = {}
+    result_map = {}
     for cte in query_decomposed:
         if cte["name"] == "final_query":
             continue
-        hint = _extract_constraints_hint(cte["code"], dialect)
+        sim = _run_simplify(cte["code"], dialect=dialect)
+        hint = _simplification_to_hint(sim)
         if hint:
-            result[cte["name"]] = json.loads(hint)
-    return result
+            result_map[cte["name"]] = json.loads(hint)
+    return result_map
 
 
 def _get_failing_cte_from_results(history) -> tuple:
@@ -270,19 +368,32 @@ async def generate_examples_(
 
     schema = await get_schemas(project_id=state["project"])
 
-    data_model = await create_combined_model(used_columns, schema)
+    dialect = state.get("dialect", "bigquery")
+    optimized_sql = state.get("optimized_sql", "")
+
+    # Single simplify() call — result reused for hint + mandatory set + unconstrained
+    sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
+    constraints = _simplification_to_hint(sim_result)
+
+    if sim_result is not None:
+        mandatory = _build_mandatory_set(sim_result)
+        filtered_schema = filter_columns_mandatory(schema, used_columns, mandatory)
+        unconstrained_cols = _get_unconstrained_cols(used_columns, schema, mandatory)
+    else:
+        # simplify() failed — fall back to full column set, no sparse filling
+        mandatory = {}
+        filtered_schema = filter_columns(schema, used_columns)
+        unconstrained_cols = []
+
+    data_model = create_pydantic_models(filtered_schema)
     output_type = get_generation_output_type(data_model, existing_tests)
     parser = create_output_fixing_parser(
         PydanticOutputParser(pydantic_object=output_type)
     )
 
-    dialect = state.get("dialect", "bigquery")
-
-    constraints = _extract_constraints_hint(
-        state.get("optimized_sql", ""),
-        schema=schema,
-        dialect=dialect,
-    )
+    excluded_col_names = [
+        f"{e['table']}.{e['col_name']}" for e in unconstrained_cols
+    ]
 
     prompt = await create_appropriate_prompt(
         state,
@@ -291,11 +402,23 @@ async def generate_examples_(
         used_columns,
         parser.get_format_instructions(),
         constraints_hint=constraints,
+        excluded_columns=excluded_col_names,
     )
     if prompt is None:
         return None, None
 
     generated_data = await (prompt | llm | parser).ainvoke({})
+
+    # Build value pool for unconstrained columns and fill rows
+    if unconstrained_cols:
+        from build_query.sparse_filler import build_unconstrained_pool, fill_unconstrained
+        pool = await build_unconstrained_pool(
+            unconstrained_cols, state.get("profile"), llm
+        )
+        raw_data = _convert_datetime_fields(generated_data.data.dict())
+        filled_data = fill_unconstrained(raw_data, pool)
+    else:
+        filled_data = _convert_datetime_fields(generated_data.data.dict())
 
     generated = {
         "test_name": generated_data.test_name,
@@ -303,7 +426,7 @@ async def generate_examples_(
         "unit_test_build_reasoning": generated_data.unit_test_build_reasoning,
         "tags": generated_data.tags,
         "suggestions": generated_data.suggestions,
-        "data": _convert_datetime_fields(generated_data.data.dict()),
+        "data": filled_data,
     }
 
     # Determine which test_index slot this new test occupies
@@ -376,43 +499,45 @@ async def create_appropriate_prompt(
     used_columns,
     format_instructions,
     constraints_hint: str = "",
+    excluded_columns: list[str] | None = None,
 ):
     sql = state.get("optimized_sql", "")
+    dialect = state.get("dialect", "bigquery")
     profile = state.get("profile")
+    stripped_sql = _strip_unconstrained_from_sql(sql, excluded_columns or [], dialect)
     if not existing_tests:
         return generate_data_prompt(
             history,
-            state["dialect"],
+            dialect,
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=sql,
+            sql=stripped_sql,
             profile=profile,
         )
     elif state.get("input", "").strip():
-        # Only use update_data_prompt when the frontend explicitly targeted a test (test_index set).
         if state.get("test_index") is not None:
             return update_data_prompt(
-                history, state["input"], state["dialect"], format_instructions, sql=sql
+                history, state["input"], dialect, format_instructions, sql=sql
             )
         return generate_data_prompt(
             history,
-            state["dialect"],
+            dialect,
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=sql,
+            sql=stripped_sql,
             user_instruction=state["input"],
             profile=profile,
         )
     elif state.get("status") == "empty_results":
         return generate_data_prompt(
             history,
-            state["dialect"],
+            dialect,
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=sql,
+            sql=stripped_sql,
             profile=profile,
         )
     else:
