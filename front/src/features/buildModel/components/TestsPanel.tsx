@@ -1,3 +1,4 @@
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import AddIcon from '@mui/icons-material/Add';
 import CancelIcon from '@mui/icons-material/Cancel';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
@@ -18,7 +19,6 @@ import FilterListIcon from '@mui/icons-material/FilterList';
 import SyncIcon from '@mui/icons-material/Sync';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import {
-  Alert,
   Box,
   Button,
   Chip,
@@ -37,20 +37,19 @@ import {
 import { DangerIconButton, MutedIconButton, OutlinedPrimaryButton, PrimaryButton, TealIconButton } from '../../../style/AppButtons';
 import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
+import { useTranslation } from 'react-i18next';
 import SqlEditor from '../../../shared/SqlEditor';
 import { patchModelTests } from '../../../api/messages';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
+import { relativeDate } from '../../../utils/dates';
 import ExcelDownloader from '../../../shared/ExcelDownloader';
 import ExcelUploader from '../../../shared/ExcelUploader';
 import { setTestResults } from '../buildModelSlice';
 import DisplayTable from './DisplayTable';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
-import { useTestPanelState, VerdictFilter } from '../hooks/useTestPanelState';
+import { useTestPanelState } from '../hooks/useTestPanelState';
 import {
-  Verdict,
-  VERDICT_META,
   statusToVerdict,
-  verdictText,
   testExecStatus,
   getVerdictInfo,
 } from '../../../utils/verdict';
@@ -435,10 +434,11 @@ function AssertionRow({ a, expanded, onToggle, onDelete }: {
   );
 }
 
-function ResultWithAssertions({ inputData, outputData, assertionResults }: {
+function ResultWithAssertions({ inputData, outputData, assertionResults, onEditAssertions }: {
   inputData: Record<string, any[]>;
   outputData: any[];
   assertionResults: AssertionItem[];
+  onEditAssertions?: () => void;
 }) {
   const [expandedSet, setExpandedSet] = useState<Set<number>>(() => {
     const s = new Set<number>();
@@ -535,9 +535,18 @@ function ResultWithAssertions({ inputData, outputData, assertionResults }: {
       {/* 3. Assertions */}
       {hasAssertions && (
         <Box sx={{ px: 2, pb: 1.5 }}>
-          <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
-            3 · Assertions sur ce résultat
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
+            <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              3 · Assertions sur ce résultat
+            </Typography>
+            {onEditAssertions && (
+              <Tooltip title="Modifier l'assertion (sans régénérer les données)">
+                <MutedIconButton size="small" onClick={onEditAssertions} sx={{ color: '#6941c6', ml: 0.25 }}>
+                  <AutoAwesomeIcon sx={{ fontSize: 13 }} />
+                </MutedIconButton>
+              </Tooltip>
+            )}
+          </Box>
           <Box sx={{ border: `1px solid ${BORDER}`, borderRadius: '8px', overflow: 'hidden' }}>
             {localAssertions.map((a, i) => (
               <AssertionRow key={i} a={a} expanded={expandedSet.has(i)} onToggle={() => toggle(i)} onDelete={() => deleteAssertion(i)} />
@@ -974,9 +983,18 @@ function TestCard({
             autoFocus fullWidth size="small" variant="standard" multiline minRows={2}
           />
         ) : (
-          <Typography sx={{ fontWeight: 600, color: INK, fontSize: 13.5, lineHeight: 1.5 }}>
-            {description}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 0.5 }}>
+            <Typography sx={{ fontWeight: 600, color: INK, fontSize: 13.5, lineHeight: 1.5, flex: 1 }}>
+              {description}
+            </Typography>
+            {test.status !== 'pending' && (
+              <Tooltip title="Éditer la description">
+                <MutedIconButton size="small" onClick={onStartEdit} sx={{ mt: '1px', flexShrink: 0 }}>
+                  <EditIcon sx={{ fontSize: 13 }} />
+                </MutedIconButton>
+              </Tooltip>
+            )}
+          </Box>
         )}
 
         {/* Verdict text */}
@@ -997,22 +1015,12 @@ function TestCard({
       <Box sx={{ display: 'flex', gap: 0.5, px: 1.5, pb: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
         {test.status !== 'pending' && (
           <>
-            <Tooltip title="Éditer la description">
-              <MutedIconButton size="small" onClick={onStartEdit}><EditIcon sx={{ fontSize: 14 }} /></MutedIconButton>
-            </Tooltip>
             <Tooltip title={selectedTestIndex === idx ? 'Sélectionné — écris ton instruction dans le chat' : 'Modifier avec MockSQL'}>
               {selectedTestIndex === idx
                 ? <TealIconButton size="small" onClick={onSelectForModification}><AutoAwesomeIcon sx={{ fontSize: 14 }} /></TealIconButton>
                 : <MutedIconButton size="small" onClick={onSelectForModification}><AutoAwesomeIcon sx={{ fontSize: 14 }} /></MutedIconButton>
               }
             </Tooltip>
-            {onEditAssertions && (
-              <Tooltip title="Modifier l'assertion (sans régénérer les données)">
-                <MutedIconButton size="small" onClick={onEditAssertions} sx={{ color: '#6941c6' }}>
-                  <EditIcon sx={{ fontSize: 14 }} />
-                </MutedIconButton>
-              </Tooltip>
-            )}
             {onRerunTest && (
               <Tooltip title="Relancer ce test">
                 <MutedIconButton size="small" onClick={onRerunTest}><ReplayIcon sx={{ fontSize: 14 }} /></MutedIconButton>
@@ -1086,6 +1094,7 @@ function TestCard({
               inputData={inputData}
               outputData={outputData}
               assertionResults={test.assertion_results ?? []}
+              onEditAssertions={onEditAssertions}
             />
             {test.status !== 'pending' && Object.keys(inputData).length > 0 && (
               <Box sx={{ px: 2, pb: 1.5, display: 'flex', gap: 1 }}>
@@ -1096,6 +1105,58 @@ function TestCard({
           </>
         )
       )}
+    </Box>
+  );
+}
+
+/* ─── StaleInfo ──────────────────────────────────────────────────── */
+export interface StaleInfo {
+  isStale: boolean;
+  commitsSince: number;
+  lastTestedAt?: string;
+  onReevaluate: () => void;
+}
+
+function StaleBanner({ info }: { info: StaleInfo }) {
+  const { t } = useTranslation();
+  const changesLabel = info.commitsSince > 0
+    ? `${info.commitsSince} changement${info.commitsSince > 1 ? 's' : ''} depuis le dernier test`
+    : 'le fichier source a été modifié';
+
+  return (
+    <Box sx={{
+      display: 'flex', alignItems: 'center', gap: 1.5,
+      px: 2, py: '9px', flexShrink: 0,
+      bgcolor: '#fffbeb', borderBottom: '1px solid #f5d878',
+    }}>
+      <WarningAmberIcon sx={{ fontSize: 15, color: '#c78f00', flexShrink: 0 }} />
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Typography sx={{ fontSize: 12, fontWeight: 700, color: '#7a5500', lineHeight: 1.3 }}>
+          Fichier modifié — {changesLabel}
+        </Typography>
+        {info.lastTestedAt && (
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px', mt: '2px' }}>
+            <AccessTimeIcon sx={{ fontSize: 11, color: '#a07820' }} />
+            <Typography sx={{ fontSize: 11, color: '#a07820' }}>
+              Testé {relativeDate(info.lastTestedAt, t)}
+            </Typography>
+          </Box>
+        )}
+      </Box>
+      <Box
+        component="button"
+        onClick={info.onReevaluate}
+        sx={{
+          display: 'inline-flex', alignItems: 'center', gap: '5px',
+          px: '11px', py: '5px', fontSize: 11.5, fontWeight: 600,
+          border: '1.5px solid #c78f00', borderRadius: '8px',
+          bgcolor: '#fff', color: '#7a5500', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+          '&:hover': { bgcolor: '#fff8e1', borderColor: '#a07820' },
+        }}
+      >
+        <ReplayIcon sx={{ fontSize: 13 }} />
+        Ré-évaluer
+      </Box>
     </Box>
   );
 }
@@ -1112,13 +1173,14 @@ interface TestsPanelProps {
   onOpenChat?: () => void;
   modelId?: string;
   sqlProps?: SqlStripProps;
+  staleInfo?: StaleInfo;
 }
 
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
   onUpload, onSuggestionFill, onRerunTest, onOpenChat, modelId,
-  sqlProps,
+  sqlProps, staleInfo,
 }) => {
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
@@ -1230,6 +1292,9 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
+      {/* Stale banner */}
+      {staleInfo?.isStale && <StaleBanner info={staleInfo} />}
+
       {/* Header */}
       {testResults.length > 0 && (
         <Box sx={{ flexShrink: 0, px: 2, py: 1.25, borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>

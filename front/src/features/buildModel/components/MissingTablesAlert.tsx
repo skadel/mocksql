@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Box, Checkbox, Chip, FormControlLabel, LinearProgress, Tooltip, Typography } from '@mui/material'; // Tooltip kept for onDismiss button
+import { Box, Checkbox, FormControlLabel, LinearProgress, Tooltip, Typography } from '@mui/material'; // Tooltip kept for onDismiss button
 import TableChartIcon from '@mui/icons-material/TableChart';
 import DownloadIcon from '@mui/icons-material/Download';
 import StorageIcon from '@mui/icons-material/Storage';

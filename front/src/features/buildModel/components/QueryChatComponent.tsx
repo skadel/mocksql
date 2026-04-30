@@ -3,7 +3,7 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, Grid, IconButton, InputAdornment, LinearProgress, Slide, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, Slide, TextField, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
@@ -25,7 +25,7 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, resetContext } from '../buildModelSlice';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction } from '../buildModelSlice';
 import { getMessages, patchModelSql } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
@@ -67,7 +67,8 @@ const ChatComponent: React.FC = () => {
     onSkip: () => Promise<void>;
   } | null>(null);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
-  const [validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const [_validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
   const [submissionStep, setSubmissionStep] = useState<string | null>(null);
   const [alwaysFix, setAlwaysFix] = useLocalStorageState('alwaysFix', false);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
@@ -504,7 +505,7 @@ const ChatComponent: React.FC = () => {
     } finally {
       setIsImporting(false);
     }
-  }, [tablesToImport, handleNewChatSubmit]);
+  }, [tablesToImport, handleNewChatSubmit, t]);
 
   // -------- Silent auto-import when user preference is set
   useEffect(() => {
@@ -608,6 +609,18 @@ const ChatComponent: React.FC = () => {
     [isSending, currentModelId, optimizedSql, renderMessages, selectedChildIndices, dispatch, t, restoredMessageId]
   );
 
+  // -------- Ré-évaluer (reload file + rerun)
+  const handleReevaluate = useCallback(async () => {
+    if (!currentModelPath || isSending) return;
+    try {
+      const newSql = await fetchModelSql(currentModelPath);
+      if (newSql && newSql.trim()) await handleSQLUpdate(newSql);
+      else await handleSQLUpdate(sqlQuery);
+    } catch {
+      await handleSQLUpdate(sqlQuery);
+    }
+  }, [currentModelPath, isSending, handleSQLUpdate, sqlQuery]);
+
   // -------- Restore SQL from history
   const handleHistorySelect = useCallback((entry: SqlHistoryEntry) => {
     setSqlQuery(entry.sql);
@@ -663,7 +676,7 @@ const ChatComponent: React.FC = () => {
       }
     }
     prevLoadingRef.current = loading;
-  }, [loading, error]);
+  }, [loading, error, t]);
 
   const handleAddTest = useCallback(() => {
     setSelectedTestIndex(null);
@@ -684,7 +697,7 @@ const ChatComponent: React.FC = () => {
 
   const handleRerunTest = useCallback((idx: number) => {
     handleSendMessage(t('chat.regenerate_test'), idx);
-  }, [handleSendMessage]);
+  }, [handleSendMessage, t]);
 
 
   return (
@@ -1000,6 +1013,12 @@ const ChatComponent: React.FC = () => {
                     }
                   : undefined,
               }}
+              staleInfo={currentModel?.isStale ? {
+                isStale: true,
+                commitsSince: currentModel.commitsSince ?? 0,
+                lastTestedAt: currentModel.updateDate,
+                onReevaluate: handleReevaluate,
+              } : undefined}
               onSuggestionFill={(text) => { setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
               onUpload={(uploadedData) => {
                 const lastMsg = renderMessages[renderMessages.length - 1] as any;
