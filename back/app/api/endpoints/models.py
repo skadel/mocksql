@@ -51,7 +51,6 @@ async def get_models():
                     if stored_hash and current_hash:
                         is_stale = current_hash != stored_hash
                     elif stored_sha:
-                        current_sha = data.get("source_sha")  # re-use stored; fresh check below
                         is_stale = False  # unknown without fresh git call
                     else:
                         is_stale = False
@@ -62,10 +61,13 @@ async def get_models():
                     elif not is_stale and stored_sha and stored_hash is None:
                         # legacy: no hash stored yet — check via git
                         from storage.test_repository import get_model_file_git_sha
+
                         current_git_sha = get_model_file_git_sha(model_name)
                         if current_git_sha and current_git_sha != stored_sha:
                             is_stale = True
-                            commits_since = get_commits_since_sha(model_name, stored_sha)
+                            commits_since = get_commits_since_sha(
+                                model_name, stored_sha
+                            )
 
                     tested.append(
                         {
@@ -79,7 +81,9 @@ async def get_models():
                         }
                     )
                     continue
-            untested.append({**f, "model_name": model_name, "is_stale": False, "commits_since": 0})
+            untested.append(
+                {**f, "model_name": model_name, "is_stale": False, "commits_since": 0}
+            )
         tested.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
         return tested + untested
     except Exception as e:

@@ -14,7 +14,12 @@ from models.env_variables import (
     BQ_SCHEMA_BILLING_PROJECT,
     AUTO_PROFILING,
 )
-from storage.test_repository import get_test, get_model_file_git_sha, get_model_file_hash, update_test
+from storage.test_repository import (
+    get_test,
+    get_model_file_git_sha,
+    get_model_file_hash,
+    update_test,
+)
 from utils.sql_code import extract_real_table_refs
 
 dotenv.load_dotenv()

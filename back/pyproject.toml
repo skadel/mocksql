@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "mocksql"
-version = "0.1.3"
+version = "0.1.4"
 description = "TDD engine for Analytics Engineering — generate unit test data for SQL queries"
 authors = ["Adel Skhiri <skhiriadel92@gmail.com>"]
 license = "MIT"
