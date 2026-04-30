@@ -112,7 +112,7 @@ export async function streamThunk(
     });
   } catch (error: any) {
       if (controller.signal.aborted) {
-        dispatch(setError(‘Flux interrompu par l’utilisateur.’));
+        dispatch(setError("Flux interrompu par l’utilisateur."));
       } else {
         const sseError: string | undefined = error?.error;
         if (sseError?.includes(‘Reauthentication’) || sseError?.includes(‘application-default’)) {
