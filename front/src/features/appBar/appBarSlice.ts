@@ -147,6 +147,9 @@ export const buildAppBarSlice = createSlice({
                         folder,
                         updateDate: f.updated_at,
                         isTested: !!f.session_id,
+                        modelName: f.model_name,
+                        isStale: f.is_stale ?? false,
+                        commitsSince: f.commits_since ?? 0,
                     };
                 });
                 state.currentModel = state.models.find(model => model.session_id === state.currentModelId);

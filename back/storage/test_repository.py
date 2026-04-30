@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import re
@@ -140,6 +141,37 @@ def get_model_file_git_sha(model_name: str) -> Optional[str]:
         return sha or None
     except Exception:
         return None
+
+
+def get_model_file_hash(model_name: str) -> Optional[str]:
+    """Return a short SHA-256 hash of the model file's current content, or None."""
+    sql_file = get_models_path() / f"{model_name}.sql"
+    if not sql_file.exists():
+        return None
+    try:
+        content = sql_file.read_bytes()
+        return hashlib.sha256(content).hexdigest()[:16]
+    except Exception:
+        return None
+
+
+def get_commits_since_sha(model_name: str, source_sha: str) -> int:
+    """Return the number of commits that touched the model file since source_sha."""
+    sql_file = get_models_path() / f"{model_name}.sql"
+    if not sql_file.exists():
+        return 0
+    try:
+        result = subprocess.run(
+            ["git", "rev-list", "--count", f"{source_sha}..HEAD", "--", str(sql_file)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(sql_file.parent),
+        )
+        count_str = result.stdout.strip()
+        return int(count_str) if count_str.isdigit() else 0
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------

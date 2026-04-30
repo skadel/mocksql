@@ -14,7 +14,7 @@ from models.env_variables import (
     BQ_SCHEMA_BILLING_PROJECT,
     AUTO_PROFILING,
 )
-from storage.test_repository import get_test, get_model_file_git_sha, update_test
+from storage.test_repository import get_test, get_model_file_git_sha, get_model_file_hash, update_test
 from utils.sql_code import extract_real_table_refs
 
 dotenv.load_dotenv()
@@ -175,6 +175,7 @@ async def validate_query_route(body: ValidateQueryRequest):
     if body.session:
         model_name = (cached_session or {}).get("model_name", "")
         source_sha = get_model_file_git_sha(model_name) if model_name else None
+        source_hash = get_model_file_hash(model_name) if model_name else None
         session_update: dict = {
             "sql": body.sql,
             "used_columns": used_columns,
@@ -182,6 +183,8 @@ async def validate_query_route(body: ValidateQueryRequest):
         }
         if source_sha:
             session_update["source_sha"] = source_sha
+        if source_hash:
+            session_update["source_hash"] = source_hash
         update_test(body.session, session_update)
 
     return {

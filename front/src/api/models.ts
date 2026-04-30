@@ -10,6 +10,9 @@ export interface SqlFile {
   session_id?: string;
   updated_at?: string;
   test_name?: string;
+  model_name?: string;
+  is_stale?: boolean;
+  commits_since?: number;
 }
 
 export interface TestSession {

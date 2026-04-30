@@ -6,6 +6,7 @@ import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import CancelIcon from '@mui/icons-material/Cancel';
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline';
 import ScienceIcon from '@mui/icons-material/Science';
+import UpdateIcon from '@mui/icons-material/Update';
 import { Box, Chip, IconButton, Tooltip, Typography } from '@mui/material';
 import React, { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
@@ -83,6 +84,13 @@ function countFiles(node: FolderNode): number {
   return node.children.reduce<number>((acc, child) => {
     if (child.type === 'file') return acc + 1;
     return acc + countFiles(child);
+  }, 0);
+}
+
+function countStaleFiles(node: FolderNode): number {
+  return node.children.reduce<number>((acc, child) => {
+    if (child.type === 'file') return acc + (child.model.isStale ? 1 : 0);
+    return acc + countStaleFiles(child);
   }, 0);
 }
 
@@ -217,17 +225,27 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
       >
         <SqlIcon color={isActive ? TEAL : isTested ? '#23a26d' : LINE} />
         <Box sx={{ flex: 1, minWidth: 0 }}>
-          <Typography
-            noWrap
-            sx={{
-              fontSize: 12.5,
-              fontWeight: isActive ? 600 : 400,
-              color: isActive ? TEAL : INK,
-              lineHeight: 1.3,
-            }}
-          >
-            {model.name || model.session_id}
-          </Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+            <Typography
+              noWrap
+              sx={{
+                fontSize: 12.5,
+                fontWeight: isActive ? 600 : 400,
+                color: isActive ? TEAL : INK,
+                lineHeight: 1.3,
+              }}
+            >
+              {model.name || model.session_id}
+            </Typography>
+            {model.isStale && (
+              <Tooltip title={model.commitsSince && model.commitsSince > 0
+                ? `${model.commitsSince} changement${model.commitsSince > 1 ? 's' : ''} depuis le dernier test`
+                : 'Fichier modifié depuis le dernier test'}
+              >
+                <WarningAmberIcon sx={{ fontSize: 11, color: '#c78f00', flexShrink: 0 }} />
+              </Tooltip>
+            )}
+          </Box>
           <Typography sx={{ fontSize: 10.5, color: '#a0adb0', whiteSpace: 'nowrap', mt: '1px' }}>
             {isTested ? relativeDate(model.updateDate, t) : t('model.not_tested')}
           </Typography>
@@ -268,8 +286,9 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ node, depth, q, currentModelId
   const visible = q ? folderHasMatch(node, q) : true;
   if (!visible) return null;
 
-  const isOpen  = q ? true : open;
-  const nFiles  = countFiles(node);
+  const isOpen   = q ? true : open;
+  const nFiles   = countFiles(node);
+  const nStale   = countStaleFiles(node);
 
   return (
     <>
@@ -316,6 +335,16 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ node, depth, q, currentModelId
         >
           {node.name}
         </Typography>
+
+        {/* Stale count badge */}
+        {!q && nStale > 0 && (
+          <Tooltip title={`${nStale} fichier${nStale > 1 ? 's' : ''} modifié${nStale > 1 ? 's' : ''}`}>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: '2px', mr: '4px' }}>
+              <WarningAmberIcon sx={{ fontSize: 11, color: '#c78f00' }} />
+              <Typography sx={{ fontSize: 10, fontWeight: 700, color: '#c78f00' }}>{nStale}</Typography>
+            </Box>
+          </Tooltip>
+        )}
 
         {/* File count badge */}
         {!q && (
@@ -381,9 +410,10 @@ const SqlFileList: React.FC<Props> = ({ search }) => {
   const allModels      = useAppSelector(s => s.appBarModel.models);
   const currentModelId = useAppSelector(s => s.appBarModel.currentModelId);
 
-  const models = useMemo(() => allModels.filter(m => m.isTested), [allModels]);
-  const q      = search.toLowerCase().trim();
-  const tree   = useMemo(() => buildTree(models), [models]);
+  const models      = useMemo(() => allModels.filter(m => m.isTested), [allModels]);
+  const q           = search.toLowerCase().trim();
+  const tree        = useMemo(() => buildTree(models), [models]);
+  const totalStale  = useMemo(() => models.filter(m => m.isStale).length, [models]);
 
   const hasResults = q
     ? models.some(m => (m.name ?? m.session_id ?? '').toLowerCase().includes(q))
@@ -401,6 +431,23 @@ const SqlFileList: React.FC<Props> = ({ search }) => {
 
   return (
     <>
+      {/* Global stale aggregate banner */}
+      {totalStale > 0 && !q && (
+        <Box sx={{
+          display: 'flex', alignItems: 'center', gap: '6px',
+          mx: '6px', mb: '4px', px: '10px', py: '6px',
+          bgcolor: '#fffbeb', border: '1px solid #f5d878', borderRadius: '8px',
+        }}>
+          <UpdateIcon sx={{ fontSize: 13, color: '#c78f00', flexShrink: 0 }} />
+          <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: '#7a5500', flex: 1 }}>
+            {totalStale} fichier{totalStale > 1 ? 's' : ''} modifié{totalStale > 1 ? 's' : ''}
+          </Typography>
+          <Typography sx={{ fontSize: 10.5, color: '#a07820' }}>
+            tests à relancer
+          </Typography>
+        </Box>
+      )}
+
       {tree.map(node => (
         <TreeNodeComponent
           key={node.type === 'file' ? node.model.session_id : node.path}

@@ -12,6 +12,8 @@ from storage.test_repository import (
     read_model_sql,
     _test_path,
     _read_json,
+    get_model_file_hash,
+    get_commits_since_sha,
 )
 
 router = APIRouter()
@@ -35,20 +37,49 @@ async def get_models():
         tested = []
         untested = []
         for f in sql_files:
-            p = _test_path(f["name"])
+            model_name = f["name"]
+            p = _test_path(model_name)
             if p.exists():
                 data = _read_json(p)
                 if data:
+                    current_hash = get_model_file_hash(model_name)
+                    stored_hash: str | None = data.get("source_hash")
+                    stored_sha: str | None = data.get("source_sha")
+
+                    # Staleness: prefer content-hash comparison (works without git);
+                    # fall back to git SHA if hash not yet stored.
+                    if stored_hash and current_hash:
+                        is_stale = current_hash != stored_hash
+                    elif stored_sha:
+                        current_sha = data.get("source_sha")  # re-use stored; fresh check below
+                        is_stale = False  # unknown without fresh git call
+                    else:
+                        is_stale = False
+
+                    commits_since = 0
+                    if is_stale and stored_sha:
+                        commits_since = get_commits_since_sha(model_name, stored_sha)
+                    elif not is_stale and stored_sha and stored_hash is None:
+                        # legacy: no hash stored yet — check via git
+                        from storage.test_repository import get_model_file_git_sha
+                        current_git_sha = get_model_file_git_sha(model_name)
+                        if current_git_sha and current_git_sha != stored_sha:
+                            is_stale = True
+                            commits_since = get_commits_since_sha(model_name, stored_sha)
+
                     tested.append(
                         {
                             **f,
                             "session_id": data.get("test_id"),
                             "updated_at": data.get("updated_at"),
                             "test_name": data.get("test_name"),
+                            "model_name": model_name,
+                            "is_stale": is_stale,
+                            "commits_since": commits_since,
                         }
                     )
                     continue
-            untested.append(f)
+            untested.append({**f, "model_name": model_name, "is_stale": False, "commits_since": 0})
         tested.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
         return tested + untested
     except Exception as e:

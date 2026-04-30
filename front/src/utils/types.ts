@@ -155,6 +155,9 @@ export interface Model {
   source_project?: string;
   source_database?: string;
   folder?: string;
+  modelName?: string;
+  isStale?: boolean;
+  commitsSince?: number;
 }
 
 export interface Project {
