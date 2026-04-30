@@ -23,3 +23,4 @@ class MsgType(str, Enum):
     PROFILE_QUERY = "profile_query"
     PROFILE_RESULT = "profile_result"
     EVALUATION = "evaluation"
+    ASSERTION_EDIT = "assertion_edit"

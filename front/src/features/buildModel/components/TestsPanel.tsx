@@ -893,6 +893,7 @@ interface TestCardProps {
   onAddComment: (text: string) => void;
   onDeleteComment: (id: string) => void;
   onSelectForModification: () => void;
+  onEditAssertions?: () => void;
   onRerunTest?: () => void;
   onUpload?: (data: Record<string, any[]>) => void;
 }
@@ -904,7 +905,7 @@ function TestCard({
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
-  onSelectForModification, onRerunTest, onUpload,
+  onSelectForModification, onEditAssertions, onRerunTest, onUpload,
 }: TestCardProps) {
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   const tags: string[] = test.tags ?? [];
@@ -1005,6 +1006,13 @@ function TestCard({
                 : <MutedIconButton size="small" onClick={onSelectForModification}><AutoAwesomeIcon sx={{ fontSize: 14 }} /></MutedIconButton>
               }
             </Tooltip>
+            {onEditAssertions && (
+              <Tooltip title="Modifier l'assertion (sans régénérer les données)">
+                <MutedIconButton size="small" onClick={onEditAssertions} sx={{ color: '#6941c6' }}>
+                  <EditIcon sx={{ fontSize: 14 }} />
+                </MutedIconButton>
+              </Tooltip>
+            )}
             {onRerunTest && (
               <Tooltip title="Relancer ce test">
                 <MutedIconButton size="small" onClick={onRerunTest}><ReplayIcon sx={{ fontSize: 14 }} /></MutedIconButton>
@@ -1096,6 +1104,7 @@ function TestCard({
 interface TestsPanelProps {
   onAddTest: () => void;
   onSelectForModification: (idx: number) => void;
+  onEditAssertions?: (idx: number) => void;
   selectedTestIndex: number | null;
   onUpload?: (uploadedData: Record<string, any[]>) => void;
   onSuggestionFill?: (text: string) => void;
@@ -1107,7 +1116,7 @@ interface TestsPanelProps {
 
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
-  onAddTest, onSelectForModification, selectedTestIndex,
+  onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
   onUpload, onSuggestionFill, onRerunTest, onOpenChat, modelId,
   sqlProps,
 }) => {
@@ -1368,6 +1377,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onAddComment={(text) => addComment(testKey, text)}
                   onDeleteComment={(id) => deleteComment(testKey, id)}
                   onSelectForModification={() => onSelectForModification(idx)}
+                  onEditAssertions={onEditAssertions ? () => onEditAssertions(idx) : undefined}
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
                   onUpload={onUpload}
                 />

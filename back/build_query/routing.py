@@ -39,6 +39,24 @@ async def routing(state: QueryState):
             ],
         }
 
+    # Assertion-only mode: user wants to modify assertion metadata without regenerating data
+    if state.get("assertion_only"):
+        input_text = state.get("input", "").strip()
+        messages = []
+        if input_text:
+            messages.append(
+                HumanMessage(
+                    content=input_text,
+                    id=state["user_message_id"],
+                    additional_kwargs={
+                        "type": MsgType.EXAMPLES_INSTRUCTION,
+                        "parent": state["parent_message_id"],
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            )
+        return {"route": "assertion_modifier", "messages": messages}
+
     input_text = state.get("input", "").strip()
     messages = []
 

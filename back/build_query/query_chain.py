@@ -3,6 +3,7 @@ import uuid
 
 from langchain_core.messages import AIMessage
 
+from build_query.assertion_modifier import modify_assertions
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
 from build_query.test_evaluator import evaluate_tests
@@ -129,6 +130,7 @@ def build_query_graph():
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
     builder.add_node("generator", generate_examples)
+    builder.add_node("assertion_modifier", modify_assertions)
     builder.add_node("executor", run_on_examples)
     builder.add_node("test_evaluator", evaluate_tests)
     builder.add_node("history_saver", history_saver)
@@ -138,6 +140,8 @@ def build_query_graph():
         if state.get("error"):
             return "history_saver"
         route = state.get("route", "").lower()
+        if route == "assertion_modifier":
+            return "assertion_modifier"
         if "executor" in route:
             return "executor"
         if route == "other":
@@ -163,6 +167,7 @@ def build_query_graph():
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
     builder.add_edge("generator", "executor")
+    builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("other", "history_saver")

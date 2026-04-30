@@ -232,6 +232,7 @@ export interface ChatQueryParams {
   profileResult?: string;
   testIndex?: number;
   context?: 'sql_update';
+  assertionOnly?: boolean;
 }
 
 

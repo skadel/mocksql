@@ -46,3 +46,6 @@ class QueryState(TypedDict):
     rerun_all_tests: Optional[
         bool
     ]  # True when SQL changed: re-run all existing tests with new SQL
+    assertion_only: Optional[
+        bool
+    ]  # True when user edits assertion metadata only (no input data regeneration)

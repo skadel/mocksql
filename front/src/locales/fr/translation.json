@@ -74,8 +74,10 @@
   "chat": {
     "regenerate_test": "Régénère ce test",
     "modify_test": "Test #{{index}} — Modifier avec MockSQL",
+    "edit_assertion": "Test #{{index}} — Modifier l'assertion",
     "global_instruction": "Instruction globale",
     "modify_test_chip": "Modifier le test #{{index}}",
+    "edit_assertion_chip": "Assertion · Test #{{index}}",
     "sending": "Envoi en cours…",
     "describe_modification": "Décrire la modification souhaitée…",
     "add_constraints": "Demander une modification, ajouter des contraintes…"

@@ -77,6 +77,7 @@ const ChatComponent: React.FC = () => {
   const [fileSearch, setFileSearch] = useState('');
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
+  const [assertionOnly, setAssertionOnly] = useState(false);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
 
@@ -269,7 +270,8 @@ const ChatComponent: React.FC = () => {
       userTables?: Record<string, Record<string, any>[]>,
       create: boolean = false,
       testIndex?: number,
-      profileResult?: string
+      profileResult?: string,
+      isAssertionOnly?: boolean
     ): Promise<boolean> => {
       const text = (input ?? '').trim();
       if (!text && !userTables && !currentSqlQuery && !profileResult) return false;
@@ -306,6 +308,7 @@ const ChatComponent: React.FC = () => {
           userTables,
           profileResult,
           testIndex,
+          assertionOnly: isAssertionOnly,
         })).unwrap?.();
         return true;
       } catch {
@@ -524,16 +527,17 @@ const ChatComponent: React.FC = () => {
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
       const lastMessageId = lastMessage ? lastMessage.id : '';
 
-      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex);
+      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly);
       setIsSending(false);
 
       if (ok) {
         setUserInput('');
         setSelectedTestIndex(null);
+        setAssertionOnly(false);
         if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
       }
     },
-    [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex]
+    [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly]
   );
 
   const onSendClick = useCallback(() => {
@@ -667,6 +671,13 @@ const ChatComponent: React.FC = () => {
   }, []);
 
   const handleSelectTestForModification = useCallback((idx: number) => {
+    setAssertionOnly(false);
+    setSelectedTestIndex(idx);
+    setChatOverlayOpen(true);
+  }, []);
+
+  const handleEditAssertions = useCallback((idx: number) => {
+    setAssertionOnly(true);
     setSelectedTestIndex(idx);
     setChatOverlayOpen(true);
   }, []);
@@ -968,6 +979,7 @@ const ChatComponent: React.FC = () => {
             <TestsPanel
               onAddTest={handleAddTest}
               onSelectForModification={handleSelectTestForModification}
+              onEditAssertions={handleEditAssertions}
               onRerunTest={handleRerunTest}
               selectedTestIndex={selectedTestIndex}
               sqlProps={{
@@ -998,7 +1010,7 @@ const ChatComponent: React.FC = () => {
 
             {chatOverlayOpen && (
               <Box
-                onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); }}
+                onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); setAssertionOnly(false); }}
                 sx={{ position: 'absolute', inset: 0, bgcolor: 'rgba(15,39,42,.18)', zIndex: 20 }}
               />
             )}
@@ -1019,12 +1031,14 @@ const ChatComponent: React.FC = () => {
                   <Box sx={{ flex: 1, minWidth: 0 }}>
                     <Typography sx={{ fontWeight: 700, color: '#0f272a', fontSize: 14, lineHeight: 1.2 }}>MockSQL</Typography>
                     <Typography sx={{ fontSize: 11.5, color: '#6b8287', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {selectedTestIndex !== null
-                        ? t('chat.modify_test', { index: selectedTestIndex + 1 })
-                        : t('chat.global_instruction')}
+                      {selectedTestIndex !== null && assertionOnly
+                        ? t('chat.edit_assertion', { index: selectedTestIndex + 1 })
+                        : selectedTestIndex !== null
+                          ? t('chat.modify_test', { index: selectedTestIndex + 1 })
+                          : t('chat.global_instruction')}
                     </Typography>
                   </Box>
-                  <IconButton size="small" onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); }}>
+                  <IconButton size="small" onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); setAssertionOnly(false); }}>
                     <CloseIcon sx={{ fontSize: 16 }} />
                   </IconButton>
                 </Box>
@@ -1059,10 +1073,14 @@ const ChatComponent: React.FC = () => {
                   {selectedTestIndex !== null && (
                     <Box sx={{ mb: 0.75 }}>
                       <Chip
-                        label={t('chat.modify_test_chip', { index: selectedTestIndex + 1 })}
-                        onDelete={() => setSelectedTestIndex(null)}
+                        label={assertionOnly
+                          ? t('chat.edit_assertion_chip', { index: selectedTestIndex + 1 })
+                          : t('chat.modify_test_chip', { index: selectedTestIndex + 1 })}
+                        onDelete={() => { setSelectedTestIndex(null); setAssertionOnly(false); }}
                         size="small"
-                        sx={{ bgcolor: '#e8f5f5', color: '#1ca8a4', border: '1px solid #1ca8a444', fontWeight: 600, fontSize: 11 }}
+                        sx={assertionOnly
+                          ? { bgcolor: '#f0ecff', color: '#6941c6', border: '1px solid #6941c644', fontWeight: 600, fontSize: 11 }
+                          : { bgcolor: '#e8f5f5', color: '#1ca8a4', border: '1px solid #1ca8a444', fontWeight: 600, fontSize: 11 }}
                       />
                     </Box>
                   )}

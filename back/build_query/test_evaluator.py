@@ -8,6 +8,7 @@ from utils.llm_errors import is_vertex_permission_error, normalize_llm_content
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
+from utils.test_utils import build_test_detail, find_current_test
 
 
 async def evaluate_tests(state: QueryState):
@@ -35,40 +36,11 @@ async def evaluate_tests(state: QueryState):
 
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
 
-    # Identify the current test: prefer the one matching state["test_index"],
-    # otherwise fall back to the last element in the list.
-    current_test_index = state.get("test_index")
-    current_test = None
-    if current_test_index is not None:
-        current_test = next(
-            (t for t in all_tests if t.get("test_index") == current_test_index),
-            None,
-        )
+    current_test = find_current_test(all_tests, state.get("test_index"))
     if current_test is None:
-        if not all_tests:
-            return {}
-        current_test = all_tests[-1]
+        return {}
 
-    try:
-        result_rows = json.loads(current_test.get("results_json") or "[]")
-    except Exception:
-        result_rows = []
-
-    input_data = current_test.get("data", {})
-
-    test_detail = {
-        "description": current_test.get("unit_test_description", ""),
-        "reasoning": current_test.get("unit_test_build_reasoning", ""),
-        "tags": current_test.get("tags", []),
-        "input_data": input_data,
-        "status": current_test.get("status"),
-        "row_count": len(result_rows),
-        "result_rows": result_rows[:20],  # cap to avoid bloating the prompt
-    }
-    if current_test.get("error"):
-        test_detail["error"] = current_test["error"]
-    if current_test.get("failing_cte"):
-        test_detail["failing_cte"] = current_test["failing_cte"]
+    test_detail = build_test_detail(current_test)
 
     prompt = f"""Tu es un expert en qualité de tests SQL unitaires.
 
@@ -103,7 +75,10 @@ Exemple : `**Bon** — Couvre la jointure sur clé manquante. Données et résul
         state.get("gen_retries") if state.get("gen_retries") is not None else 2
     )
     is_insuffisant = "Insuffisant" in content
-    should_retry = is_insuffisant and gen_retries > 0
+    # Skip auto-retry when in assertion-only mode — the input data hasn't changed
+    should_retry = (
+        is_insuffisant and gen_retries > 0 and not state.get("assertion_only")
+    )
 
     return {
         "messages": [
