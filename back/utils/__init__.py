@@ -10,6 +10,7 @@ class ColumnSchema(BaseModel):
     field_path: str
     primary_key: bool = False
     data_type: str
+    mode: str = "NULLABLE"
     description: Optional[str] = ""
     categorical: bool = False
     table_description: Optional[str] = None

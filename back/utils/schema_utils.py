@@ -116,6 +116,7 @@ def generate_tables_and_columns_from_project_schema(
                 {
                     "name": name,
                     "type": dtype,
+                    "mode": _get(col, "mode", "NULLABLE"),
                     "description": _norm_desc(_get(col, "description", "")),
                 }
             )

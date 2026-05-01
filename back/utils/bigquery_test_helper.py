@@ -41,7 +41,7 @@ class BigQueryTestHelper:
             self.client.delete_table(table_ref)
             print(f"Deleted existing table {table_name}")
         except NotFound:
-            print(f"Table {table_name} does not exist, no need to delete")
+            print(f"Table {table_name} does not exist, no need to deleeeeeete")
 
         # Create the new table
         table = bigquery.Table(table_ref, schema=schema)
@@ -54,127 +54,74 @@ class BigQueryTestHelper:
         else:
             print(f"Creating table {table.table_id} without expiration time")
 
+        print("<<<<<<<<<<<<<<<<<<<table")
+        print(table)
+        print("<<<<<<<<<<<<<<<<<<<schema")
+        print(schema)
         self.client.create_table(table)
         print(f"Created table {table.table_id}")
 
     def build_schema(self, columns: List[dict]) -> List[bigquery.SchemaField]:
         """
-        Converts a list of column definitions into a BigQuery schema.
-        Handles nested/repeated fields like ARRAY<STRUCT<...>> by creating RECORD fields.
+        Construit le schéma BigQuery de manière récursive en utilisant le dot-notation.
+        Assumes que 'columns' contient tous les champs (ex: 'totals', 'totals.hits', etc.)
         """
-        schema = []
+        root_fields = [col for col in columns if "." not in col["name"]]
 
-        for column in columns:
-            if "." in column["name"]:
-                # Skip nested subfields like "all_tags.key"
-                continue
+        def get_subfields(parent_name):
+            parent_depth = parent_name.count(".")
+            immediate_children = [
+                col for col in columns
+                if col["name"].startswith(f"{parent_name}.")
+                and col["name"].count(".") == parent_depth + 1
+            ]
+            subfields = []
+            for col in immediate_children:
+                field_type = self.convert_type(col["type"])
+                mode = col.get("mode", "NULLABLE")
+                nested_fields = get_subfields(col["name"]) if field_type == "RECORD" else []
+                subfields.append(
+                    bigquery.SchemaField(
+                        name=col["name"].split(".")[-1],
+                        field_type=field_type,
+                        mode=mode,
+                        fields=nested_fields,
+                    )
+                )
+            return subfields
 
-            field_type, mode, subfields = self.convert_type(column["type"])
-            schema.append(
+        final_schema = []
+        for col in root_fields:
+            field_type = self.convert_type(col["type"])
+            mode = col.get("mode", "NULLABLE")
+            nested_fields = get_subfields(col["name"]) if field_type == "RECORD" else []
+            final_schema.append(
                 bigquery.SchemaField(
-                    name=column["name"],
+                    name=col["name"],
                     field_type=field_type,
                     mode=mode,
-                    fields=subfields,
+                    fields=nested_fields,
                 )
             )
-        return schema
+        return final_schema
 
-    def convert_type(self, type_str: str) -> tuple:
-        """
-        Converts a raw type string like "ARRAY<STRUCT<key STRING, value STRING>>"
-        or "ARRAY<INT64>" into a BigQuery type, mode, and subfields.
-        """
-        if type_str.startswith("ARRAY<STRUCT<"):
-            # Handle ARRAY<STRUCT<...>>
-            struct_def = type_str[
-                len("ARRAY<STRUCT<") : -2
-            ]  # Extract inner STRUCT definition
-            subfields = self.extract_struct_fields(struct_def)
-            return "RECORD", "REPEATED", subfields
-        elif type_str.startswith("ARRAY<"):
-            # Handle ARRAY<...>
-            inner_type = type_str[len("ARRAY<") : -1]  # Extract the inner type
-            if inner_type in [
-                "INT64",
-                "STRING",
-                "BOOL",
-                "NUMERIC",
-                "GEOGRAPHY",
-                "TIMESTAMP",
-            ]:
-                return self.convert_primitive_type(inner_type), "REPEATED", []
-            else:
-                raise ValueError(f"Unsupported ARRAY type: {inner_type}")
-        elif type_str.startswith("STRUCT<"):
-            struct_def = type_str[
-                len("STRUCT<") : -1
-            ]  # Extract inner STRUCT definition
-            subfields = self.extract_struct_fields(struct_def)
-            return "RECORD", "NULLABLE", subfields
-        else:
-            # Primitive type
-            result = (self.convert_primitive_type(type_str), "NULLABLE", [])
-            return result
-
-    @staticmethod
-    def convert_primitive_type(type_str: str) -> str:
-        """
-        Maps raw types to BigQuery primitive types, but if a type is not mapped,
-        it returns the original type instead of raising an error.
-        """
-        type_mapping = {
+    def convert_type(self, type_str: str) -> str:
+        type_str = type_str.upper()
+        if "STRUCT" in type_str or "RECORD" in type_str:
+            return "RECORD"
+        mapping = {
             "INT64": "INTEGER",
-            "FLOAT64": "FLOAT",
+            "STRING": "STRING",
             "BOOL": "BOOLEAN",
+            "FLOAT64": "FLOAT",
+            "TIMESTAMP": "TIMESTAMP",
+            "DATE": "DATE",
+            "NUMERIC": "NUMERIC",
+            "GEOGRAPHY": "GEOGRAPHY",
         }
-
-        return type_mapping.get(type_str, type_str)
-
-    def extract_struct_fields(self, struct_def: str) -> List[bigquery.SchemaField]:
-        """
-        Extracts fields from a STRUCT definition string and converts them to BigQuery SchemaFields.
-        Handles nested STRUCTs.
-        """
-        fields = []
-        buffer = []
-        level = 0  # Track nesting level
-
-        for char in struct_def:
-            if char == "<":
-                level += 1
-            elif char == ">":
-                level -= 1
-            elif char == "," and level == 0:
-                # Split at top-level commas
-                field_def = "".join(buffer).strip()
-                buffer = []
-                if field_def:
-                    fields.append(self.parse_single_field(field_def))
-                continue
-            buffer.append(char)
-
-        # Add the last field if buffer is not empty
-        if buffer:
-            field_def = "".join(buffer).strip()
-            if field_def:
-                fields.append(self.parse_single_field(field_def))
-
-        return fields
-
-    def parse_single_field(self, field_def: str) -> bigquery.SchemaField:
-        """
-        Parses a single field definition (e.g., "key STRING" or "nested STRUCT<...>").
-        """
-        try:
-            name, type_str = field_def.split(" ", 1)
-            field_type, mode, subfields = self.convert_type(type_str)
-            return bigquery.SchemaField(
-                name=name, field_type=field_type, mode=mode, fields=subfields
-            )
-        except ValueError as e:
-            raise ValueError(f"Error parsing STRUCT field: {field_def}") from e
-
+        clean = type_str.replace("ARRAY<", "").replace(">", "").strip()
+        return mapping.get(clean, "STRING")
+    
     async def insert_data(
         self,
         session_id: str,

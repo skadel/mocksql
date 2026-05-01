@@ -33,6 +33,7 @@ def _flatten_bq_schema(fields: list, prefix: str = "") -> list:
             {
                 "field_path": field_path,
                 "data_type": field["type"],
+                "mode": field.get("mode", "NULLABLE"),
                 "description": field.get("description", ""),
             }
         )
@@ -47,6 +48,7 @@ def _schema_fields_to_dicts(fields: Any) -> list:
         entry = {
             "name": f.name,
             "type": f.field_type,
+            "mode": f.mode,
             "description": f.description or "",
         }
         if f.fields:
