@@ -160,6 +160,24 @@ export interface Model {
   commitsSince?: number;
 }
 
+export interface ExploreModel {
+  name: string;
+  model_name: string;
+  is_tested: boolean;
+  session_id?: string;
+  priority_score: number;
+  complexity_score: number;
+  recent_commits: number;
+  complexity_breakdown: {
+    window_functions?: number;
+    case_when?: number;
+    regex?: number;
+    joins?: number;
+    subqueries?: number;
+    ctes?: number;
+  };
+}
+
 export interface Project {
     project_id: string;
     name: string;

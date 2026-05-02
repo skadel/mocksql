@@ -12,6 +12,7 @@ import { resetContext } from '../../buildModel/buildModelSlice';
 import { setCurrentId, toggleDrawer } from '../appBarSlice';
 import { fetchModels } from '../../../api/models';
 import SqlFileList from './SqlFileList';
+import ModelExplorer from './ModelExplorer';
 
 export const drawerWidth = 260;
 
@@ -38,6 +39,7 @@ const DrawerComponent: React.FC = () => {
   const { i18n }   = useTranslation();
   const [language, setLanguage] = useState(i18n.language);
   const [search, setSearch]     = useState('');
+  const [activeTab, setActiveTab] = useState<'models' | 'priority'>('models');
 
   const drawerOpen  = useAppSelector(s => s.appBarModel.drawerOpen);
   const testedCount = useAppSelector(s => s.appBarModel.models.filter(m => m.isTested).length);
@@ -152,11 +154,36 @@ const DrawerComponent: React.FC = () => {
           </Tooltip>
         </Box>
 
-        {/* ── Section label ────────────────────────────────────────── */}
-        <Box sx={{ px: '16px', mb: '8px' }}>
-          <Typography sx={{ fontSize: 11, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.6px' }}>
-            Models{testedCount > 0 && ` · ${testedCount}`}
-          </Typography>
+        {/* ── Tab toggle ───────────────────────────────────────────── */}
+        <Box sx={{ display: 'flex', gap: '4px', mx: '10px', mb: '8px' }}>
+          {(['models', 'priority'] as const).map(tab => (
+            <Box
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              sx={{
+                flex: 1,
+                py: '5px',
+                textAlign: 'center',
+                cursor: 'pointer',
+                borderRadius: '7px',
+                bgcolor: activeTab === tab ? '#fff' : 'transparent',
+                border: activeTab === tab ? `1px solid ${LINE}` : '1px solid transparent',
+                boxShadow: activeTab === tab ? '0 1px 3px rgba(0,0,0,.06)' : 'none',
+                transition: 'all .12s',
+                '&:hover': activeTab !== tab ? { bgcolor: '#eaeeef' } : {},
+              }}
+            >
+              <Typography sx={{
+                fontSize: 11,
+                fontWeight: 600,
+                color: activeTab === tab ? INK : MUTED,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+              }}>
+                {tab === 'models' ? `Modèles${testedCount > 0 ? ` · ${testedCount}` : ''}` : 'Priorité'}
+              </Typography>
+            </Box>
+          ))}
         </Box>
 
         {/* ── Search ───────────────────────────────────────────────── */}
@@ -191,7 +218,9 @@ const DrawerComponent: React.FC = () => {
 
         {/* ── List content (scrollable) ─────────────────────────────── */}
         <Box sx={{ flex: 1, overflowY: 'auto', pb: '8px' }}>
-          <SqlFileList search={search} />
+          {activeTab === 'models'
+            ? <SqlFileList search={search} />
+            : <ModelExplorer search={search} />}
         </Box>
 
         {/* ── Footer ───────────────────────────────────────────────── */}

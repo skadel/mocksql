@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from build_query.complexity_scorer import compute_complexity_score, compute_priority_score
 from storage.test_repository import (
     list_models,
     list_all_tests,
@@ -14,6 +15,7 @@ from storage.test_repository import (
     _read_json,
     get_model_file_hash,
     get_commits_since_sha,
+    get_recent_commits,
 )
 
 router = APIRouter()
@@ -126,6 +128,48 @@ async def get_test_route(session_id: str, model_name: str = None):
         return test
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models/explore")
+async def explore_models():
+    """Return all SQL models with complexity + git activity scores, sorted by priority desc.
+
+    Includes both tested and untested models so engineers can identify what most
+    needs test coverage.
+    """
+    try:
+        sql_files = list_models()
+        results = []
+        for f in sql_files:
+            model_name = f["name"]
+            sql = read_model_sql(model_name) or ""
+            complexity = compute_complexity_score(sql)
+            recent_commits = get_recent_commits(model_name)
+            priority = compute_priority_score(complexity["total"], recent_commits)
+
+            tested = _test_path(model_name).exists()
+            session_id: str | None = None
+            if tested:
+                data = _read_json(_test_path(model_name))
+                session_id = data.get("test_id") if data else None
+
+            results.append(
+                {
+                    "name": model_name,
+                    "model_name": model_name,
+                    "is_tested": tested,
+                    "session_id": session_id,
+                    "priority_score": priority,
+                    "complexity_score": complexity["total"],
+                    "recent_commits": recent_commits,
+                    "complexity_breakdown": complexity["breakdown"],
+                }
+            )
+
+        results.sort(key=lambda x: x["priority_score"], reverse=True)
+        return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

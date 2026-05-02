@@ -1,6 +1,7 @@
 import { createAsyncThunk } from '@reduxjs/toolkit';
 import {
-    Model
+    Model,
+    ExploreModel,
 } from '../utils/types';
 import { apiRequest } from "./utils";
 
@@ -24,6 +25,12 @@ export interface TestSession {
   created_at: string;
   updated_at: string;
 }
+
+export const fetchModelPriority = async (): Promise<ExploreModel[]> => {
+  const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/models/explore`);
+  if (!response.ok) return [];
+  return response.json();
+};
 
 export const fetchSqlFiles = async (): Promise<SqlFile[]> => {
   const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/models`);

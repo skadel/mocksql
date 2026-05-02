@@ -174,6 +174,25 @@ def get_commits_since_sha(model_name: str, source_sha: str) -> int:
         return 0
 
 
+def get_recent_commits(model_name: str, days: int = 90) -> int:
+    """Count commits touching this model file in the last N days."""
+    sql_file = get_models_path() / f"{model_name}.sql"
+    if not sql_file.exists():
+        return 0
+    try:
+        result = subprocess.run(
+            ["git", "log", f"--since={days} days ago", "--oneline", "--", str(sql_file)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(sql_file.parent),
+        )
+        lines = [line for line in result.stdout.strip().splitlines() if line]
+        return len(lines)
+    except Exception:
+        return 0
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
