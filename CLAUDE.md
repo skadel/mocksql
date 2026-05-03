@@ -16,7 +16,7 @@ MockSQL partage le même mécanisme de base que les bibliothèques de mocking SQ
 | Couverture | Aucune — l'ingé doit y penser | 6 axes + suggestions contextuelles |
 | Qualité du test | Pas d'évaluation | Verdict LLM (good / warn / bad) |
 | Interface | Bibliothèque dans du code de test | UI dédiée (GenerateView → TestsView) |
-| Dérive | Inexistante | Roadmap : alerte si le SQL prod a changé |
+| Dérive | Inexistante |
 | Moteur SQL | Connecteur par DB | DuckDB unifié — 0 € facturé sur BigQuery |
 
 **Message clé** : "Les bibliothèques de mocking SQL vous forcent à écrire les données de test vous-même — MockSQL les génère pour vous, les évalue, et détecte ce que vous n'avez pas couvert."
@@ -90,17 +90,6 @@ Les requêtes ne sont **jamais** exécutées sur BigQuery ou Postgres — unique
 - Chip topbar : `BigQuery · DuckDB local` (tooltip : "Exécution locale — 0 € facturé")
 - Tooltip bouton ré-exécuter : `Exécution locale · 0 € facturé`
 - Vue ImportView : "MockSQL exécute tes requêtes en local via DuckDB — aucune requête facturée sur BigQuery."
-
-### Connecteurs SQL (roadmap)
-
-Le flow actuel lit les fichiers `.sql` directement depuis `models_path` (dossier local). Les connecteurs ci-dessous remplacent ou enrichissent cette source à terme.
-
-**dbt (priorité 1)** — lit le `manifest.json` pour récupérer le SQL compilé, les sources, le DAG de dépendances, et les tests dbt existants (`schema.yml`). `models_path` pointerait vers les modèles dbt compilés. Permet l'import DuckDB automatique des tables upstream.
-
-**Git/GitHub (priorité 2)** — enrichit le fichier local avec un suivi de SHA : stocke le SHA du commit à la création des tests. Détection de dérive : bandeau *"La requête a évolué en prod (3 commits depuis le dernier test)"* avec diff et CTA "Ré-évaluer".
-
-**Dérive (drift detection)** — quand le SHA du fichier source change, les tests existants passent en état `stale` et un bandeau d'alerte s'affiche dans la TestsView.
-
 ---
 
 ## Stack
