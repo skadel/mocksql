@@ -72,8 +72,8 @@ class TestOrPredicatesGap:
         filters, _, _, _ = extract_constraints(sql)
         ops_y = [f.op for f in filters if f.column == col("a", "y")]
         ops_x = [f.op for f in filters if f.column == col("a", "x")]
-        assert ops_y == ["eq"]   # AND part captured
-        assert ops_x == []       # OR part dropped
+        assert ops_y == ["eq"]  # AND part captured
+        assert ops_x == []  # OR part dropped
 
     def test_or_in_join_on_dropped(self):
         """ON a.id = b.id OR a.code = b.code — OR drops the entire condition."""
@@ -352,9 +352,7 @@ class TestUnionBranches:
         branch_values = []
         for branch in r.union_branches:
             vals = {
-                f.value
-                for filters in branch.source_columns.values()
-                for f in filters
+                f.value for filters in branch.source_columns.values() for f in filters
             }
             branch_values.append(vals)
         # Each branch should contain exactly one of {1, 2, 3} and not the others
@@ -406,8 +404,9 @@ class TestUnionBranches:
         assert len(r.union_branches) == 2
 
         def pairs_of(branch: SimplificationResult):
-            return [frozenset({x, y}) for x, y in branch.filters
-                    if hasattr(x, 'table')]  # crude check
+            return [
+                frozenset({x, y}) for x, y in branch.filters if hasattr(x, "table")
+            ]  # crude check
 
         b0_classes = r.union_branches[0].equivalence_classes
         b1_classes = r.union_branches[1].equivalence_classes
@@ -468,7 +467,9 @@ class TestOrPaths:
         for path in r.or_paths:
             y_vals = [f.value for f in path if f.column.column == "y"]
             assert 10 in y_vals, "a.y = 10 must appear in every OR path"
-        x_vals = {f.value for path in r.or_paths for f in path if f.column.column == "x"}
+        x_vals = {
+            f.value for path in r.or_paths for f in path if f.column.column == "x"
+        }
         assert x_vals == {1, 2}
 
     def test_three_way_or(self):
@@ -556,9 +557,8 @@ class TestOrPathsLimit:
     """
 
     # SQL with 6 independent OR clauses × 2 alternatives = 2^6 = 64 paths > 32
-    _SQL_64_PATHS = (
-        "SELECT * FROM myproject.analytics.a AS a WHERE "
-        + " AND ".join(f"(a.c{i} = {i*10} OR a.c{i} = {i*10+1})" for i in range(1, 7))
+    _SQL_64_PATHS = "SELECT * FROM myproject.analytics.a AS a WHERE " + " AND ".join(
+        f"(a.c{i} = {i * 10} OR a.c{i} = {i * 10 + 1})" for i in range(1, 7)
     )
 
     def test_below_emit_limit_no_truncation(self):
@@ -641,7 +641,9 @@ class TestCteOrPaths:
         r = simplify(sql)
         # CTE OR produces 2 paths
         assert len(r.or_paths) == 2
-        x_vals = {f.value for path in r.or_paths for f in path if f.column.column == "x"}
+        x_vals = {
+            f.value for path in r.or_paths for f in path if f.column.column == "x"
+        }
         assert x_vals == {1, 2}
         # Outer WHERE z > 0 is captured in flat source_columns (not in OR paths)
         z_col = next((c for c in r.source_columns if c.column == "z"), None)
@@ -688,4 +690,6 @@ class TestCteOrPaths:
         """
         filters, _, _, _ = extract_constraints(sql)
         status_filters = [f for f in filters if f.column.column == "status"]
-        assert status_filters == [], "extract_constraints still drops CTE OR (known gap)"
+        assert status_filters == [], (
+            "extract_constraints still drops CTE OR (known gap)"
+        )

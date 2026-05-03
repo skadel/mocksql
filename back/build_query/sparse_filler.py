@@ -83,7 +83,7 @@ async def _llm_sample_values(
     """Ask the LLM to produce _POOL_SIZE realistic values for a column."""
     prompt = (
         f'Generate exactly {_POOL_SIZE} realistic sample values for column "{col_name}" '
-        f"of SQL type {col_type} in table \"{table_name}\". "
+        f'of SQL type {col_type} in table "{table_name}". '
         f"Return ONLY a JSON array of values, no explanation."
     )
     try:

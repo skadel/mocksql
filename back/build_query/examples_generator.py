@@ -12,7 +12,10 @@ from pydantic import Field, create_model
 
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
 from build_query.state import QueryState
-from utils.examples import create_pydantic_models, filter_columns, filter_columns_mandatory
+from utils.examples import (
+    create_pydantic_models,
+    filter_columns,
+)
 from utils.llm_factory import make_llm
 from storage.config import get_llm_model
 from utils.msg_types import MsgType
@@ -449,25 +452,27 @@ async def generate_examples_(
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
 
-    if sim_result is not None:
-        mandatory = _build_mandatory_set(sim_result)
-        filtered_schema = filter_columns_mandatory(schema, used_columns, mandatory)
-        unconstrained_cols = _get_unconstrained_cols(used_columns, schema, mandatory)
-    else:
-        # simplify() failed — fall back to full column set, no sparse filling
-        mandatory = {}
-        filtered_schema = filter_columns(schema, used_columns)
-        unconstrained_cols = []
+    # TODO improve generation perf
+    # filter mandatory and only generate constrained later when we are confident about sim_result later,
+    # if sim_result is not None:
+    #     mandatory = _build_mandatory_set(sim_result)
+    #     filtered_schema = filter_columns_mandatory(schema, used_columns, mandatory)
+    #     unconstrained_cols = _get_unconstrained_cols(used_columns, schema, mandatory)
+    # else:
+    #     # simplify() failed — fall back to full column set, no sparse filling
+    #     mandatory = {}
+    #     filtered_schema = filter_columns(schema, used_columns)
+    #     unconstrained_cols = []
+    # excluded_col_names = [f"{e['table']}.{e['col_name']}" for e in unconstrained_cols]
+
+    filtered_schema = filter_columns(schema, used_columns)
+    excluded_col_names = []
 
     data_model = create_pydantic_models(filtered_schema)
     output_type = get_generation_output_type(data_model, existing_tests)
     parser = create_output_fixing_parser(
         PydanticOutputParser(pydantic_object=output_type)
     )
-
-    excluded_col_names = [
-        f"{e['table']}.{e['col_name']}" for e in unconstrained_cols
-    ]
 
     prompt = await create_appropriate_prompt(
         state,
@@ -483,16 +488,23 @@ async def generate_examples_(
 
     generated_data = await (prompt | llm | parser).ainvoke({})
 
-    # Build value pool for unconstrained columns and fill rows
-    if unconstrained_cols:
-        from build_query.sparse_filler import build_unconstrained_pool, fill_unconstrained
-        pool = await build_unconstrained_pool(
-            unconstrained_cols, state.get("profile"), llm
-        )
-        raw_data = _convert_datetime_fields(generated_data.data.dict())
-        filled_data = fill_unconstrained(raw_data, pool)
-    else:
-        filled_data = _convert_datetime_fields(generated_data.data.dict())
+    # #
+    # # Build value pool for unconstrained columns and fill rows
+    # if unconstrained_cols:
+    #     from build_query.sparse_filler import (
+    #         build_unconstrained_pool,
+    #         fill_unconstrained,
+    #     )
+
+    #     pool = await build_unconstrained_pool(
+    #         unconstrained_cols, state.get("profile"), llm
+    #     )
+    #     raw_data = _convert_datetime_fields(generated_data.data.dict())
+    #     filled_data = fill_unconstrained(raw_data, pool)
+    # else:
+    #     filled_data = _convert_datetime_fields(generated_data.data.dict())
+
+    filled_data = generated_data
 
     generated = {
         "test_name": generated_data.test_name,

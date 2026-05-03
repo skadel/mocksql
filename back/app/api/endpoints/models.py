@@ -2,7 +2,10 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from build_query.complexity_scorer import compute_complexity_score, compute_priority_score
+from build_query.complexity_scorer import (
+    compute_complexity_score,
+    compute_priority_score,
+)
 from storage.test_repository import (
     list_models,
     list_all_tests,

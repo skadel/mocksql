@@ -181,7 +181,14 @@ def get_recent_commits(model_name: str, days: int = 90) -> int:
         return 0
     try:
         result = subprocess.run(
-            ["git", "log", f"--since={days} days ago", "--oneline", "--", str(sql_file)],
+            [
+                "git",
+                "log",
+                f"--since={days} days ago",
+                "--oneline",
+                "--",
+                str(sql_file),
+            ],
             capture_output=True,
             text=True,
             timeout=5,

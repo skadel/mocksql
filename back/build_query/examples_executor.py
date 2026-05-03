@@ -25,8 +25,8 @@ from storage.test_repository import get_test
 from utils.saver import examples_state_retriever
 
 
-
 logger = logging.getLogger(__name__)
+
 
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
     """Load the persisted test suite from the test file."""
@@ -52,8 +52,10 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
 
     schemas = await get_schemas(project_id=state["project"])
     used_columns = [json.loads(c) for c in state.get("used_columns") or []]
-    
-    logger.debug("\n[DEBUG] >>> run_on_examples : used_columns bruts récupérés depuis le state:")
+
+    logger.debug(
+        "\n[DEBUG] >>> run_on_examples : used_columns bruts récupérés depuis le state:"
+    )
     for uc in used_columns:
         logger.debug(f"      - {uc}")
 
@@ -88,7 +90,9 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     all_tests_results: List[Dict[str, Any]] = []
     with initialize_duckdb(DB_PATH) as con:
         for loop_index, test_case in enumerate(unit_tests):
-            logger.debug(f"\n[DEBUG] >>> Lancement test {loop_index} avec table(s) : {list(test_case.get('data', {}).keys())}")
+            logger.debug(
+                f"\n[DEBUG] >>> Lancement test {loop_index} avec table(s) : {list(test_case.get('data', {}).keys())}"
+            )
             test_result = await _run_single_test_case(
                 state=state,
                 test_case=test_case,
@@ -171,8 +175,10 @@ def filter_schemas_by_used_columns(
         else item["table"]: [col.lower() for col in item["used_columns"]]
         for item in used_columns_info
     }
-    
-    logger.debug("\n[DEBUG] >>> filter_schemas_by_used_columns : used_cols_dict généré:")
+
+    logger.debug(
+        "\n[DEBUG] >>> filter_schemas_by_used_columns : used_cols_dict généré:"
+    )
     logger.debug(f"      - {used_cols_dict}")
 
     filtered_schemas = []
@@ -182,7 +188,9 @@ def filter_schemas_by_used_columns(
 
         if qualified in used_cols_dict:
             wanted_cols = used_cols_dict[qualified]
-            logger.debug(f"\n[DEBUG] >>> Filtrage de la table {qualified}. wanted_cols: {wanted_cols}")
+            logger.debug(
+                f"\n[DEBUG] >>> Filtrage de la table {qualified}. wanted_cols: {wanted_cols}"
+            )
 
             filtered_columns = [
                 col
@@ -191,7 +199,9 @@ def filter_schemas_by_used_columns(
                 or any(col["name"].lower().startswith(f"{w}.") for w in wanted_cols)
             ]
 
-            logger.debug(f"[DEBUG] >>> Table {qualified} - Colonnes conservées: {[c['name'] for c in filtered_columns]}")
+            logger.debug(
+                f"[DEBUG] >>> Table {qualified} - Colonnes conservées: {[c['name'] for c in filtered_columns]}"
+            )
 
             if filtered_columns:
                 filtered_schemas.append(

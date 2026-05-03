@@ -13,9 +13,12 @@ os.environ.setdefault("DUCKDB_PATH", ":memory:")
 from dataclasses import dataclass, field
 from typing import List
 
-import pytest
 
-from build_query.schema_fetcher import _bq_ddl_type, _flatten_bq_schema, _schema_fields_to_dicts
+from build_query.schema_fetcher import (
+    _bq_ddl_type,
+    _flatten_bq_schema,
+    _schema_fields_to_dicts,
+)
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
 
 
@@ -34,7 +37,9 @@ class FakeField:
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def _make_flat_row(field_path, data_type, mode="NULLABLE", catalog="p", schema="ds", table="t"):
+def _make_flat_row(
+    field_path, data_type, mode="NULLABLE", catalog="p", schema="ds", table="t"
+):
     return {
         "table_catalog": catalog,
         "table_schema": schema,
@@ -45,13 +50,16 @@ def _make_flat_row(field_path, data_type, mode="NULLABLE", catalog="p", schema="
         "description": "",
     }
 
+
 # ─── _schema_fields_to_dicts ──────────────────────────────────────────────────
 
 
 def test_fields_to_dicts_preserves_mode_nullable():
     fields = [FakeField(name="user_id", field_type="STRING", mode="NULLABLE")]
     result = _schema_fields_to_dicts(fields)
-    assert result == [{"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": ""}]
+    assert result == [
+        {"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": ""}
+    ]
 
 
 def test_fields_to_dicts_preserves_mode_repeated():
@@ -77,7 +85,9 @@ def test_fields_to_dicts_nested_record():
 
 
 def test_flatten_simple_field():
-    dicts = [{"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": ""}]
+    dicts = [
+        {"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": ""}
+    ]
     rows = _flatten_bq_schema(dicts)
     assert rows == [
         {
@@ -97,7 +107,14 @@ def test_flatten_repeated_record_preserves_mode():
             "type": "RECORD",
             "mode": "REPEATED",
             "description": "",
-            "fields": [{"name": "page", "type": "STRING", "mode": "NULLABLE", "description": ""}],
+            "fields": [
+                {
+                    "name": "page",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": "",
+                }
+            ],
         }
     ]
     rows = _flatten_bq_schema(dicts)
@@ -176,7 +193,14 @@ def test_flatten_stores_bq_ddl_type_on_record():
             "type": "RECORD",
             "mode": "NULLABLE",
             "description": "",
-            "fields": [{"name": "campaign", "type": "STRING", "mode": "NULLABLE", "description": ""}],
+            "fields": [
+                {
+                    "name": "campaign",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": "",
+                }
+            ],
         }
     ]
     rows = _flatten_bq_schema(dicts)
@@ -191,7 +215,14 @@ def test_flatten_stores_bq_ddl_type_on_repeated_record():
             "type": "RECORD",
             "mode": "REPEATED",
             "description": "",
-            "fields": [{"name": "type", "type": "STRING", "mode": "NULLABLE", "description": ""}],
+            "fields": [
+                {
+                    "name": "type",
+                    "type": "STRING",
+                    "mode": "NULLABLE",
+                    "description": "",
+                }
+            ],
         }
     ]
     rows = _flatten_bq_schema(dicts)

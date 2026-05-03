@@ -48,7 +48,6 @@ class PostgresTestHelper:
         session_id: str,
         table_name_key: str,
         columns: List[Dict[str, Any]],
-        expiration_hours: Optional[int] = None,
     ):
         """
         Create or replace a test table with session-specific suffix.

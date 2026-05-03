@@ -44,7 +44,11 @@ def compute_complexity_score(sql: str, dialect: str = "bigquery") -> dict:
     if windows:
         breakdown["window_functions"] = len(windows)
 
-    regex_nodes = list(tree.find_all(exp.RegexpLike, exp.RegexpExtract, exp.RegexpReplace, exp.RegexpILike))
+    regex_nodes = list(
+        tree.find_all(
+            exp.RegexpLike, exp.RegexpExtract, exp.RegexpReplace, exp.RegexpILike
+        )
+    )
     if regex_nodes:
         breakdown["regex"] = len(regex_nodes)
 
@@ -72,6 +76,8 @@ def compute_complexity_score(sql: str, dialect: str = "bigquery") -> dict:
 
 def compute_priority_score(complexity_total: float, recent_commits: int) -> float:
     """Combine complexity and git recency into a 0–100 priority score."""
-    complexity_norm = min(complexity_total / _COMPLEXITY_CAP, 1.0) * _COMPLEXITY_MAX_SCORE
+    complexity_norm = (
+        min(complexity_total / _COMPLEXITY_CAP, 1.0) * _COMPLEXITY_MAX_SCORE
+    )
     recency_norm = min(recent_commits / _RECENCY_CAP, 1.0) * _RECENCY_MAX_SCORE
     return round(complexity_norm + recency_norm, 1)

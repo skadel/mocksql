@@ -158,7 +158,9 @@ class SimplificationResult:
     # (after AND×OR cartesian expansion) that alone satisfies the condition.
     # Example: WHERE a.y=10 AND (a.x=1 OR a.x=2) → [[y=10,x=1], [y=10,x=2]]
     or_paths: list[list["FilterConstraint"]] = field(default_factory=list)
-    or_paths_truncated: bool = False  # True when > _MAX_OR_PATHS_EMIT paths were truncated
+    or_paths_truncated: bool = (
+        False  # True when > _MAX_OR_PATHS_EMIT paths were truncated
+    )
 
 
 # ─── Union-Find ───────────────────────────────────────────────────────────────
@@ -451,7 +453,9 @@ class _LineageResolver:
                     sources.append(ColumnRef(base_table, base_col))
             return sources if sources else [col]
         except Exception as exc:
-            logger.debug("resolve_all lineage failed for %s.%s: %s", col.table, col.column, exc)
+            logger.debug(
+                "resolve_all lineage failed for %s.%s: %s", col.table, col.column, exc
+            )
             return [col]
 
     def _resolve_via_lineage(self, col: ColumnRef) -> ColumnRef:
@@ -478,11 +482,18 @@ class _LineageResolver:
                             col_expr, n.source, self._dialect
                         )
                     except Exception as exc:
-                        logger.debug("lineage sql build failed for %s.%s: %s", col.table, col.column, exc)
+                        logger.debug(
+                            "lineage sql build failed for %s.%s: %s",
+                            col.table,
+                            col.column,
+                            exc,
+                        )
                         lineage_sql = n.name
             return ColumnRef(base_table, base_col, lineage=lineage_sql)
         except Exception as exc:
-            logger.debug("resolve lineage failed for %s.%s: %s", col.table, col.column, exc)
+            logger.debug(
+                "resolve lineage failed for %s.%s: %s", col.table, col.column, exc
+            )
             return col
 
 
@@ -523,10 +534,12 @@ def _flatten_and(cond: exp.Expression) -> list[exp.Expression]:
 
 
 _MAX_OR_PATHS_COMPUTE = 128  # hard cap inside _to_dnf — prevents exponential blowup
-_MAX_OR_PATHS_EMIT    = 32   # max paths emitted in or_paths (sent to LLM)
+_MAX_OR_PATHS_EMIT = 32  # max paths emitted in or_paths (sent to LLM)
 
 
-def _to_dnf(cond: exp.Expression, _max: int = _MAX_OR_PATHS_COMPUTE) -> list[list[exp.Expression]]:
+def _to_dnf(
+    cond: exp.Expression, _max: int = _MAX_OR_PATHS_COMPUTE
+) -> list[list[exp.Expression]]:
     """Convert a condition to Disjunctive Normal Form (DNF).
 
     Returns a list of AND-paths (alternatives), where each path is a list of
@@ -547,7 +560,9 @@ def _to_dnf(cond: exp.Expression, _max: int = _MAX_OR_PATHS_COMPUTE) -> list[lis
         right_paths = _to_dnf(cond.args["expression"], _max)
         return [lp + rp for lp in left_paths for rp in right_paths][:_max]
     if isinstance(cond, exp.Or):
-        return (_to_dnf(cond.args["this"], _max) + _to_dnf(cond.args["expression"], _max))[:_max]
+        return (
+            _to_dnf(cond.args["this"], _max) + _to_dnf(cond.args["expression"], _max)
+        )[:_max]
     return [[cond]]
 
 
@@ -1240,7 +1255,9 @@ def simplify(
             _collect_aliases(statement, _or_alias_map)
             where = statement.args.get("where")
             if where is not None:
-                or_paths, truncated = _extract_or_paths(where.this, _or_alias_map, _or_resolver)
+                or_paths, truncated = _extract_or_paths(
+                    where.this, _or_alias_map, _or_resolver
+                )
                 if or_paths:
                     result.or_paths = or_paths
                     result.or_paths_truncated = truncated

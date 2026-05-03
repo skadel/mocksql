@@ -100,7 +100,6 @@ class DuckDBTestHelper:
         session_id: str,
         table_name_key: str,
         columns: List[Dict[str, Any]],
-        expiration_hours: Optional[int] = None,  # non applicable en DuckDB
     ):
         """
         Crée (ou remplace) une table de test suffixée par session.
