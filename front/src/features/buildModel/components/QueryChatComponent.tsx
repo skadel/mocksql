@@ -123,6 +123,7 @@ const ChatComponent: React.FC = () => {
 
   const messagesRef = useRef(messages);
   const { currentModelId, drawerOpen, models: allModels } = useAppSelector((state) => state.appBarModel);
+  const currentProjectId = useAppSelector((state) => state.appBarModel.currentProjectId);
   const currentModel = useMemo(
     () => allModels.find(m => m.session_id === currentModelId),
     [allModels, currentModelId],
@@ -730,7 +731,7 @@ const ChatComponent: React.FC = () => {
             <Box sx={{ mb: 1 }}>
               <MissingTablesAlert
                 missingTables={missingTables}
-                projectId=""
+                projectId={currentProjectId}
                 onImport={tablesToImport ? handleAutoImport : undefined}
                 importing={isImporting}
               />
@@ -743,29 +744,6 @@ const ChatComponent: React.FC = () => {
       {uiPhase === 'entry' && (
         <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, bgcolor: '#dde3e6' }} ref={containerRef}>
           <Box sx={{ maxWidth: 920, mx: 'auto', px: '28px', pt: '32px', pb: '60px' }}>
-
-            {/* Alerts */}
-            {isSending && submissionStep && (
-              <Box sx={{ mb: 2 }}>
-                <LinearProgress variant="indeterminate" sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
-                <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>{submissionStep}</Typography>
-              </Box>
-            )}
-            {submitError && (
-              <Alert severity="error" sx={{ borderRadius: '12px', mb: 2 }} onClose={() => setSubmitError(null)}>
-                {submitError}
-              </Alert>
-            )}
-            {missingTables && (
-              <Box sx={{ mb: 2 }}>
-                <MissingTablesAlert
-                  missingTables={missingTables}
-                  projectId=""
-                  onImport={tablesToImport ? handleAutoImport : undefined}
-                  importing={isImporting}
-                />
-              </Box>
-            )}
 
             {/* Page header */}
             <Box sx={{ display: 'flex', alignItems: 'center', gap: '14px', mb: '24px' }}>
@@ -958,6 +936,29 @@ const ChatComponent: React.FC = () => {
                 {isSending ? t('generate.generating') : t('generate.generate_tests')}
               </Button>
             </Box>
+
+            {/* Feedback zone — loading bar, errors, import (below the button) */}
+            {(isSending && submissionStep) && (
+              <Box sx={{ mt: 3 }}>
+                <LinearProgress variant="indeterminate" sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
+                <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>{submissionStep}</Typography>
+              </Box>
+            )}
+            {submitError && (
+              <Alert severity="error" sx={{ borderRadius: '12px', mt: 2 }} onClose={() => setSubmitError(null)}>
+                {submitError}
+              </Alert>
+            )}
+            {missingTables && (
+              <Box sx={{ mt: 2 }}>
+                <MissingTablesAlert
+                  missingTables={missingTables}
+                  projectId={currentProjectId}
+                  onImport={tablesToImport ? handleAutoImport : undefined}
+                  importing={isImporting}
+                />
+              </Box>
+            )}
 
           </Box>
         </Box>
