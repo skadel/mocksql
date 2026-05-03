@@ -128,6 +128,28 @@ async def delete_project_table(project_id: str, table_name: str):
     return {"removed": table_name, "remaining": len(updated)}
 
 
+class ProjectPreferencesRequest(BaseModel):
+    auto_import: Optional[bool] = None
+
+
+@router.patch("/project/{project_id}/preferences")
+async def update_project_preferences(project_id: str, body: ProjectPreferencesRequest):
+    rows = await query(
+        f"SELECT project_id FROM {PROJECTS_TABLE_NAME} WHERE project_id = $1",
+        (project_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if body.auto_import is not None:
+        await execute(
+            f"UPDATE {PROJECTS_TABLE_NAME} SET auto_import = $1, updated_at = $2 WHERE project_id = $3",
+            body.auto_import,
+            datetime.now().isoformat(),
+            project_id,
+        )
+    return {"updated": True}
+
+
 @router.post("/projects/share")
 async def share_project(body: ShareProjectRequest):
     target_rows = await query(
