@@ -29,7 +29,9 @@ def filter_columns(schemas, used_columns):
 
         # Assurer qu'il y a au moins 2 parties (projet.database.table ou database.table) pour extraire correctement
         if len(parts) < 2:
-            logger.warning("Skipping table '%s' due to unexpected format.", table["table_name"])
+            logger.warning(
+                "Skipping table '%s' due to unexpected format.", table["table_name"]
+            )
             continue  # Saute cette table si le format n'est pas comme attendu
 
         # Extraire le nom de la base de données et le nom de la table de la structure 'schemas'
@@ -282,7 +284,9 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
 def _resolve_duck_type(bq_ddl_type: str, dialect: str) -> str:
     """Convert a BigQuery DDL type string to DuckDB DDL type string via sqlglot."""
     try:
-        dummy = sqlglot.parse_one(f"CREATE TABLE _t (_c {bq_ddl_type})", dialect=dialect)
+        dummy = sqlglot.parse_one(
+            f"CREATE TABLE _t (_c {bq_ddl_type})", dialect=dialect
+        )
         duck_sql = dummy.sql(dialect="duckdb")
         # "CREATE TABLE _t (_c TYPE)" → extract "TYPE" (strip last ")" from col list)
         return duck_sql.split("(_c ", 1)[1][:-1]
@@ -317,6 +321,7 @@ def create_test_tables(
 
     # Si used_columns est None, on crée un dictionnaire vide afin de ne pas filtrer les colonnes.
     if used_columns is not None:
+
         def _uc_key(uc: dict) -> str:
             if uc.get("database"):
                 return f"{uc['database']}_{uc['table']}"
@@ -339,7 +344,8 @@ def create_test_tables(
             if qualified_key in used_columns_dict:
                 wanted = [c.lower() for c in used_columns_dict[qualified_key]]
                 filtered_columns = [
-                    col for col in table["columns"]
+                    col
+                    for col in table["columns"]
                     if col["name"].lower() in wanted
                     or any(col["name"].lower().startswith(f"{w}.") for w in wanted)
                 ]
@@ -355,8 +361,10 @@ def create_test_tables(
                 if base in ("RECORD", "STRUCT"):
                     depth = col_name.count(".")
                     children = [
-                        c for c in filtered_columns
-                        if c["name"].startswith(f"{col_name}.") and c["name"].count(".") == depth + 1
+                        c
+                        for c in filtered_columns
+                        if c["name"].startswith(f"{col_name}.")
+                        and c["name"].count(".") == depth + 1
                     ]
                     if children:
                         inner = ", ".join(
@@ -364,13 +372,16 @@ def create_test_tables(
                             for c in children
                         )
                         struct_type = f"STRUCT<{inner}>"
-                        return f"ARRAY<{struct_type}>" if mode == "REPEATED" else struct_type
+                        return (
+                            f"ARRAY<{struct_type}>"
+                            if mode == "REPEATED"
+                            else struct_type
+                        )
                 return f"ARRAY<{base}>" if mode == "REPEATED" else base
 
             root_columns = [col for col in filtered_columns if "." not in col["name"]]
             columns_def = ", ".join(
-                f"{col['name']} {_get_ddl_type(col['name'])}"
-                for col in root_columns
+                f"{col['name']} {_get_ddl_type(col['name'])}" for col in root_columns
             )
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"
             logger.debug("Creating table %s ...", table_name)
@@ -394,26 +405,37 @@ def create_test_tables(
             logger.debug("Table %s created successfully.", table_name)
 
             # Enregistre la définition avec les types DuckDB résolus (plus de RECORD brut)
-            duckdb_typed_tables.append({
-                "table_name": table_name,
-                "columns": [
-                    {**col, "type": _resolve_duck_type(_get_ddl_type(col["name"]), dialect)}
-                    for col in root_columns
-                ],
-            })
+            duckdb_typed_tables.append(
+                {
+                    "table_name": table_name,
+                    "columns": [
+                        {
+                            **col,
+                            "type": _resolve_duck_type(
+                                _get_ddl_type(col["name"]), dialect
+                            ),
+                        }
+                        for col in root_columns
+                    ],
+                }
+            )
 
         except Exception as e:
-            errors.append({
-                "table_name": table["table_name"],
-                "query": create_table_query,
-                "error": str(e),
-            })
+            errors.append(
+                {
+                    "table_name": table["table_name"],
+                    "query": create_table_query,
+                    "error": str(e),
+                }
+            )
 
     if errors:
         for err in errors:
             logger.error(
                 "Erreur création table %s: %s\n  Requête : %s",
-                err["table_name"], err["error"], err["query"],
+                err["table_name"],
+                err["error"],
+                err["query"],
             )
         raise RuntimeError(
             f"Échec création de {len(errors)} table(s) : "
@@ -713,9 +735,7 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
 
     # Nodes inside Unnest are source refs — do not rename those
     inside_unnest: set[int] = {
-        id(col)
-        for un in tree.find_all(exp.Unnest)
-        for col in un.find_all(exp.Column)
+        id(col) for un in tree.find_all(exp.Unnest) for col in un.find_all(exp.Column)
     }
 
     for col in tree.find_all(exp.Column):

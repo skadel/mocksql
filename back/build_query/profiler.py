@@ -1202,12 +1202,8 @@ def _build_col_query(
         distinct_expr: exp.Expression = exp.Count(
             this=exp.Distinct(expressions=[_cref()])
         )
-        min_expr: exp.Expression = exp.Cast(
-            this=exp.Min(this=_cref()), to=str_dtype
-        )
-        max_expr: exp.Expression = exp.Cast(
-            this=exp.Max(this=_cref()), to=str_dtype
-        )
+        min_expr: exp.Expression = exp.Cast(this=exp.Min(this=_cref()), to=str_dtype)
+        max_expr: exp.Expression = exp.Cast(this=exp.Max(this=_cref()), to=str_dtype)
     else:
         dup_expr = exp.Null()
         top_expr = exp.Null()

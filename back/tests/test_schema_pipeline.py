@@ -38,7 +38,13 @@ class FakeField:
 
 
 def _make_flat_row(
-    field_path, data_type, mode="NULLABLE", catalog="p", schema="ds", table="t"
+    field_path,
+    data_type,
+    bq_ddl_type,
+    mode="NULLABLE",
+    catalog="p",
+    schema="ds",
+    table="t",
 ):
     return {
         "table_catalog": catalog,
@@ -46,6 +52,7 @@ def _make_flat_row(
         "table_name": table,
         "field_path": field_path,
         "data_type": data_type,
+        "bq_ddl_type": bq_ddl_type,
         "mode": mode,
         "description": "",
     }
@@ -236,8 +243,15 @@ def test_flatten_stores_bq_ddl_type_on_repeated_record():
 def test_generate_preserves_mode():
     project_schema = {
         "data": [
-            _make_flat_row("hits", "RECORD", mode="REPEATED"),
-            _make_flat_row("hits.page", "STRING", mode="NULLABLE"),
+            _make_flat_row(
+                "hits",
+                "RECORD",
+                bq_ddl_type="ARRAY<STRUCT<type STRING>>",
+                mode="REPEATED",
+            ),
+            _make_flat_row(
+                "hits.page", "STRING", bq_ddl_type="STRING", mode="NULLABLE"
+            ),
         ]
     }
     tables = generate_tables_and_columns_from_project_schema(project_schema)
@@ -256,6 +270,7 @@ def test_generate_missing_mode_defaults_nullable():
                 "table_name": "t",
                 "field_path": "user_id",
                 "data_type": "STRING",
+                "bq_ddl_type": "STRING",
                 "description": "",
             }
         ]

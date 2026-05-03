@@ -22,7 +22,9 @@ def bq_to_duck(sql: str) -> str:
 @pytest.fixture
 def con():
     c = duckdb.connect()
-    c.execute("CREATE TABLE ds_ga_sfx (id TEXT, hits STRUCT(type TEXT, hitNumber INT)[])")
+    c.execute(
+        "CREATE TABLE ds_ga_sfx (id TEXT, hits STRUCT(type TEXT, hitNumber INT)[])"
+    )
     c.execute(
         "INSERT INTO ds_ga_sfx VALUES "
         "('v1', [ROW('PAGE', 1)::STRUCT(type TEXT, hitNumber INT)])"
@@ -34,11 +36,10 @@ def con():
 # Cas : alias UNNEST == nom de la colonne source (ambiguïté DuckDB)
 # ---------------------------------------------------------------------------
 
+
 class TestConflictingAlias:
     def test_rename_col_alias(self):
-        duck = bq_to_duck(
-            "SELECT hits.type FROM ds.ga CROSS JOIN UNNEST(hits) AS hits"
-        )
+        duck = bq_to_duck("SELECT hits.type FROM ds.ga CROSS JOIN UNNEST(hits) AS hits")
         assert "_hits_u" in duck
         assert "hits.type" not in duck or "_hits_u.type" in duck
 
@@ -79,6 +80,7 @@ class TestConflictingAlias:
 # ---------------------------------------------------------------------------
 # Cas : pas de conflit — la requête ne doit pas être modifiée
 # ---------------------------------------------------------------------------
+
 
 class TestNoConflict:
     def test_alias_different_from_source(self):

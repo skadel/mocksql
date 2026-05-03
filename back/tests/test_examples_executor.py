@@ -165,8 +165,16 @@ class TestFilterSchemasWithRecordColumns:
                     {"name": "fullVisitorId", "type": "STRING", "mode": "NULLABLE"},
                     {"name": "visitId", "type": "INTEGER", "mode": "NULLABLE"},
                     {"name": "trafficSource", "type": "RECORD", "mode": "NULLABLE"},
-                    {"name": "trafficSource.campaign", "type": "STRING", "mode": "NULLABLE"},
-                    {"name": "trafficSource.keyword", "type": "STRING", "mode": "NULLABLE"},
+                    {
+                        "name": "trafficSource.campaign",
+                        "type": "STRING",
+                        "mode": "NULLABLE",
+                    },
+                    {
+                        "name": "trafficSource.keyword",
+                        "type": "STRING",
+                        "mode": "NULLABLE",
+                    },
                     {"name": "hits", "type": "RECORD", "mode": "REPEATED"},
                     {"name": "hits.type", "type": "STRING", "mode": "NULLABLE"},
                     {"name": "hits.hitNumber", "type": "INTEGER", "mode": "NULLABLE"},
@@ -176,7 +184,13 @@ class TestFilterSchemasWithRecordColumns:
         ]
 
     def test_record_parent_includes_subfields(self, record_schemas):
-        used = [{"database": "dataset", "table": "ga_sessions", "used_columns": ["trafficSource"]}]
+        used = [
+            {
+                "database": "dataset",
+                "table": "ga_sessions",
+                "used_columns": ["trafficSource"],
+            }
+        ]
         result = filter_schemas_by_used_columns(record_schemas, used)
         col_names = [c["name"] for c in result[0]["columns"]]
         assert "trafficSource" in col_names
@@ -184,7 +198,13 @@ class TestFilterSchemasWithRecordColumns:
         assert "trafficSource.keyword" in col_names
 
     def test_record_subfields_not_included_for_unrelated_parent(self, record_schemas):
-        used = [{"database": "dataset", "table": "ga_sessions", "used_columns": ["trafficSource"]}]
+        used = [
+            {
+                "database": "dataset",
+                "table": "ga_sessions",
+                "used_columns": ["trafficSource"],
+            }
+        ]
         result = filter_schemas_by_used_columns(record_schemas, used)
         col_names = [c["name"] for c in result[0]["columns"]]
         assert "hits" not in col_names
@@ -207,7 +227,9 @@ class TestFilterSchemasWithRecordColumns:
 
     def test_flat_schema_unaffected(self, simple_schemas):
         """Régression : les schémas sans RECORD ne changent pas."""
-        used = [{"database": "dataset", "table": "orders", "used_columns": ["order_id"]}]
+        used = [
+            {"database": "dataset", "table": "orders", "used_columns": ["order_id"]}
+        ]
         result = filter_schemas_by_used_columns(simple_schemas, used)
         assert [c["name"] for c in result[0]["columns"]] == ["order_id"]
 

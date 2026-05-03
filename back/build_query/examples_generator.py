@@ -452,8 +452,8 @@ async def generate_examples_(
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
 
-    # TODO improve generation perf
-    # filter mandatory and only generate constrained later when we are confident about sim_result later,
+    # TODO improve generation perf by filtering mandatory and only generate constrained
+    # implement this later when we are confident about sim_result later, sometimes there is columns missing for now
     # if sim_result is not None:
     #     mandatory = _build_mandatory_set(sim_result)
     #     filtered_schema = filter_columns_mandatory(schema, used_columns, mandatory)
@@ -488,7 +488,7 @@ async def generate_examples_(
 
     generated_data = await (prompt | llm | parser).ainvoke({})
 
-    # #
+    # # TODO implement this optimisation later
     # # Build value pool for unconstrained columns and fill rows
     # if unconstrained_cols:
     #     from build_query.sparse_filler import (
@@ -504,7 +504,7 @@ async def generate_examples_(
     # else:
     #     filled_data = _convert_datetime_fields(generated_data.data.dict())
 
-    filled_data = generated_data
+    filled_data = _convert_datetime_fields(generated_data.data.dict())
 
     generated = {
         "test_name": generated_data.test_name,

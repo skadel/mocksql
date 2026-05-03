@@ -119,6 +119,7 @@ def to_duck_expr(value: Any, duck_type: str) -> str:
     escaped_value = str(value).replace("'", "''")
     return f"'{escaped_value}'"
 
+
 def build_insert_statement(
     table_name: str,
     records: List[Dict],
@@ -130,7 +131,12 @@ def build_insert_statement(
     - used_cols: liste des noms de colonnes à insérer (None => toutes).
     """
     all_cols = [col["name"] for col in schema["columns"]]
-    logger.debug("build_insert_statement table=%s  all_cols=%s  used_cols=%s", table_name, all_cols, used_cols)
+    logger.debug(
+        "build_insert_statement table=%s  all_cols=%s  used_cols=%s",
+        table_name,
+        all_cols,
+        used_cols,
+    )
 
     # Si on a une liste de colonnes utilisées, on ne garde que celles qui matchent (insensible à la casse).
     if used_cols is not None:
@@ -159,7 +165,7 @@ def build_insert_statement(
             if col_schema:
                 duck_type = col_schema["type"]
                 logger.debug("  col=%s  duck_type=%s", column, duck_type)
-                
+
                 # Recherche insensible à la casse dans record
                 value = next(
                     (val for k, val in record.items() if k.lower() == column.lower()),
@@ -183,7 +189,9 @@ def build_insert_statement(
                 row_exprs.append("NULL")
         values_str_list.append(f"({', '.join(row_exprs)})")
 
-    stmt = f"INSERT INTO {table_name} ({column_list}) VALUES {', '.join(values_str_list)};"
+    stmt = (
+        f"INSERT INTO {table_name} ({column_list}) VALUES {', '.join(values_str_list)};"
+    )
     logger.debug("INSERT généré (tronqué) : %.200s", stmt)
     return stmt
 
@@ -202,6 +210,7 @@ def insert_examples(
 
     # Transformer la liste used_columns en dict pour accès rapide
     if used_columns is not None:
+
         def _uc_key(uc: dict) -> str:
             if uc.get("database"):
                 return f"{uc['database']}_{uc['table']}"
@@ -258,18 +267,25 @@ def insert_examples(
             if schema_tname.endswith(f"_{suffix_key}"):
                 duckdb_base = schema_tname[: -len(f"_{suffix_key}")]
             else:
-                duckdb_base = "_".join(t_parts[-2:]) if len(t_parts) >= 2 else t_parts[-1]
-            
+                duckdb_base = (
+                    "_".join(t_parts[-2:]) if len(t_parts) >= 2 else t_parts[-1]
+                )
+
             table_name_with_suffix = f"{duckdb_base}_{suffix_key}"
             qualified_key = duckdb_base  # même format que used_columns_dict
 
-            logger.debug("Traitement table=%s  qualified_key=%s", table_name, qualified_key)
+            logger.debug(
+                "Traitement table=%s  qualified_key=%s", table_name, qualified_key
+            )
             if qualified_key in used_columns_dict:
                 cols_to_use = used_columns_dict[qualified_key]
                 logger.debug("Match used_columns_dict  cols_to_use=%s", cols_to_use)
             else:
                 cols_to_use = None
-                logger.debug("Aucun match dans used_columns_dict pour %s (fallback None)", qualified_key)
+                logger.debug(
+                    "Aucun match dans used_columns_dict pour %s (fallback None)",
+                    qualified_key,
+                )
 
             insert_stmt = build_insert_statement(
                 table_name_with_suffix, records, table_schema, used_cols=cols_to_use

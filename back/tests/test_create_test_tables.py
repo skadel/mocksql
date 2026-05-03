@@ -103,7 +103,8 @@ class TestCreateTestTables:
     def test_old_cache_without_bq_ddl_type(self, con):
         """Cache ancien : pas de bq_ddl_type, reconstruction depuis sous-champs."""
         columns_no_bq_type = [
-            col for col in GA_SESSIONS_COLUMNS
+            col
+            for col in GA_SESSIONS_COLUMNS
             if "bq_ddl_type" not in col  # aucun ne l'a, c'est le cas cache ancien
         ]
         table = {**GA_SESSIONS_TABLE, "columns": columns_no_bq_type}
@@ -193,7 +194,10 @@ class TestEndToEnd:
                     "fullVisitorId": "visitor_1",
                     "visitId": 42,
                     "trafficSource": {"campaign": "organic", "keyword": "sql"},
-                    "hits": [{"type": "PAGE", "hitNumber": 1}, {"type": "EVENT", "hitNumber": 2}],
+                    "hits": [
+                        {"type": "PAGE", "hitNumber": 1},
+                        {"type": "EVENT", "hitNumber": 2},
+                    ],
                 }
             ]
         }
@@ -201,7 +205,9 @@ class TestEndToEnd:
         con.execute(stmts[0])
 
         table_name = duckdb_tables[0]["table_name"]
-        rows = con.execute(f"SELECT fullVisitorId, visitId FROM {table_name}").fetchall()
+        rows = con.execute(
+            f"SELECT fullVisitorId, visitId FROM {table_name}"
+        ).fetchall()
         assert rows == [("visitor_1", 42)]
 
     def test_struct_field_accessible_via_dot_notation(self, con, duckdb_tables):
