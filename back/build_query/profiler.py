@@ -127,6 +127,33 @@ _ORDERABLE_TYPES = frozenset(
 )
 
 
+def _is_unprofilable(col_type: str) -> bool:
+    """Return True if *col_type* cannot be used with MIN/MAX/DISTINCT/GROUP BY.
+
+    Applies to ARRAY, STRUCT, and RECORD types (BigQuery nested/repeated fields).
+
+    Examples:
+        >>> _is_unprofilable("RECORD")
+        True
+        >>> _is_unprofilable("STRUCT")
+        True
+        >>> _is_unprofilable("ARRAY")
+        True
+        >>> _is_unprofilable("ARRAY<STRUCT<x INT64>>")
+        True
+        >>> _is_unprofilable("STRUCT<x STRING>")
+        True
+        >>> _is_unprofilable("STRING")
+        False
+        >>> _is_unprofilable("INTEGER")
+        False
+    """
+    upper = col_type.upper().strip()
+    return upper in ("RECORD", "STRUCT", "ARRAY") or upper.startswith(
+        ("ARRAY<", "STRUCT<")
+    )
+
+
 def _is_orderable(col_type: str) -> bool:
     """Return True if *col_type* supports MIN/MAX (i.e. is numeric or temporal).
 
@@ -1133,6 +1160,7 @@ def _build_col_query(
     """
     str_t = _str_type(dialect)
     str_dtype = exp.DataType.build(str_t)
+    complex_col = _is_unprofilable(col_type)
 
     def _cref() -> exp.Column:
         return exp.Column(this=exp.Identifier(this=col, quoted=True))
@@ -1140,34 +1168,52 @@ def _build_col_query(
     def _not_null() -> exp.Expression:
         return exp.Not(this=exp.Is(this=_cref(), expression=exp.Null()))
 
-    dup_alias = f"_dup_{idx}"
-    dup_inner = (
-        exp.select(_cref())
-        .from_(_table_expr(table))
-        .where(_not_null())
-        .group_by(exp.Literal.number(1))
-        .having(
-            exp.GT(this=exp.Count(this=exp.Star()), expression=exp.Literal.number(1))
+    if not complex_col:
+        dup_inner = (
+            exp.select(_cref())
+            .from_(_table_expr(table))
+            .where(_not_null())
+            .group_by(exp.Literal.number(1))
+            .having(
+                exp.GT(
+                    this=exp.Count(this=exp.Star()), expression=exp.Literal.number(1)
+                )
+            )
         )
-    )
-    dup_outer = exp.select(exp.Count(this=exp.Star())).from_(
-        dup_inner.subquery(dup_alias)
-    )
+        dup_expr: exp.Expression = exp.select(exp.Count(this=exp.Star())).from_(
+            dup_inner.subquery(f"_dup_{idx}")
+        )
 
-    top_alias = f"_top_{idx}"
-    top_inner = (
-        exp.select(_cref(), exp.alias_(exp.Count(this=exp.Star()), "_cnt"))
-        .from_(_table_expr(table))
-        .where(_not_null())
-        .group_by(exp.Literal.number(1))
-        .order_by(exp.Ordered(this=exp.column("_cnt"), desc=True))
-        .limit(top_k)
-    )
-    top_outer = exp.select(
-        exp.Anonymous(
-            this="STRING_AGG", expressions=[exp.Cast(this=_cref(), to=str_dtype)]
+        top_alias = f"_top_{idx}"
+        top_inner = (
+            exp.select(_cref(), exp.alias_(exp.Count(this=exp.Star()), "_cnt"))
+            .from_(_table_expr(table))
+            .where(_not_null())
+            .group_by(exp.Literal.number(1))
+            .order_by(exp.Ordered(this=exp.column("_cnt"), desc=True))
+            .limit(top_k)
         )
-    ).from_(top_inner.subquery(top_alias))
+        top_expr: exp.Expression = exp.select(
+            exp.Anonymous(
+                this="STRING_AGG", expressions=[exp.Cast(this=_cref(), to=str_dtype)]
+            )
+        ).from_(top_inner.subquery(top_alias))
+
+        distinct_expr: exp.Expression = exp.Count(
+            this=exp.Distinct(expressions=[_cref()])
+        )
+        min_expr: exp.Expression = exp.Cast(
+            this=exp.Min(this=_cref()), to=str_dtype
+        )
+        max_expr: exp.Expression = exp.Cast(
+            this=exp.Max(this=_cref()), to=str_dtype
+        )
+    else:
+        dup_expr = exp.Null()
+        top_expr = exp.Null()
+        distinct_expr = exp.Null()
+        min_expr = exp.Null()
+        max_expr = exp.Null()
 
     return (
         exp.select(
@@ -1182,13 +1228,15 @@ def _build_col_query(
                 "null_count",
             ),
             exp.alias_(exp.Count(this=_cref()), "non_null_count"),
+            exp.alias_(distinct_expr, "distinct_count"),
             exp.alias_(
-                exp.Count(this=exp.Distinct(expressions=[_cref()])), "distinct_count"
+                dup_expr.subquery() if not complex_col else dup_expr, "dup_count"
             ),
-            exp.alias_(dup_outer.subquery(), "dup_count"),
-            exp.alias_(exp.Cast(this=exp.Min(this=_cref()), to=str_dtype), "min_val"),
-            exp.alias_(exp.Cast(this=exp.Max(this=_cref()), to=str_dtype), "max_val"),
-            exp.alias_(top_outer.subquery(), "top_values"),
+            exp.alias_(min_expr, "min_val"),
+            exp.alias_(max_expr, "max_val"),
+            exp.alias_(
+                top_expr.subquery() if not complex_col else top_expr, "top_values"
+            ),
             exp.alias_(exp.Null(), "left_table"),
             exp.alias_(exp.Null(), "right_table"),
             exp.alias_(exp.Null(), "left_expr"),
@@ -1713,7 +1761,7 @@ def build_profile_query(
 
     type_map: dict[str, dict[str, str]] = {
         tbl: {
-            col["name"]: col.get("type", "STRING")
+            col["name"]: col.get("bq_ddl_type") or col.get("type", "STRING")
             for col in norm["tables_by_name"][tbl].get("columns", [])
         }
         for tbl in norm["tables_by_name"]

@@ -119,7 +119,6 @@ def to_duck_expr(value: Any, duck_type: str) -> str:
     escaped_value = str(value).replace("'", "''")
     return f"'{escaped_value}'"
 
-
 def build_insert_statement(
     table_name: str,
     records: List[Dict],
@@ -131,6 +130,7 @@ def build_insert_statement(
     - used_cols: liste des noms de colonnes à insérer (None => toutes).
     """
     all_cols = [col["name"] for col in schema["columns"]]
+    logger.debug("build_insert_statement table=%s  all_cols=%s  used_cols=%s", table_name, all_cols, used_cols)
 
     # Si on a une liste de colonnes utilisées, on ne garde que celles qui matchent (insensible à la casse).
     if used_cols is not None:
@@ -138,6 +138,8 @@ def build_insert_statement(
         columns = [c for c in all_cols if c.lower() in used_lower]
     else:
         columns = all_cols
+
+    logger.debug("colonnes finales pour INSERT: %s", columns)
 
     column_list = ", ".join(columns)
     values_str_list = []
@@ -156,6 +158,8 @@ def build_insert_statement(
             )
             if col_schema:
                 duck_type = col_schema["type"]
+                logger.debug("  col=%s  duck_type=%s", column, duck_type)
+                
                 # Recherche insensible à la casse dans record
                 value = next(
                     (val for k, val in record.items() if k.lower() == column.lower()),
@@ -179,9 +183,9 @@ def build_insert_statement(
                 row_exprs.append("NULL")
         values_str_list.append(f"({', '.join(row_exprs)})")
 
-    return (
-        f"INSERT INTO {table_name} ({column_list}) VALUES {', '.join(values_str_list)};"
-    )
+    stmt = f"INSERT INTO {table_name} ({column_list}) VALUES {', '.join(values_str_list)};"
+    logger.debug("INSERT généré (tronqué) : %.200s", stmt)
+    return stmt
 
 
 def insert_examples(
@@ -192,17 +196,20 @@ def insert_examples(
 ):
     """
     Génère des instructions SQL INSERT pour chaque table.
-    - used_columns: liste de dicts:
-        [
-          {"table": "NomTableSansSchema", "used_columns": ["col1", "col2"]},
-          ...
-        ]
-      Si None => on insère toutes les colonnes.
     """
-    logger.debug(f"Schemas : {schemas}")
+    logger.debug("insert_examples appelé avec used_columns=%s", used_columns)
+    logger.debug("Schemas : %s", schemas)
+
     # Transformer la liste used_columns en dict pour accès rapide
     if used_columns is not None:
-        used_columns_dict = {uc["table"]: uc["used_columns"] for uc in used_columns}
+        def _uc_key(uc: dict) -> str:
+            if uc.get("database"):
+                return f"{uc['database']}_{uc['table']}"
+            parts = uc["table"].split(".")
+            return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
+        used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
+        logger.debug("used_columns_dict keys: %s", list(used_columns_dict.keys()))
     else:
         used_columns_dict = {}
         logger.info(
@@ -246,26 +253,24 @@ def insert_examples(
         logger.debug(f"table schema {table_schema}")
         if table_schema and len(records) > 0:
             t_parts = table_name.split(".")
-            qualified_key = ".".join(t_parts[-2:]) if len(t_parts) >= 2 else t_parts[-1]
             suffix_key = suffix.replace("-", "_")
             schema_tname = table_schema["table_name"]
             if schema_tname.endswith(f"_{suffix_key}"):
                 duckdb_base = schema_tname[: -len(f"_{suffix_key}")]
             else:
-                duckdb_base = (
-                    "_".join(t_parts[-2:]) if len(t_parts) >= 2 else t_parts[-1]
-                )
+                duckdb_base = "_".join(t_parts[-2:]) if len(t_parts) >= 2 else t_parts[-1]
+            
             table_name_with_suffix = f"{duckdb_base}_{suffix_key}"
-            logger.debug("Nom de table avec suffixe: %s", table_name_with_suffix)
+            qualified_key = duckdb_base  # même format que used_columns_dict
+
+            logger.debug("Traitement table=%s  qualified_key=%s", table_name, qualified_key)
             if qualified_key in used_columns_dict:
                 cols_to_use = used_columns_dict[qualified_key]
-                logger.debug(
-                    "Colonnes spécifiques à utiliser pour '%s': %s",
-                    qualified_key,
-                    cols_to_use,
-                )
+                logger.debug("Match used_columns_dict  cols_to_use=%s", cols_to_use)
             else:
                 cols_to_use = None
+                logger.debug("Aucun match dans used_columns_dict pour %s (fallback None)", qualified_key)
+
             insert_stmt = build_insert_statement(
                 table_name_with_suffix, records, table_schema, used_cols=cols_to_use
             )

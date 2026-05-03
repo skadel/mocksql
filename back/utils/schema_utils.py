@@ -75,6 +75,8 @@ def update_schema(
 def generate_tables_and_columns_from_project_schema(
     project_schema: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
+    print("<<<<<<<<<<<<<<<<<<<<<<<<<project_schema")
+    print(project_schema)
     try:
         validated_schema = ProjectSchema(**project_schema)
     except ValidationError as e:
@@ -112,14 +114,15 @@ def generate_tables_and_columns_from_project_schema(
             dtype = _get(col, "data_type", "")
             if not name or not dtype:
                 continue
-            table_info["columns"].append(
-                {
-                    "name": name,
-                    "type": dtype,
-                    "mode": _get(col, "mode", "NULLABLE"),
-                    "description": _norm_desc(_get(col, "description", "")),
-                }
-            )
+            entry: dict = {
+                "name": name,
+                "type": dtype,
+                "mode": _get(col, "mode", "NULLABLE"),
+                "description": _norm_desc(_get(col, "description", "")),
+            }
+            if bq_ddl_type := _get(col, "bq_ddl_type", ""):
+                entry["bq_ddl_type"] = bq_ddl_type
+            table_info["columns"].append(entry)
 
         tables_and_columns.append(table_info)
 

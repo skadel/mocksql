@@ -25,6 +25,20 @@ def parse_ref(ref: str, billing_project: str) -> tuple[str, str, str]:
     )
 
 
+def _bq_ddl_type(field: dict) -> str:
+    """Generate a BigQuery DDL type string from a nested field dict (from _schema_fields_to_dicts).
+    Handles STRUCT<...> and ARRAY<...> so sqlglot can transpile correctly to DuckDB.
+    """
+    base = field["type"].upper()
+    mode = field.get("mode", "NULLABLE").upper()
+    if base in ("RECORD", "STRUCT") and field.get("fields"):
+        inner = ", ".join(f"{f['name']} {_bq_ddl_type(f)}" for f in field["fields"])
+        bq_type = f"STRUCT<{inner}>"
+    else:
+        bq_type = base
+    return f"ARRAY<{bq_type}>" if mode == "REPEATED" else bq_type
+
+
 def _flatten_bq_schema(fields: list, prefix: str = "") -> list:
     rows = []
     for field in fields:
@@ -35,6 +49,7 @@ def _flatten_bq_schema(fields: list, prefix: str = "") -> list:
                 "data_type": field["type"],
                 "mode": field.get("mode", "NULLABLE"),
                 "description": field.get("description", ""),
+                "bq_ddl_type": _bq_ddl_type(field),
             }
         )
         if field.get("fields"):
@@ -128,6 +143,8 @@ async def fetch_tables_schema(
     sem = asyncio.Semaphore(concurrency)
     tasks = [_fetch_single_table(sem, client, ref, billing_project) for ref in refs]
     results = await asyncio.gather(*tasks)
+    print("<<<<<<<<<<<<<<<<<<<<results")
+    print(results)
 
     schema_rows: list[dict] = []
     failed: list[dict] = []

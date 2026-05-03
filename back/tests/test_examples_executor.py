@@ -152,6 +152,66 @@ class TestFilterSchemasByUsedColumns:
         assert len(result[0]["columns"]) == 2
 
 
+class TestFilterSchemasWithRecordColumns:
+    """Vérifie que les sous-champs RECORD sont inclus quand le parent est référencé."""
+
+    @pytest.fixture
+    def record_schemas(self):
+        return [
+            {
+                "table_name": "project.dataset.ga_sessions",
+                "description": "",
+                "columns": [
+                    {"name": "fullVisitorId", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "visitId", "type": "INTEGER", "mode": "NULLABLE"},
+                    {"name": "trafficSource", "type": "RECORD", "mode": "NULLABLE"},
+                    {"name": "trafficSource.campaign", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "trafficSource.keyword", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "hits", "type": "RECORD", "mode": "REPEATED"},
+                    {"name": "hits.type", "type": "STRING", "mode": "NULLABLE"},
+                    {"name": "hits.hitNumber", "type": "INTEGER", "mode": "NULLABLE"},
+                ],
+                "primary_keys": [],
+            }
+        ]
+
+    def test_record_parent_includes_subfields(self, record_schemas):
+        used = [{"database": "dataset", "table": "ga_sessions", "used_columns": ["trafficSource"]}]
+        result = filter_schemas_by_used_columns(record_schemas, used)
+        col_names = [c["name"] for c in result[0]["columns"]]
+        assert "trafficSource" in col_names
+        assert "trafficSource.campaign" in col_names
+        assert "trafficSource.keyword" in col_names
+
+    def test_record_subfields_not_included_for_unrelated_parent(self, record_schemas):
+        used = [{"database": "dataset", "table": "ga_sessions", "used_columns": ["trafficSource"]}]
+        result = filter_schemas_by_used_columns(record_schemas, used)
+        col_names = [c["name"] for c in result[0]["columns"]]
+        assert "hits" not in col_names
+        assert "hits.type" not in col_names
+
+    def test_multiple_record_parents(self, record_schemas):
+        used = [
+            {
+                "database": "dataset",
+                "table": "ga_sessions",
+                "used_columns": ["fullVisitorId", "trafficSource", "hits"],
+            }
+        ]
+        result = filter_schemas_by_used_columns(record_schemas, used)
+        col_names = [c["name"] for c in result[0]["columns"]]
+        assert "trafficSource.campaign" in col_names
+        assert "hits.type" in col_names
+        assert "hits.hitNumber" in col_names
+        assert "fullVisitorId" in col_names
+
+    def test_flat_schema_unaffected(self, simple_schemas):
+        """Régression : les schémas sans RECORD ne changent pas."""
+        used = [{"database": "dataset", "table": "orders", "used_columns": ["order_id"]}]
+        result = filter_schemas_by_used_columns(simple_schemas, used)
+        assert [c["name"] for c in result[0]["columns"]] == ["order_id"]
+
+
 # ---------------------------------------------------------------------------
 # _extract_conditions
 # ---------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import logging
 import re
 from typing import Dict, Any, Optional, Type, List, Tuple
 
@@ -10,6 +11,8 @@ from sqlglot.optimizer import traverse_scope, find_all_in_scope
 
 from common_vars import type_mapping
 from models.env_variables import BQ_TEST_PROJECT
+
+logger = logging.getLogger(__name__)
 
 # Initialize DuckDB connection
 DB_PATH = ":memory:"
@@ -26,9 +29,7 @@ def filter_columns(schemas, used_columns):
 
         # Assurer qu'il y a au moins 2 parties (projet.database.table ou database.table) pour extraire correctement
         if len(parts) < 2:
-            print(
-                f"Warning: Skipping table '{table['table_name']}' due to unexpected format."
-            )
+            logger.warning("Skipping table '%s' due to unexpected format.", table["table_name"])
             continue  # Saute cette table si le format n'est pas comme attendu
 
         # Extraire le nom de la base de données et le nom de la table de la structure 'schemas'
@@ -278,6 +279,17 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
     return CombinedModel
 
 
+def _resolve_duck_type(bq_ddl_type: str, dialect: str) -> str:
+    """Convert a BigQuery DDL type string to DuckDB DDL type string via sqlglot."""
+    try:
+        dummy = sqlglot.parse_one(f"CREATE TABLE _t (_c {bq_ddl_type})", dialect=dialect)
+        duck_sql = dummy.sql(dialect="duckdb")
+        # "CREATE TABLE _t (_c TYPE)" → extract "TYPE" (strip last ")" from col list)
+        return duck_sql.split("(_c ", 1)[1][:-1]
+    except Exception:
+        return bq_ddl_type
+
+
 def create_test_tables(
     tables: list,
     suffix: str,
@@ -305,34 +317,63 @@ def create_test_tables(
 
     # Si used_columns est None, on crée un dictionnaire vide afin de ne pas filtrer les colonnes.
     if used_columns is not None:
-        used_columns_dict = {uc["table"]: uc["used_columns"] for uc in used_columns}
+        def _uc_key(uc: dict) -> str:
+            if uc.get("database"):
+                return f"{uc['database']}_{uc['table']}"
+            parts = uc["table"].split(".")
+            return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+
+        used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
     else:
         used_columns_dict = {}
 
     for table in tables:
+        create_table_query = "(non générée)"
         try:
             parts = table["table_name"].split(".")
-            qualified_key = ".".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
             duckdb_base = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+            qualified_key = duckdb_base  # même format que used_columns_dict
             table_name = f"{duckdb_base}_{suffix.replace('-', '_')}"
 
-            # Filtrage en tenant compte de la casse si des colonnes utilisées sont définies
+            # Filtrage avec sous-champs inclus pour pouvoir reconstruire les types STRUCT
             if qualified_key in used_columns_dict:
+                wanted = [c.lower() for c in used_columns_dict[qualified_key]]
                 filtered_columns = [
-                    col
-                    for col in table["columns"]
-                    if col["name"].lower()
-                    in [c.lower() for c in used_columns_dict[qualified_key]]
+                    col for col in table["columns"]
+                    if col["name"].lower() in wanted
+                    or any(col["name"].lower().startswith(f"{w}.") for w in wanted)
                 ]
             else:
                 filtered_columns = table["columns"]
 
-            # Construction de la requête
+            def _get_ddl_type(col_name: str) -> str:
+                col = next(c for c in filtered_columns if c["name"] == col_name)
+                if bq_ddl_type := col.get("bq_ddl_type"):
+                    return bq_ddl_type
+                base = col["type"].upper()
+                mode = col.get("mode", "NULLABLE").upper()
+                if base in ("RECORD", "STRUCT"):
+                    depth = col_name.count(".")
+                    children = [
+                        c for c in filtered_columns
+                        if c["name"].startswith(f"{col_name}.") and c["name"].count(".") == depth + 1
+                    ]
+                    if children:
+                        inner = ", ".join(
+                            f"{c['name'].split('.')[-1]} {_get_ddl_type(c['name'])}"
+                            for c in children
+                        )
+                        struct_type = f"STRUCT<{inner}>"
+                        return f"ARRAY<{struct_type}>" if mode == "REPEATED" else struct_type
+                return f"ARRAY<{base}>" if mode == "REPEATED" else base
+
+            root_columns = [col for col in filtered_columns if "." not in col["name"]]
             columns_def = ", ".join(
-                [f"{col['name']} {col['type']}" for col in filtered_columns]
+                f"{col['name']} {_get_ddl_type(col['name'])}"
+                for col in root_columns
             )
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"
-            print(f"Creating table {table_name}...")
+            logger.debug("Creating table %s ...", table_name)
 
             # Parse and convert SQL to DuckDB dialect
             create_test_table_query = sqlglot.parse_one(
@@ -350,20 +391,34 @@ def create_test_tables(
 
             # Execute the table creation query
             con.execute(create_test_table_query)
-            print(f"Table {table_name} created successfully.")
+            logger.debug("Table %s created successfully.", table_name)
 
-            # Enregistre la définition de la table créée
-            duckdb_typed_tables.append(
-                {"table_name": table_name, "columns": filtered_columns}
-            )
+            # Enregistre la définition avec les types DuckDB résolus (plus de RECORD brut)
+            duckdb_typed_tables.append({
+                "table_name": table_name,
+                "columns": [
+                    {**col, "type": _resolve_duck_type(_get_ddl_type(col["name"]), dialect)}
+                    for col in root_columns
+                ],
+            })
 
         except Exception as e:
-            errors.append({"table_name": table["table_name"], "error": str(e)})
+            errors.append({
+                "table_name": table["table_name"],
+                "query": create_table_query,
+                "error": str(e),
+            })
 
-    # Gestion des erreurs éventuelles
     if errors:
         for err in errors:
-            print(f"Erreur création table {err['table_name']}: {err['error']}")
+            logger.error(
+                "Erreur création table %s: %s\n  Requête : %s",
+                err["table_name"], err["error"], err["query"],
+            )
+        raise RuntimeError(
+            f"Échec création de {len(errors)} table(s) : "
+            + "; ".join(e["table_name"] for e in errors)
+        )
 
     return duckdb_typed_tables
 
@@ -373,11 +428,11 @@ def execute_queries(queries: list[str], con: duckdb.DuckDBPyConnection):
         for idx, query in enumerate(queries, start=1):
             try:
                 result = con.execute(query).fetchall()  # Fetch results for verification
-                print(f"Result for query {idx}: {result}")
+                logger.debug("Result for query %d: %s", idx, result)
             except Exception as e:
-                print(f"Error executing query {idx}: {e}")
+                logger.error("Error executing query %d: %s", idx, e)
     except Exception as e:
-        print(f"Error establishing database connection: {e}")
+        logger.error("Error establishing database connection: %s", e)
 
 
 def fix_duck_db_sql(duckdb_sql: str) -> str:
@@ -583,9 +638,7 @@ async def run_query_on_test_dataset(
         result = con.execute(fixed_duckdb_sql).fetchdf()
         return result, fixed_duckdb_sql
     except Exception as e:
-        print(f"Failed to run query: {e}")
-        print("<<<<<<<<<<fixed_duckdb_sql>>>>>>>>>>")
-        print(fixed_duckdb_sql)
+        logger.error("Failed to run query: %s\nSQL:\n%s", e, fixed_duckdb_sql)
         raise
 
 
@@ -621,24 +674,71 @@ async def create_tables_on_test_dataset(
     try:
         # Execute the table creation SQL
         con.execute(create_table_sql)
-        print(f"Table {table_name}_{suffix} created successfully.")
-
-        # # Fetch and display table schema information
-        # result = con.execute(f"PRAGMA table_info('{table_name}_{suffix}')").fetchall()
-        # print(f"Schema for table {table_name}_{suffix}: {result}")
+        logger.debug("Table %s_%s created successfully.", table_name, suffix)
     except Exception as e:
-        print(f"Failed to create table {table_name}: {e}")
+        logger.error("Failed to create table %s: %s", table_name, e)
         raise
+
+
+def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
+    """
+    Rename UNNEST column aliases that conflict with their source column name.
+
+    BigQuery allows CROSS JOIN UNNEST(hits) AS hits where the alias matches the
+    source column.  DuckDB raises "Ambiguous reference" in that case.
+    Fix: rename the column alias to _{name}_u and patch all Column refs in the
+    query that point to that alias (excluding refs inside the Unnest node itself).
+    """
+    renames: dict[str, str] = {}
+
+    for unnest_node in tree.find_all(exp.Unnest):
+        tbl_alias = unnest_node.find(exp.TableAlias)
+        if not tbl_alias:
+            continue
+        alias_cols = tbl_alias.args.get("columns") or []
+        src_names = {
+            e.name.lower()
+            for e in unnest_node.expressions
+            if hasattr(e, "name") and e.name
+        }
+        for alias_col in alias_cols:
+            old = alias_col.name
+            if old and old.lower() in src_names:
+                new = f"_{old}_u"
+                renames[old] = new
+                alias_col.set("this", new)
+
+    if not renames:
+        return tree
+
+    # Nodes inside Unnest are source refs — do not rename those
+    inside_unnest: set[int] = {
+        id(col)
+        for un in tree.find_all(exp.Unnest)
+        for col in un.find_all(exp.Column)
+    }
+
+    for col in tree.find_all(exp.Column):
+        if id(col) in inside_unnest:
+            continue
+        # hits.type   → Column(table="hits", this="type")            → col.table matches
+        # hits.page.pagePath → Column(db="hits", table="page", this="pagePath") → col.db matches
+        for attr in ("catalog", "db", "table"):
+            val = col.text(attr)
+            if val and val in renames:
+                col.set(attr, exp.to_identifier(renames[val]))
+                break
+
+    return tree
 
 
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
     )
-    sqlglot.parse_one(query_on_test_ds, dialect=dialect)
-    duckdb_sql = sqlglot.parse_one(query_on_test_ds, dialect=dialect).sql(
-        dialect="duckdb"
-    )
+    tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
+    tree = _fix_unnest_alias_conflicts(tree)
+    duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
 
