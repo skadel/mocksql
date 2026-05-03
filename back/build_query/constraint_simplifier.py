@@ -1,30 +1,67 @@
 """
 constraint_simplifier.py — SQL constraint extraction and simplification.
 
-Public API:
-    simplify(sql, dialect="bigquery") -> SimplificationResult
+Public API
+----------
+    simplify(sql, dialect="bigquery", schema=None) -> SimplificationResult
+    extract_constraints(sql, dialect, schema)       -> (filters, equalities, functional, col_inequalities)
 
+simplify() algorithm
+--------------------
 Given a SQL query the function:
-  1. Resolves CTE column lineage back to base tables.
-  2. Extracts three kinds of constraints:
-       • FilterConstraint  – column <op> literal  (WHERE / ON predicates)
-       • EqualityConstraint – col = col            (join keys, simple equalities)
-       • FunctionalConstraint – col = f(col)       (TRIM, UPPER, …)
+  1. Resolves CTE column lineage back to base tables (sqlglot lineage engine).
+  2. Extracts three kinds of constraints via extract_constraints():
+       • FilterConstraint      – column <op> literal  (WHERE / ON predicates)
+       • EqualityConstraint    – col = col            (join keys, simple equalities)
+       • FunctionalConstraint  – col = f(col)         (TRIM, UPPER, …)
   3. Builds Union-Find equivalence classes from column equalities.
-  4. Simplifies to a minimal generation set:
-       • source_columns  – must be generated (one rep per equivalence class + filtered cols)
-       • derived_columns – can be computed from a source
-       • equivalence_classes – groups of columns sharing the same value
+  4. Produces a minimal generation set:
+       • source_columns        – must be generated (one rep per equivalence class + filtered cols)
+       • derived_columns       – can be computed from a source
+       • equivalence_classes   – groups of columns sharing the same value
+  5. For UNION / UNION ALL queries, recursively calls simplify() per branch and stores
+     independent SimplificationResults in union_branches — so the LLM sees disjoint paths
+     instead of a flat merged set of constraints.
+  6. Computes OR paths via DNF (Disjunctive Normal Form) for WHERE clauses that contain
+     OR nodes — including the outermost SELECT WHERE and CTE body WHEREs:
+       • or_paths              – one list[FilterConstraint] per satisfying OR branch
+       • or_paths_truncated    – True when expansion exceeded _MAX_OR_PATHS_EMIT (32)
+     The DNF expansion is capped at _MAX_OR_PATHS_COMPUTE (128) internally to prevent
+     exponential blowup (e.g. 7 independent OR clauses × 2 alternatives = 128 paths).
+
+Known gaps (extract_constraints)
+---------------------------------
+  • OR predicates are dropped by _flatten_and — captured by or_paths in simplify() instead.
+  • OR in JOIN ON clauses is dropped entirely.
+  • HAVING predicates are not captured (they apply to groups, not individual rows).
+  • Inner WHERE of IN (subquery) is not walked.
+  • CASE WHEN branch conditions are not extracted.
+
+SimplificationResult fields
+----------------------------
+  source_columns        dict[ColumnRef, list[FilterConstraint]]
+  derived_columns       dict[ColumnRef, (source_ColumnRef, "FUNC(source)")]
+  equivalence_classes   list[frozenset[ColumnRef]]
+  filters               list[FilterConstraint]        (raw, for downstream use)
+  functional            list[FunctionalConstraint]    (raw)
+  col_inequalities      list[(ColumnRef, ColumnRef)]  (anti-join pairs)
+  union_branches        list[SimplificationResult]    (one per UNION branch; empty if no UNION)
+  or_paths              list[list[FilterConstraint]]  (one per OR branch; empty if no OR)
+  or_paths_truncated    bool
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import sqlglot
 from sqlglot import expressions as exp
 from sqlglot.optimizer.simplify import simplify as sg_simplify
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Data structures ──────────────────────────────────────────────────────────
@@ -109,6 +146,20 @@ class SimplificationResult:
     # Comes from LEFT/RIGHT/FULL JOIN … ON a = b WHERE b IS NULL patterns.
     col_inequalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
 
+    # Per-branch SimplificationResults for UNION / UNION ALL queries.
+    # Each entry is the independent result for one branch; empty for non-UNION queries.
+    # Lets the LLM understand that each branch is a separate satisfying path (one test row
+    # per branch) rather than a flat mix of constraints that must all hold simultaneously.
+    union_branches: list["SimplificationResult"] = field(default_factory=list)
+
+    # OR paths from DNF of the outermost WHERE clause.
+    # Non-empty only when the WHERE has at least one OR node.
+    # Each inner list is a complete, independent set of FilterConstraints
+    # (after AND×OR cartesian expansion) that alone satisfies the condition.
+    # Example: WHERE a.y=10 AND (a.x=1 OR a.x=2) → [[y=10,x=1], [y=10,x=2]]
+    or_paths: list[list["FilterConstraint"]] = field(default_factory=list)
+    or_paths_truncated: bool = False  # True when > _MAX_OR_PATHS_EMIT paths were truncated
+
 
 # ─── Union-Find ───────────────────────────────────────────────────────────────
 
@@ -166,6 +217,8 @@ def _literal_value(node: exp.Expression) -> Any:
             s = node.name
             return float(s) if "." in s else int(s)
         return node.name  # string literal
+    if isinstance(node, exp.Boolean):
+        return node.this  # True or False
     if isinstance(node, exp.Null):
         return None
     if isinstance(node, exp.Neg):
@@ -397,7 +450,8 @@ class _LineageResolver:
                     base_col = n.name.split(".")[-1].lower()
                     sources.append(ColumnRef(base_table, base_col))
             return sources if sources else [col]
-        except Exception:
+        except Exception as exc:
+            logger.debug("resolve_all lineage failed for %s.%s: %s", col.table, col.column, exc)
             return [col]
 
     def _resolve_via_lineage(self, col: ColumnRef) -> ColumnRef:
@@ -423,10 +477,12 @@ class _LineageResolver:
                         lineage_sql = _build_column_sql(
                             col_expr, n.source, self._dialect
                         )
-                    except Exception:
+                    except Exception as exc:
+                        logger.debug("lineage sql build failed for %s.%s: %s", col.table, col.column, exc)
                         lineage_sql = n.name
             return ColumnRef(base_table, base_col, lineage=lineage_sql)
-        except Exception:
+        except Exception as exc:
+            logger.debug("resolve lineage failed for %s.%s: %s", col.table, col.column, exc)
             return col
 
 
@@ -464,6 +520,69 @@ def _flatten_and(cond: exp.Expression) -> list[exp.Expression]:
     if isinstance(cond, exp.And):
         return _flatten_and(cond.left) + _flatten_and(cond.right)
     return [cond]
+
+
+_MAX_OR_PATHS_COMPUTE = 128  # hard cap inside _to_dnf — prevents exponential blowup
+_MAX_OR_PATHS_EMIT    = 32   # max paths emitted in or_paths (sent to LLM)
+
+
+def _to_dnf(cond: exp.Expression, _max: int = _MAX_OR_PATHS_COMPUTE) -> list[list[exp.Expression]]:
+    """Convert a condition to Disjunctive Normal Form (DNF).
+
+    Returns a list of AND-paths (alternatives), where each path is a list of
+    atomic predicates that must all hold simultaneously.
+
+      AND(A, B)          → [[A, B]]
+      OR(A, B)           → [[A], [B]]
+      AND(OR(A,B), C)    → [[A, C], [B, C]]
+      OR(AND(A,B), C)    → [[A, B], [C]]
+
+    The _max parameter caps the result at each recursion level to prevent
+    exponential blowup (e.g. 7 OR clauses × 2 alternatives = 128 > _max).
+    """
+    if isinstance(cond, exp.Paren):
+        return _to_dnf(cond.this, _max)
+    if isinstance(cond, exp.And):
+        left_paths = _to_dnf(cond.args["this"], _max)
+        right_paths = _to_dnf(cond.args["expression"], _max)
+        return [lp + rp for lp in left_paths for rp in right_paths][:_max]
+    if isinstance(cond, exp.Or):
+        return (_to_dnf(cond.args["this"], _max) + _to_dnf(cond.args["expression"], _max))[:_max]
+    return [[cond]]
+
+
+def _extract_or_paths(
+    cond: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: "_LineageResolver",
+) -> tuple[list[list[FilterConstraint]], bool]:
+    """Extract OR paths from a WHERE condition using DNF.
+
+    Returns (paths, truncated) where:
+      - paths  : one FilterConstraint list per OR path (empty when no OR node).
+      - truncated : True when computed paths exceeded _MAX_OR_PATHS_EMIT and were cut.
+    _to_dnf internally caps at _MAX_OR_PATHS_COMPUTE to prevent exponential blowup.
+    """
+    paths = _to_dnf(cond)
+    if len(paths) <= 1:
+        return [], False
+
+    truncated = len(paths) > _MAX_OR_PATHS_EMIT
+    if truncated:
+        logger.warning(
+            "OR path expansion truncated: %d paths → %d emitted",
+            len(paths),
+            _MAX_OR_PATHS_EMIT,
+        )
+    paths_to_process = paths[:_MAX_OR_PATHS_EMIT]
+
+    result: list[list[FilterConstraint]] = []
+    for path_preds in paths_to_process:
+        path_filters: list[FilterConstraint] = []
+        for pred in path_preds:
+            _dispatch_pred(pred, alias_map, resolver, path_filters, [], [])
+        result.append(path_filters)
+    return result, truncated
 
 
 def _collect_safe_cast_constraints(
@@ -930,6 +1049,7 @@ def extract_constraints(
         schema: project schema from get_schemas(), used by sqlglot lineage for
                 accurate CTE resolution and type-aware column tracking.
     """
+    _t0 = time.monotonic()
     statement = sqlglot.parse_one(sql, dialect=dialect)
     sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
     resolver = _LineageResolver(statement, sqlglot_schema, dialect)
@@ -967,7 +1087,43 @@ def extract_constraints(
         col_inequalities,
     )
 
+    logger.debug(
+        "extract_constraints: %.1fms — filters=%d equalities=%d functional=%d inequalities=%d",
+        (time.monotonic() - _t0) * 1000,
+        len(filters),
+        len(equalities),
+        len(functional),
+        len(col_inequalities),
+    )
     return filters, equalities, functional, col_inequalities
+
+
+# ─── UNION branch splitter ────────────────────────────────────────────────────
+
+
+def _collect_union_branches(
+    node: exp.Expression,
+    with_clause: exp.Expression | None,
+    dialect: str,
+) -> list[str]:
+    """Return one SQL string per leaf SELECT branch of a UNION tree.
+
+    Each branch is wrapped with the original WITH clause so CTE lineage
+    resolution still works when simplify() processes it independently.
+    Returns an empty list if *node* is not a UNION.
+    """
+    if isinstance(node, exp.Union):
+        left_branches = _collect_union_branches(node.left, with_clause, dialect)
+        right_branches = _collect_union_branches(node.right, with_clause, dialect)
+        return left_branches + right_branches
+
+    if not isinstance(node, exp.Select):
+        return []
+
+    branch = node.copy()
+    if with_clause is not None:
+        branch.set("with_", with_clause.copy())
+    return [branch.sql(dialect=dialect)]
 
 
 # ─── Simplifier ───────────────────────────────────────────────────────────────
@@ -995,6 +1151,7 @@ def simplify(
        - Mark all others as derived from the representative (propagation).
     5. Functional-derived columns are marked as derived (not generated).
     """
+    _t0 = time.monotonic()
     filters, equalities, functional, col_inequalities = extract_constraints(
         sql, dialect, schema
     )
@@ -1061,4 +1218,60 @@ def simplify(
         expr_str = f"{fc.func}({fc.source})"
         result.derived_columns[fc.derived] = (fc.source, expr_str)
 
+    # Build per-branch results for UNION queries so the LLM sees independent paths.
+    statement = sqlglot.parse_one(sql, dialect=dialect)
+    with_clause = statement.args.get("with_") if hasattr(statement, "args") else None
+    branch_sqls = _collect_union_branches(statement, with_clause, dialect)
+    if len(branch_sqls) > 1:
+        for branch_sql in branch_sqls:
+            try:
+                result.union_branches.append(simplify(branch_sql, dialect, schema))
+            except Exception as exc:
+                logger.debug("union branch simplify failed: %s", exc)
+
+    # OR paths — outermost WHERE + CTE bodies (non-UNION queries only).
+    if not isinstance(statement, exp.Union):
+        sqlglot_schema_or = _schemas_to_sqlglot(schema) if schema else None
+        _or_resolver = _LineageResolver(statement, sqlglot_schema_or, dialect)
+
+        # Outermost SELECT WHERE
+        if isinstance(statement, exp.Select):
+            _or_alias_map: dict[str, str] = {}
+            _collect_aliases(statement, _or_alias_map)
+            where = statement.args.get("where")
+            if where is not None:
+                or_paths, truncated = _extract_or_paths(where.this, _or_alias_map, _or_resolver)
+                if or_paths:
+                    result.or_paths = or_paths
+                    result.or_paths_truncated = truncated
+
+        # CTE body WHEREs (OR paths are added even when outermost WHERE has no OR).
+        # Note: CTE-level OR paths are not AND-merged with the outer WHERE constraints;
+        # those remain in source_columns as flat filters for the LLM to combine.
+        if with_clause:
+            for cte in with_clause.expressions or []:
+                inner = cte.this
+                if isinstance(inner, exp.Select):
+                    cte_where = inner.args.get("where")
+                    if cte_where is not None:
+                        cte_alias_map: dict[str, str] = {}
+                        _collect_aliases(inner, cte_alias_map)
+                        cte_paths, cte_truncated = _extract_or_paths(
+                            cte_where.this, cte_alias_map, _or_resolver
+                        )
+                        if cte_paths:
+                            result.or_paths.extend(cte_paths)
+                            if cte_truncated:
+                                result.or_paths_truncated = True
+
+    logger.debug(
+        "simplify: %.1fms total — source_cols=%d derived=%d equiv_classes=%d branches=%d or_paths=%d truncated=%s",
+        (time.monotonic() - _t0) * 1000,
+        len(result.source_columns),
+        len(result.derived_columns),
+        len(result.equivalence_classes),
+        len(result.union_branches),
+        len(result.or_paths),
+        result.or_paths_truncated,
+    )
     return result

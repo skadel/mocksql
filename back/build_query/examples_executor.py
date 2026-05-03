@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 import uuid
 from typing import List, Dict, Any, Optional
@@ -24,6 +25,9 @@ from storage.test_repository import get_test
 from utils.saver import examples_state_retriever
 
 
+
+logger = logging.getLogger(__name__)
+
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
     """Load the persisted test suite from the test file."""
     test = get_test(session_id)
@@ -32,16 +36,9 @@ def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
     return []
 
 
-async def run_on_examples(state: QueryState) -> Dict[str, Any]:
+async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     """
     Exécute les unit tests sur les données générées et renvoie les résultats.
-
-    Deux modes :
-    - rerun_all_tests=True  : recharge tous les tests depuis la DB + le nouveau test du
-      générateur, les ré-exécute tous et marque le message RESULTS avec rerun_all=True.
-    - mode normal           : exécute seulement le (unique) nouveau test produit par le
-      générateur (ou les tests existants si le générateur n'en a pas produit de nouveau).
-      Le merge avec la suite complète est fait dans saver.py au moment de la persistance.
     """
     if state.get("error"):
         return {}
@@ -55,6 +52,11 @@ async def run_on_examples(state: QueryState) -> Dict[str, Any]:
 
     schemas = await get_schemas(project_id=state["project"])
     used_columns = [json.loads(c) for c in state.get("used_columns") or []]
+    
+    logger.debug("\n[DEBUG] >>> run_on_examples : used_columns bruts récupérés depuis le state:")
+    for uc in used_columns:
+        logger.debug(f"      - {uc}")
+
     filtered_schemas = filter_schemas_by_used_columns(schemas, used_columns)
 
     # Détermination de la liste de tests à exécuter
@@ -86,6 +88,7 @@ async def run_on_examples(state: QueryState) -> Dict[str, Any]:
     all_tests_results: List[Dict[str, Any]] = []
     with initialize_duckdb(DB_PATH) as con:
         for loop_index, test_case in enumerate(unit_tests):
+            logger.debug(f"\n[DEBUG] >>> Lancement test {loop_index} avec table(s) : {list(test_case.get('data', {}).keys())}")
             test_result = await _run_single_test_case(
                 state=state,
                 test_case=test_case,
@@ -168,25 +171,28 @@ def filter_schemas_by_used_columns(
         else item["table"]: [col.lower() for col in item["used_columns"]]
         for item in used_columns_info
     }
+    
+    logger.debug("\n[DEBUG] >>> filter_schemas_by_used_columns : used_cols_dict généré:")
+    logger.debug(f"      - {used_cols_dict}")
 
     filtered_schemas = []
     for table_schema in schemas:
-        # 2. On récupère le nom de la table (suffixe) pour matcher dans used_cols_dict
         parts = table_schema["table_name"].split(".")
         qualified = ".".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
-        # 3. Si le nom qualifié de la table est dans le dictionnaire des tables utilisées
         if qualified in used_cols_dict:
             wanted_cols = used_cols_dict[qualified]
+            logger.debug(f"\n[DEBUG] >>> Filtrage de la table {qualified}. wanted_cols: {wanted_cols}")
 
-            # 4. Ne garder que les colonnes qui apparaissent dans wanted_cols
             filtered_columns = [
                 col
                 for col in table_schema["columns"]
                 if col["name"].lower() in wanted_cols
+                or any(col["name"].lower().startswith(f"{w}.") for w in wanted_cols)
             ]
 
-            # 5. Si après filtrage il reste des colonnes, on garde ce schéma
+            logger.debug(f"[DEBUG] >>> Table {qualified} - Colonnes conservées: {[c['name'] for c in filtered_columns]}")
+
             if filtered_columns:
                 filtered_schemas.append(
                     {
@@ -532,7 +538,7 @@ async def _run_single_test_case(
         test_data = _prepare_test_data(test_case, schemas)
         suffix = f"{session_id}{test_index}"
 
-        print("<<<<<<< will create temp tables")
+        logger.debug("Creating temp tables for suffix=%s", suffix)
 
         # Création des tables de test dans DuckDB + insertion
         duckdb_tables_schema = create_test_tables(

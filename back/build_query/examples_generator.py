@@ -1,4 +1,5 @@
 import json
+import logging
 import uuid
 from datetime import datetime, date
 from typing import List, Optional
@@ -7,6 +8,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.messages import AIMessage
 from models.schemas import get_schemas
 from pydantic import Field, create_model
+
 
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
 from build_query.state import QueryState
@@ -18,6 +20,7 @@ from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
 
 llm = make_llm()
+logger = logging.getLogger(__name__)
 
 
 def _convert_datetime_fields(data):
@@ -74,56 +77,127 @@ def _run_simplify(
         from build_query.constraint_simplifier import simplify as _simplify_sql
 
         return _simplify_sql(sql_query, schema=schema, dialect=dialect)
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "constraint_simplifier failed (sql_hash=%s dialect=%s): %s",
+            hash(sql_query),
+            dialect,
+            exc,
+            exc_info=True,
+        )
         return None
 
 
-def _simplification_to_hint(result) -> str:
-    """Convert a SimplificationResult to a JSON constraints hint string."""
-    if result is None:
-        return ""
+def _format_filter_constraints(constraints: list) -> list[str]:
+    """Format a list of FilterConstraints as human-readable strings."""
+    filters = []
+    for c in constraints:
+        col_ref = c.column
+        op = _OP_LABELS.get(c.op, c.op.upper())
+        if c.op == "between":
+            lo, hi = (
+                c.value if isinstance(c.value, (list, tuple)) else (c.value, c.value)
+            )
+            filters.append(f"{col_ref} {op} {lo} AND {hi}")
+        elif c.op in ("in", "not_in"):
+            vals = c.value or []
+            val_str = "(" + ", ".join(repr(v) for v in vals[:6])
+            if len(vals) > 6:
+                val_str += ", ..."
+            val_str += ")"
+            filters.append(f"{col_ref} {op} {val_str}")
+        elif c.op in ("is_null", "is_not_null"):
+            filters.append(f"{col_ref} {op}")
+        else:
+            val = repr(c.value) if c.value is not None else ""
+            filters.append(f"{col_ref} {op} {val}".rstrip())
+    return filters
 
+
+def _branch_to_dict(result) -> dict:
+    """Convert a SimplificationResult to a plain dict (joins/filters/anti_joins)."""
     joins = [
         " = ".join(sorted(str(c) for c in group))
         for group in result.equivalence_classes
     ]
     anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
+    all_constraints = [c for cs in result.source_columns.values() for c in cs]
+    filters = _format_filter_constraints(all_constraints)
+    d: dict = {}
+    if joins:
+        d["joins"] = joins
+    if anti_joins:
+        d["anti_joins"] = anti_joins
+    if filters:
+        d["filters"] = filters
+    return d
 
-    filters = []
-    for col_ref, constraints in result.source_columns.items():
-        for c in constraints:
-            op = _OP_LABELS.get(c.op, c.op.upper())
-            if c.op == "between":
-                lo, hi = (
-                    c.value
-                    if isinstance(c.value, (list, tuple))
-                    else (c.value, c.value)
-                )
-                filters.append(f"{col_ref} {op} {lo} AND {hi}")
-            elif c.op in ("in", "not_in"):
-                vals = c.value or []
-                val_str = "(" + ", ".join(repr(v) for v in vals[:6])
-                if len(vals) > 6:
-                    val_str += ", ..."
-                val_str += ")"
-                filters.append(f"{col_ref} {op} {val_str}")
-            elif c.op in ("is_null", "is_not_null"):
-                filters.append(f"{col_ref} {op}")
-            else:
-                val = repr(c.value) if c.value is not None else ""
-                filters.append(f"{col_ref} {op} {val}".rstrip())
 
-    if not joins and not anti_joins and not filters:
+def _or_path_to_dict(or_path_filters: list, result) -> dict:
+    """Build a path dict for one OR branch, keeping join/anti-join context from result."""
+    joins = [
+        " = ".join(sorted(str(c) for c in group))
+        for group in result.equivalence_classes
+    ]
+    anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
+    filters = _format_filter_constraints(or_path_filters)
+    d: dict = {}
+    if joins:
+        d["joins"] = joins
+    if anti_joins:
+        d["anti_joins"] = anti_joins
+    if filters:
+        d["filters"] = filters
+    return d
+
+
+def _simplification_to_hint(result) -> str:
+    """Convert a SimplificationResult to a JSON constraints hint string.
+
+    Priority:
+      1. UNION branches  → {"paths": [branch0, branch1, ...]}
+         Each branch with OR inside is further expanded into sub-paths.
+      2. OR paths only   → {"paths": [or_path0, or_path1, ...]}
+         Each path includes join/anti-join context so the LLM sees complete rows.
+      3. Flat query      → {"joins": ..., "filters": ..., "anti_joins": ...}
+    """
+    if result is None:
         return ""
 
-    structured: dict = {}
-    if joins:
-        structured["joins"] = joins
-    if anti_joins:
-        structured["anti_joins"] = anti_joins
-    if filters:
-        structured["filters"] = filters
+    if result.union_branches:
+        paths = []
+        truncated = False
+        for branch in result.union_branches:
+            if branch.or_paths:
+                for or_path in branch.or_paths:
+                    d = _or_path_to_dict(or_path, branch)
+                    if d:
+                        paths.append(d)
+                if branch.or_paths_truncated:
+                    truncated = True
+            else:
+                d = _branch_to_dict(branch)
+                if d:
+                    paths.append(d)
+        paths = [p for p in paths if p]
+        if paths:
+            hint: dict = {"paths": paths}
+            if truncated:
+                hint["paths_truncated"] = True
+            return json.dumps(hint, ensure_ascii=False, indent=2)
 
+    if result.or_paths:
+        paths = [_or_path_to_dict(p, result) for p in result.or_paths]
+        paths = [p for p in paths if p]
+        if paths:
+            hint = {"paths": paths}
+            if result.or_paths_truncated:
+                hint["paths_truncated"] = True
+            return json.dumps(hint, ensure_ascii=False, indent=2)
+
+    structured = _branch_to_dict(result)
+    if not structured:
+        return ""
     return json.dumps(structured, ensure_ascii=False, indent=2)
 
 
