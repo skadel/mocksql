@@ -157,15 +157,7 @@ async def optimize_and_extract(query_ast, mapping, dialect, optimize=False):
 # utils/compile_query.py (ou là où se trouve ta fonction)
 async def compile_query(sql_code, project, dialect):
     if dialect == "bigquery":
-        from utils.bigquery_test_helper import BigQueryTestHelper
-        from models.schemas import get_schemas
-
-        bq_test = BigQueryTestHelper()
-        schemas = await get_schemas()
-        if schemas:
-            bq_test.create_empty_tables(schemas)
-        q = await bq_test.query_on_test_dataset(sql_code, "")
-        return run_query(q, dry=True).total_bytes_processed
+        return run_query(sql_code, dry=True).total_bytes_processed
 
     elif dialect == "postgres":
         from utils.postgres_test_helper import query_on_test_dataset, PostgresTestHelper

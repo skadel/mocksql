@@ -14,11 +14,9 @@ from dataclasses import dataclass, field
 from typing import List
 
 import pytest
-from google.cloud import bigquery
 
-from build_query.schema_fetcher import _flatten_bq_schema, _schema_fields_to_dicts
+from build_query.schema_fetcher import _bq_ddl_type, _flatten_bq_schema, _schema_fields_to_dicts
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
-from utils.bigquery_test_helper import BigQueryTestHelper
 
 
 # ─── Mock SchemaField ─────────────────────────────────────────────────────────
@@ -46,12 +44,6 @@ def _make_flat_row(field_path, data_type, mode="NULLABLE", catalog="p", schema="
         "mode": mode,
         "description": "",
     }
-
-
-def _build_via_helper(columns):
-    helper = BigQueryTestHelper.__new__(BigQueryTestHelper)
-    return helper.build_schema(columns)
-
 
 # ─── _schema_fields_to_dicts ──────────────────────────────────────────────────
 
@@ -88,7 +80,13 @@ def test_flatten_simple_field():
     dicts = [{"name": "user_id", "type": "STRING", "mode": "NULLABLE", "description": ""}]
     rows = _flatten_bq_schema(dicts)
     assert rows == [
-        {"field_path": "user_id", "data_type": "STRING", "mode": "NULLABLE", "description": ""}
+        {
+            "field_path": "user_id",
+            "data_type": "STRING",
+            "mode": "NULLABLE",
+            "description": "",
+            "bq_ddl_type": "STRING",
+        }
     ]
 
 
@@ -113,6 +111,92 @@ def test_flatten_missing_mode_defaults_nullable():
     dicts = [{"name": "x", "type": "STRING", "description": ""}]
     rows = _flatten_bq_schema(dicts)
     assert rows[0]["mode"] == "NULLABLE"
+
+
+# ─── _bq_ddl_type ────────────────────────────────────────────────────────────
+
+
+def test_bq_ddl_type_scalar():
+    assert _bq_ddl_type({"type": "STRING", "mode": "NULLABLE"}) == "STRING"
+
+
+def test_bq_ddl_type_scalar_repeated():
+    assert _bq_ddl_type({"type": "STRING", "mode": "REPEATED"}) == "ARRAY<STRING>"
+
+
+def test_bq_ddl_type_record_with_subfields():
+    field = {
+        "type": "RECORD",
+        "mode": "NULLABLE",
+        "fields": [
+            {"type": "STRING", "mode": "NULLABLE", "name": "campaign"},
+            {"type": "STRING", "mode": "NULLABLE", "name": "keyword"},
+        ],
+    }
+    assert _bq_ddl_type(field) == "STRUCT<campaign STRING, keyword STRING>"
+
+
+def test_bq_ddl_type_repeated_record():
+    field = {
+        "type": "RECORD",
+        "mode": "REPEATED",
+        "fields": [
+            {"type": "STRING", "mode": "NULLABLE", "name": "type"},
+            {"type": "INTEGER", "mode": "NULLABLE", "name": "hitNumber"},
+        ],
+    }
+    assert _bq_ddl_type(field) == "ARRAY<STRUCT<type STRING, hitNumber INTEGER>>"
+
+
+def test_bq_ddl_type_nested_record():
+    field = {
+        "type": "RECORD",
+        "mode": "NULLABLE",
+        "fields": [
+            {
+                "type": "RECORD",
+                "mode": "NULLABLE",
+                "name": "page",
+                "fields": [{"type": "STRING", "mode": "NULLABLE", "name": "pagePath"}],
+            }
+        ],
+    }
+    assert _bq_ddl_type(field) == "STRUCT<page STRUCT<pagePath STRING>>"
+
+
+def test_bq_ddl_type_record_without_subfields():
+    # Cache ancien sans sous-champs : fallback sur le type brut, pas de crash
+    assert _bq_ddl_type({"type": "RECORD", "mode": "NULLABLE"}) == "RECORD"
+
+
+def test_flatten_stores_bq_ddl_type_on_record():
+    dicts = [
+        {
+            "name": "trafficSource",
+            "type": "RECORD",
+            "mode": "NULLABLE",
+            "description": "",
+            "fields": [{"name": "campaign", "type": "STRING", "mode": "NULLABLE", "description": ""}],
+        }
+    ]
+    rows = _flatten_bq_schema(dicts)
+    root = next(r for r in rows if r["field_path"] == "trafficSource")
+    assert root["bq_ddl_type"] == "STRUCT<campaign STRING>"
+
+
+def test_flatten_stores_bq_ddl_type_on_repeated_record():
+    dicts = [
+        {
+            "name": "hits",
+            "type": "RECORD",
+            "mode": "REPEATED",
+            "description": "",
+            "fields": [{"name": "type", "type": "STRING", "mode": "NULLABLE", "description": ""}],
+        }
+    ]
+    rows = _flatten_bq_schema(dicts)
+    root = next(r for r in rows if r["field_path"] == "hits")
+    assert root["bq_ddl_type"] == "ARRAY<STRUCT<type STRING>>"
 
 
 # ─── generate_tables_and_columns_from_project_schema ──────────────────────────
@@ -148,132 +232,3 @@ def test_generate_missing_mode_defaults_nullable():
     tables = generate_tables_and_columns_from_project_schema(project_schema)
     col = tables[0]["columns"][0]
     assert col["mode"] == "NULLABLE"
-
-
-# ─── convert_type ────────────────────────────────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    "type_str, expected",
-    [
-        ("STRING", "STRING"),
-        ("INT64", "INTEGER"),
-        ("FLOAT64", "FLOAT"),
-        ("BOOL", "BOOLEAN"),
-        ("TIMESTAMP", "TIMESTAMP"),
-        ("DATE", "DATE"),
-        ("RECORD", "RECORD"),
-        ("STRUCT", "RECORD"),
-        ("ARRAY<STRING>", "STRING"),
-        ("ARRAY<STRUCT<x STRING>>", "RECORD"),
-        ("UNKNOWN_TYPE", "STRING"),
-    ],
-)
-def test_convert_type(type_str, expected):
-    helper = BigQueryTestHelper.__new__(BigQueryTestHelper)
-    assert helper.convert_type(type_str) == expected
-
-
-# ─── build_schema ────────────────────────────────────────────────────────────
-
-
-def test_build_schema_flat():
-    columns = [
-        {"name": "user_id", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "count", "type": "INT64", "mode": "NULLABLE"},
-    ]
-    schema = _build_via_helper(columns)
-    assert len(schema) == 2
-    assert schema[0].name == "user_id"
-    assert schema[0].field_type == "STRING"
-    assert schema[0].mode == "NULLABLE"
-
-
-def test_build_schema_repeated_record():
-    columns = [
-        {"name": "hits", "type": "RECORD", "mode": "REPEATED"},
-        {"name": "hits.page", "type": "STRING", "mode": "NULLABLE"},
-        {"name": "hits.type", "type": "STRING", "mode": "NULLABLE"},
-    ]
-    schema = _build_via_helper(columns)
-    assert len(schema) == 1
-    hits = schema[0]
-    assert hits.name == "hits"
-    assert hits.field_type == "RECORD"
-    assert hits.mode == "REPEATED"
-    assert len(hits.fields) == 2
-    field_names = {f.name for f in hits.fields}
-    assert field_names == {"page", "type"}
-
-
-def test_build_schema_nested_repeated():
-    columns = [
-        {"name": "sessions", "type": "RECORD", "mode": "REPEATED"},
-        {"name": "sessions.hits", "type": "RECORD", "mode": "REPEATED"},
-        {"name": "sessions.hits.page", "type": "STRING", "mode": "NULLABLE"},
-    ]
-    schema = _build_via_helper(columns)
-    sessions = schema[0]
-    assert sessions.mode == "REPEATED"
-    hits = sessions.fields[0]
-    assert hits.name == "hits"
-    assert hits.mode == "REPEATED"
-    assert hits.fields[0].name == "page"
-
-
-# ─── Chaîne complète : FakeField → build_schema ───────────────────────────────
-
-
-def test_full_chain_ga_hits():
-    """
-    Simule un schéma Google Analytics : hits est REPEATED RECORD avec un sous-champ page.
-    Vérifie que mode=REPEATED survit à toute la pipeline.
-    """
-    bq_schema = [
-        FakeField(
-            name="visitId",
-            field_type="INTEGER",
-            mode="NULLABLE",
-        ),
-        FakeField(
-            name="hits",
-            field_type="RECORD",
-            mode="REPEATED",
-            fields=[
-                FakeField(name="hitNumber", field_type="INTEGER", mode="NULLABLE"),
-                FakeField(name="page", field_type="STRING", mode="NULLABLE"),
-            ],
-        ),
-    ]
-
-    # Étape 1 : SchemaField → dicts imbriqués
-    dicts = _schema_fields_to_dicts(bq_schema)
-
-    # Étape 2 : dicts → lignes aplaties (dot-notation)
-    flat_rows = _flatten_bq_schema(dicts)
-
-    # Étape 3 : lignes → project_schema → tables_and_columns
-    project_schema = {
-        "data": [
-            {
-                "table_catalog": "my_project",
-                "table_schema": "ga",
-                "table_name": "sessions",
-                **row,
-            }
-            for row in flat_rows
-        ]
-    }
-    tables = generate_tables_and_columns_from_project_schema(project_schema)
-    columns = tables[0]["columns"]
-
-    # Étape 4 : tables_and_columns → BigQuery SchemaField
-    schema = _build_via_helper(columns)
-
-    schema_by_name = {f.name: f for f in schema}
-    assert schema_by_name["visitId"].mode == "NULLABLE"
-    assert schema_by_name["hits"].mode == "REPEATED"
-    assert schema_by_name["hits"].field_type == "RECORD"
-    hits_subfields = {f.name: f for f in schema_by_name["hits"].fields}
-    assert "hitNumber" in hits_subfields
-    assert "page" in hits_subfields
