@@ -388,12 +388,15 @@ class TestFunctions(unittest.TestCase):
             all(field in combined_model.model_fields for field in expected_fields)
         )
 
-        # Get inner model types from list[Model] annotation
-        products_model = get_args(combined_model.model_fields["products"].annotation)[0]
-        orders_model = get_args(combined_model.model_fields["orders"].annotation)[0]
-        order_items_model = get_args(
-            combined_model.model_fields["order_items"].annotation
-        )[0]
+        # Get inner model types from Optional[list[Model]] annotation
+        # get_args(Optional[list[M]]) = (list[M], NoneType); then get_args(list[M]) = (M,)
+        def _inner_model(field_name):
+            outer = get_args(combined_model.model_fields[field_name].annotation)[0]
+            return get_args(outer)[0]
+
+        products_model = _inner_model("products")
+        orders_model = _inner_model("orders")
+        order_items_model = _inner_model("order_items")
 
         # Assert each model has the correct fields and types
         self.assertTrue(issubclass(products_model, BaseModel))

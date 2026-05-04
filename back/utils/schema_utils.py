@@ -75,8 +75,6 @@ def update_schema(
 def generate_tables_and_columns_from_project_schema(
     project_schema: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
-    print("<<<<<<<<<<<<<<<<<<<<<<<<<project_schema")
-    print(project_schema)
     try:
         validated_schema = ProjectSchema(**project_schema)
     except ValidationError as e:

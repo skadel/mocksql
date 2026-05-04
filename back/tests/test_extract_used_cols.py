@@ -24,11 +24,16 @@ class TestExtractUsedColumns(unittest.TestCase):
                 "database": "",
                 "table": "users",
                 "used_columns": ["age", "id", "name"],
+                "used_identifiers": ["age", "name", "id", "u"],
             }
         ]
         query, _, used_columns, literals = asyncio.run(
             evaluate_and_fix_query(query, "dummy", mapping=tables, dialect="bigquery")
         )
+        for entry in used_columns:
+            entry["used_identifiers"] = sorted(entry.get("used_identifiers", []))
+        for entry in expected:
+            entry["used_identifiers"] = sorted(entry.get("used_identifiers", []))
         self.assertEqual(used_columns, expected)
 
     async def test_table_mix_alias(self):

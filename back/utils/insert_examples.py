@@ -3,6 +3,8 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from utils.examples import _uc_key
+
 logger = logging.getLogger(__name__)
 
 
@@ -210,13 +212,6 @@ def insert_examples(
 
     # Transformer la liste used_columns en dict pour accès rapide
     if used_columns is not None:
-
-        def _uc_key(uc: dict) -> str:
-            if uc.get("database"):
-                return f"{uc['database']}_{uc['table']}"
-            parts = uc["table"].split(".")
-            return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-
         used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
         logger.debug("used_columns_dict keys: %s", list(used_columns_dict.keys()))
     else:
@@ -290,6 +285,8 @@ def insert_examples(
             insert_stmt = build_insert_statement(
                 table_name_with_suffix, records, table_schema, used_cols=cols_to_use
             )
+            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<insert_stmt")
+            print(insert_stmt)
             yield insert_stmt
         elif len(records) == 0:
             logger.debug("Table '%s' ignorée car elle est vide.", table_name)

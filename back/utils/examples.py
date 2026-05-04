@@ -55,71 +55,21 @@ def filter_columns(schemas, used_columns):
         )
 
         if used_table_entry:
-            filtered_columns = [
-                col
-                for col in table["columns"]
-                if col["name"].lower()
-                in [uc.lower() for uc in used_table_entry["used_columns"]]
-            ]
-            filtered_tables.append(
-                {"table_name": qualified_under_name, "columns": filtered_columns}
-            )
-
-    return filtered_tables
-
-
-def filter_columns_mandatory(
-    schemas: list,
-    used_columns: list,
-    mandatory: dict[str, set[str]],
-) -> list:
-    """Like filter_columns() but further restricts to columns in the mandatory set.
-
-    mandatory: {table_name_short: {col1, col2, ...}} built from SimplificationResult.source_columns.
-    Falls back to all used columns for a table when it has no mandatory entry.
-    """
-    filtered_tables = []
-    for table in schemas:
-        parts = table["table_name"].split(".")
-        if len(parts) < 2:
-            continue
-
-        db_name_from_schema = parts[-2]
-        table_name_from_schema = parts[-1]
-        qualified_under_name = "_".join(parts[-2:])
-
-        used_table_entry = next(
-            (
-                item
-                for item in used_columns
-                if item.get("database") == db_name_from_schema
-                and item.get("table") == table_name_from_schema
-            ),
-            None,
-        )
-
-        if not used_table_entry:
-            continue
-
-        mandatory_cols = mandatory.get(table_name_from_schema)
-        if mandatory_cols:
-            filtered_columns = [
-                col
-                for col in table["columns"]
-                if col["name"].lower() in mandatory_cols
-                and col["name"].lower()
-                in [uc.lower() for uc in used_table_entry["used_columns"]]
-            ]
-        else:
-            # No mandatory entry for this table → keep all used columns (safe fallback)
-            filtered_columns = [
-                col
-                for col in table["columns"]
-                if col["name"].lower()
-                in [uc.lower() for uc in used_table_entry["used_columns"]]
-            ]
-
-        if filtered_columns:
+            used_cols = {uc.lower() for uc in used_table_entry["used_columns"]}
+            used_ids = {
+                ui.lower() for ui in used_table_entry.get("used_identifiers", [])
+            }
+            filtered_columns = []
+            for col in table["columns"]:
+                if col["name"].lower() in used_cols:
+                    if used_ids and "STRUCT<" in col.get("bq_ddl_type", ""):
+                        col = {
+                            **col,
+                            "bq_ddl_type": _filter_struct_type(
+                                col["bq_ddl_type"], used_ids
+                            ),
+                        }
+                    filtered_columns.append(col)
             filtered_tables.append(
                 {"table_name": qualified_under_name, "columns": filtered_columns}
             )
@@ -217,6 +167,89 @@ def parse_struct_fields(fields_str: str) -> List[str]:
     return cleaned_fields
 
 
+def _split_ddl_struct_fields(struct_inner: str) -> List[tuple]:
+    """Split STRUCT inner content into (field_name, field_type) pairs.
+
+    Uses bracket-level counting so commas inside nested STRUCT<> or ARRAY<> are
+    not treated as field separators.  Field names in BQ DDL never contain spaces.
+    """
+    raw: List[str] = []
+    start = 0
+    level = 0
+    for i, c in enumerate(struct_inner):
+        if c == "<":
+            level += 1
+        elif c == ">":
+            level -= 1
+        elif c == "," and level == 0:
+            raw.append(struct_inner[start:i].strip())
+            start = i + 1
+    raw.append(struct_inner[start:].strip())
+
+    result = []
+    for field in raw:
+        parts = field.split(" ", 1)
+        if len(parts) == 2:
+            result.append((parts[0], parts[1].strip()))
+    return result
+
+
+def _filter_struct_type(bq_ddl_type: str, used_ids: set) -> str:
+    """Trim a BQ DDL type to only keep STRUCT fields whose names appear in used_ids."""
+    if not used_ids:
+        return bq_ddl_type
+
+    is_array = bq_ddl_type.startswith("ARRAY<")
+    inner = bq_ddl_type[6:-1] if is_array else bq_ddl_type
+
+    if not inner.startswith("STRUCT<"):
+        return bq_ddl_type
+
+    struct_inner = inner[7:-1]
+    try:
+        pairs = _split_ddl_struct_fields(struct_inner)
+    except Exception:
+        return bq_ddl_type
+
+    kept = []
+    for fname, ftype in pairs:
+        if fname.lower() in used_ids:
+            kept.append(f"{fname} {_filter_struct_type(ftype, used_ids)}")
+
+    if not kept:
+        return bq_ddl_type
+
+    struct_type = f"STRUCT<{', '.join(kept)}>"
+    return f"ARRAY<{struct_type}>" if is_array else struct_type
+
+
+def _bq_ddl_to_pydantic(model_name: str, bq_ddl_type: str):
+    """Recursively convert a BQ DDL type string to a Python/Pydantic type."""
+    if bq_ddl_type.startswith("ARRAY<"):
+        inner = bq_ddl_type[6:-1]
+        inner_type = _bq_ddl_to_pydantic(f"{model_name}_item", inner)
+        return List[inner_type]
+
+    if bq_ddl_type.startswith("STRUCT<"):
+        struct_inner = bq_ddl_type[7:-1]
+        try:
+            pairs = _split_ddl_struct_fields(struct_inner)
+        except Exception:
+            return Dict[str, Any]
+
+        fields_def = {}
+        for fname, ftype in pairs:
+            sub_type = _bq_ddl_to_pydantic(f"{model_name}_{fname}", ftype)
+            fields_def[fname.lower()] = (Optional[sub_type], Field(None))
+
+        if not fields_def:
+            return Dict[str, Any]
+
+        return create_model(model_name, **fields_def)
+
+    return type_mapping.get(bq_ddl_type.upper(), str)
+
+
 def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]:
     models = {}
     for table in filtered_tables_and_columns:
@@ -225,60 +258,35 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
 
         for column in table["columns"]:
             col_name = column["name"].lower()
-            col_type_str = column["type"]
-            col_type = parse_field_type(col_type_str)
             col_description = column.get("description", None)
+            bq_ddl = column.get("bq_ddl_type", "")
 
-            if isinstance(col_type, type) and issubclass(col_type, dict):
-                # Handle STRUCT types by creating a nested model
-                struct_model_fields = {}
-                for struct_field_name, struct_field_type in col_type.items():
-                    struct_model_fields[struct_field_name] = (
-                        Optional[struct_field_type],
-                        Field(None, description=None),
-                    )
-                struct_model = create_model(
-                    f"{table_name}_{col_name}", **struct_model_fields
-                )
-                fields[col_name] = (
-                    Optional[struct_model],
-                    Field(None, description=col_description),
-                )
-
-            elif isinstance(col_type, list):
-                # Handle ARRAY of STRUCT
-                if isinstance(col_type[0], dict):
-                    array_struct_fields = {}
-                    for struct_field_name, struct_field_type in col_type[0].items():
-                        array_struct_fields[struct_field_name] = (
-                            Optional[struct_field_type],
-                            Field(None, description=None),
-                        )
-                    array_struct_model = create_model(
-                        f"{table_name}_{col_name}_item", **array_struct_fields
-                    )
-                    fields[col_name] = (
-                        Optional[List[array_struct_model]],
-                        Field(None, description=col_description),
-                    )
-                else:
-                    fields[col_name] = (
-                        Optional[col_type],
-                        Field(None, description=col_description),
-                    )
+            if bq_ddl:
+                col_type = _bq_ddl_to_pydantic(f"{table_name}_{col_name}", bq_ddl)
             else:
-                fields[col_name] = (
-                    Optional[col_type],
-                    Field(None, description=col_description),
-                )
+                col_type = parse_field_type(column["type"])
 
-        # Create the model for the table
+            fields[col_name] = (
+                Optional[col_type],
+                Field(None, description=col_description),
+            )
+
         model = create_model(table_name, **fields)
-        models[table_name] = (list[model], Field(None, description="Model for table "))
+        models[table_name] = (
+            Optional[list[model]],
+            Field(None, description="Model for table "),
+        )
 
-    # Create a combined model
     CombinedModel = create_model("CombinedModel", **models)
     return CombinedModel
+
+
+def _uc_key(uc: dict) -> str:
+    """Compute a lookup key matching duckdb_base for a used_columns entry."""
+    if uc.get("database"):
+        return f"{uc['database']}_{uc['table']}"
+    parts = uc["table"].split(".")
+    return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
 
 def _resolve_duck_type(bq_ddl_type: str, dialect: str) -> str:
@@ -287,11 +295,35 @@ def _resolve_duck_type(bq_ddl_type: str, dialect: str) -> str:
         dummy = sqlglot.parse_one(
             f"CREATE TABLE _t (_c {bq_ddl_type})", dialect=dialect
         )
-        duck_sql = dummy.sql(dialect="duckdb")
-        # "CREATE TABLE _t (_c TYPE)" → extract "TYPE" (strip last ")" from col list)
-        return duck_sql.split("(_c ", 1)[1][:-1]
+        col_def = dummy.find(exp.ColumnDef)
+        return col_def.args["kind"].sql(dialect="duckdb")
     except Exception:
         return bq_ddl_type
+
+
+def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
+    """Recursively resolve the DuckDB DDL type for a column, handling STRUCT/ARRAY."""
+    col = next(c for c in filtered_columns if c["name"] == col_name)
+    if bq_ddl_type := col.get("bq_ddl_type"):
+        return bq_ddl_type
+    base = col["type"].upper()
+    mode = col.get("mode", "NULLABLE").upper()
+    if base in ("RECORD", "STRUCT"):
+        depth = col_name.count(".")
+        children = [
+            c
+            for c in filtered_columns
+            if c["name"].startswith(f"{col_name}.")
+            and c["name"].count(".") == depth + 1
+        ]
+        if children:
+            inner = ", ".join(
+                f"{c['name'].split('.')[-1]} {_get_ddl_type(c['name'], filtered_columns)}"
+                for c in children
+            )
+            struct_type = f"STRUCT<{inner}>"
+            return f"ARRAY<{struct_type}>" if mode == "REPEATED" else struct_type
+    return f"ARRAY<{base}>" if mode == "REPEATED" else base
 
 
 def create_test_tables(
@@ -321,13 +353,6 @@ def create_test_tables(
 
     # Si used_columns est None, on crée un dictionnaire vide afin de ne pas filtrer les colonnes.
     if used_columns is not None:
-
-        def _uc_key(uc: dict) -> str:
-            if uc.get("database"):
-                return f"{uc['database']}_{uc['table']}"
-            parts = uc["table"].split(".")
-            return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-
         used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
     else:
         used_columns_dict = {}
@@ -352,36 +377,10 @@ def create_test_tables(
             else:
                 filtered_columns = table["columns"]
 
-            def _get_ddl_type(col_name: str) -> str:
-                col = next(c for c in filtered_columns if c["name"] == col_name)
-                if bq_ddl_type := col.get("bq_ddl_type"):
-                    return bq_ddl_type
-                base = col["type"].upper()
-                mode = col.get("mode", "NULLABLE").upper()
-                if base in ("RECORD", "STRUCT"):
-                    depth = col_name.count(".")
-                    children = [
-                        c
-                        for c in filtered_columns
-                        if c["name"].startswith(f"{col_name}.")
-                        and c["name"].count(".") == depth + 1
-                    ]
-                    if children:
-                        inner = ", ".join(
-                            f"{c['name'].split('.')[-1]} {_get_ddl_type(c['name'])}"
-                            for c in children
-                        )
-                        struct_type = f"STRUCT<{inner}>"
-                        return (
-                            f"ARRAY<{struct_type}>"
-                            if mode == "REPEATED"
-                            else struct_type
-                        )
-                return f"ARRAY<{base}>" if mode == "REPEATED" else base
-
             root_columns = [col for col in filtered_columns if "." not in col["name"]]
             columns_def = ", ".join(
-                f"{col['name']} {_get_ddl_type(col['name'])}" for col in root_columns
+                f"{col['name']} {_get_ddl_type(col['name'], filtered_columns)}"
+                for col in root_columns
             )
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"
             logger.debug("Creating table %s ...", table_name)
@@ -412,7 +411,7 @@ def create_test_tables(
                         {
                             **col,
                             "type": _resolve_duck_type(
-                                _get_ddl_type(col["name"]), dialect
+                                _get_ddl_type(col["name"], filtered_columns), dialect
                             ),
                         }
                         for col in root_columns
@@ -733,14 +732,12 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     if not renames:
         return tree
 
-    # Nodes inside Unnest are source refs — do not rename those
-    inside_unnest: set[int] = {
-        id(col) for un in tree.find_all(exp.Unnest) for col in un.find_all(exp.Column)
-    }
-
+    # Source columns inside UNNEST (e.g. `hits` in UNNEST(hits)) have no table
+    # qualifier, so they are naturally immune to the rename below.
+    # References to an unnested alias inside another UNNEST (e.g. `hits.product`
+    # in UNNEST(hits.product)) have the alias as their table qualifier and must
+    # be renamed — so we do not skip columns that appear inside Unnest nodes.
     for col in tree.find_all(exp.Column):
-        if id(col) in inside_unnest:
-            continue
         # hits.type   → Column(table="hits", this="type")            → col.table matches
         # hits.page.pagePath → Column(db="hits", table="page", this="pagePath") → col.db matches
         for attr in ("catalog", "db", "table"):

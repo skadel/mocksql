@@ -204,53 +204,6 @@ def _simplification_to_hint(result) -> str:
     return json.dumps(structured, ensure_ascii=False, indent=2)
 
 
-def _build_mandatory_set(result) -> dict[str, set[str]]:
-    """Build {table_name_short: {col, ...}} from SimplificationResult.source_columns."""
-    mandatory: dict[str, set[str]] = {}
-    for col_ref in result.source_columns:
-        table = (col_ref.real_table or col_ref.table).split(".")[-1].lower()
-        mandatory.setdefault(table, set()).add(col_ref.column.lower())
-    # Also include columns that appear in derived_columns as sources
-    for col_ref in result.derived_columns:
-        table = (col_ref.real_table or col_ref.table).split(".")[-1].lower()
-        mandatory.setdefault(table, set()).add(col_ref.column.lower())
-    return mandatory
-
-
-def _get_unconstrained_cols(
-    used_columns: list[dict],
-    schemas: list[dict],
-    mandatory: dict[str, set[str]],
-) -> list[dict]:
-    """Return [{table, col_name, col_type}] for columns absent from the mandatory set."""
-    schema_types: dict[str, dict[str, str]] = {}
-    for tbl in schemas:
-        short = tbl["table_name"].split(".")[-1].lower()
-        schema_types[short] = {
-            col["name"].lower(): col.get("type", "STRING")
-            for col in tbl.get("columns", [])
-        }
-
-    unconstrained = []
-    for entry in used_columns:
-        if isinstance(entry, str):
-            entry = json.loads(entry)
-        table = entry.get("table", "").lower()
-        mandatory_cols = mandatory.get(table, set())
-        col_types = schema_types.get(table, {})
-        for col in entry.get("used_columns", []):
-            col_lower = col.lower()
-            if col_lower not in mandatory_cols:
-                unconstrained.append(
-                    {
-                        "table": table,
-                        "col_name": col_lower,
-                        "col_type": col_types.get(col_lower, "STRING"),
-                    }
-                )
-    return unconstrained
-
-
 def _strip_unconstrained_from_sql(
     sql: str, excluded_col_names: list[str], dialect: str = "bigquery"
 ) -> str:
@@ -452,19 +405,8 @@ async def generate_examples_(
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
 
-    # TODO improve generation perf by filtering mandatory and only generate constrained
-    # implement this later when we are confident about sim_result later, sometimes there is columns missing for now
-    # if sim_result is not None:
-    #     mandatory = _build_mandatory_set(sim_result)
-    #     filtered_schema = filter_columns_mandatory(schema, used_columns, mandatory)
-    #     unconstrained_cols = _get_unconstrained_cols(used_columns, schema, mandatory)
-    # else:
-    #     # simplify() failed — fall back to full column set, no sparse filling
-    #     mandatory = {}
-    #     filtered_schema = filter_columns(schema, used_columns)
-    #     unconstrained_cols = []
-    # excluded_col_names = [f"{e['table']}.{e['col_name']}" for e in unconstrained_cols]
-
+    # TODO(#XXX): filtrer uniquement les colonnes contraintes (mandatory) pour réduire
+    # le contexte LLM — en attente de stabilisation de sim_result.
     filtered_schema = filter_columns(schema, used_columns)
     excluded_col_names = []
 
@@ -487,22 +429,6 @@ async def generate_examples_(
         return None, None
 
     generated_data = await (prompt | llm | parser).ainvoke({})
-
-    # # TODO implement this optimisation later
-    # # Build value pool for unconstrained columns and fill rows
-    # if unconstrained_cols:
-    #     from build_query.sparse_filler import (
-    #         build_unconstrained_pool,
-    #         fill_unconstrained,
-    #     )
-
-    #     pool = await build_unconstrained_pool(
-    #         unconstrained_cols, state.get("profile"), llm
-    #     )
-    #     raw_data = _convert_datetime_fields(generated_data.data.dict())
-    #     filled_data = fill_unconstrained(raw_data, pool)
-    # else:
-    #     filled_data = _convert_datetime_fields(generated_data.data.dict())
 
     filled_data = _convert_datetime_fields(generated_data.data.dict())
 

@@ -78,6 +78,10 @@ class DuckDBTestHelper:
         col_list = ", ".join(cols)
         sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
         values = [tuple(r.get(c) for c in cols) for r in cols and records]
+        print("<<<<<<<<<<<<<<<<<<<<<<sql")
+        print(sql)
+        print("<<<<<<<<<<<<value")
+        print(values)
         # NOTE: on préfère executemany côté DuckDB pour des batches homogènes
         self.conn.executemany(sql, values)
 
@@ -118,6 +122,8 @@ class DuckDBTestHelper:
                 name=table_name, cols=",\n    ".join(col_defs) if col_defs else ""
             ),
         ]
+        print("<<<<<<<<<<<<<<<<<<<<<<<stmts")
+        print(stmts)
         async with self._lock:
             await asyncio.to_thread(self._sync_exec_many, stmts)
         print(f"Created table {table_name}")
@@ -136,18 +142,6 @@ class DuckDBTestHelper:
         async with self._lock:
             await asyncio.to_thread(self._sync_insert_many, table_name, records)
         print(f"Inserted {len(records)} rows into {table_name}")
-
-    async def create_empty_tables(
-        self, session_id: str, tables_and_columns: List[Dict[str, Any]]
-    ):
-        """
-        Crée des tables vides pour chaque spec.
-        """
-        # Séquentiel par sécurité (DDL) + lock interne dans create_table
-        for tbl in tables_and_columns:
-            parts = tbl["table_name"].split(".")
-            key = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-            await self.create_table(session_id, key, tbl["columns"])
 
     async def execute_query(
         self, sql: str, params: Optional[Tuple[Any, ...]] = None
@@ -175,6 +169,7 @@ class DuckDBTestHelper:
         Pour chaque table, crée et insère (si overwrite=True), puis exécute la requête et retourne un DataFrame.
         """
         try:
+            print("<<<<<<<<<<<<<<<<<<<< create tables and insert json")
             if overwrite:
                 # DDL + DML séquentiels pour éviter les soucis de lock
                 for tbl in tables_and_columns:

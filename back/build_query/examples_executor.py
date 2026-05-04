@@ -98,7 +98,7 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
                 test_case=test_case,
                 loop_index=loop_index,
                 session_id=session_id_duckdb,
-                query=state.get("query"),
+                query=state.get("optimized_sql"),
                 schemas=filtered_schemas,
                 used_columns=used_columns,
                 con=con,
@@ -565,7 +565,6 @@ async def _run_single_test_case(
             used_columns=used_columns,
         )
         execute_queries(list(insert_queries), con)
-
         # 2) On exécute la requête globale
         final_res_df, final_duckdb_sql = await run_query_on_test_dataset(
             query, suffix, state["project"], dialect, con

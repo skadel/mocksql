@@ -7,7 +7,7 @@ from google.cloud import bigquery
 from langchain_core.messages import AIMessage
 from sqlglot import MappingSchema
 from sqlglot import expressions as exp
-from sqlglot.optimizer.scope import Scope, traverse_scope
+from sqlglot.optimizer.scope import traverse_scope
 
 from build_query.state import QueryState
 from common_vars import get_tables_mapping
@@ -277,8 +277,12 @@ async def get_source_columns(optimized, tables):
         project = entry["project"]
         database = entry["database"]
         used_columns_in_table = entry["used_columns"]
+
+        used_identifiers = entry.get("used_identifiers", [])
+
         qualified = f"{database}.{table}" if database else table
         lookup_key = qualified if qualified in tables else table
+
         if lookup_key in tables:
             used_columns.append(
                 {
@@ -286,6 +290,7 @@ async def get_source_columns(optimized, tables):
                     "database": database,
                     "table": table,
                     "used_columns": sorted(used_columns_in_table),
+                    "used_identifiers": used_identifiers,
                 }
             )
     return used_columns
@@ -378,11 +383,9 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
 
 
 def get_all_columns_with_sources(sql_expression):
-    # Dictionnaire pour stocker les colonnes et leurs sources
     col_with_sources = {}
 
-    # Fonction pour extraire les colonnes d'un scope
-    def extract_columns_from_scope(scope: Scope):
+    def extract_columns_from_scope(scope):
         for column in scope.columns:
             table_alias = column.table
             project_text = None
@@ -392,13 +395,16 @@ def get_all_columns_with_sources(sql_expression):
 
             if table_alias in scope.sources:
                 source = scope.sources[table_alias]
+
+                # On ignore les fausses tables créées par les UNNEST
+                if isinstance(source, exp.Unnest):
+                    continue
+
                 if isinstance(source, exp.Table):
-                    # Récupération du nom de la table
                     table_token = source.this
                     table_name_text = table_token.this if table_token else table_alias
                     alias = source.args.get("alias")
                     alias_text = alias.text("this") if alias else table_name_text
-                    # Récupération du projet (catalog) et de la base (db)
                     project_text = source.catalog
                     database_text = source.db
                 else:
@@ -408,7 +414,10 @@ def get_all_columns_with_sources(sql_expression):
                 table_name_text = table_alias
                 alias_text = table_alias
 
-            # Clé composite pour identifier de manière unique chaque table : (projet, base, table)
+            # Sécurité pour ne pas stocker de sources vides
+            if not table_name_text:
+                continue
+
             key = (project_text, database_text, table_name_text)
             if key not in col_with_sources:
                 col_with_sources[key] = {
@@ -418,20 +427,33 @@ def get_all_columns_with_sources(sql_expression):
                     "alias": alias_text,
                     "used_columns": set(),
                 }
-            col_with_sources[key]["used_columns"].add(column.name)
 
-    # Parcours des scopes de l'expression SQL
+            col_with_sources[key]["used_columns"].add(column.name.lower())
+
+    # 1. Parcours classique des scopes
     scopes = traverse_scope(sql_expression)
     for scope in scopes:
         extract_columns_from_scope(scope)
 
-    # Formatage du résultat sous forme d'une liste de dictionnaires
+    # 2. L'APPROCHE CHIRURGICALE : On extrait uniquement les morceaux de colonnes
+    global_columns = set()
+    for col in sql_expression.find_all(exp.Column):
+        # col.parts sépare les éléments (ex: hits.product.v2productname -> ['hits', 'product', 'v2productname'])
+        if hasattr(col, "parts"):
+            for part in col.parts:
+                global_columns.add(part.name.lower())
+        else:
+            global_columns.add(col.name.lower())
+
+    # 3. Formatage
     result = []
     for _, info in sorted(
         col_with_sources.items(), key=lambda x: (x[0][0] or "", x[0][1] or "", x[0][2])
     ):
         info["used_columns"] = list(info["used_columns"])
+        info["used_identifiers"] = list(global_columns)
         result.append(info)
+
     return result
 
 

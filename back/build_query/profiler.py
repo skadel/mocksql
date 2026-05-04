@@ -1766,9 +1766,6 @@ def build_profile_query(
     parts: list[str] = []
     idx = 0
 
-    print("<<<<<<<<<<<<<<<<<<<<<<<<used_columns")
-    print(used_columns)
-
     for entry in used_columns:
         table = entry.get("table", "")
         col_list = entry.get("used_columns", [])

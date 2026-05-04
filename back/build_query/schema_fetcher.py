@@ -143,8 +143,6 @@ async def fetch_tables_schema(
     sem = asyncio.Semaphore(concurrency)
     tasks = [_fetch_single_table(sem, client, ref, billing_project) for ref in refs]
     results = await asyncio.gather(*tasks)
-    print("<<<<<<<<<<<<<<<<<<<<results")
-    print(results)
 
     schema_rows: list[dict] = []
     failed: list[dict] = []
