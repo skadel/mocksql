@@ -3,6 +3,7 @@ import { updateModel, deleteModel, fetchModels, createModel } from '../../api/mo
 import { addProject, deleteProject, fetchProjects } from '../../api/projects';
 import { handleRejectedCaseAppBar } from '../../utils/errorCase';
 import { AppBarState, Model, Project } from '../../utils/types';
+import { chatQuery } from '../../api/query';
 
 
 const initialState: AppBarState = {
@@ -129,6 +130,12 @@ export const buildAppBarSlice = createSlice({
               })
               .addCase(createModel.fulfilled, (state, action) => {
                 state.loadingAppBar = false;
+              })
+              .addCase(chatQuery.fulfilled, (state, action) => {
+                const sessionId = action.meta.arg.sessionId;
+                const model = state.models.find(m => m.session_id === sessionId);
+                if (model) model.isTested = true;
+                if (state.currentModel?.session_id === sessionId) state.currentModel.isTested = true;
               })
             .addCase(fetchModels.pending, (state) => {
                 state.loadingAppBar = true;
