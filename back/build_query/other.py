@@ -11,8 +11,6 @@ from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_history_from_state
 
-llm = make_llm()
-
 
 async def other(state: QueryState):
     """Solves the query using the given input"""
@@ -32,6 +30,7 @@ async def other(state: QueryState):
     template: ChatPromptTemplate = build_other_prompt(
         history=history, user_input=state["input"], dialect=state["dialect"]
     )
+    llm = make_llm()
 
     runnable = template | llm | StrOutputParser()
 

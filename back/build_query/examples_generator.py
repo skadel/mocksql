@@ -22,7 +22,6 @@ from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
 
-llm = make_llm()
 logger = logging.getLogger(__name__)
 
 
@@ -427,7 +426,7 @@ async def generate_examples_(
     )
     if prompt is None:
         return None, None
-
+    llm = make_llm()
     generated_data = await (prompt | llm | parser).ainvoke({})
 
     filled_data = _convert_datetime_fields(generated_data.data.dict())
