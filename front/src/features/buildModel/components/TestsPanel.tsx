@@ -18,11 +18,15 @@ import ViewAgendaIcon from '@mui/icons-material/ViewAgenda';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import SyncIcon from '@mui/icons-material/Sync';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
+import DifferenceIcon from '@mui/icons-material/Difference';
 import {
   Box,
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
   Divider,
   IconButton,
   List,
@@ -1109,55 +1113,291 @@ function TestCard({
   );
 }
 
+/* ─── Diff utils ──────────────────────────────────────────────────── */
+type DiffLineType = 'same' | 'add' | 'remove';
+interface DiffLine { type: DiffLineType; text: string; oldNo: number | null; newNo: number | null; }
+
+function computeLineDiff(oldText: string, newText: string): DiffLine[] {
+  const a = oldText.split('\n'), b = newText.split('\n');
+  const m = a.length, n = b.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+  for (let i = 1; i <= m; i++)
+    for (let j = 1; j <= n; j++)
+      dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] + 1 : Math.max(dp[i-1][j], dp[i][j-1]);
+  const raw: Pick<DiffLine, 'type' | 'text'>[] = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && a[i-1] === b[j-1]) { raw.unshift({ type: 'same',   text: a[i-1] }); i--; j--; }
+    else if (j > 0 && (i === 0 || dp[i][j-1] >= dp[i-1][j])) { raw.unshift({ type: 'add',    text: b[j-1] }); j--; }
+    else { raw.unshift({ type: 'remove', text: a[i-1] }); i--; }
+  }
+  let oldNo = 1, newNo = 1;
+  return raw.map(l => {
+    const line: DiffLine = { ...l, oldNo: l.type === 'add' ? null : oldNo, newNo: l.type === 'remove' ? null : newNo };
+    if (l.type !== 'add') oldNo++;
+    if (l.type !== 'remove') newNo++;
+    return line;
+  });
+}
+
+/* collapse unchanged runs longer than 2×ctx, keep ctx lines around each hunk */
+function contextualLines(lines: DiffLine[], ctx = 3): (DiffLine | { collapsed: number })[] {
+  const changed = new Set(lines.map((l, i) => l.type !== 'same' ? i : -1).filter(i => i >= 0));
+  if (changed.size === 0) return [];
+  const visible = new Set<number>();
+  changed.forEach(ci => { for (let k = Math.max(0, ci - ctx); k <= Math.min(lines.length - 1, ci + ctx); k++) visible.add(k); });
+  const out: (DiffLine | { collapsed: number })[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (visible.has(i)) { out.push(lines[i++]); }
+    else {
+      let cnt = 0;
+      while (i < lines.length && !visible.has(i)) { cnt++; i++; }
+      out.push({ collapsed: cnt });
+    }
+  }
+  return out;
+}
+
 /* ─── StaleInfo ──────────────────────────────────────────────────── */
 export interface StaleInfo {
   isStale: boolean;
   commitsSince: number;
   lastTestedAt?: string;
   onReevaluate: () => void;
+  currentSql?: string;
+  onFetchNewSql?: () => Promise<string | null>;
 }
 
-function StaleBanner({ info }: { info: StaleInfo }) {
+function StaleBanner({ info, tests, sqlFileName }: { info: StaleInfo; tests: any[]; sqlFileName?: string }) {
   const { t } = useTranslation();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [newSql, setNewSql] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
+
   const changesLabel = info.commitsSince > 0
     ? `${info.commitsSince} changement${info.commitsSince > 1 ? 's' : ''} depuis le dernier test`
     : 'le fichier source a été modifié';
 
+  async function handleOpenDiff() {
+    setModalOpen(true);
+    if (newSql !== null || !info.onFetchNewSql) return;
+    setFetching(true);
+    const result = await info.onFetchNewSql();
+    setFetching(false);
+    setNewSql(result);
+  }
+
+  const diffLines = useMemo(() => {
+    if (!info.currentSql || !newSql) return [];
+    return computeLineDiff(info.currentSql, newSql);
+  }, [info.currentSql, newSql]);
+
+  const chunks = useMemo(() => contextualLines(diffLines), [diffLines]);
+  const addCount    = diffLines.filter(l => l.type === 'add').length;
+  const removeCount = diffLines.filter(l => l.type === 'remove').length;
+  const noDiff      = newSql !== null && addCount === 0 && removeCount === 0;
+
+  const showDiffBtn = !!info.onFetchNewSql && !!info.currentSql;
+
   return (
-    <Box sx={{
-      display: 'flex', alignItems: 'center', gap: 1.5,
-      px: 2, py: '9px', flexShrink: 0,
-      bgcolor: '#fffbeb', borderBottom: '1px solid #f5d878',
-    }}>
-      <WarningAmberIcon sx={{ fontSize: 15, color: '#c78f00', flexShrink: 0 }} />
-      <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Typography sx={{ fontSize: 12, fontWeight: 700, color: '#7a5500', lineHeight: 1.3 }}>
-          Fichier modifié — {changesLabel}
-        </Typography>
-        {info.lastTestedAt && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px', mt: '2px' }}>
-            <AccessTimeIcon sx={{ fontSize: 11, color: '#a07820' }} />
-            <Typography sx={{ fontSize: 11, color: '#a07820' }}>
-              Testé {relativeDate(info.lastTestedAt, t)}
-            </Typography>
+    <>
+      <Box sx={{
+        display: 'flex', alignItems: 'center', gap: 1.5,
+        px: 2, py: '9px', flexShrink: 0,
+        bgcolor: '#fffbeb', borderBottom: '1px solid #f5d878',
+      }}>
+        <WarningAmberIcon sx={{ fontSize: 15, color: '#c78f00', flexShrink: 0 }} />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography sx={{ fontSize: 12, fontWeight: 700, color: '#7a5500', lineHeight: 1.3 }}>
+            Fichier modifié — {changesLabel}
+          </Typography>
+          {info.lastTestedAt && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px', mt: '2px' }}>
+              <AccessTimeIcon sx={{ fontSize: 11, color: '#a07820' }} />
+              <Typography sx={{ fontSize: 11, color: '#a07820' }}>
+                Testé {relativeDate(info.lastTestedAt, t)}
+              </Typography>
+            </Box>
+          )}
+        </Box>
+        {showDiffBtn && (
+          <Box
+            component="button"
+            onClick={handleOpenDiff}
+            sx={{
+              display: 'inline-flex', alignItems: 'center', gap: '5px',
+              px: '11px', py: '5px', fontSize: 11.5, fontWeight: 600,
+              border: '1.5px solid #c0cdd0', borderRadius: '8px',
+              bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+              '&:hover': { borderColor: '#2BB0A8', color: '#2BB0A8', bgcolor: '#f0fafa' },
+            }}
+          >
+            <DifferenceIcon sx={{ fontSize: 13 }} />
+            Voir la diff
           </Box>
         )}
+        <Box
+          component="button"
+          onClick={info.onReevaluate}
+          sx={{
+            display: 'inline-flex', alignItems: 'center', gap: '5px',
+            px: '11px', py: '5px', fontSize: 11.5, fontWeight: 600,
+            border: '1.5px solid #c78f00', borderRadius: '8px',
+            bgcolor: '#fff', color: '#7a5500', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
+            '&:hover': { bgcolor: '#fff8e1', borderColor: '#a07820' },
+          }}
+        >
+          <ReplayIcon sx={{ fontSize: 13 }} />
+          Ré-évaluer
+        </Box>
       </Box>
-      <Box
-        component="button"
-        onClick={info.onReevaluate}
-        sx={{
-          display: 'inline-flex', alignItems: 'center', gap: '5px',
-          px: '11px', py: '5px', fontSize: 11.5, fontWeight: 600,
-          border: '1.5px solid #c78f00', borderRadius: '8px',
-          bgcolor: '#fff', color: '#7a5500', cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
-          '&:hover': { bgcolor: '#fff8e1', borderColor: '#a07820' },
-        }}
-      >
-        <ReplayIcon sx={{ fontSize: 13 }} />
-        Ré-évaluer
-      </Box>
-    </Box>
+
+      {/* ── Diff modal ─────────────────────────────────────────── */}
+      <Dialog open={modalOpen} onClose={() => setModalOpen(false)} maxWidth="md" fullWidth
+        PaperProps={{ sx: { borderRadius: '14px', maxHeight: '85vh' } }}>
+
+        {/* Header */}
+        <Box sx={{ px: 2.5, pt: 2, pb: 1.5, borderBottom: `1px solid ${BORDER}`, display: 'flex', alignItems: 'center', gap: 1.5, flexShrink: 0 }}>
+          <DifferenceIcon sx={{ fontSize: 18, color: '#c78f00' }} />
+          <Box sx={{ flex: 1 }}>
+            <Typography sx={{ fontWeight: 700, fontSize: 14, color: INK }}>
+              Diff SQL{sqlFileName ? ` — ${sqlFileName}` : ''}
+            </Typography>
+            {!fetching && newSql !== null && (
+              <Box sx={{ display: 'flex', gap: 1, mt: '3px' }}>
+                {addCount > 0 && (
+                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: '#23a26d', bgcolor: '#e6ffec', px: '7px', borderRadius: 999 }}>
+                    +{addCount} ligne{addCount > 1 ? 's' : ''}
+                  </Typography>
+                )}
+                {removeCount > 0 && (
+                  <Typography sx={{ fontSize: 11, fontWeight: 700, color: '#d0503f', bgcolor: '#ffebe9', px: '7px', borderRadius: 999 }}>
+                    −{removeCount} ligne{removeCount > 1 ? 's' : ''}
+                  </Typography>
+                )}
+                {noDiff && (
+                  <Typography sx={{ fontSize: 11, color: MUTED }}>Aucune différence détectée</Typography>
+                )}
+              </Box>
+            )}
+          </Box>
+          <IconButton size="small" onClick={() => setModalOpen(false)} sx={{ color: MUTED }}>
+            <CancelIcon sx={{ fontSize: 16 }} />
+          </IconButton>
+        </Box>
+
+        <DialogContent sx={{ p: 0, display: 'flex', flexDirection: 'column', gap: 0, overflow: 'hidden' }}>
+
+          {/* Diff view */}
+          <Box sx={{ flex: chunks.length > 0 ? '0 1 auto' : 1, overflowY: 'auto', maxHeight: tests.length > 0 ? '45vh' : '65vh' }}>
+            {fetching && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 3, color: MUTED }}>
+                <CircularProgress size={16} thickness={4} sx={{ color: TEAL }} />
+                <Typography sx={{ fontSize: 13 }}>Chargement du fichier…</Typography>
+              </Box>
+            )}
+            {!fetching && newSql === null && !info.onFetchNewSql && (
+              <Typography sx={{ p: 3, fontSize: 13, color: MUTED }}>Aperçu de la diff non disponible.</Typography>
+            )}
+            {!fetching && chunks.length > 0 && (
+              <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12 }}>
+                <tbody>
+                  {chunks.map((entry, ei) => {
+                    if ('collapsed' in entry) {
+                      return (
+                        <Box component="tr" key={`c-${ei}`} sx={{ bgcolor: '#f5f8fa' }}>
+                          <Box component="td" colSpan={3} sx={{ px: 2, py: '4px', color: MUTED, fontSize: 11.5, fontStyle: 'italic', borderBottom: `1px solid ${BORDER}` }}>
+                            ··· {entry.collapsed} ligne{entry.collapsed > 1 ? 's' : ''} identique{entry.collapsed > 1 ? 's' : ''} masquée{entry.collapsed > 1 ? 's' : ''}
+                          </Box>
+                        </Box>
+                      );
+                    }
+                    const l = entry as DiffLine;
+                    const bg    = l.type === 'add' ? '#e6ffec' : l.type === 'remove' ? '#ffebe9' : '#fff';
+                    const fg    = l.type === 'add' ? '#23a26d' : l.type === 'remove' ? '#d0503f' : MUTED;
+                    const prefix = l.type === 'add' ? '+' : l.type === 'remove' ? '−' : ' ';
+                    return (
+                      <Box component="tr" key={ei} sx={{ bgcolor: bg, '&:hover': { filter: 'brightness(0.97)' } }}>
+                        <Box component="td" sx={{ px: '10px', py: '2px', color: MUTED, fontSize: 10.5, userSelect: 'none', minWidth: 36, textAlign: 'right', borderRight: `1px solid ${BORDER}`, opacity: 0.6, whiteSpace: 'nowrap' }}>
+                          {l.oldNo ?? ''}
+                        </Box>
+                        <Box component="td" sx={{ px: '10px', py: '2px', color: MUTED, fontSize: 10.5, userSelect: 'none', minWidth: 36, textAlign: 'right', borderRight: `1px solid ${BORDER}`, opacity: 0.6, whiteSpace: 'nowrap' }}>
+                          {l.newNo ?? ''}
+                        </Box>
+                        <Box component="td" sx={{ px: '14px', py: '2px', whiteSpace: 'pre', color: l.type === 'same' ? INK : fg }}>
+                          <Box component="span" sx={{ color: fg, userSelect: 'none', mr: '6px', fontWeight: 700 }}>{prefix}</Box>
+                          {l.text}
+                        </Box>
+                      </Box>
+                    );
+                  })}
+                </tbody>
+              </Box>
+            )}
+            {!fetching && noDiff && (
+              <Box sx={{ p: 3, textAlign: 'center' }}>
+                <CheckCircleIcon sx={{ fontSize: 28, color: '#23a26d', mb: 1 }} />
+                <Typography sx={{ fontSize: 13, color: '#23a26d', fontWeight: 600 }}>Fichier synchronisé — aucune modification détectée</Typography>
+              </Box>
+            )}
+          </Box>
+
+          {/* Test summary */}
+          {tests.length > 0 && (
+            <>
+              <Box sx={{ px: 2.5, py: '8px', bgcolor: '#f5f8fa', borderTop: `1px solid ${BORDER}`, borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                  Tests actuels · {tests.length}
+                </Typography>
+              </Box>
+              <Box sx={{ overflowY: 'auto', maxHeight: '28vh' }}>
+                {tests.map((test, idx) => {
+                  const { verdict, label, fg, bg } = getVerdictInfo(test);
+                  const execSt = testExecStatus(test);
+                  return (
+                    <Box key={idx} sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 2.5, py: '7px', borderBottom: `1px solid #f0f3f4`, '&:last-of-type': { borderBottom: 'none' } }}>
+                      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '7px', py: '2px', borderRadius: 999, fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
+                        {verdict === 'good' && <CheckCircleIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'warn' && <WarningAmberIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'bad'  && <CancelIcon sx={{ fontSize: 10 }} />}
+                        {label}
+                      </Box>
+                      {execSt === 'fail' && (
+                        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '3px', bgcolor: '#ffebe9', color: '#d0503f', px: '6px', py: '1px', borderRadius: 999, fontSize: 10, fontWeight: 700, flexShrink: 0 }}>
+                          <CancelIcon sx={{ fontSize: 9 }} /> Échec
+                        </Box>
+                      )}
+                      {execSt === 'pass' && (
+                        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '3px', bgcolor: '#e6ffec', color: '#23a26d', px: '6px', py: '1px', borderRadius: 999, fontSize: 10, fontWeight: 700, flexShrink: 0 }}>
+                          <CheckCircleIcon sx={{ fontSize: 9 }} /> Pass
+                        </Box>
+                      )}
+                      <Typography sx={{ fontSize: 12.5, color: INK, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        #{idx + 1} {test.unit_test_description ?? '—'}
+                      </Typography>
+                    </Box>
+                  );
+                })}
+              </Box>
+            </>
+          )}
+        </DialogContent>
+
+        <DialogActions sx={{ px: 2.5, py: 1.5, borderTop: `1px solid ${BORDER}`, gap: 1 }}>
+          <Box component="button" onClick={() => setModalOpen(false)} sx={{ px: '14px', py: '6px', fontSize: 12, fontWeight: 600, border: `1.5px solid ${BORDER}`, borderRadius: '8px', bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit', '&:hover': { borderColor: MUTED } }}>
+            Fermer
+          </Box>
+          <Box
+            component="button"
+            onClick={() => { setModalOpen(false); info.onReevaluate(); }}
+            sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', px: '14px', py: '6px', fontSize: 12, fontWeight: 600, border: '1.5px solid #c78f00', borderRadius: '8px', bgcolor: '#fff', color: '#7a5500', cursor: 'pointer', fontFamily: 'inherit', '&:hover': { bgcolor: '#fff8e1' } }}
+          >
+            <ReplayIcon sx={{ fontSize: 13 }} /> Ré-évaluer
+          </Box>
+        </DialogActions>
+      </Dialog>
+    </>
   );
 }
 
@@ -1309,7 +1549,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Stale banner */}
-      {staleInfo?.isStale && <StaleBanner info={staleInfo} />}
+      {staleInfo?.isStale && <StaleBanner info={staleInfo} tests={testResults} sqlFileName={sqlProps?.sqlFileName} />}
       {!staleInfo?.isStale && syncedAt && (
         <Box sx={{
           display: 'flex', alignItems: 'center', gap: 1,

@@ -1019,6 +1019,13 @@ const ChatComponent: React.FC = () => {
                 commitsSince: currentModel.commitsSince ?? 0,
                 lastTestedAt: currentModel.updateDate,
                 onReevaluate: handleReevaluate,
+                currentSql: sqlQuery,
+                onFetchNewSql: currentModelPath
+                  ? async () => {
+                      try { return await fetchModelSql(currentModelPath); }
+                      catch { return null; }
+                    }
+                  : undefined,
               } : undefined}
               onSuggestionFill={(text) => { setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
               onUpload={(uploadedData) => {
