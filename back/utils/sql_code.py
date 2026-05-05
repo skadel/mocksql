@@ -60,7 +60,9 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
                 continue
 
             # Gestion des artefacts (PIVOT/UNPIVOT) et du masquage (shadowing)
-            if _is_cte_reference(source, active_cte_names, all_cte_names, scope_has_pivot):
+            if _is_cte_reference(
+                source, active_cte_names, all_cte_names, scope_has_pivot
+            ):
                 continue
 
             if not _is_duplicate_table(source, real_tables):
@@ -132,7 +134,9 @@ def _is_cte_reference(
     return False
 
 
-def _is_duplicate_table(source: sg.exp.Table, existing_tables: list[sg.exp.Table]) -> bool:
+def _is_duplicate_table(
+    source: sg.exp.Table, existing_tables: list[sg.exp.Table]
+) -> bool:
     """
     Vérifie si la table est déjà présente dans la liste basée sur sa signature complète.
     """
