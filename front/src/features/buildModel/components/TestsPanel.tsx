@@ -1225,6 +1225,22 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     persist(testResults.map((t, i) => i === idx ? { ...t, unit_test_description: newDesc } : t));
   };
 
+  const prevStaleRef = useRef<boolean>(false);
+  const [syncedAt, setSyncedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    const isNowStale = staleInfo?.isStale ?? false;
+    if (prevStaleRef.current && !isNowStale) setSyncedAt(Date.now());
+    prevStaleRef.current = isNowStale;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staleInfo?.isStale]);
+
+  useEffect(() => {
+    if (!syncedAt) return;
+    const t = setTimeout(() => setSyncedAt(null), 6000);
+    return () => clearTimeout(t);
+  }, [syncedAt]);
+
   const prevTestCountRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -1294,6 +1310,18 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
       {/* Stale banner */}
       {staleInfo?.isStale && <StaleBanner info={staleInfo} />}
+      {!staleInfo?.isStale && syncedAt && (
+        <Box sx={{
+          display: 'flex', alignItems: 'center', gap: 1,
+          px: 2, py: '7px', flexShrink: 0,
+          bgcolor: '#eaf5f0', borderBottom: '1px solid #b2e0ce',
+        }}>
+          <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d', flexShrink: 0 }} />
+          <Typography sx={{ fontSize: 12, fontWeight: 600, color: '#1b7a55' }}>
+            Synchronisé — {relTime(syncedAt)}
+          </Typography>
+        </Box>
+      )}
 
       {/* Header */}
       {testResults.length > 0 && (
