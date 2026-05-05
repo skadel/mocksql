@@ -324,16 +324,24 @@ puis générez un unique test unitaire en format JSON.
 
 7. **Ne pas inclure la requête SQL** dans le résultat.
 8. **Un seul test** dans la clé `unit_tests`.
+9. **Conditions OR / groupes de contraintes multiples** : quand le SQL contient plusieurs branches alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** par test et construire des données qui satisfont uniquement cette branche. Ne pas essayer de couvrir plusieurs alternatives à la fois. La description doit nommer explicitement la branche choisie (ex. "Pour un utilisateur premium …" plutôt que "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les autres branches alimentent les suggestions.
+
+**Ce que cet outil NE doit PAS tester** (laisser au moteur de warehouse) :
+- Les expressions constantes dans le SELECT final (ex. `SELECT 'valeur_fixe' AS col`) : résultat trivial, aucune logique métier à valider.
+- Les fonctions d'agrégation pures (SUM, AVG, COUNT, MIN, MAX) sans filtre ou condition métier : elles sont garanties correctes par le moteur SQL.
+- Le comportement interne des fonctions SQL (ordre de STRING_AGG, précision de CAST, format de DATE_FORMAT…) : tester la DB, pas la logique métier.
+- Les règles de calcul que toute implémentation SQL correcte produirait identiquement.
+Privilégier des scénarios où **la logique métier** — les filtres, jointures, conditions temporelles, règles de déduplication — est réellement testée.
 
 **Format de sortie obligatoire** : un objet JSON unique, sans commentaire ni texte additionnel, sous la forme :
 ```json
 {
-  "unit_test_description": "Vérifie que <assertion courte et actionnable>",
+  "unit_test_description": "Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat métier attendu]",
   "unit_test_build_reasoning": "...",
   "tags": ["Logique métier", "..."],
   "suggestions": [
-    "Vérifie que <assertion complémentaire 1>",
-    "S'assure que <assertion complémentaire 2>"
+    "Pour [sujet] [contexte spécifique] → [résultat attendu dans les données de sortie]",
+    "Pour [sujet] [autre contexte] → [résultat attendu dans les données de sortie]"
   ],
   "data": {
     "Table1Name": [
@@ -345,10 +353,10 @@ puis générez un unique test unitaire en format JSON.
   }
 }
 ```
-- `unit_test_description`: Assertion **courte et actionnable** commençant par un verbe ("Vérifie que…", "S'assure que…"). Exemple : "Vérifie que price > 0 pour toutes les lignes France".
+- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
 - `unit_test_build_reasoning`: Expliquez brièvement la logique de génération des données en vous concentrant sur les contraintes.
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
-- `suggestions`: Exactement 2 assertions actionnables de tests complémentaires à générer ensuite (même format que `unit_test_description`).
+- `suggestions`: Exactement 2 **scénarios métier** complémentaires au format *"Pour [sujet] [contexte] → [résultat attendu]"*. Les suggestions doivent cibler des cas métier distincts avec des valeurs concrètes — pas le comportement technique des fonctions SQL. Exemple à éviter : "S'assure que STRING_AGG trie correctement les valeurs" → Exemple correct : "Pour un client NO_SIRET NS ayant souscrit aux contrats C1, C2, C3 avec des type_operation différents → le champ type_operation de sortie contient toutes les valeurs séparées par '·'".
 - `data`: Données cohérentes, correctes pour la requête.
 
 ⚠️ **Toute casse incorrecte dans les noms de tables sera considérée comme une erreur.**
@@ -385,12 +393,14 @@ Ne produisez qu'une seule réponse en JSON conforme, sans texte additionnel."""
 Génère un test unitaire conforme aux consignes ci-dessus, avec :
 - Un seul test
 - Résultat JSON uniquement (champs dans l'ordre : unit_test_description, unit_test_build_reasoning, tags, suggestions, data)
-- `unit_test_description` : assertion courte commençant par "Vérifie que" ou "S'assure que"
+- `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
-- `suggestions` : exactement 2 assertions actionnables de tests à générer ensuite
+- `suggestions` : exactement 2 scénarios métier au format "Pour [sujet] [contexte] → [résultat]" — viser des cas métier distincts avec des valeurs concrètes, pas le comportement interne des fonctions SQL
 - Pas de requête SQL source dans la sortie
 - Données complètes, sans colonnes nulles ni vides (sauf si l'instruction le demande explicitement)
 - Attention stricte à la **casse exacte** des noms de tables dans le JSON
+- Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
+- Si le SQL a des conditions OR ou plusieurs branches CASE, choisir **une seule branche** et nommer explicitement la branche dans la description (les autres branches vont dans les suggestions)
 {non_empty_constraint}
 Voici les colonnes qui doivent être générées (les clés `data` doivent utiliser exactement le format `{{dataset}}_{{table}}` ci-dessous) :
 {[{"table_key": f"{u.get('database', '')}_{u.get('table', '')}" if u.get("database") else u.get("table", ""), "columns": u.get("used_columns", [])} for u in used_columns]}
@@ -466,9 +476,10 @@ Modifie les données JSON selon l’instruction ci-dessous :
 
 Génère un unique test unitaire modifié selon l’instruction ci-dessus.
 Respecte l’ordre des champs : unit_test_description, unit_test_build_reasoning, tags, suggestions, data.
-- `unit_test_description` : assertion courte commençant par "Vérifie que" ou "S’assure que"
+- `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
-- `suggestions` : exactement 2 assertions actionnables de tests complémentaires
+- `suggestions` : exactement 2 scénarios métier au format "Pour [sujet] [contexte] → [résultat]" — cibler des cas métier distincts avec des valeurs concrètes, pas le comportement interne des fonctions SQL
+- Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
 
 {format_instructions}
 
@@ -521,9 +532,11 @@ def query_change_data_prompt(
         "The query has been changed. Generate a single unit test adapted to the new query.\n\n"
         f"{format_instructions}\n\n"
         "Field order: unit_test_description, unit_test_build_reasoning, tags, suggestions, data.\n"
-        "- unit_test_description: short actionable assertion starting with 'Vérifie que' or 'S'assure que'.\n"
+        "- unit_test_description: business-contextualized description in the format 'Pour [subject with concrete values] [condition/situation] → [expected business result]'. Mention concrete values (IDs, dates, statuses). Avoid generic formulations like 'Vérifie que le calcul est correct'.\n"
         "- tags: relevant labels among Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance.\n"
-        "- suggestions: exactly 2 actionable assertions for complementary tests.\n\n"
+        "- suggestions: exactly 2 business scenarios in format 'Pour [subject] [context] → [expected result]'. Target distinct business cases with concrete values — not the internal behavior of SQL functions (avoid: 'S'assure que STRING_AGG trie correctement' → prefer: 'Pour un client avec contrats C1/C2/C3 de types différents → le champ type_operation agrège toutes les valeurs séparées par \"·\"').\n"
+        "- Do NOT test constant expressions, pure aggregates (SUM/AVG/COUNT), or internal SQL function behavior — these are guaranteed correct by the warehouse engine.\n"
+        "- If the SQL has OR conditions or multiple CASE branches, pick ONE branch per test and name it explicitly in the description. Other branches go into suggestions.\n\n"
         "old query :\n"
         "{old_query}\n\n"
         "New query :\n"
