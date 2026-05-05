@@ -17,37 +17,40 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
     - Les fonctions de table (ex: UNNEST, générateurs de tableaux, fonctions personnalisées)
     - Les artefacts syntaxiques (ex: références CTE masquées dans des nœuds PIVOT/UNPIVOT)
 
+    IMPORTANT: Cette fonction contourne un bug connu de SQLglot où les CTEs référencées
+    dans des clauses UNPIVOT ne sont pas correctement identifiées dans les scopes.
+
     Args:
         sql (str): La requête SQL à analyser.
         dialect (str): Le dialecte SQL ciblé (ex: "bigquery", "snowflake").
 
     Returns:
         list[sg.exp.Table]: Une liste d'objets Table représentant les dépendances réelles.
+
+    Raises:
+        sqlglot.ParseError: Si le SQL est syntaxiquement incorrect.
     """
     parsed = sg.parse_one(sql, dialect=dialect)
+
     real_tables: list[sg.exp.Table] = []
 
-    for scope in traverse_scope(parsed):
-        # 1. Extraction des CTE actives dans la portée (scope) courante.
-        # Gestion de la rétrocompatibilité : selon les versions de sqlglot,
-        # scope.ctes peut être un dictionnaire ou une liste.
-        active_cte_names = set()
-        if isinstance(scope.ctes, dict):
-            active_cte_names.update(scope.ctes.keys())
-        elif isinstance(scope.ctes, list):
-            for item in scope.ctes:
-                if isinstance(item, str):
-                    active_cte_names.add(item)
-                elif hasattr(item, "alias"):
-                    active_cte_names.add(item.alias)
+    # 1. Collecte de TOUTES les CTEs définies dans la requête
+    # Cette approche globale contourne le bug SQLglot avec UNPIVOT qui ne propage
+    # pas correctement les CTEs entre scopes.
+    all_cte_names = _extract_all_cte_names(parsed)
 
-        # 2. Analyse des sources de données de la portée courante.
+    # 2. Analyse des sources de données par scope avec filtrage robuste
+    for scope in traverse_scope(parsed):
+        # Détecte si le scope contient un PIVOT/UNPIVOT pour activer le fallback global.
+        # Bug SQLglot : scope.ctes est vide dans ces scopes même quand des CTEs y sont référencées.
+        scope_has_pivot = bool(scope.expression.find(sg.exp.Pivot))
+
+        active_cte_names = _extract_scope_cte_names(scope)
+
         for source in scope.sources.values():
-            # Ne conserver que les objets de type Table
             if not isinstance(source, sg.exp.Table):
                 continue
 
-            # Ignorer les artefacts de parsing sans nom
             if not source.name:
                 continue
 
@@ -56,18 +59,101 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
             if not isinstance(source.this, sg.exp.Identifier):
                 continue
 
-            # Gestion des artefacts (PIVOT/UNPIVOT) et du masquage (shadowing) :
-            # Si une table n'est pas qualifiée (aucun schéma/dataset renseigné)
-            # ET que son nom correspond à une CTE active dans ce scope, il s'agit
-            # d'une référence interne à la CTE. On l'ignore.
-            # (Les tables réelles pleinement qualifiées comme 'dataset.table' sont conservées).
-            is_unqualified = not source.db and not source.catalog
-            if is_unqualified and source.name in active_cte_names:
+            # Gestion des artefacts (PIVOT/UNPIVOT) et du masquage (shadowing)
+            if _is_cte_reference(source, active_cte_names, all_cte_names, scope_has_pivot):
                 continue
 
-            real_tables.append(source)
+            if not _is_duplicate_table(source, real_tables):
+                real_tables.append(source)
 
     return real_tables
+
+
+def _extract_all_cte_names(parsed: sg.exp.Expression) -> set[str]:
+    """
+    Extrait tous les noms de CTEs définis dans la requête complète.
+
+    Workaround pour le bug SQLglot où les CTEs dans UNPIVOT ne sont pas
+    correctement propagées dans les scopes.
+    """
+    all_cte_names = set()
+
+    for with_stmt in parsed.find_all(sg.exp.With):
+        for cte in with_stmt.expressions:
+            if isinstance(cte, sg.exp.CTE) and cte.alias:
+                all_cte_names.add(cte.alias)
+
+    return all_cte_names
+
+
+def _extract_scope_cte_names(scope) -> set[str]:
+    """
+    Extrait les noms des CTEs du scope courant avec gestion de rétrocompatibilité.
+    """
+    active_cte_names = set()
+
+    if isinstance(scope.ctes, dict):
+        active_cte_names.update(scope.ctes.keys())
+    elif isinstance(scope.ctes, list):
+        for item in scope.ctes:
+            if isinstance(item, str):
+                active_cte_names.add(item)
+            elif hasattr(item, "alias"):
+                active_cte_names.add(item.alias)
+
+    return active_cte_names
+
+
+def _is_cte_reference(
+    source: sg.exp.Table,
+    active_cte_names: set[str],
+    all_cte_names: set[str],
+    scope_has_pivot: bool,
+) -> bool:
+    """
+    Détermine si une table est une référence à une CTE.
+
+    Stratégie hybride :
+    - Vérification normale via scope.ctes (cas standard).
+    - Fallback global via all_cte_names uniquement si le scope contient un PIVOT/UNPIVOT :
+      SQLglot ne propage pas scope.ctes dans ces scopes (bug connu).
+      Le fallback global ne s'applique PAS aux scopes sans PIVOT/UNPIVOT pour éviter
+      de filtrer une vraie table qui partage son nom avec une CTE (shadowing).
+    """
+    is_unqualified = not source.db and not source.catalog
+
+    if is_unqualified and source.name in active_cte_names:
+        return True
+
+    # Fallback PIVOT/UNPIVOT : scope.ctes est vide même quand des CTEs sont référencées
+    if scope_has_pivot and is_unqualified and source.name in all_cte_names:
+        return True
+
+    return False
+
+
+def _is_duplicate_table(source: sg.exp.Table, existing_tables: list[sg.exp.Table]) -> bool:
+    """
+    Vérifie si la table est déjà présente dans la liste basée sur sa signature complète.
+    """
+    source_signature = _get_table_signature(source)
+
+    for existing in existing_tables:
+        if _get_table_signature(existing) == source_signature:
+            return True
+
+    return False
+
+
+def _get_table_signature(table: sg.exp.Table) -> str:
+    """
+    Génère une signature unique pour une table basée sur catalog.schema.table.
+    """
+    catalog = table.catalog or ""
+    schema = table.db or ""
+    name = table.name or ""
+
+    return f"{catalog}.{schema}.{name}"
 
 
 def build_sql(sub_questions: list[dict] | None, final_sql: str) -> str:

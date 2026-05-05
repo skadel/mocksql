@@ -196,6 +196,65 @@ class TestExtractRealTableRefs:
             "project.dataset.customers",
         }
 
+    def test_cte_unpivot_sqlglot_bug(self):
+        # Régression : SQLglot ne propage pas les CTEs dans le scope UNPIVOT
+        # quand la CTE intermédiaire est définie dans la même WITH clause.
+        # scope.ctes est vide pour le scope UNPIVOT → nvx_pdv était retourné
+        # comme une vraie table avec l'ancien algorithme (scope uniquement).
+        sql = """
+        WITH
+        cte1 AS (
+            SELECT code FROM dataset.real_table
+        ),
+        nvx_pdv AS (
+            SELECT * FROM cte1
+        ),
+        final AS (
+            SELECT * FROM nvx_pdv
+            UNPIVOT(valeur FOR indicateur IN (code))
+        )
+        SELECT * FROM final
+        """
+        assert names(sql) == {"dataset.real_table"}
+
+    def test_pivot_on_chained_cte_sqlglot_bug(self):
+        # Régression : même bug que UNPIVOT — le scope du CTE contenant PIVOT
+        # a scope.ctes vide, donc la CTE intermédiaire `src` était retournée
+        # comme une vraie table.
+        sql = """
+        WITH
+        src AS (
+            SELECT cat, val FROM ds.t
+        ),
+        pivoted AS (
+            SELECT * FROM src
+            PIVOT(SUM(val) FOR cat IN ('a', 'b'))
+        )
+        SELECT * FROM pivoted
+        """
+        assert names(sql) == {"ds.t"}
+
+    def test_double_unpivot_chain_sqlglot_bug(self):
+        # Régression : quand plusieurs CTEs enchaînés contiennent chacun un UNPIVOT,
+        # tous leurs scopes ont scope.ctes vide. L'ancien algo retournait `a` et `b`
+        # comme vraies tables au lieu de les filtrer.
+        sql = """
+        WITH
+        a AS (
+            SELECT x, y FROM ds.t
+        ),
+        b AS (
+            SELECT * FROM a
+            UNPIVOT(v FOR k IN (x, y))
+        ),
+        c AS (
+            SELECT * FROM b
+            UNPIVOT(v2 FOR k2 IN (v))
+        )
+        SELECT * FROM c
+        """
+        assert names(sql) == {"ds.t"}
+
     def test_cte_with_aggregations_and_unpivot(self):
         sql = """
         WITH agg AS (
