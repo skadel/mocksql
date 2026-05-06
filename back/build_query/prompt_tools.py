@@ -425,6 +425,7 @@ def update_data_prompt(
     dialect: str,
     format_instructions: str,
     sql: str = "",
+    existing_test: Optional[dict] = None,
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
@@ -467,9 +468,14 @@ def update_data_prompt(
     # 4. Construction du message final (Human) contenant les instructions de modification.
     sql_block = f"\nRequête SQL :\n```sql\n{sql}\n```\n" if sql else ""
 
+    existing_test_block = ""
+    if existing_test:
+        from build_query.converstion_history import _format_unit_tests_for_generator
+        existing_test_block = f"\nTest à modifier :\n```json\n{_format_unit_tests_for_generator([existing_test])}\n```\n"
+
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}
+{sql_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>
