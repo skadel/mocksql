@@ -897,6 +897,7 @@ interface TestCardProps {
   isCollapsed: boolean;
   areCommentsOpen: boolean;
   comments: Comment[];
+  isLoading?: boolean;
   onStartEdit: () => void;
   onSaveEdit: () => void;
   onEditDescription: (val: string) => void;
@@ -914,7 +915,7 @@ interface TestCardProps {
 function TestCard({
   test, idx, selectedTestIndex,
   isEditing, editedDescription, isCollapsed,
-  areCommentsOpen, comments,
+  areCommentsOpen, comments, isLoading,
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
@@ -966,7 +967,13 @@ function TestCard({
           )}
           {test.status === 'pending' && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11.5 }}>
-              <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} /> En cours…
+              <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} />
+              {Object.keys(inputData).length > 0 ? 'Exécution DuckDB…' : 'Génération…'}
+            </Box>
+          )}
+          {test.status !== 'pending' && isLoading && !test.evaluation && (
+            <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11.5 }}>
+              <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} /> Évaluation…
             </Box>
           )}
           {tags.map((tg) => {
@@ -1002,7 +1009,13 @@ function TestCard({
         )}
 
         {/* Verdict text */}
-        {test.status && test.status !== 'pending' && (
+        {test.status && test.status !== 'pending' && isLoading && !test.evaluation && (
+          <Box sx={{ mt: 1, p: '9px 12px', bgcolor: '#f5f7f8', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <CircularProgress size={10} thickness={5} sx={{ color: TEAL }} />
+            <Typography sx={{ fontSize: 12, color: MUTED }}>Évaluation en cours…</Typography>
+          </Box>
+        )}
+        {test.status && test.status !== 'pending' && (!isLoading || test.evaluation) && (
           <Box sx={{
             mt: 1, p: '9px 12px', bgcolor: bg, borderRadius: '8px',
             borderLeft: `2px solid ${fg}`, fontSize: 12.5, color: BODY, lineHeight: 1.55,
@@ -1087,10 +1100,34 @@ function TestCard({
       {/* Data section */}
       {!isCollapsed && (
         test.status === 'pending' ? (
-          <Box sx={{ borderTop: '1px solid #eff3f4', px: 2, py: 2 }}>
-            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
-            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
-            <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1 }} />
+          <Box sx={{ borderTop: '1px solid #eff3f4' }}>
+            {Object.keys(inputData).length > 0 ? (
+              <>
+                <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
+                  <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
+                    Données d'entrée
+                  </Typography>
+                  <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
+                    {Object.entries(inputData).map(([key, val]) => (
+                      <DisplayTable key={key} jsonData={val as any[]} tableName={key} />
+                    ))}
+                  </Box>
+                </Box>
+                <Box sx={{ display: 'flex', justifyContent: 'center', py: '2px', color: MUTED }}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M6 13l6 6 6-6" /></svg>
+                </Box>
+                <Box sx={{ px: 2, pb: 2 }}>
+                  <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
+                  <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1 }} />
+                </Box>
+              </>
+            ) : (
+              <Box sx={{ px: 2, py: 2 }}>
+                <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
+                <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1, mb: 0.5 }} />
+                <Skeleton variant="rectangular" height={28} sx={{ borderRadius: 1 }} />
+              </Box>
+            )}
           </Box>
         ) : (
           <>
@@ -1425,6 +1462,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
+  const isLoading = useAppSelector((state) => !!state.buildModel.loading);
 
   const {
     editingIndex, setEditingIndex,
@@ -1505,6 +1543,8 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     const prev = prevTestCountRef.current;
     const curr = testResults.length;
     if (curr > prev) {
+      // Collapse data sections of all previously existing tests so the new one is in focus
+      setCollapsed(new Set(Array.from({ length: prev }, (_, i) => i)));
       const targetId = `test-${curr}`;
       setTimeout(() => {
         const el = document.getElementById(targetId);
@@ -1697,6 +1737,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   isCollapsed={collapsed.has(idx)}
                   areCommentsOpen={!!openComments[testKey]}
                   comments={testComments}
+                  isLoading={isLoading}
                   onStartEdit={() => setEditingIndex(idx)}
                   onSaveEdit={() => handleSaveEdit(idx)}
                   onEditDescription={(val) => setEditedDescriptions((prev) => ({ ...prev, [idx]: val }))}
