@@ -28,7 +28,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly
+      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly, forceRoute
     } = params;
 
     if (!userInput && !query && !userTables && !profileResult) return;
@@ -105,7 +105,7 @@ export const chatQuery = createAsyncThunk(
             used_columns: [],
             used_columns_changed: false,
             optimize: true,
-            route: '',
+            route: forceRoute ?? (testIndex != null ? 'generator' : ''),
             status: '',
             save: '',
             title: '',

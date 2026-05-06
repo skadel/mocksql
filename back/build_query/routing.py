@@ -72,7 +72,10 @@ async def routing(state: QueryState):
     # When only user text is provided (no new SQL), classify intent with LLM
     # Skip classification when test_index is set: it's always a test modification
     if input_text:
-        detected_route = await _classify_intent(state, input_text)
+        if state.get("route") == "generator":
+            detected_route = "generator"
+        else:
+            detected_route = await _classify_intent(state, input_text)
         if detected_route == "other":
             messages.append(
                 HumanMessage(

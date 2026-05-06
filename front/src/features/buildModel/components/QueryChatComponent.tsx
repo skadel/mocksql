@@ -102,6 +102,7 @@ const ChatComponent: React.FC = () => {
     forceNewRef.current = isForceNew;
   }, [location.search]);
   const autoFixedIds = useRef<Set<string>>(new Set());
+  const forcedRouteRef = useRef('');
   const awaitingGetMessagesRef = useRef(false);
   const pendingSessionRef = useRef<string | null>(null);
   const prevLoadingRef = useRef<boolean | null>(null);
@@ -273,7 +274,8 @@ const ChatComponent: React.FC = () => {
       create: boolean = false,
       testIndex?: number,
       profileResult?: string,
-      isAssertionOnly?: boolean
+      isAssertionOnly?: boolean,
+      forceRoute?: string
     ): Promise<boolean> => {
       const text = (input ?? '').trim();
       if (!text && !userTables && !currentSqlQuery && !profileResult) return false;
@@ -311,6 +313,7 @@ const ChatComponent: React.FC = () => {
           profileResult,
           testIndex,
           assertionOnly: isAssertionOnly,
+          forceRoute,
         })).unwrap?.();
         return true;
       } catch {
@@ -529,7 +532,9 @@ const ChatComponent: React.FC = () => {
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
       const lastMessageId = lastMessage ? lastMessage.id : '';
 
-      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly);
+      const routeHint = forcedRouteRef.current;
+      forcedRouteRef.current = '';
+      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly, routeHint || undefined);
       setIsSending(false);
 
       if (ok) {
@@ -1027,7 +1032,7 @@ const ChatComponent: React.FC = () => {
                     }
                   : undefined,
               } : undefined}
-              onSuggestionFill={(text) => { setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
+              onSuggestionFill={(text) => { forcedRouteRef.current = 'generator'; setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
               onUpload={(uploadedData) => {
                 const lastMsg = renderMessages[renderMessages.length - 1] as any;
                 sendMessage('', sqlQuery, lastMsg?.id, lastMsg?.id, uploadedData, false);
