@@ -147,7 +147,7 @@ Samples:
                 "human",
                 f"""Here is the conversation history to help you classify : {history_parsed}
 
-Here’s the faulty {dialect.upper()} SQL query
+Here's the faulty {dialect.upper()} SQL query
 <sql>
 {query}
 </sql>
@@ -282,15 +282,15 @@ def generate_data_prompt(
 
     if user_instruction:
         consignes_1_2 = """\
-1. **Respectez l’instruction utilisateur** : le test doit implémenter exactement le scénario décrit
-   dans l’instruction ci-dessous, même s’il s’agit d’un cas limite, d’un résultat vide ou de valeurs NULL.
+1. **Respectez l'instruction utilisateur** : le test doit implémenter exactement le scénario décrit
+   dans l'instruction ci-dessous, même s'il s'agit d'un cas limite, d'un résultat vide ou de valeurs NULL.
 2. **Cas spécifiques permis** : contrairement au test standard, ce test peut couvrir des scénarios
-   d’erreurs, de jointures défaillantes ou tout autre cas demandé par l’instruction."""
+   d'erreurs, de jointures défaillantes ou tout autre cas demandé par l'instruction."""
     else:
         consignes_1_2 = """\
-1. **Usage nominal uniquement** : concentrez-vous sur un cas d’usage métier standard, où le résultat
+1. **Usage nominal uniquement** : concentrez-vous sur un cas d'usage métier standard, où le résultat
    de la requête est non vide et non nul (pas de valeurs NULL ou vides).
-2. **Exclusion des cas exceptionnels** : pas de scénarios d’erreurs ou de jointures défaillantes."""
+2. **Exclusion des cas exceptionnels** : pas de scénarios d'erreurs ou de jointures défaillantes."""
 
     system_message_content = (
         f"""
@@ -428,16 +428,16 @@ def update_data_prompt(
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
-    en appliquant précisément les instructions de modification fournies, sans ajouter d’explications
+    en appliquant précisément les instructions de modification fournies, sans ajouter d'explications
     ou de commentaires superflus. Les tests qui ne sont pas concernés par la modification ne doivent
-    pas être réécrits. En cas d’ajout de nouveaux tests, il convient d’utiliser des index distincts de
+    pas être réécrits. En cas d'ajout de nouveaux tests, il convient d'utiliser des index distincts de
     ceux déjà existants pour éviter tout écrasement.
 
-    Points d’attention :
-    1. **Renforcement du cadrage** : l’objectif est de modifier les données sources JSON, pas d’expliquer
+    Points d'attention :
+    1. **Renforcement du cadrage** : l'objectif est de modifier les données sources JSON, pas d'expliquer
        ou de justifier les modifications.
-    2. **Filtrage de l’historique** : on n’inclut que les messages utiles (sans la requête SQL).
-    3. **Strict respect de l’instruction** : si une partie du test n’a pas besoin d’être modifiée, elle ne
+    2. **Filtrage de l'historique** : on n'inclut que les messages utiles (sans la requête SQL).
+    3. **Strict respect de l'instruction** : si une partie du test n'a pas besoin d'être modifiée, elle ne
        doit pas être réécrite.
     4. **Format JSON strict** : toute sortie doit respecter le format défini dans `format_instructions`.
     """
@@ -448,7 +448,7 @@ def update_data_prompt(
         "Votre objectif est de mettre à jour les données sources JSON selon les instructions données,\n"
         "sans ajouter d'explications ou de justifications superflues.\n"
         "Ne modifiez que les parties explicitement concernées par les instructions, sans réécrire les tests inchangés.\n"
-        "En cas d’ajout d’un nouveau test, utilisez un index qui n’existe pas encore.\n"
+        "En cas d'ajout d'un nouveau test, utilisez un index qui n'existe pas encore.\n"
     )
     system_msg = SystemMessage(content=system_message_content)
 
@@ -460,7 +460,7 @@ def update_data_prompt(
         excluded_agents=[MsgType.PROVIDED_SQL],
     )
 
-    # 3. Ajout d’un horodatage (optionnel).
+    # 3. Ajout d'un horodatage (optionnel).
     current_datetime = datetime.datetime.now()
     formatted_datetime = current_datetime.strftime("%Y-%m-%d %H:%M")
 
@@ -468,14 +468,14 @@ def update_data_prompt(
     sql_block = f"\nRequête SQL :\n```sql\n{sql}\n```\n" if sql else ""
 
     final_human_message_content = f"""
-Modifie les données JSON selon l’instruction ci-dessous :
+Modifie les données JSON selon l'instruction ci-dessous :
 {sql_block}
 <Instruction>
 {user_input}
 </Instruction>
 
-Génère un unique test unitaire modifié selon l’instruction ci-dessus.
-Respecte l’ordre des champs : unit_test_description, unit_test_build_reasoning, tags, suggestions, data.
+Génère un unique test unitaire modifié selon l'instruction ci-dessus.
+Respecte l'ordre des champs : unit_test_description, unit_test_build_reasoning, tags, suggestions, data.
 - `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
 - `suggestions` : exactement 2 scénarios métier au format "Pour [sujet] [contexte] → [résultat]" — cibler des cas métier distincts avec des valeurs concrètes, pas le comportement interne des fonctions SQL
@@ -502,17 +502,17 @@ def query_change_data_prompt(
     history, dialect: str, format_instructions: str
 ) -> ChatPromptTemplate:
     """
-    Construit un prompt permettant d’adapter des données de test JSON existantes à une nouvelle requête SQL,
-    en se basant sur l’ancienne requête. L’objectif est d’ajuster (ou générer) des données unitaires
-    pour garantir qu’elles soient pertinentes pour la nouvelle requête, sans ajouter de commentaires
+    Construit un prompt permettant d'adapter des données de test JSON existantes à une nouvelle requête SQL,
+    en se basant sur l'ancienne requête. L'objectif est d'ajuster (ou générer) des données unitaires
+    pour garantir qu'elles soient pertinentes pour la nouvelle requête, sans ajouter de commentaires
     ou de justifications superflues.
 
-    Points d’attention :
+    Points d'attention :
     1. **Aucune sortie superflue** : la réponse doit suivre strictement le format JSON imposé par
        `format_instructions`, sans explication ou justification.
-    2. **Mise à jour ciblée** : on adapte uniquement les tests qui doivent l’être pour la nouvelle requête.
+    2. **Mise à jour ciblée** : on adapte uniquement les tests qui doivent l'être pour la nouvelle requête.
     3. **Old query / new query** : la fonction doit contextualiser le changement de requête pour
-       guider l’IA, mais ces requêtes ne doivent pas forcément apparaître dans la sortie finale.
+       guider l'IA, mais ces requêtes ne doivent pas forcément apparaître dans la sortie finale.
     4. **Date et heure courantes** : ajoutées en fin de consigne pour contexte, à la manière
        des autres fonctions.
     """
@@ -573,7 +573,7 @@ def make_routing_prompt(
         history,
         current_agent=MsgType.ROUTE,
         output_format="text",
-        excluded_agents=[MsgType.PROVIDED_SQL],
+        excluded_agents=[],
         dialect=dialect,
     )
     history_block = (
@@ -587,21 +587,21 @@ def make_routing_prompt(
                 """Vous êtes un routeur qui classe la question utilisateur dans : `query`, `analysis`, `other`.
 
 Définitions strictes :
-- `query` : la demande peut être satisfaite par **une seule requête SQL** (éventuellement avec agrégats, joins, fenêtres, filtres, seuils) SANS nécessiter d’interpréter un résultat pour décider d’une requête suivante.
-- `analysis` : besoin d’un **raisonnement multi-étapes** avec **itération ou branchement** après inspection des résultats (ex. diagnostic de causes, segmentation exploratoire, boucles "voir résultat → ajuster la stratégie/filtre → refaire", formulation d’hypothèses, choix de plusieurs vues/visualisations). Si une seule requête suffit, **ne classez PAS** en analysis.
+- `query` : la demande peut être satisfaite par **une seule requête SQL** (éventuellement avec agrégats, joins, fenêtres, filtres, seuils) SANS nécessiter d'interpréter un résultat pour décider d'une requête suivante.
+- `analysis` : besoin d'un **raisonnement multi-étapes** avec **itération ou branchement** après inspection des résultats (ex. diagnostic de causes, segmentation exploratoire, boucles "voir résultat → ajuster la stratégie/filtre → refaire", formulation d'hypothèses, choix de plusieurs vues/visualisations). Si une seule requête suffit, **ne classez PAS** en analysis.
 - `other` : le reste.
 
 Règles de décision (top-down) :
 1) La demande est-elle résoluble par une seule requête SQL claire ? → `query`.
-2) Sinon, la demande requiert-elle d’**interpréter** des résultats pour **choisir** des requêtes suivantes OU de **tester des hypothèses**/**segmentations multiples** ? → `analysis`.
+2) Sinon, la demande requiert-elle d'**interpréter** des résultats pour **choisir** des requêtes suivantes OU de **tester des hypothèses**/**segmentations multiples** ? → `analysis`.
 3) Sinon → `other`.
 
 Signaux forts de `query` : verbes "liste/compte/compare/vérifie/filtre", seuils simples (ex. "> 10%"), périodes précises, métriques nettes.
-Signaux forts de `analysis` : "pourquoi/expliquer les causes/proposer axes d’analyse/identifier segments contributeurs", "itérer jusqu’à trouver…", "explorer".
+Signaux forts de `analysis` : "pourquoi/expliquer les causes/proposer axes d'analyse/identifier segments contributeurs", "itérer jusqu'à trouver…", "explorer".
 
 Sortie JSON (un seul objet) :
 - Toujours : "title" (2–3 mots, concrets), "route", "reasoning" (≤35 mots, expliquant la règle activée).
-N’affichez rien d’autre.
+N'affichez rien d'autre.
 
 **Description de la base** :
 {{descriptions}}
@@ -611,15 +611,15 @@ N’affichez rien d’autre.
             # Exemples positifs/négatifs pour stabiliser la frontière
             (
                 "human",
-                "<question>\nTop 5 des clients par chiffre d’affaires ?\n</question>",
+                "<question>\nTop 5 des clients par chiffre d'affaires ?\n</question>",
             ),
             (
                 "ai",
-                '{"title": "Top 5 CA", "route": "query", "reasoning": "Une seule agrégation/tri suffit ; pas d’itération sur résultats."}',
+                '{"title": "Top 5 CA", "route": "query", "reasoning": "Une seule agrégation/tri suffit ; pas d\'itération sur résultats."}',
             ),
             (
                 "human",
-                "<question>\nQuel est l’évolution du chiffre d’affaires sur le dernier mois ?\n</question>",
+                "<question>\nQuel est l'évolution du chiffre d'affaires sur le dernier mois ?\n</question>",
             ),
             (
                 "ai",
@@ -627,7 +627,7 @@ N’affichez rien d’autre.
             ),
             (
                 "human",
-                "<question>\nNotre chiffre d’affaires a baissé de 12% au T2 vs T1. Pourquoi ?\n</question>",
+                "<question>\nNotre chiffre d'affaires a baissé de 12% au T2 vs T1. Pourquoi ?\n</question>",
             ),
             (
                 "ai",
@@ -639,11 +639,11 @@ N’affichez rien d’autre.
             ),
             (
                 "ai",
-                '{"title": "Axes utilisateurs", "route": "analysis", "reasoning": "Demande ouverte d’exploration multi-étapes, non une requête unique."}',
+                '{"title": "Axes utilisateurs", "route": "analysis", "reasoning": "Demande ouverte d\'exploration multi-étapes, non une requête unique."}',
             ),
             (
                 "human",
-                "<question>\nVérifie que sur la dernière partition_date je n’ai pas de baisse du nombre de contrats de plus de 10%.\n</question>",
+                "<question>\nVérifie que sur la dernière partition_date je n'ai pas de baisse du nombre de contrats de plus de 10%.\n</question>",
             ),
             (
                 "ai",
@@ -657,24 +657,73 @@ N’affichez rien d’autre.
     prompt_messages = [
         (
             "system",
-            """Tu es un routeur pour MockSQL, un outil de génération et de test de requêtes SQL.
+            """Tu es un routeur pour MockSQL, un outil de test de requêtes SQL.
 
-Étiquettes :
-- `generator` : le message concerne la génération, la modification ou l’évaluation de tests SQL (données de test, assertions, scénarios, cas limites, verdicts).
-- `other` : le message est hors-sujet (salutation, question générale sans lien avec les tests SQL, etc.).
+Routes :
+- `generator` : l'utilisateur demande à MockSQL d'**agir** — créer, modifier, ajouter, supprimer, régénérer des tests, des données de test, des assertions ou des verdicts. Le message est **impératif** (ordre ou requête d'action), même formulé poliment ("peux-tu ajouter…").
+- `other` : l'utilisateur **pose une question** ou **réfléchit à voix haute** — il veut une explication, comprendre un résultat, discuter d'une piste, ou exprime un avis sans demander à MockSQL de modifier quoi que ce soit.
 
-Règle unique : si le message, même de près ou de loin, porte sur les tests SQL ou la requête en cours → `generator`. Sinon → `other`.
+Règle de décision : demande-toi "MockSQL doit-il **modifier ou générer** quelque chose ?" Si oui → `generator`. Sinon → `other`.
+
+Signaux `generator` : "ajoute", "modifie", "génère", "change", "supprime", "mets à jour", "refais", "crée", "peux-tu faire", "je veux que tu…"
+Signaux `other` : "pourquoi", "comment", "qu'est-ce que", "c'est quoi", "tu penses que", "il faudrait peut-être", "je me demande si", "est-ce normal"
 
 Sortie JSON (unique) :
-{ "reasoning": "<≤30 mots>", "route": "generator" | "other" }
-N’affichez rien d’autre.
+{ "reasoning": "<≤25 mots>", "route": "generator" | "other" }
+N'affichez rien d'autre.
 """,
         ),
         (
             "human",
-            history_block
-            + "Nouvelle question :\n<question>\n{{input}}\n</question>\n\n"
-            + "\n\nSortie JSON :",
+            "<question>\nAjoute un test avec des valeurs NULL sur la colonne user_id.\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Demande impérative de création de test — MockSQL doit agir.", "route": "generator"}',
+        ),
+        (
+            "human",
+            "<question>\nPourquoi le test 2 échoue ?\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Question explicative sur un résultat — aucune action demandée.", "route": "other"}',
+        ),
+        (
+            "human",
+            "<question>\nPeux-tu générer un cas limite pour les ex æquo ?\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Requête de génération formulée poliment — MockSQL doit créer un test.", "route": "generator"}',
+        ),
+        (
+            "human",
+            "<question>\nJe me demande s'il faudrait tester les cas avec une plage vide.\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Reflexion a voix haute, aucune action demandee a MockSQL.", "route": "other"}',
+        ),
+        (
+            "human",
+            "<question>\nChange le verdict du test 1 en warn, les assertions sont trop permissives.\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Modification explicite de verdict existant — MockSQL doit agir.", "route": "generator"}',
+        ),
+        (
+            "human",
+            "<question>\nComment fonctionne la clause WINDOW dans cette requête ?\n</question>",
+        ),
+        (
+            "ai",
+            '{"reasoning": "Question technique sur la requete — explication attendue, pas de modification.", "route": "other"}',
+        ),
+        (
+            "human",
+            history_block + "<question>\n{{input}}\n</question>\n\nSortie JSON :",
         ),
     ]
     return ChatPromptTemplate.from_messages(prompt_messages, "mustache")

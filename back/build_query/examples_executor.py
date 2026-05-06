@@ -638,6 +638,9 @@ async def _run_single_test_case(
                 assertion_results = await _evaluate_assertions_with_retry(
                     assertions, **retry_kwargs
                 )
+                assertion_results = await _fix_logically_failing_assertions(
+                    assertion_results, **retry_kwargs
+                )
         finally:
             con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
 
@@ -911,6 +914,106 @@ async def _evaluate_assertions_with_retry(
             if new_assertion:
                 new_eval = _evaluate_assertions([new_assertion], view_name, con)
                 results[i] = new_eval[0]
+
+    return results
+
+
+async def _fix_logically_failing_assertions(
+    assertion_results: List[Dict[str, Any]],
+    view_name: str,
+    con,
+    duckdb_sql: str,
+    test_data: list,
+    result_df,
+    test_description: str,
+) -> List[Dict[str, Any]]:
+    """
+    Pour les assertions qui échouent logiquement (passed=False, sans erreur SQL),
+    demande au LLM si l'assertion elle-même est incorrecte. Si oui, la régénère
+    et la réévalue une fois. Appelée uniquement lors de la génération initiale.
+    """
+    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
+    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
+    sample = result_df.head(5).to_dict(orient="records")
+    results = list(assertion_results)
+
+    failing_indices = [
+        i for i, r in enumerate(results) if not r.get("passed") and not r.get("error")
+    ]
+    if not failing_indices:
+        return results
+
+    for i in failing_indices:
+        a = results[i]
+        failing_rows = a.get("failing_rows", [])
+
+        prompt = f"""Tu es un expert en tests SQL DuckDB dbt-style.
+
+Tu viens de générer une assertion qui échoue (retourne des lignes alors qu'elle devrait en retourner 0).
+Détermine si l'assertion est logiquement correcte ou si tu as fait une erreur dans sa logique.
+
+Description du test : {test_description}
+
+Données de test input :
+{test_data}
+
+Requête SQL testée :
+```sql
+{duckdb_sql}
+```
+
+Schéma exact de `__result__` :
+{schema_str}
+
+Exemples de résultat réel :
+{json.dumps(sample, ensure_ascii=False, default=str)}
+
+Assertion qui échoue :
+- Description : {a.get("description", "")}
+- SQL :
+```sql
+{a.get("sql", "")}
+```
+
+Lignes retournées par l'assertion (violations détectées) :
+{json.dumps(failing_rows[:10], ensure_ascii=False, default=str)}
+
+Question : l'assertion est-elle logiquement correcte par rapport au résultat réel, \
+ou as-tu fait une erreur dans sa formulation (mauvaise valeur attendue, mauvaise colonne, condition inversée, etc.) ?
+
+- Si l'assertion est **correcte** et le test échoue vraiment → réponds : {{"correct": true}}
+- Si l'assertion est **incorrecte** (tu as fait une erreur) → régénère-la : \
+{{"correct": false, "description": "...", "sql": "SELECT ..."}}
+
+Règles DuckDB strictes :
+- Utilise UNIQUEMENT les colonnes du schéma ci-dessus
+- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête
+
+Réponds UNIQUEMENT avec un objet JSON (aucun texte autour)."""
+
+        llm = make_llm()
+        try:
+            result = await llm.ainvoke(prompt)
+            content = normalize_llm_content(result.content)
+            json_match = re.search(r"\{[\s\S]*\}", content)
+            if not json_match:
+                continue
+            parsed = json.loads(json_match.group())
+            if not isinstance(parsed, dict):
+                continue
+            if parsed.get("correct"):
+                continue
+            new_sql = parsed.get("sql")
+            if not new_sql:
+                continue
+            new_assertion = {
+                "description": parsed.get("description", a["description"]),
+                "sql": new_sql,
+            }
+            new_eval = _evaluate_assertions([new_assertion], view_name, con)
+            results[i] = new_eval[0]
+        except Exception:
+            pass
 
     return results
 
