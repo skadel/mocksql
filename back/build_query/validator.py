@@ -3,6 +3,7 @@ import re
 from collections import defaultdict
 
 import sqlglot
+from sqlglot._typing import E
 from google.cloud import bigquery
 from langchain_core.messages import AIMessage
 from sqlglot import MappingSchema
@@ -46,7 +47,6 @@ async def validate_query(code, project, dialect, parent, state):
 
         optimized_sql, optimized, used_columns, literals = await evaluate_and_fix_query(
             code,
-            project=project,
             mapping=tables,
             dialect=dialect,
             optimize=state.get("optimize", False),
@@ -77,15 +77,10 @@ def has_used_column_changed(formatted_used_columns, state):
     return previous != formatted_used_columns
 
 
-async def evaluate_and_fix_query(
-    query, project, mapping=None, dialect="bigquery", optimize=False
-):
+async def evaluate_and_fix_query(query, mapping, dialect="bigquery", optimize=False):
     """
     Évalue et optimise une requête SQL en remplaçant les variables et en extrayant les informations nécessaires.
     """
-    if mapping is None:
-        mapping = await get_tables_mapping(project_id=project)
-
     parsed_statements = sqlglot.parse(query, read=dialect)
 
     final_query_ast = find_final_query_ast(parsed_statements)
@@ -141,7 +136,7 @@ def find_final_query_ast(parsed_statements) -> exp.Query | exp.With:
     raise Exception("NO SQL QUERY FOUND")
 
 
-async def optimize_and_extract(query_ast, mapping, dialect, optimize=False):
+async def optimize_and_extract(query_ast: E, mapping, dialect, optimize=False):
     """Optimise la requête et extrait les informations nécessaires."""
     result = await optimize_and_extract_info(
         query_ast, mapping, dialect, optimize=optimize
@@ -249,7 +244,7 @@ def find_literals_and_columns(parsed_query: exp.Expression):
     return output
 
 
-async def optimize_and_extract_info(parsed, tables, dialect, optimize=False):
+async def optimize_and_extract_info(parsed: E, tables, dialect, optimize=False):
     # Optimize the SQL query
     optimized = optimize_query(parsed, tables, dialect=dialect, optimize=optimize)
 
@@ -378,8 +373,11 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
             print(f"Optimisation complète échouée ({e}), fallback sur qualify.")
             parsed = pre_optimize
 
+    from utils.examples import _fix_unnest_alias_conflicts
+
     expr = qualify_tables(parsed)
-    return qualify_columns(expr, schema, infer_schema=True)
+    expr = qualify_columns(expr, schema, infer_schema=True)
+    return _fix_unnest_alias_conflicts(expr)
 
 
 def get_all_columns_with_sources(sql_expression):

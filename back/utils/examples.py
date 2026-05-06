@@ -632,6 +632,58 @@ def fix_duck_db_sql(duckdb_sql: str) -> str:
     return s
 
 
+def _fix_bare_unnest_col_refs(sql: str, error_msg: str) -> str | None:
+    """
+    Piloted by DuckDB BinderException: finds the exact bare column name from the
+    error message (e.g. productrevenue) and injects the full struct path from the
+    innermost UNNEST alias.  Only touches the one reported column — never corrupts
+    other references like fullvisitorid.
+    """
+    m = re.search(
+        r'(?:Referenced )?[Cc]olumn "([^"]+)" (?:not found|referenced that exists)',
+        error_msg,
+    )
+    if not m:
+        return None
+
+    bare_col = m.group(1).lower()
+
+    try:
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+    except Exception:
+        return None
+
+    unnest_aliases = []
+    for unnest in tree.find_all(exp.Unnest):
+        table_alias = unnest.args.get("alias")
+        if isinstance(table_alias, exp.TableAlias):
+            t_name = table_alias.name
+            cols = table_alias.args.get("columns", [])
+            if t_name and cols:
+                unnest_aliases.append((t_name, cols[0].name))
+
+    if not unnest_aliases:
+        return None
+
+    target_t, target_c = unnest_aliases[-1]
+
+    patched = False
+    for col in tree.find_all(exp.Column):
+        if (
+            col.name.lower() == bare_col
+            and not col.args.get("table")
+            and not col.args.get("db")
+        ):
+            col.set("table", exp.to_identifier(target_c))
+            col.set("db", exp.to_identifier(target_t))
+            patched = True
+
+    if not patched:
+        return None
+
+    return tree.sql(dialect="duckdb")
+
+
 async def run_query_on_test_dataset(
     query: str, session: str, project: str, dialect: str, con: duckdb.DuckDBPyConnection
 ) -> tuple[DataFrame, str]:
@@ -649,18 +701,25 @@ async def run_query_on_test_dataset(
         tuple[DataFrame, str]: The result of the query execution as a Pandas DataFrame,
             and the DuckDB SQL that was actually executed.
     """
-    # Parse the query to DuckDB SQL format
     duckdb_sql = await parse_test_query(query, session, dialect)
+    current_sql = fix_duck_db_sql(duckdb_sql)
 
-    # Workaround to fix potential issues with the generated DuckDB SQL
-    fixed_duckdb_sql = fix_duck_db_sql(duckdb_sql)
+    for _ in range(10):
+        try:
+            result = con.execute(current_sql).fetchdf()
+            return result, current_sql
+        except duckdb.BinderException as e:
+            patched = _fix_bare_unnest_col_refs(current_sql, str(e))
+            if patched is None:
+                logger.error("Failed to run query: %s\nSQL:\n%s", e, current_sql)
+                raise
+            current_sql = patched
+        except Exception as e:
+            logger.error("Failed to run query: %s\nSQL:\n%s", e, current_sql)
+            raise
 
-    try:
-        result = con.execute(fixed_duckdb_sql).fetchdf()
-        return result, fixed_duckdb_sql
-    except Exception as e:
-        logger.error("Failed to run query: %s\nSQL:\n%s", e, fixed_duckdb_sql)
-        raise
+    result = con.execute(current_sql).fetchdf()
+    return result, current_sql
 
 
 async def create_tables_on_test_dataset(
@@ -708,9 +767,16 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     BigQuery allows CROSS JOIN UNNEST(hits) AS hits where the alias matches the
     source column.  DuckDB raises "Ambiguous reference" in that case.
     Fix: rename the column alias to _{name}_u and patch all Column refs in the
-    query that point to that alias (excluding refs inside the Unnest node itself).
+    query that point to that alias.
+
+    Two representation cases handled (depends on whether qualify_columns ran first):
+      Pre-qualify:  hits.type  → Column(table="hits", this="type")       → qualifier renamed
+      Post-qualify: _t0.hits.type → Dot(Column(table="_t0", this="hits"), "type")
+                    → col.name == "hits" and col.table is the UNNEST table alias → col.this renamed
     """
     renames: dict[str, str] = {}
+    # table_alias → {old_col_alias → new_col_alias}, populated after qualify_tables
+    unnest_table_col_renames: dict[str, dict[str, str]] = {}
 
     for unnest_node in tree.find_all(exp.Unnest):
         tbl_alias = unnest_node.find(exp.TableAlias)
@@ -722,29 +788,43 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
             for e in unnest_node.expressions
             if hasattr(e, "name") and e.name
         }
+        table_alias_name = tbl_alias.name
         for alias_col in alias_cols:
             old = alias_col.name
             if old and old.lower() in src_names:
                 new = f"_{old}_u"
                 renames[old] = new
                 alias_col.set("this", new)
+                if table_alias_name:
+                    unnest_table_col_renames.setdefault(table_alias_name, {})[old] = new
 
     if not renames:
         return tree
 
-    # Source columns inside UNNEST (e.g. `hits` in UNNEST(hits)) have no table
-    # qualifier, so they are naturally immune to the rename below.
-    # References to an unnested alias inside another UNNEST (e.g. `hits.product`
-    # in UNNEST(hits.product)) have the alias as their table qualifier and must
-    # be renamed — so we do not skip columns that appear inside Unnest nodes.
     for col in tree.find_all(exp.Column):
-        # hits.type   → Column(table="hits", this="type")            → col.table matches
-        # hits.page.pagePath → Column(db="hits", table="page", this="pagePath") → col.db matches
+        renamed = False
+        # Pre-qualify case: qualifier is the UNNEST column alias (hits.type, product.v2name)
         for attr in ("catalog", "db", "table"):
             val = col.text(attr)
             if val and val in renames:
                 col.set(attr, exp.to_identifier(renames[val]))
+                renamed = True
                 break
+
+        if not renamed:
+            # Post-qualify case: qualify_columns replaced the UNNEST table alias with _tN
+            # and turned struct access into Dot(Column(table="_tN", this="old_alias"), field).
+            # The column name itself is the UNNEST alias — rename col.this.
+            col_table = col.text("table")
+            if col_table and col_table in unnest_table_col_renames:
+                old_name = col.name
+                if old_name in unnest_table_col_renames[col_table]:
+                    col.set(
+                        "this",
+                        exp.to_identifier(
+                            unnest_table_col_renames[col_table][old_name]
+                        ),
+                    )
 
     return tree
 
@@ -754,7 +834,6 @@ async def parse_test_query(query, suffix, dialect):
         sql_query=query, suffix=suffix, dialect=dialect
     )
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
-    tree = _fix_unnest_alias_conflicts(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
