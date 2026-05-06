@@ -17,7 +17,7 @@ import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
-import { createModel, createTestApi, fetchModelSql } from '../../../api/models';
+import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
 import SqlEditor from '../../../shared/SqlEditor';
 import { chatQuery, stopStream, validateQueryApi, checkProfileApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
@@ -458,7 +458,8 @@ const ChatComponent: React.FC = () => {
     pendingSessionRef.current = testId;
 
     await runSqlSubmissionFlow(fileSql, testId);
-  }, [selectedModelName, isSending, navigate, t, runSqlSubmissionFlow]);
+    dispatch(fetchModels());
+  }, [selectedModelName, isSending, navigate, t, runSqlSubmissionFlow, dispatch]);
 
   // -------- First message (SQL required)
   const handleNewChatSubmit = useCallback(async () => {

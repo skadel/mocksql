@@ -48,6 +48,14 @@ const DrawerComponent: React.FC = () => {
     dispatch(fetchModels());
   }, [dispatch]);
 
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') dispatch(fetchModels());
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [dispatch]);
+
   const handleChangeLanguage = (e: SelectChangeEvent<string>) => {
     const lang = e.target.value;
     setLanguage(lang);
