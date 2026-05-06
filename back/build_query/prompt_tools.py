@@ -471,6 +471,7 @@ def update_data_prompt(
     existing_test_block = ""
     if existing_test:
         from build_query.converstion_history import _format_unit_tests_for_generator
+
         existing_test_block = f"\nTest à modifier :\n```json\n{_format_unit_tests_for_generator([existing_test])}\n```\n"
 
     final_human_message_content = f"""

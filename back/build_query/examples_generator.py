@@ -529,9 +529,16 @@ async def create_appropriate_prompt(
     elif state.get("input", "").strip():
         if state.get("test_index") is not None:
             idx = state["test_index"]
-            existing_test = existing_tests[idx] if 0 <= idx < len(existing_tests) else None
+            existing_test = (
+                existing_tests[idx] if 0 <= idx < len(existing_tests) else None
+            )
             return update_data_prompt(
-                history, state["input"], dialect, format_instructions, sql=sql, existing_test=existing_test
+                history,
+                state["input"],
+                dialect,
+                format_instructions,
+                sql=sql,
+                existing_test=existing_test,
             )
         return generate_data_prompt(
             history,
