@@ -1,10 +1,18 @@
-.PHONY: style format test check build-cli build-ui build-all
+.PHONY: style format test check build-cli build-ui build-dev-ui build-all
 
 build-cli:
 	poetry build --output dist
 
 build-ui:
 	cd ../front && npm ci && npm run build
+	npx rimraf static ui/mocksql_ui/static
+	npx cpx "../front/build/**" static
+	npx cpx "../front/build/**" ui/mocksql_ui/static
+	poetry build --output dist
+	cd ui && poetry build --output ../dist
+
+build-dev-ui:
+	cd ../front && npm i && npm run build
 	npx rimraf static ui/mocksql_ui/static
 	npx cpx "../front/build/**" static
 	npx cpx "../front/build/**" ui/mocksql_ui/static
