@@ -13,15 +13,18 @@ from utils.saver import get_history_from_state
 async def conversational_agent(state: QueryState):
     """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
     existing_tests = await retrieve_existing_tests(state["session"], state)
-    tests_summary = "\n".join(
-        f"Test {t.get('test_index')}: {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
-        for t in existing_tests
-    ) or "Aucun test pour l'instant."
+    tests_summary = (
+        "\n".join(
+            f"Test {t.get('test_index')}: {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
+            for t in existing_tests
+        )
+        or "Aucun test pour l'instant."
+    )
 
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
-SQL testé (dialecte {state.get('dialect', 'bigquery')}):
-{state.get('optimized_sql') or state.get('query', '')}
+SQL testé (dialecte {state.get("dialect", "bigquery")}):
+{state.get("optimized_sql") or state.get("query", "")}
 
 Tests existants :
 {tests_summary}

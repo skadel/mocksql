@@ -70,7 +70,11 @@ async def routing(state: QueryState):
         return {"route": "fixer", "messages": error_history}
 
     # When existing tests are present, route all natural language input to the conversational agent
-    if input_text and state.get("has_existing_tests") and not state.get("rerun_all_tests"):
+    if (
+        input_text
+        and state.get("has_existing_tests")
+        and not state.get("rerun_all_tests")
+    ):
         messages.append(
             HumanMessage(
                 content=input_text,

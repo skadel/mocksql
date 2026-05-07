@@ -701,11 +701,7 @@ async def run_query_on_test_dataset(
         tuple[DataFrame, str]: The result of the query execution as a Pandas DataFrame,
             and the DuckDB SQL that was actually executed.
     """
-    print("<<<<<<<<<<<<<<<<<<<<<query")
-    print(query)
     duckdb_sql = await parse_test_query(query, session, dialect)
-    print("<<<<<<<<<<<<<<<<<<<<<duckdb_sql")
-    print(duckdb_sql)
     current_sql = fix_duck_db_sql(duckdb_sql)
 
     for _ in range(10):
@@ -833,16 +829,63 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _qualify_group_order_by_aliases(tree: exp.Expression) -> None:
+    """
+    Replace bare column refs in GROUP BY / ORDER BY with their qualified form
+    when a SELECT alias maps to a qualified column, to avoid DuckDB ambiguity
+    errors when the alias name also exists in multiple joined tables.
+    e.g. SELECT t.year AS year ... JOIN y ON t.year = y.year GROUP BY year
+      → GROUP BY t.year
+
+    Workaround for sqlglot not resolving GROUP BY aliases during BQ→DuckDB
+    transpilation. See test_alert_when_sqlglot_fixes_group_by_aliases_natively.
+    """
+    for select in tree.find_all(exp.Select):
+        alias_map: dict[str, exp.Column] = {}
+        for expr in select.expressions:
+            if (
+                isinstance(expr, exp.Alias)
+                and isinstance(expr.this, exp.Column)
+                and expr.this.args.get("table")
+            ):
+                alias_map[expr.alias.lower()] = expr.this
+
+        if not alias_map:
+            continue
+
+        group = select.args.get("group")
+        if group:
+            new_exprs = []
+            for expr in group.expressions:
+                if (
+                    isinstance(expr, exp.Column)
+                    and not expr.args.get("table")
+                    and expr.name.lower() in alias_map
+                ):
+                    new_exprs.append(alias_map[expr.name.lower()].copy())
+                else:
+                    new_exprs.append(expr)
+            group.set("expressions", new_exprs)
+
+        order = select.args.get("order")
+        if order:
+            for ordered in order.expressions:
+                inner = ordered.this
+                if (
+                    isinstance(inner, exp.Column)
+                    and not inner.args.get("table")
+                    and inner.name.lower() in alias_map
+                ):
+                    ordered.set("this", alias_map[inner.name.lower()].copy())
+
+
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
     )
-    print("<<<<<<<<<<<<<<query_on_test_ds")
-    print(query_on_test_ds)
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
+    _qualify_group_order_by_aliases(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
-    print("<<<<<<<<<<<<<<duckdb_sql")
-    print(duckdb_sql)
     return duckdb_sql
 
 

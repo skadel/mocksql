@@ -20,12 +20,13 @@ class TestSuggestionsOutput(BaseModel):
     suggestions: list[str] = Field(
         description="Liste exacte de 3 suggestions de cas de tests d'une phrase commençant par un verbe.",
         min_length=1,
-        max_length=3
+        max_length=3,
     )
+
 
 async def generate_suggestions(state: QueryState):
     """Génère des suggestions de cas de tests non encore couverts et les émet comme message SUGGESTIONS."""
-    
+
     # --- 1. Préparation des données ---
     test_cases = await retrieve_existing_tests(state["session"], state)
     if not test_cases:
@@ -33,8 +34,10 @@ async def generate_suggestions(state: QueryState):
 
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
     dialect = state.get("dialect", "bigquery")
-    
-    raw_instructions = (state.get("agent_tool_args") or {}).get("instructions", "") or ""
+
+    raw_instructions = (state.get("agent_tool_args") or {}).get(
+        "instructions", ""
+    ) or ""
     if isinstance(raw_instructions, list):
         raw_instructions = " ".join(str(x) for x in raw_instructions if x)
     instructions = raw_instructions.strip()
@@ -45,15 +48,26 @@ async def generate_suggestions(state: QueryState):
     )
 
     # Formatage propre avec balises XML pour le prompt
-    instruction_block = "<instructions_specifiques>\n{}\n</instructions_specifiques>" if instructions else ""
-    existing_tests_block = existing if existing else "Aucun test existant pour le moment."
+    instruction_block = (
+        "<instructions_specifiques>\n{}\n</instructions_specifiques>"
+        if instructions
+        else ""
+    )
+    existing_tests_block = (
+        existing if existing else "Aucun test existant pour le moment."
+    )
 
     # --- 2. Construction du Prompt ---
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", """Tu es un expert en assurance qualité et en tests unitaires SQL (dialecte: {}).
-Ton objectif est de fournir des idées de cas de tests pertinents et non couverts pour garantir la robustesse de la requête."""),
-        
-        ("user", """Voici la requête SQL à analyser :
+    prompt_template = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                """Tu es un expert en assurance qualité et en tests unitaires SQL (dialecte: {}).
+Ton objectif est de fournir des idées de cas de tests pertinents et non couverts pour garantir la robustesse de la requête.""",
+            ),
+            (
+                "user",
+                """Voici la requête SQL à analyser :
 <sql>
 {}
 </sql>
@@ -66,8 +80,10 @@ Voici les tests déjà générés (à ne pas reproduire) :
 </tests_existants>
 
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
-Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").""")
-    ])
+Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").""",
+            ),
+        ]
+    )
 
     # --- 3. Exécution avec LangChain (Structured Output) ---
     llm = make_llm()
@@ -76,14 +92,16 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
 
     try:
         # L'IA renvoie directement l'objet Python formaté !
-        result = await chain.ainvoke({
-            "dialect": dialect,
-            "sql": sql,
-            "instruction_block": instruction_block,
-            "existing_tests_block": existing_tests_block
-        })
+        result = await chain.ainvoke(
+            {
+                "dialect": dialect,
+                "sql": sql,
+                "instruction_block": instruction_block,
+                "existing_tests_block": existing_tests_block,
+            }
+        )
         suggestions = result.suggestions[:3]
-        
+
     except Exception as e:
         print(f"Erreur LLM lors de la génération des suggestions: {e}")
         # Fallback: collect from existing test.suggestions fields

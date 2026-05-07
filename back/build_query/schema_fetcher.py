@@ -131,7 +131,9 @@ async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
         raise RuntimeError(f"bq CLI timed out after {_CLI_TIMEOUT}s for {bq_ref}")
     if result.returncode != 0:
         stderr = result.stderr.strip()
-        if any(kw in stderr.lower() for kw in ("login", "credential", "auth", "password")):
+        if any(
+            kw in stderr.lower() for kw in ("login", "credential", "auth", "password")
+        ):
             raise RuntimeError(
                 f"bq CLI not authenticated for {bq_ref}. Run: gcloud auth login"
             )
@@ -152,8 +154,12 @@ async def _fetch_single_table(
             return ref, rows, None
         except Exception as api_exc:
             if _is_auth_error(api_exc):
-                return ref, [], (
-                    "Reauthentication required. Run: gcloud auth application-default login"
+                return (
+                    ref,
+                    [],
+                    (
+                        "Reauthentication required. Run: gcloud auth application-default login"
+                    ),
                 )
             print(f"[import] API failed for {ref} ({api_exc}), trying CLI fallback")
             try:
