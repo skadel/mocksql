@@ -72,14 +72,34 @@ def _schema_fields_to_dicts(fields: Any) -> list:
     return result
 
 
+_API_TIMEOUT = 60.0
+_CLI_TIMEOUT = 60
+
+
 async def _fetch_table_via_api(client: Any, ref: str, billing_project: str) -> list:
     proj, dataset, table = parse_ref(ref, billing_project)
-    bq_table = await asyncio.to_thread(client.get_table, f"{proj}.{dataset}.{table}")
+    bq_table = await asyncio.wait_for(
+        asyncio.to_thread(client.get_table, f"{proj}.{dataset}.{table}"),
+        timeout=_API_TIMEOUT,
+    )
     fields = _schema_fields_to_dicts(bq_table.schema)
     return [
         {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
         for row in _flatten_bq_schema(fields)
     ]
+
+
+_AUTH_KEYWORDS = (
+    "reauthentication is needed",
+    "invalid_grant",
+    "could not refresh access token",
+    "token has been expired or revoked",
+)
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(kw in msg for kw in _AUTH_KEYWORDS)
 
 
 async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
@@ -96,13 +116,26 @@ async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
         bq_ref,
     ]
     print(f"[import-cli] {cmd}")
-    result = await asyncio.to_thread(
-        lambda c=cmd: subprocess.run(
-            c, capture_output=True, text=True, shell=(os.name == "nt")
+    try:
+        result = await asyncio.to_thread(
+            lambda c=cmd: subprocess.run(
+                c,
+                capture_output=True,
+                text=True,
+                shell=(os.name == "nt"),
+                stdin=subprocess.DEVNULL,
+                timeout=_CLI_TIMEOUT,
+            )
         )
-    )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"bq CLI timed out after {_CLI_TIMEOUT}s for {bq_ref}")
     if result.returncode != 0:
-        raise RuntimeError(f"bq show failed for {bq_ref}: {result.stderr.strip()}")
+        stderr = result.stderr.strip()
+        if any(kw in stderr.lower() for kw in ("login", "credential", "auth", "password")):
+            raise RuntimeError(
+                f"bq CLI not authenticated for {bq_ref}. Run: gcloud auth login"
+            )
+        raise RuntimeError(f"bq show failed for {bq_ref}: {stderr}")
     fields = json.loads(result.stdout)
     return [
         {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
@@ -118,6 +151,10 @@ async def _fetch_single_table(
             rows = await _fetch_table_via_api(client, ref, billing_project)
             return ref, rows, None
         except Exception as api_exc:
+            if _is_auth_error(api_exc):
+                return ref, [], (
+                    "Reauthentication required. Run: gcloud auth application-default login"
+                )
             print(f"[import] API failed for {ref} ({api_exc}), trying CLI fallback")
             try:
                 rows = await _fetch_table_via_cli(ref, billing_project)
