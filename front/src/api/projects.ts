@@ -1,4 +1,4 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import {
   Project
 } from '../utils/types';
@@ -8,7 +8,7 @@ import { apiRequest } from "./utils";
 export const fetchProjectById = createAsyncThunk(
   'project/fetchProjectById',
   async (projectId: string, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/project/${projectId}`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/project/${projectId}`;
     return apiRequest<string>({
       url,
       method: 'GET',
@@ -22,7 +22,7 @@ export const fetchProjectById = createAsyncThunk(
 export const addProject = createAsyncThunk(
   'projects/addProject',
   async (project: Project, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/projects`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/projects`;
     return apiRequest<Project>({
       url,
       method: 'POST',
@@ -37,7 +37,7 @@ export const addProject = createAsyncThunk(
 export const deleteProject = createAsyncThunk(
   'projects/deleteProject',
   async (projectId: string, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/projects/${projectId}`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/projects/${projectId}`;
     return apiRequest<string>({
       url,
       method: 'DELETE',
@@ -54,7 +54,7 @@ export const deleteProjectTable = createAsyncThunk(
     { projectId, tableName }: { projectId: string; tableName: string },
     { rejectWithValue, dispatch }
   ) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/projects/${projectId}/table/${tableName}`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/projects/${projectId}/table/${tableName}`;
     return apiRequest<string>({
       url,
       method: 'DELETE',
@@ -68,7 +68,7 @@ export const deleteProjectTable = createAsyncThunk(
 export const fetchProjects = createAsyncThunk(
   'projects/fetchProjects',
   async (user_sub: string | undefined, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/projects`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/projects`;
     return apiRequest<Project[]>({
       url,
       method: 'GET',
@@ -86,7 +86,7 @@ export const shareProject = createAsyncThunk<
 >(
   'projects/shareProject',
   async ({ project, target }, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/projects/share`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/projects/share`;
     return apiRequest<Project>({
       url,
       method: 'POST',

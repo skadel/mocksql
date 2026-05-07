@@ -1,4 +1,4 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import {
     RejectValue
 } from '../utils/types';
@@ -10,7 +10,7 @@ export const getTableChanges = createAsyncThunk(
     { modelId, currentProjectId }: { modelId: string; currentProjectId: string },
     { dispatch, rejectWithValue }
   ) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/getTableChanges`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/getTableChanges`;
     return apiRequest<any[]>({
       url,
       method: 'POST',
@@ -29,9 +29,9 @@ export const fetchUniqueColumns = createAsyncThunk<
 >(
   'query/fetchUniqueColumns',
   async ({ modelId, currentProjectId, id }, { dispatch, rejectWithValue }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/uniqueColumns`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/uniqueColumns`;
 
-    // On ne met id que s'il est défini
+    // On ne met id que s'il est dÃ©fini
     const body: Record<string, any> = {
       session: modelId,
       project: currentProjectId,
@@ -53,7 +53,7 @@ export const fetchUniqueColumns = createAsyncThunk<
 export const saveTableDetails = createAsyncThunk(
   'table/saveTableDetails',
   async (tableData: any, { dispatch, rejectWithValue }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/saveTableDetails`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/saveTableDetails`;
     return apiRequest<any>({
       url,
       method: 'POST',
@@ -73,7 +73,7 @@ export const fetchListTablesAndDatasets = createAsyncThunk<
 >(
   'query/fetchListTablesAndDatasets',
   async ({ inputValue }, { dispatch, rejectWithValue }) => {
-    let url = `${process.env.REACT_APP_BACKEND_URL}/api/list-datasets-and-tables`;
+    let url = `${import.meta.env.VITE_BACKEND_URL}/api/list-datasets-and-tables`;
     if (inputValue) {
       const queryParams = new URLSearchParams({ input_value: inputValue }).toString();
       url = `${url}?${queryParams}`;
@@ -95,7 +95,7 @@ export const fetchPostgresTables = createAsyncThunk<
 >(
   'query/fetchPostgresTables',
   async ({ project, inputValue }, { dispatch, rejectWithValue }) => {
-    let url = `${process.env.REACT_APP_BACKEND_URL}/api/list-postgres-tables`;
+    let url = `${import.meta.env.VITE_BACKEND_URL}/api/list-postgres-tables`;
     if (inputValue || project) {
       const params = new URLSearchParams();
       if (inputValue) {
@@ -123,7 +123,7 @@ export const fetchMotherDuckTables = createAsyncThunk<
 >(
   'query/fetchMotherDuckTables',
   async ({ project, inputValue }, { dispatch, rejectWithValue }) => {
-    let url = `${process.env.REACT_APP_BACKEND_URL}/api/list-duckdb-tables`;
+    let url = `${import.meta.env.VITE_BACKEND_URL}/api/list-duckdb-tables`;
     if (inputValue || project) {
       const params = new URLSearchParams();
       if (inputValue) {
@@ -152,7 +152,7 @@ export const fetchSchema = createAsyncThunk<
 >(
   'query/fetchSchema',
   async ({ inputs }, { dispatch, rejectWithValue }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/schema`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/schema`;
     return apiRequest<any>({
       url,
       method: 'POST',
@@ -171,7 +171,7 @@ export const fetchPGSchema = createAsyncThunk<
 >(
   'query/fetchPgSchema',
   async ({ inputs, projectId }, { dispatch, rejectWithValue }) => {
-    let url = `${process.env.REACT_APP_BACKEND_URL}/api/pg-schema`;
+    let url = `${import.meta.env.VITE_BACKEND_URL}/api/pg-schema`;
     if (projectId) {
       const params = new URLSearchParams();
       params.append('project', projectId);
@@ -195,7 +195,7 @@ export const fetchDuckDBSchema = createAsyncThunk<
 >(
   'query/fetchDuckSchema',
   async ({ inputs, projectId }, { dispatch, rejectWithValue }) => {
-    let url = `${process.env.REACT_APP_BACKEND_URL}/api/duckdb-schema`;
+    let url = `${import.meta.env.VITE_BACKEND_URL}/api/duckdb-schema`;
     if (projectId) {
       const params = new URLSearchParams();
       params.append('project', projectId);

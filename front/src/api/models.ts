@@ -1,4 +1,4 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import {
     Model,
     ExploreModel,
@@ -27,20 +27,20 @@ export interface TestSession {
 }
 
 export const fetchModelPriority = async (): Promise<ExploreModel[]> => {
-  const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/models/explore`);
+  const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/models/explore`);
   if (!response.ok) return [];
   return response.json();
 };
 
 export const fetchSqlFiles = async (): Promise<SqlFile[]> => {
-  const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/models`);
+  const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/models`);
   if (!response.ok) return [];
   return response.json();
 };
 
 export const fetchModelSql = async (modelName: string): Promise<string | null> => {
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/models/sql?name=${encodeURIComponent(modelName)}`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/models/sql?name=${encodeURIComponent(modelName)}`,
   );
   if (!response.ok) return null;
   const data = await response.json();
@@ -48,7 +48,7 @@ export const fetchModelSql = async (modelName: string): Promise<string | null> =
 };
 
 export const createTestApi = async (modelName: string): Promise<TestSession> => {
-  const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/tests`, {
+  const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/tests`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model_name: modelName }),
@@ -58,7 +58,7 @@ export const createTestApi = async (modelName: string): Promise<TestSession> => 
 };
 
 export const getTestsByModelName = async (modelName: string): Promise<TestSession[]> => {
-  const response = await fetch(`${process.env.REACT_APP_BACKEND_URL}/api/tests?model_name=${encodeURIComponent(modelName)}`);
+  const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/tests?model_name=${encodeURIComponent(modelName)}`);
   if (!response.ok) return [];
   return response.json();
 };
@@ -69,7 +69,7 @@ export const getTestsByModelName = async (modelName: string): Promise<TestSessio
 export const createModel = createAsyncThunk(
   'models/createModel',
   async (model: Model, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/models`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/models`;
     return apiRequest<Model>({
       url,
       method: 'POST',
@@ -83,7 +83,7 @@ export const createModel = createAsyncThunk(
 export const updateModel = createAsyncThunk(
   'models/addModel',
   async (model: Model, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/models`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/models`;
     return apiRequest<Model>({
       url,
       method: 'POST',
@@ -98,7 +98,7 @@ export const updateModel = createAsyncThunk(
 export const deleteModel = createAsyncThunk(
   'models/deleteModel',
   async (modelId: string, { rejectWithValue, dispatch }) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/models/${modelId}`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/models/${modelId}`;
     return apiRequest<string>({
       url,
       method: 'DELETE',
@@ -113,7 +113,7 @@ export const deleteModel = createAsyncThunk(
 export const fetchModels = createAsyncThunk(
     'models/fetchModels',
     async (_: void, { rejectWithValue, dispatch }) => {
-      const url = `${process.env.REACT_APP_BACKEND_URL}/api/models`;
+      const url = `${import.meta.env.VITE_BACKEND_URL}/api/models`;
       return apiRequest<SqlFile[]>({
         url,
         method: 'GET',

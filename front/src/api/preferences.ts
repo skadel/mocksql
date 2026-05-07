@@ -1,8 +1,8 @@
-const API_BASE = process.env.REACT_APP_BACKEND_URL;
+﻿const API_BASE = import.meta.env.VITE_BACKEND_URL;
 
 /**
  * Retourne un identifiant stable pour l'utilisateur courant.
- * Essaie de décoder le sub du JWT, sinon génère/récupère un deviceId dans localStorage.
+ * Essaie de dÃ©coder le sub du JWT, sinon gÃ©nÃ¨re/rÃ©cupÃ¨re un deviceId dans localStorage.
  */
 export function getOrCreateUserId(): string {
   const jwt = localStorage.getItem('jwt');
@@ -11,7 +11,7 @@ export function getOrCreateUserId(): string {
       const payload = JSON.parse(atob(jwt.split('.')[1]));
       if (payload.sub) return payload.sub;
     } catch {
-      // JWT mal formé, on continue
+      // JWT mal formÃ©, on continue
     }
   }
   let deviceId = localStorage.getItem('deviceId');

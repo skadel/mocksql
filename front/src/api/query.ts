@@ -1,9 +1,11 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import { v4 as uuidv4 } from 'uuid';
 import {
   addTextMessage,
   appendQueryComponentMessage,
+  appendComponentToLastMessage,
   appendStreamingReasoning,
+  removeMessage,
   setError,
   setLoading,
   setLoadingMessage
@@ -41,7 +43,7 @@ export const chatQuery = createAsyncThunk(
       dispatch(addTextMessage({
         id: userMessageId,
         type: 'user',
-        contents: { text: '📊 Résultats de profiling uploadés' },
+        contents: { text: 'ðŸ“Š RÃ©sultats de profiling uploadÃ©s' },
         parent: ChangedMessageId,
         children: [],
       }));
@@ -65,7 +67,7 @@ export const chatQuery = createAsyncThunk(
       dispatch(addTextMessage({
         id: userMessageId,
         type: 'user',
-        contents: { text: 'Mise à jour SQL' },
+        contents: { text: 'Mise Ã  jour SQL' },
         contentType: 'sql_update',
         parent: parentMessageId || undefined,
         children: [],
@@ -74,12 +76,14 @@ export const chatQuery = createAsyncThunk(
 
     let step = '';
     const capturedSteps = ['parser', 'generator', 'executor'];
+    // Tracks the temp message id used for streaming conversational agent tokens
+    let convStreamId: string | null = null;
 
     dispatch(setError(''));
     const token = localStorage.getItem('jwt') || '';
 
     await streamThunk(
-      `${process.env.REACT_APP_BACKEND_URL}/api/query/build/stream_events`,
+      `${import.meta.env.VITE_BACKEND_URL}/api/query/build/stream_events`,
       {
         method: 'POST',
         openWhenHidden: true,
@@ -158,13 +162,43 @@ export const chatQuery = createAsyncThunk(
             }
           }
           else if (pd.event === 'on_chat_model_stream') {
-            const text = (pd.data?.chunk?.content || [])
-              .filter((c: any) => c.type === 'text')
-              .map((c: any) => c.text || '')
-              .join('');
-            if (text) dispatch(appendStreamingReasoning(text));
+            const rawContent = pd.data?.chunk?.content;
+            const text = Array.isArray(rawContent)
+              ? rawContent.filter((c: any) => c.type === 'text').map((c: any) => c.text || '').join('')
+              : typeof rawContent === 'string' ? rawContent : '';
+
+            if (!text) return;
+
+            // Stream conversational agent tokens directly into the chat thread
+            if (pd.metadata?.langgraph_node === 'conversational_agent') {
+              if (!convStreamId) {
+                convStreamId = uuidv4();
+                dispatch(appendQueryComponentMessage({
+                  id: convStreamId,
+                  type: 'bot',
+                  contents: { text },
+                  parent: userMessageId,
+                  children: [],
+                }));
+              } else {
+                dispatch(appendComponentToLastMessage({
+                  id: convStreamId,
+                  type: 'bot',
+                  contents: { text },
+                  parent: userMessageId,
+                  children: [],
+                }));
+              }
+            } else {
+              dispatch(appendStreamingReasoning(text));
+            }
           }
           else if (pd.event === 'on_chain_stream') {
+            // Replace the streaming placeholder with the final persisted message
+            if (pd.name === 'conversational_agent' && convStreamId) {
+              dispatch(removeMessage(convStreamId));
+              convStreamId = null;
+            }
             (pd.data?.chunk.messages || []).forEach((m: any) => {
               const nm = formatMessage(m);
               if (nm.contents.tables !== undefined) {
@@ -209,7 +243,7 @@ export interface ValidateQueryResult {
 export const validateQueryApi = async (params: ValidateQueryParams): Promise<ValidateQueryResult> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/validate-query`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/validate-query`,
     {
       method: 'POST',
       headers: {
@@ -245,7 +279,7 @@ export interface CheckProfileResult {
 export const checkProfileApi = async (params: CheckProfileParams): Promise<CheckProfileResult> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/check-profile`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/check-profile`,
     {
       method: 'POST',
       headers: {
@@ -270,7 +304,7 @@ export interface SaveProfileParams {
 export const saveProfileApi = async (params: SaveProfileParams): Promise<void> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/save-profile`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/save-profile`,
     {
       method: 'POST',
       headers: {
@@ -292,7 +326,7 @@ export interface SkipProfilingParams {
 export const skipProfilingApi = async (params: SkipProfilingParams): Promise<void> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/skip-profile`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/skip-profile`,
     {
       method: 'POST',
       headers: {
@@ -333,7 +367,7 @@ export interface AutoProfileParams {
 export const autoProfileApi = async (params: AutoProfileParams): Promise<void> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/auto-profile`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/auto-profile`,
     {
       method: 'POST',
       headers: {
@@ -356,7 +390,7 @@ export interface ImportMissingTablesParams {
 export const importMissingTablesApi = async (params: ImportMissingTablesParams): Promise<{ imported: number; tables: string[] }> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
-    `${process.env.REACT_APP_BACKEND_URL}/api/import-missing-tables`,
+    `${import.meta.env.VITE_BACKEND_URL}/api/import-missing-tables`,
     {
       method: 'POST',
       headers: {
@@ -379,7 +413,7 @@ export const fetchPage = createAsyncThunk<FetchPageResponse, FetchPageArgs, { re
     const offset = safePage * safeLimit;
 
     return apiRequest<FetchPageResponse>({
-      url: `${process.env.REACT_APP_BACKEND_URL}/api/fetch-page`,
+      url: `${import.meta.env.VITE_BACKEND_URL}/api/fetch-page`,
       method: 'POST',
       body: { project, sql, dialect, msgId, offset, limit: safeLimit },
       defaultFailureMessage: 'Failed to fetch page',

@@ -1,4 +1,4 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import { apiRequest } from "./utils";
 
 
@@ -15,7 +15,7 @@ export const patchModelSql = createAsyncThunk(
     { rejectWithValue, dispatch }
   ) => {
     await apiRequest({
-      url: `${process.env.REACT_APP_BACKEND_URL}/api/models/sql`,
+      url: `${import.meta.env.VITE_BACKEND_URL}/api/models/sql`,
       method: 'PATCH',
       body: {
         sessionId,
@@ -39,7 +39,7 @@ export const patchModelTests = createAsyncThunk(
     { rejectWithValue, dispatch }
   ) => {
     await apiRequest({
-      url: `${process.env.REACT_APP_BACKEND_URL}/api/models/tests`,
+      url: `${import.meta.env.VITE_BACKEND_URL}/api/models/tests`,
       method: 'PATCH',
       body: { sessionId, tests },
       defaultFailureMessage: 'Failed to update tests',
@@ -57,7 +57,7 @@ export const getMessages = createAsyncThunk(
     { modelId, t }: { modelId: string; t: Function },
     { rejectWithValue, dispatch }
   ) => {
-    const url = `${process.env.REACT_APP_BACKEND_URL}/api/getMessages`;
+    const url = `${import.meta.env.VITE_BACKEND_URL}/api/getMessages`;
     const response = await apiRequest<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; last_error?: string; sql_history?: any[] }>({
       url,
       method: 'POST',

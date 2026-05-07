@@ -1,6 +1,6 @@
-import { createAsyncThunk } from '@reduxjs/toolkit';
+﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 
-const API_BASE = process.env.REACT_APP_BACKEND_URL;
+const API_BASE = import.meta.env.VITE_BACKEND_URL;
 
 /**
  * Fetch the current authenticated user. If unauthenticated, open login dialog.
