@@ -49,3 +49,6 @@ class QueryState(TypedDict):
     assertion_only: Optional[
         bool
     ]  # True when user edits assertion metadata only (no input data regeneration)
+    has_existing_tests: Optional[bool]  # set by pre_routing: True if test_cases already exist
+    agent_tool_call: Optional[str]  # tool called by conversational_agent: "generate_test" | "delete_test" | None
+    agent_tool_args: Optional[Dict]  # args of the tool call

@@ -69,6 +69,21 @@ async def routing(state: QueryState):
         )
         return {"route": "fixer", "messages": error_history}
 
+    # When existing tests are present, route all natural language input to the conversational agent
+    if input_text and state.get("has_existing_tests") and not state.get("rerun_all_tests"):
+        messages.append(
+            HumanMessage(
+                content=input_text,
+                id=state["user_message_id"],
+                additional_kwargs={
+                    "type": MsgType.QUERY,
+                    "parent": state["parent_message_id"],
+                    "request_id": state.get("request_id"),
+                },
+            )
+        )
+        return {"route": "conversational_agent", "messages": messages}
+
     # When only user text is provided (no new SQL), classify intent with LLM
     # Skip classification when test_index is set: it's always a test modification
     if input_text:

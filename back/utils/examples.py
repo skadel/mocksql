@@ -701,7 +701,11 @@ async def run_query_on_test_dataset(
         tuple[DataFrame, str]: The result of the query execution as a Pandas DataFrame,
             and the DuckDB SQL that was actually executed.
     """
+    print("<<<<<<<<<<<<<<<<<<<<<query")
+    print(query)
     duckdb_sql = await parse_test_query(query, session, dialect)
+    print("<<<<<<<<<<<<<<<<<<<<<duckdb_sql")
+    print(duckdb_sql)
     current_sql = fix_duck_db_sql(duckdb_sql)
 
     for _ in range(10):
@@ -833,8 +837,12 @@ async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
     )
+    print("<<<<<<<<<<<<<<query_on_test_ds")
+    print(query_on_test_ds)
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     duckdb_sql = tree.sql(dialect="duckdb")
+    print("<<<<<<<<<<<<<<duckdb_sql")
+    print(duckdb_sql)
     return duckdb_sql
 
 

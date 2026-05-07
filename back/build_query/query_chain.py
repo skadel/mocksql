@@ -4,8 +4,11 @@ import uuid
 from langchain_core.messages import AIMessage
 
 from build_query.assertion_modifier import modify_assertions
+from build_query.conversational_agent import conversational_agent
+from build_query.delete_test_node import delete_test_node
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
+from build_query.suggestions_node import generate_suggestions
 from build_query.test_evaluator import evaluate_tests
 from build_query.profile_checker import _normalize_profile
 from build_query.routing import routing
@@ -32,16 +35,21 @@ async def pre_routing(state: QueryState):
     if not test:
         return {}
 
+    has_existing_tests = len(test.get("test_cases") or []) > 0
     stored_sql = (test.get("sql") or "").strip()
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
     stored_used_columns = test.get("used_columns") or []
 
     if incoming_query and stored_sql != incoming_query:
         print("not validated query")
-        return {}
+        return {"has_existing_tests": has_existing_tests}
 
     if not stored_used_columns:
-        return {"validated_sql": stored_sql, "optimized_sql": stored_optimised_sql}
+        return {
+            "validated_sql": stored_sql,
+            "optimized_sql": stored_optimised_sql,
+            "has_existing_tests": has_existing_tests,
+        }
 
     from models.schemas import get_profile
 
@@ -57,6 +65,7 @@ async def pre_routing(state: QueryState):
         "validated_sql": stored_sql,
         "optimized_sql": stored_optimised_sql,
         "history": history,
+        "has_existing_tests": has_existing_tests,
     }
 
 
@@ -129,10 +138,13 @@ def build_query_graph():
 
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
+    builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("delete_test_node", delete_test_node)
     builder.add_node("generator", generate_examples)
     builder.add_node("assertion_modifier", modify_assertions)
     builder.add_node("executor", run_on_examples)
     builder.add_node("test_evaluator", evaluate_tests)
+    builder.add_node("suggestions_generator", generate_suggestions)
     builder.add_node("history_saver", history_saver)
     builder.add_node("other", _handle_other)
 
@@ -140,6 +152,8 @@ def build_query_graph():
         if state.get("error"):
             return "history_saver"
         route = state.get("route", "").lower()
+        if route == "conversational_agent":
+            return "conversational_agent"
         if route == "assertion_modifier":
             return "assertion_modifier"
         if "executor" in route:
@@ -149,6 +163,16 @@ def build_query_graph():
         if len(state.get("used_columns", [])) == 0:
             return "executor"
         return "generator"
+
+    def route_agent_output(state: QueryState):
+        tool_call = state.get("agent_tool_call")
+        if tool_call == "generate_test":
+            return "generator"
+        if tool_call == "delete_test":
+            return "delete_test_node"
+        if tool_call == "generate_suggestions":
+            return "suggestions_generator"
+        return "history_saver"
 
     def route_executor(state: QueryState):
         if state.get("error"):
@@ -161,15 +185,21 @@ def build_query_graph():
             and (state.get("gen_retries") or 0) > 0
         ):
             return "generator"
-        return "history_saver"
+        # Skip suggestions for assertion-only edits (data didn't change)
+        if state.get("assertion_only"):
+            return "history_saver"
+        return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
+    builder.add_conditional_edges("conversational_agent", route_agent_output)
+    builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("suggestions_generator", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)
 
