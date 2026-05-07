@@ -31,6 +31,7 @@ export interface MessageContents {
   meta?: DisplayTableMeta;
   error?: string;
   profileRequest?: ProfileRequest;
+  suggestions?: string[];
 }
 
 export interface Message {
@@ -125,6 +126,8 @@ export interface BuildModelState {
     };
     restoredMessageId?: string;
     lastError?: string;
+    workspaceMode: boolean;
+    suggestions: string[];
 }
 
 

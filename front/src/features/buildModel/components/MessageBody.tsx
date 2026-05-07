@@ -148,8 +148,29 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       )}
 
+      {/* Notification de génération de test sur scénario */}
+      {msg.contentType === 'generate_test_scenario' && msg.contents.text && (
+        <Box
+          sx={{
+            mt: 0.5,
+            p: 1.25,
+            bgcolor: '#f0fafa',
+            borderRadius: '8px',
+            border: '1px solid #c8e6e4',
+            borderLeft: '3px solid #1ca8a4',
+          }}
+        >
+          <Typography sx={{ fontSize: 11, color: '#1ca8a4', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 0.5 }}>
+            Génération de test pour le scénario suivant
+          </Typography>
+          <Typography variant="body2" sx={{ color: '#333', lineHeight: 1.5 }}>
+            {msg.contents.text}
+          </Typography>
+        </Box>
+      )}
+
       {/* Texte */}
-      {msg.contents.text && msg.contentType !== 'evaluation' && (
+      {msg.contents.text && msg.contentType !== 'evaluation' && msg.contentType !== 'generate_test_scenario' && (
         msg.type === 'user' ? (
           <Typography
             variant="body2"
@@ -274,6 +295,45 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             })}
           </Box>
       )}
+      {/* Suggestions */}
+      {msg.contentType === 'suggestions' && Array.isArray(msg.contents.suggestions) && msg.contents.suggestions.length > 0 && (
+        <Box sx={{ mt: 0.5 }}>
+          <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
+            Cas suggérés
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+            {(msg.contents.suggestions as string[]).map((s, i) => (
+              <Box
+                key={i}
+                component="button"
+                onClick={() => onSuggestionClick?.(s)}
+                sx={{
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 1,
+                  textAlign: 'left',
+                  p: '9px 11px',
+                  borderRadius: '9px',
+                  border: '1px solid #d2efec',
+                  bgcolor: '#f8fffe',
+                  cursor: 'pointer',
+                  fontFamily: 'inherit',
+                  width: '100%',
+                  '&:hover': { bgcolor: '#ecf7f6', borderColor: '#2BB0A8' },
+                }}
+              >
+                <Typography sx={{ color: '#2BB0A8', fontWeight: 700, fontSize: 14, flexShrink: 0, lineHeight: 1.4 }}>
+                  +
+                </Typography>
+                <Typography sx={{ flex: 1, fontSize: 13, color: '#333', lineHeight: 1.4 }}>
+                  {s}
+                </Typography>
+              </Box>
+            ))}
+          </Box>
+        </Box>
+      )}
+
       {/* Erreur */}
       {msg.contents.error && (
         <Alert severity="error" sx={{ mt: 2 }}>

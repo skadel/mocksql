@@ -103,9 +103,41 @@ export function formatMessage(message: any): Message {
       }
       break;
 
-    default:
+    case 'delete_test': {
+      const parsed = JSON.parse(message.content);
+      (newMessage.contents as any).testIndex = parsed.test_index;
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
+      }
+      break;
+    }
+
+    case 'suggestions': {
+      try {
+        newMessage.contents.suggestions = JSON.parse(message.content);
+      } catch {
+        newMessage.contents.suggestions = [];
+      }
+      break;
+    }
+
+    case 'generate_test_scenario':
       newMessage.contents.text = message.content;
       break;
+
+    default: {
+      const raw = message.content;
+      if (Array.isArray(raw)) {
+        console.warn('[formatMessage] content is array for type', messageContentType, raw);
+        newMessage.contents.text = raw
+          .filter((c: any) => c?.type === 'text')
+          .map((c: any) => c?.text ?? '')
+          .join('');
+      } else {
+        newMessage.contents.text = raw;
+      }
+      break;
+    }
   }
 
   return newMessage;

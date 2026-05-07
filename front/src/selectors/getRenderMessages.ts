@@ -81,6 +81,7 @@ const coalesceBotMessages = (msg1: Message, msg2: Message): Message => ({
     real_res: concatMaybeArray(msg1.contents?.real_res, msg2.contents?.real_res),
     meta: msg2.contents?.meta ?? msg1.contents?.meta,
     error: msg2.contents?.error ?? msg1.contents?.error,
+    suggestions: msg2.contents?.suggestions ?? msg1.contents?.suggestions,
   },
   sqlPrice: (msg2 as any).sqlPrice ?? (msg1 as any).sqlPrice,
   sqlError: (msg2 as any).sqlError ?? (msg1 as any).sqlError,
@@ -143,6 +144,8 @@ export const getRenderMessages = createSelector(
         } else if (
           last.type === 'bot' &&
           msg.type === 'bot' &&
+          getContentType(msg) !== 'suggestions' &&
+          getContentType(last) !== 'suggestions' &&
           getNearestUserAncestor(last) === getNearestUserAncestor(msg)
         ) {
           out[out.length - 1] = coalesceBotMessages(last, msg);

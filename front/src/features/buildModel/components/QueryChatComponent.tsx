@@ -3,19 +3,18 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, Slide, TextField, Typography } from '@mui/material';
-import CloseIcon from '@mui/icons-material/Close';
+import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment, LinearProgress, TextField, Typography } from '@mui/material';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import SearchIcon from '@mui/icons-material/Search';
 import ScienceIcon from '@mui/icons-material/Science';
-import DroppableTextField from '../../../shared/DroppableTextField';
 import { Container } from '../../../style/StyledComponents';
 import { getLastMessage } from '../../../utils/messages';
-import MessageDisplay from './MessageDisplay';
 import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
+import ChatColumn from './ChatColumn';
+import ArtefactHeader from './ArtefactHeader';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
 import SqlEditor from '../../../shared/SqlEditor';
@@ -25,7 +24,7 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction } from '../buildModelSlice';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext } from '../buildModelSlice';
 import { getMessages, patchModelSql } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
@@ -33,12 +32,6 @@ import { relativeDate } from '../../../utils/dates';
 
 const DIALECT = 'bigquery';
 
-function extractReasoningText(raw: string): string {
-  if (!raw || !raw.trim().startsWith('{')) return raw;
-  const match = raw.match(/"reasoning"\s*:\s*"((?:[^"\\]|\\.)*)(?:"|$)/);
-  if (!match) return '';
-  return match[1].replace(/\\n/g, ' ').replace(/\\"/g, '"').trim();
-}
 
 const ChatComponent: React.FC = () => {
   const { t } = useTranslation();
@@ -53,8 +46,8 @@ const ChatComponent: React.FC = () => {
   const [optimizedSql, setOptimizedSql] = useState('');
   const [restoredMessageId, setRestoredMessageId] = useState<string | undefined>(undefined);
   const [isSending, setIsSending] = useState(false);
-  const [chatOverlayOpen, setChatOverlayOpen] = useState(false);
   const [selectedTestIndex, setSelectedTestIndex] = useState<number | null>(null);
+  const [sqlDirty, setSqlDirty] = useState(false);
   const [pendingFirstLoad, setPendingFirstLoad] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [lastErrorDismissed, setLastErrorDismissed] = useState(false);
@@ -120,6 +113,7 @@ const ChatComponent: React.FC = () => {
     sqlHistory,
     restoredMessageId: storedRestoredMessageId,
     lastError,
+    testResults,
   } = useAppSelector((state) => state.buildModel);
 
   const messagesRef = useRef(messages);
@@ -145,6 +139,11 @@ const ChatComponent: React.FC = () => {
 
   // ui phase: 'entry' | 'workspace'
   const uiPhase = !pendingFirstLoad && !currentModelId ? 'entry' : 'workspace';
+
+  // Sync workspace mode to Redux so App.tsx can hide the sidebar
+  useEffect(() => {
+    dispatch(setWorkspaceMode(uiPhase === 'workspace'));
+  }, [uiPhase, dispatch]);
 
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -557,6 +556,7 @@ const ChatComponent: React.FC = () => {
     async (newSql: string) => {
       if (isSending || !newSql.trim() || !currentModelId) return;
       setIsSending(true);
+      setSqlDirty(true);
       setSqlQuery(newSql);
 
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
@@ -611,6 +611,7 @@ const ChatComponent: React.FC = () => {
           context: 'sql_update',
         })).unwrap?.();
       } catch {}
+      setSqlDirty(false);
       setIsSending(false);
     },
     [isSending, currentModelId, optimizedSql, renderMessages, selectedChildIndices, dispatch, t, restoredMessageId]
@@ -687,19 +688,16 @@ const ChatComponent: React.FC = () => {
 
   const handleAddTest = useCallback(() => {
     setSelectedTestIndex(null);
-    setChatOverlayOpen(true);
   }, []);
 
   const handleSelectTestForModification = useCallback((idx: number) => {
     setAssertionOnly(false);
     setSelectedTestIndex(idx);
-    setChatOverlayOpen(true);
   }, []);
 
   const handleEditAssertions = useCallback((idx: number) => {
     setAssertionOnly(true);
     setSelectedTestIndex(idx);
-    setChatOverlayOpen(true);
   }, []);
 
   const handleRerunTest = useCallback((idx: number) => {
@@ -713,7 +711,7 @@ const ChatComponent: React.FC = () => {
         height: '100vh',
         width: '100%',
         maxHeight: '100%',
-        maxWidth: `calc(100vw - ${drawerOpen ? drawerWidth : 0}px)`,
+        maxWidth: uiPhase === 'workspace' ? '100vw' : `calc(100vw - ${drawerOpen ? drawerWidth : 0}px)`,
         transition: 'max-width 0.2s ease',
         p: 0,
         display: 'flex',
@@ -972,170 +970,95 @@ const ChatComponent: React.FC = () => {
 
       {/* ── STEP 2: Workspace ── */}
       {uiPhase === 'workspace' && (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          {(loading || isSending) && (
-            <Box sx={{ flexShrink: 0, px: 2, pt: 0.75, pb: 0.5 }}>
-              <LinearProgress variant="indeterminate" sx={{ height: 5, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
-              <Typography variant="caption" sx={{ color: '#6b8287', mt: 0.4, display: 'block', textAlign: 'center' }}>
-                {loading ? (loading_message || t('loading.reasoning')) : t('loading.validating_query')}…
-              </Typography>
-              {streamingReasoning && extractReasoningText(streamingReasoning) && (
-                <Typography variant="caption" sx={{
-                  color: '#8fa8ad',
-                  display: '-webkit-box',
-                  WebkitLineClamp: 3,
-                  WebkitBoxOrient: 'vertical',
-                  overflow: 'hidden',
-                  fontStyle: 'italic',
-                  lineHeight: 1.5,
-                  mt: 0.5,
-                }}>
-                  {extractReasoningText(streamingReasoning)}
-                </Typography>
-              )}
-            </Box>
-          )}
-          <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
-            <TestsPanel
-              onAddTest={handleAddTest}
-              onSelectForModification={handleSelectTestForModification}
-              onEditAssertions={handleEditAssertions}
-              onRerunTest={handleRerunTest}
-              selectedTestIndex={selectedTestIndex}
-              sqlProps={{
-                sql: sqlQuery,
-                onUpdate: handleSQLUpdate,
-                optimizedSql,
-                sqlHistory,
-                onHistorySelect: handleHistorySelect,
-                historyRestoreTrigger,
-                disabled: isSending,
-                loading: isSending,
-                hasError: lastMsgHasError,
-                sqlFileName: currentModelName || undefined,
-                onReloadFile: currentModelPath
-                  ? async () => {
-                      try { return await fetchModelSql(currentModelPath); }
-                      catch { return null; }
-                    }
-                  : undefined,
-              }}
-              staleInfo={currentModel?.isStale ? {
-                isStale: true,
-                commitsSince: currentModel.commitsSince ?? 0,
-                lastTestedAt: currentModel.updateDate,
-                onReevaluate: handleReevaluate,
-                currentSql: sqlQuery,
-                onFetchNewSql: currentModelPath
-                  ? async () => {
-                      try { return await fetchModelSql(currentModelPath); }
-                      catch { return null; }
-                    }
-                  : undefined,
-              } : undefined}
-              onSuggestionFill={(text) => { forcedRouteRef.current = 'generator'; setSelectedTestIndex(null); setUserInput(text); setChatOverlayOpen(true); }}
-              onUpload={(uploadedData) => {
-                const lastMsg = renderMessages[renderMessages.length - 1] as any;
-                sendMessage('', sqlQuery, lastMsg?.id, lastMsg?.id, uploadedData, false);
-              }}
-              onOpenChat={() => { setSelectedTestIndex(null); setChatOverlayOpen(true); }}
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'row', minHeight: 0, overflow: 'hidden' }}>
+
+          {/* Chat column — permanent left panel */}
+          <ChatColumn
+            fileName={currentModelName ? `${currentModelName}.sql` : 'requête.sql'}
+            onChangeFile={() => {
+              dispatch(resetContext());
+              dispatch(setCurrentId(''));
+              navigate('/');
+            }}
+            selectedTestIndex={selectedTestIndex}
+            assertionOnly={assertionOnly}
+            onClearAnchor={() => { setSelectedTestIndex(null); setAssertionOnly(false); }}
+            renderMessages={renderMessages as any}
+            userInput={userInput}
+            setUserInput={setUserInput}
+            onSend={onSendClick}
+            isSending={isSending}
+            loading={loading}
+            loading_message={loading_message}
+            error={error}
+            alwaysFix={alwaysFix}
+            onAlwaysFixChange={handleAlwaysFixChange}
+            sqlHistory={sqlHistory}
+            onSqlRestore={handleHistorySelect}
+            onRestoreState={handleRestoreState}
+            restoredMessageId={restoredMessageId}
+            streamingReasoning={streamingReasoning}
+            onStopStream={handleStopStream}
+            sendMessage={sendMessage}
+            sqlQuery={sqlQuery}
+          />
+
+          {/* Main area — tests + footer */}
+          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+            <ArtefactHeader
+              testCount={testResults?.length ?? 0}
+              onRerun={handleReevaluate}
+              rerunning={!!(loading || isSending)}
+              sqlDirty={sqlDirty}
             />
-
-            {chatOverlayOpen && (
-              <Box
-                onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); setAssertionOnly(false); }}
-                sx={{ position: 'absolute', inset: 0, bgcolor: 'rgba(15,39,42,.18)', zIndex: 20 }}
+            <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+              <TestsPanel
+                onAddTest={handleAddTest}
+                onSelectForModification={handleSelectTestForModification}
+                onEditAssertions={handleEditAssertions}
+                onRerunTest={handleRerunTest}
+                onSuggestionClick={(text) => setUserInput(text)}
+                selectedTestIndex={selectedTestIndex}
+                sqlProps={{
+                  sql: sqlQuery,
+                  onUpdate: handleSQLUpdate,
+                  optimizedSql,
+                  sqlHistory,
+                  onHistorySelect: handleHistorySelect,
+                  historyRestoreTrigger,
+                  disabled: isSending,
+                  loading: isSending,
+                  hasError: lastMsgHasError,
+                  sqlFileName: currentModelName || undefined,
+                  onReloadFile: currentModelPath
+                    ? async () => {
+                        try { return await fetchModelSql(currentModelPath); }
+                        catch { return null; }
+                      }
+                    : undefined,
+                }}
+                staleInfo={currentModel?.isStale ? {
+                  isStale: true,
+                  commitsSince: currentModel.commitsSince ?? 0,
+                  lastTestedAt: currentModel.updateDate,
+                  onReevaluate: handleReevaluate,
+                  currentSql: sqlQuery,
+                  onFetchNewSql: currentModelPath
+                    ? async () => {
+                        try { return await fetchModelSql(currentModelPath); }
+                        catch { return null; }
+                      }
+                    : undefined,
+                } : undefined}
+                onUpload={(uploadedData) => {
+                  const lastMsg = renderMessages[renderMessages.length - 1] as any;
+                  sendMessage('', sqlQuery, lastMsg?.id, lastMsg?.id, uploadedData, false);
+                }}
+                onOpenChat={() => { setSelectedTestIndex(null); }}
               />
-            )}
-
-            <Slide direction="left" in={chatOverlayOpen} timeout={220} unmountOnExit mountOnEnter>
-              <Box sx={{
-                position: 'absolute', top: 0, right: 0, bottom: 0,
-                width: { xs: '100%', sm: 480 },
-                bgcolor: '#fff',
-                borderLeft: '1px solid #e4eaec',
-                boxShadow: '-10px 0 40px rgba(15,39,42,.09)',
-                display: 'flex', flexDirection: 'column', zIndex: 21,
-              }}>
-                <Box sx={{ px: 2, py: 1.5, borderBottom: '1px solid #e4eaec', display: 'flex', alignItems: 'center', gap: 1.5, flexShrink: 0 }}>
-                  <Box sx={{ width: 30, height: 30, borderRadius: '9px', bgcolor: '#ecf7f6', color: '#1ca8a4', display: 'grid', placeItems: 'center' }}>
-                    <AutoAwesomeIcon sx={{ fontSize: 15 }} />
-                  </Box>
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography sx={{ fontWeight: 700, color: '#0f272a', fontSize: 14, lineHeight: 1.2 }}>MockSQL</Typography>
-                    <Typography sx={{ fontSize: 11.5, color: '#6b8287', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                      {selectedTestIndex !== null && assertionOnly
-                        ? t('chat.edit_assertion', { index: selectedTestIndex + 1 })
-                        : selectedTestIndex !== null
-                          ? t('chat.modify_test', { index: selectedTestIndex + 1 })
-                          : t('chat.global_instruction')}
-                    </Typography>
-                  </Box>
-                  <IconButton size="small" onClick={() => { setChatOverlayOpen(false); setSelectedTestIndex(null); setAssertionOnly(false); }}>
-                    <CloseIcon sx={{ fontSize: 16 }} />
-                  </IconButton>
-                </Box>
-
-                <Box sx={{ flex: 1, overflow: 'auto', minHeight: 0, px: 2, pt: 1 }} ref={containerRef}>
-                  <MessageDisplay
-                    sendMessage={(input, msgId, parentMsgId, userTables, profileResult) =>
-                      sendMessage(input, sqlQuery, msgId, parentMsgId, userTables, false, undefined, profileResult)
-                    }
-                    renderMessages={renderMessages}
-                    onRestoreState={handleRestoreState}
-                    restoredMessageId={restoredMessageId}
-                    alwaysFix={alwaysFix}
-                    onAlwaysFixChange={handleAlwaysFixChange}
-                    sqlHistory={sqlHistory}
-                    onSqlRestore={handleHistorySelect}
-                  />
-
-                  {(loading || isSending) && (
-                    <Alert icon={false} severity="info" sx={{ borderRadius: '16px', margin: '12px 0', padding: 2, textAlign: 'center', backgroundColor: '#f5f5f5', color: '#333' }}>
-                      <Box sx={{ width: '100%', mb: 1 }}>
-                        <LinearProgress variant="indeterminate" sx={{ width: '100%', height: 8, borderRadius: 4, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
-                      </Box>
-                      <Typography variant="body2">{loading ? (loading_message || 'Raisonnement') : 'Validation de la requête'}...</Typography>
-                    </Alert>
-                  )}
-
-                  {error && <Alert severity="error" sx={{ borderRadius: '16px', my: 1 }}>{error}</Alert>}
-                </Box>
-
-                <Box sx={{ flexShrink: 0, px: 2, py: 1, borderTop: '1px solid #e4eaec' }}>
-                  {selectedTestIndex !== null && (
-                    <Box sx={{ mb: 0.75 }}>
-                      <Chip
-                        label={assertionOnly
-                          ? t('chat.edit_assertion_chip', { index: selectedTestIndex + 1 })
-                          : t('chat.modify_test_chip', { index: selectedTestIndex + 1 })}
-                        onDelete={() => { setSelectedTestIndex(null); setAssertionOnly(false); }}
-                        size="small"
-                        sx={assertionOnly
-                          ? { bgcolor: '#f0ecff', color: '#6941c6', border: '1px solid #6941c644', fontWeight: 600, fontSize: 11 }
-                          : { bgcolor: '#e8f5f5', color: '#1ca8a4', border: '1px solid #1ca8a444', fontWeight: 600, fontSize: 11 }}
-                      />
-                    </Box>
-                  )}
-                  <DroppableTextField
-                    userInput={userInput}
-                    setUserInput={setUserInput}
-                    sendMessage={onSendClick}
-                    stopStream={handleStopStream}
-                    disabled={isSending}
-                    placeholder={
-                      isSending
-                        ? t('chat.sending')
-                        : selectedTestIndex !== null
-                          ? t('chat.describe_modification')
-                          : t('chat.add_constraints')
-                    }
-                  />
-                </Box>
-              </Box>
-            </Slide>
+            </Box>
+            <DuckDBFooter />
           </Box>
-          <DuckDBFooter />
         </Box>
       )}
 

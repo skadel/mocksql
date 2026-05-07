@@ -30,6 +30,8 @@ const initialState: BuildModelState = {
   sqlHistory: [],
   restoredMessageId: undefined,
   lastError: undefined,
+  workspaceMode: false,
+  suggestions: [],
 };
 
 // Fonction utilitaire pour remonter du message jusqu'à la racine
@@ -143,6 +145,11 @@ export const buildModelSlice = createSlice({
     },
     appendQueryComponentMessage(state, action: PayloadAction<Message>) {
       const msg = action.payload;
+
+      if (msg.contentType === 'suggestions') {
+        if (Array.isArray(msg.contents.suggestions)) state.suggestions = msg.contents.suggestions;
+      }
+
       state.queryComponentGraph[msg.id] = msg;
 
       if (msg.parent && state.queryComponentGraph[msg.parent]) {
@@ -191,6 +198,14 @@ export const buildModelSlice = createSlice({
           const matches = testIdx !== undefined ? t.test_index === testIdx : i === state.testResults!.length - 1;
           return matches ? { ...t, evaluation: msg.contents.text } : t;
         });
+      }
+
+      // Remove a test case deleted by the conversational agent
+      if (msg.contentType === 'delete_test') {
+        const testIndex = (msg.contents as any).testIndex ?? msg.testIndex;
+        state.testResults = (state.testResults || []).filter(
+          (t: any) => String(t.test_index) !== String(testIndex)
+        );
       }
     },
     removeMessage(state, action: PayloadAction<string>) {
@@ -280,6 +295,9 @@ export const buildModelSlice = createSlice({
     clearStreamingReasoning(state) {
       state.streamingReasoning = undefined;
     },
+    setWorkspaceMode(state, action: PayloadAction<boolean>) {
+      state.workspaceMode = action.payload;
+    },
   },
   extraReducers: (builder) => {
     builder.addCase(getMessages.pending, (state) => {
@@ -292,6 +310,8 @@ export const buildModelSlice = createSlice({
       state.sqlHistory = [];
       state.restoredMessageId = undefined;
       state.lastError = undefined;
+      state.testResults = [];
+      state.suggestions = [];
     })
       .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
         const { messages, sql, optimized_sql, test_results, restored_message_id, last_error, sql_history } = action.payload;
@@ -349,6 +369,18 @@ export const buildModelSlice = createSlice({
               });
             }
           });
+        }
+
+        // Restore suggestions from the last suggestions message in history
+        for (let i = messages.length - 1; i >= 0; i--) {
+          const raw = messages[i];
+          if (raw?.additional_kwargs?.type === 'suggestions') {
+            try {
+              const parsed = JSON.parse(raw.content);
+              if (Array.isArray(parsed)) state.suggestions = parsed;
+            } catch { /* ignore */ }
+            break;
+          }
         }
 
         // 4. Déterminer le dernier message et mettre à jour selectedChildIndices
@@ -511,7 +543,7 @@ export const { setError, resetMessages, setLoadingMessage, appendComponentToLast
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
   setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
   setTestResults, pushSqlHistory, setRestoredMessageId,
-  appendStreamingReasoning, clearStreamingReasoning } = buildModelSlice.actions;
+  appendStreamingReasoning, clearStreamingReasoning, setWorkspaceMode } = buildModelSlice.actions;
 
 export default buildModelSlice.reducer;
 

@@ -1445,9 +1445,9 @@ interface TestsPanelProps {
   onEditAssertions?: (idx: number) => void;
   selectedTestIndex: number | null;
   onUpload?: (uploadedData: Record<string, any[]>) => void;
-  onSuggestionFill?: (text: string) => void;
   onRerunTest?: (idx: number) => void;
   onOpenChat?: () => void;
+  onSuggestionClick?: (text: string) => void;
   modelId?: string;
   sqlProps?: SqlStripProps;
   staleInfo?: StaleInfo;
@@ -1456,12 +1456,13 @@ interface TestsPanelProps {
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onSuggestionFill, onRerunTest, onOpenChat, modelId,
+  onUpload, onRerunTest, onOpenChat, onSuggestionClick, modelId,
   sqlProps, staleInfo,
 }) => {
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
+  const suggestions: string[] = useAppSelector((state) => state.buildModel.suggestions ?? []);
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
 
   const {
@@ -1574,17 +1575,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     .map((t, i) => ({ t, i }))
     .filter(({ t }) => filter === 'all' || statusToVerdict(t.status, t) === filter),
     [testResults, filter]);
-
-  const allSuggestions = useMemo(() => {
-    const seen = new Set<string>();
-    const out: { text: string; tag?: string }[] = [];
-    for (const test of testResults) {
-      for (const s of (test.suggestions ?? [])) {
-        if (!seen.has(s)) { seen.add(s); out.push({ text: s }); }
-      }
-    }
-    return out.slice(-3);
-  }, [testResults]);
 
   return (
     <Box sx={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
@@ -1765,37 +1755,27 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
             )}
           </Box>
 
-          {/* Suggestions */}
-          {allSuggestions.length > 0 && (
-            <Box sx={{ mt: 2, bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '14px', p: '14px 16px' }}>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.25 }}>
-                <AutoAwesomeIcon sx={{ fontSize: 14, color: '#2BB0A8' }} />
-                <Typography sx={{ fontSize: 13, fontWeight: 700, color: INK }}>Cas suggérés par MockSQL</Typography>
-                <Typography sx={{ fontSize: 11, color: PLACEHOLDER, ml: 'auto' }}>Basé sur la couverture</Typography>
-              </Box>
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {allSuggestions.map((s, i) => (
-                  <SuggestionRow
-                    key={i}
-                    text={s.text}
-                    tag={s.tag}
-                    onFill={() => onSuggestionFill ? onSuggestionFill(s.text) : onAddTest()}
-                  />
+          <Box sx={{ mt: 1.5, px: 0.5 }}>
+            <Chip
+              label="Ajouter un test"
+              size="small"
+              clickable
+              icon={<AddIcon style={{ fontSize: 12 }} />}
+              onClick={onAddTest}
+              sx={{ fontSize: 11, height: 24, bgcolor: '#f0fafa', color: TEAL, border: '1px solid #d0eeec', '&:hover': { bgcolor: '#d0eeec' } }}
+            />
+          </Box>
+
+          {suggestions.length > 0 && (
+            <Box sx={{ mt: 2 }}>
+              <Typography sx={{ fontSize: 10, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.7, mb: 1 }}>
+                Cas suggérés
+              </Typography>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                {suggestions.map((s, i) => (
+                  <SuggestionRow key={i} text={s} onFill={() => onSuggestionClick?.(s)} />
                 ))}
               </Box>
-            </Box>
-          )}
-
-          {allSuggestions.length === 0 && (
-            <Box sx={{ mt: 1.5, px: 0.5 }}>
-              <Chip
-                label="Ajouter un test"
-                size="small"
-                clickable
-                icon={<AddIcon style={{ fontSize: 12 }} />}
-                onClick={onAddTest}
-                sx={{ fontSize: 11, height: 24, bgcolor: '#f0fafa', color: TEAL, border: '1px solid #d0eeec', '&:hover': { bgcolor: '#d0eeec' } }}
-              />
             </Box>
           )}
         </Box>
