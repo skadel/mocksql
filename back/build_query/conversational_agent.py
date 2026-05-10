@@ -52,7 +52,21 @@ Réponds en français, de manière concise et naturelle."""
         particulier (ex : 'focus sur les cas NULL', 'insiste sur les valeurs limites')."""
         return instructions
 
-    llm = make_llm().bind_tools([generate_test, delete_test, generate_suggestions])
+    @tool
+    def run_cte(test_index: int, cte_name: str, column: str = "") -> str:
+        """Exécute la requête SQL jusqu'à la CTE nommée avec les données du test et retourne les lignes.
+        Utilise cet outil pour voir ce que contient une CTE intermédiaire ou finale.
+        column est optionnel : si fourni, ne sélectionne que cette colonne (ex : 'revenue')."""
+        return f"{test_index}:{cte_name}:{column}"
+
+    @tool
+    def count_cte_steps(test_index: int, cte_name: str) -> str:
+        """Analyse pas à pas le nombre de lignes survivant à chaque JOIN et chaque condition WHERE
+        d'une CTE, via une seule requête DuckDB avec des CASE WHEN cumulatifs.
+        Utilise cet outil pour diagnostiquer pourquoi une CTE retourne 0 ligne."""
+        return f"{test_index}:{cte_name}"
+
+    llm = make_llm().bind_tools([generate_test, delete_test, generate_suggestions, run_cte, count_cte_steps])
     history = get_history_from_state(
         state,
         msg_type=[MsgType.QUERY, MsgType.OTHER, MsgType.RESULTS, MsgType.EXAMPLES],
@@ -75,8 +89,11 @@ Réponds en français, de manière concise et naturelle."""
         agent_tool_args = tc["args"]
         if agent_tool_call == "generate_test":
             new_input = agent_tool_args.get("scenario", new_input)
-        elif agent_tool_call == "generate_suggestions":
-            # instructions stored in agent_tool_args, picked up by suggestions_node
+        elif agent_tool_call == "run_cte":
+            # test_index, cte_name, column passed to debug_node via agent_tool_args
+            pass
+        elif agent_tool_call == "count_cte_steps":
+            # test_index, cte_name passed to debug_node via agent_tool_args
             pass
 
     update: dict = {

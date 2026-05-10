@@ -27,3 +27,5 @@ class MsgType(str, Enum):
     DELETE_TEST = "delete_test"
     SUGGESTIONS = "suggestions"
     GENERATE_TEST_SCENARIO = "generate_test_scenario"
+    DEBUG_RUN_CTE = "debug_run_cte"
+    DEBUG_COUNT_STEPS = "debug_count_steps"

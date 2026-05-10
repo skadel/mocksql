@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
+from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
@@ -139,6 +140,7 @@ def build_query_graph():
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
     builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("debug_node", debug_test_node)
     builder.add_node("delete_test_node", delete_test_node)
     builder.add_node("generator", generate_examples)
     builder.add_node("assertion_modifier", modify_assertions)
@@ -172,6 +174,8 @@ def build_query_graph():
             return "delete_test_node"
         if tool_call == "generate_suggestions":
             return "suggestions_generator"
+        if tool_call in ("run_cte", "count_cte_steps"):
+            return "debug_node"
         return "history_saver"
 
     def route_executor(state: QueryState):
@@ -180,11 +184,6 @@ def build_query_graph():
         return "test_evaluator"
 
     def route_evaluator(state: QueryState):
-        if (
-            state.get("status") == "empty_results"
-            and (state.get("gen_retries") or 0) > 0
-        ):
-            return "generator"
         # Skip suggestions for assertion-only edits (data didn't change)
         if state.get("assertion_only"):
             return "history_saver"
@@ -194,6 +193,7 @@ def build_query_graph():
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
     builder.add_conditional_edges("conversational_agent", route_agent_output)
+    builder.add_edge("debug_node", "history_saver")
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")

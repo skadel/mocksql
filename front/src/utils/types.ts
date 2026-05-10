@@ -11,7 +11,29 @@ export interface DisplayTableMeta {
 
 export const MsgType = {
   PROFILE_QUERY: 'profile_query',
+  DEBUG_RUN_CTE: 'debug_run_cte',
+  DEBUG_COUNT_STEPS: 'debug_count_steps',
 } as const;
+
+export interface DebugRunCteResult {
+  cte_name: string;
+  column?: string | null;
+  rows: Record<string, any>[];
+  row_count: number;
+  lineage?: string;
+  error?: string;
+}
+
+export interface DebugCountStep {
+  label: string;
+  count: number;
+}
+
+export interface DebugCountStepsResult {
+  cte_name: string;
+  steps: DebugCountStep[];
+  error?: string;
+}
 
 export interface ProfileRequest {
   message: string;
@@ -32,6 +54,9 @@ export interface MessageContents {
   error?: string;
   profileRequest?: ProfileRequest;
   suggestions?: string[];
+  reasoning?: string;
+  debugRunCte?: DebugRunCteResult;
+  debugCountSteps?: DebugCountStepsResult;
 }
 
 export interface Message {

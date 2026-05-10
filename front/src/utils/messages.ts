@@ -1,4 +1,4 @@
-import { Message, MessageContents, MsgType } from "./types";
+import { DebugRunCteResult, DebugCountStepsResult, Message, MessageContents, MsgType } from "./types";
 
 export function getLastMessage(messages, selectedChildIndices) {
   if (!messages || messages.length === 0) return null;
@@ -124,6 +124,24 @@ export function formatMessage(message: any): Message {
     case 'generate_test_scenario':
       newMessage.contents.text = message.content;
       break;
+
+    case MsgType.DEBUG_RUN_CTE: {
+      try {
+        newMessage.contents.debugRunCte = JSON.parse(message.content) as DebugRunCteResult;
+      } catch {
+        newMessage.contents.error = message.content;
+      }
+      break;
+    }
+
+    case MsgType.DEBUG_COUNT_STEPS: {
+      try {
+        newMessage.contents.debugCountSteps = JSON.parse(message.content) as DebugCountStepsResult;
+      } catch {
+        newMessage.contents.error = message.content;
+      }
+      break;
+    }
 
     default: {
       const raw = message.content;
