@@ -123,5 +123,7 @@ async def patch_model_tests(body: PatchTestsRequest):
 async def clear_history(body: ClearHistoryRequest):
     result = await delete_all_messages(body.sessionId)
     if not result.get("success"):
-        raise HTTPException(status_code=500, detail=result.get("error", "Failed to clear history"))
+        raise HTTPException(
+            status_code=500, detail=result.get("error", "Failed to clear history")
+        )
     return {"ok": True}

@@ -6,7 +6,7 @@ import duckdb
 import sqlglot
 from sqlglot import exp
 
-from build_query.examples_executor import filter_schemas_by_used_columns, _extract_conditions
+from build_query.examples_executor import _extract_conditions
 from storage.test_repository import get_test
 from utils.examples import (
     run_query_on_test_dataset,
@@ -57,7 +57,11 @@ async def _setup_test_tables(
         raise ValueError(f"Test not found for session {session_id}")
 
     test_case = next(
-        (tc for tc in (test.get("test_cases") or []) if str(tc.get("test_index")) == str(test_index)),
+        (
+            tc
+            for tc in (test.get("test_cases") or [])
+            if str(tc.get("test_index")) == str(test_index)
+        ),
         None,
     )
     if not test_case:
@@ -75,7 +79,14 @@ async def _setup_test_tables(
         dialect=dialect,
     )
     execute_queries(
-        list(insert_examples(data_dict=test_data, schemas=duckdb_schema, suffix=suffix, used_columns=used_columns)),
+        list(
+            insert_examples(
+                data_dict=test_data,
+                schemas=duckdb_schema,
+                suffix=suffix,
+                used_columns=used_columns,
+            )
+        ),
         con,
     )
     return suffix
@@ -121,14 +132,19 @@ async def execute_run_cte(
     if column:
         try:
             from sqlglot.lineage import lineage as sqlglot_lineage
+
             node = sqlglot_lineage(column, debug_sql, dialect=dialect)
             lineage_info = str(node)
         except Exception:
             pass
 
     with initialize_duckdb(DB_PATH) as con:
-        suffix = await _setup_test_tables(session_id, test_index, schemas, used_columns, dialect, con)
-        df, _ = await run_query_on_test_dataset(debug_sql, suffix, project, dialect, con)
+        suffix = await _setup_test_tables(
+            session_id, test_index, schemas, used_columns, dialect, con
+        )
+        df, _ = await run_query_on_test_dataset(
+            debug_sql, suffix, project, dialect, con
+        )
 
     result: Dict[str, Any] = {
         "cte_name": cte_name,
@@ -238,12 +254,18 @@ async def execute_count_cte_steps(
         return {"error": f"CTE '{cte_name}' not found. Available: {available}"}
 
     preceding = [c for c in ctes[:target_idx] if c["name"] != "final_query"]
-    full_sql, labels = _build_count_steps_query(ctes[target_idx]["code"], preceding, dialect)
+    full_sql, labels = _build_count_steps_query(
+        ctes[target_idx]["code"], preceding, dialect
+    )
 
     with initialize_duckdb(DB_PATH) as con:
-        suffix = await _setup_test_tables(session_id, test_index, schemas, used_columns, dialect, con)
+        suffix = await _setup_test_tables(
+            session_id, test_index, schemas, used_columns, dialect, con
+        )
         try:
-            df, _ = await run_query_on_test_dataset(full_sql, suffix, project, dialect, con)
+            df, _ = await run_query_on_test_dataset(
+                full_sql, suffix, project, dialect, con
+            )
         except Exception as e:
             logger.error("count_cte_steps failed: %s\nSQL:\n%s", e, full_sql)
             return {"error": str(e), "cte_name": cte_name}

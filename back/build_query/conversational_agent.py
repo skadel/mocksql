@@ -66,7 +66,9 @@ Réponds en français, de manière concise et naturelle."""
         Utilise cet outil pour diagnostiquer pourquoi une CTE retourne 0 ligne."""
         return f"{test_index}:{cte_name}"
 
-    llm = make_llm().bind_tools([generate_test, delete_test, generate_suggestions, run_cte, count_cte_steps])
+    llm = make_llm().bind_tools(
+        [generate_test, delete_test, generate_suggestions, run_cte, count_cte_steps]
+    )
     history = get_history_from_state(
         state,
         msg_type=[MsgType.QUERY, MsgType.OTHER, MsgType.RESULTS, MsgType.EXAMPLES],
