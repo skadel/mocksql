@@ -49,6 +49,19 @@ preprocessor_fn: "preprocessors:replace_vars"  # module:fonction, résolu depuis
 
 La fonction reçoit le SQL brut (`str`) et retourne le SQL transformé (`str`). Elle est appelée à chaque lecture de fichier (CLI `generate` et `GET /models`). Voir `storage/config.py:load_preprocessor_fn` pour l'implémentation.
 
+**Contexte métier (`mocksql.md`)** : l'ingé peut déposer des fichiers `mocksql.md` à n'importe quel niveau de son dossier de modèles pour annoter le contexte métier injecté dans les prompts LLM. La résolution est en cascade, du global au spécifique :
+
+```
+models_path/
+  mocksql.md              ← contexte global projet
+  finance/
+    mocksql.md            ← contexte du dossier finance
+    revenue.sql
+    revenue.md            ← contexte spécifique au fichier revenue.sql
+```
+
+Les fichiers trouvés sont concaténés dans l'ordre (global → spécifique) et injectés dans le prompt du générateur sous le bloc `**Contexte métier du projet**`. Un `mocksql.md` peut contenir la description du domaine, des règles métier, des cas particuliers à couvrir (ex. "un utilisateur peut avoir 2 comptes"), ou tout autre contexte que l'ingé juge utile pour guider la génération. Voir `storage/context_loader.py:load_model_context` pour l'implémentation.
+
 ### Tests et verdicts
 
 Chaque test généré porte :
@@ -416,3 +429,4 @@ App
 - **DuckDB positionné comme économie de coût** : toute mention de l'exécution dans l'UI doit souligner "0 € facturé sur BigQuery" — c'est un argument commercial, pas juste un détail technique.
 - **Import de tables manquantes** : l'`ImportView` est une étape intermédiaire entre `GenerateView` et `TestsView` — elle s'affiche uniquement si des tables référencées dans le SQL ne sont pas disponibles localement. Chaque table a son propre état (`pending` / `importing` / `done`).
 - **Dérive (drift)** : quand un modèle est lié à un fichier Git/dbt, stocker le `source_sha` à la création. Si le SHA change, afficher un bandeau d'alerte dans la TestsView et passer les tests en état `stale`.
+- **Contexte métier (`mocksql.md`)** : chargé dans `pre_routing` via `load_model_context(model_name)` et stocké dans `QueryState.model_context`. Propagé à tous les appels de `generate_data_prompt` et `update_data_prompt`. La résolution est en cascade (global → dossier → fichier) — voir `storage/context_loader.py`. Le champ est `Optional[str]` : s'il est absent ou vide, aucun bloc contexte n'apparaît dans le prompt.

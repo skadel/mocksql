@@ -978,7 +978,14 @@ function TestCard({
             const tc = tagStyle(tg);
             return <Chip key={tg} label={tg} size="small" sx={{ fontSize: 10.5, height: 20, bgcolor: tc.bg, color: tc.fg, border: 'none' }} />;
           })}
-          <Typography sx={{ fontSize: 11, color: PLACEHOLDER, ml: 'auto' }}>#{idx + 1}</Typography>
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 'auto' }}>
+            <Tooltip title="Replier ce test">
+              <MutedIconButton size="small" onClick={onToggleCollapse}>
+                <ExpandLessIcon sx={{ fontSize: 15 }} />
+              </MutedIconButton>
+            </Tooltip>
+            <Typography sx={{ fontSize: 11, color: PLACEHOLDER }}>#{idx + 1}</Typography>
+          </Box>
         </Box>
 
         {/* Description — inline editable */}
@@ -1076,12 +1083,6 @@ function TestCard({
 
         <Tooltip title="Supprimer">
           <DangerIconButton size="small" onClick={onDelete}><DeleteIcon sx={{ fontSize: 14 }} /></DangerIconButton>
-        </Tooltip>
-
-        <Tooltip title={isCollapsed ? 'Voir les données' : 'Replier les données'}>
-          <MutedIconButton size="small" onClick={onToggleCollapse}>
-            {isCollapsed ? <ExpandMoreIcon sx={{ fontSize: 16 }} /> : <ExpandLessIcon sx={{ fontSize: 16 }} />}
-          </MutedIconButton>
         </Tooltip>
       </Box>
 

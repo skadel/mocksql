@@ -516,6 +516,7 @@ async def create_appropriate_prompt(
     dialect = state.get("dialect", "bigquery")
     profile = state.get("profile")
     stripped_sql = _strip_unconstrained_from_sql(sql, excluded_columns or [], dialect)
+    model_context = state.get("model_context") or ""
     if not existing_tests:
         return generate_data_prompt(
             history,
@@ -525,6 +526,7 @@ async def create_appropriate_prompt(
             constraints_hint=constraints_hint,
             sql=stripped_sql,
             profile=profile,
+            model_context=model_context,
         )
     elif state.get("input", "").strip():
         if state.get("test_index") is not None:
@@ -539,6 +541,7 @@ async def create_appropriate_prompt(
                 format_instructions,
                 sql=sql,
                 existing_test=existing_test,
+                model_context=model_context,
             )
         return generate_data_prompt(
             history,
@@ -549,6 +552,7 @@ async def create_appropriate_prompt(
             sql=stripped_sql,
             user_instruction=state["input"],
             profile=profile,
+            model_context=model_context,
         )
     elif state.get("status") == "empty_results":
         return generate_data_prompt(
@@ -559,6 +563,7 @@ async def create_appropriate_prompt(
             constraints_hint=constraints_hint,
             sql=stripped_sql,
             profile=profile,
+            model_context=model_context,
         )
     else:
         return None

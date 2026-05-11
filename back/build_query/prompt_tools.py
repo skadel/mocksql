@@ -246,6 +246,7 @@ def generate_data_prompt(
     sql: str = "",
     user_instruction: str = "",
     profile: Optional[dict] = None,
+    model_context: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
@@ -269,6 +270,12 @@ def generate_data_prompt(
         constraints_block = ""
 
     sql_block = f"\nRequête SQL :\n```sql\n{sql}\n```\n" if sql else ""
+
+    context_block = (
+        f"\n**Contexte métier du projet (fourni par l'ingénieur data) :**\n{model_context}\n"
+        if model_context
+        else ""
+    )
 
     profile_block_str = _format_profile_block(profile, used_columns)
     profile_block = (
@@ -297,7 +304,7 @@ Vous êtes un data QA, testeur de requêtes SQL et expert en génération de don
 Analysez la requête SQL et le schéma des données sources fournis,
 puis générez un unique test unitaire en format JSON.
 
-{sql_block}{constraints_block}{profile_block}
+{context_block}{sql_block}{constraints_block}{profile_block}
 
 **Consignes principales :**
 """
@@ -425,6 +432,7 @@ def update_data_prompt(
     format_instructions: str,
     sql: str = "",
     existing_test: Optional[dict] = None,
+    model_context: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
@@ -443,12 +451,18 @@ def update_data_prompt(
     """
 
     # 1. Message system : rappel du rôle et des consignes principales.
+    context_block = (
+        f"\n**Contexte métier du projet (fourni par l'ingénieur data) :**\n{model_context}\n"
+        if model_context
+        else ""
+    )
     system_message_content = (
         "Vous êtes un data QA, testeur de requêtes SQL et expert en génération et modification de données de test JSON.\n"
         "Votre objectif est de mettre à jour les données sources JSON selon les instructions données,\n"
         "sans ajouter d'explications ou de justifications superflues.\n"
         "Ne modifiez que les parties explicitement concernées par les instructions, sans réécrire les tests inchangés.\n"
         "En cas d'ajout d'un nouveau test, utilisez un index qui n'existe pas encore.\n"
+        + context_block
     )
     system_msg = SystemMessage(content=system_message_content)
 

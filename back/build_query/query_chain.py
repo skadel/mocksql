@@ -17,6 +17,7 @@ from build_query.state import QueryState
 from models.message_service import get_messages_history
 from utils.llm_factory import make_llm
 from storage.config import get_llm_model
+from storage.context_loader import load_model_context
 from storage.test_repository import get_test
 from utils.msg_types import MsgType
 from utils.saver import history_saver, get_history_from_state
@@ -36,6 +37,7 @@ async def pre_routing(state: QueryState):
     if not test:
         return {}
 
+    model_context = load_model_context(test.get("model_name", ""))
     has_existing_tests = len(test.get("test_cases") or []) > 0
     stored_sql = (test.get("sql") or "").strip()
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
@@ -43,13 +45,14 @@ async def pre_routing(state: QueryState):
 
     if incoming_query and stored_sql != incoming_query:
         print("not validated query")
-        return {"has_existing_tests": has_existing_tests}
+        return {"has_existing_tests": has_existing_tests, "model_context": model_context}
 
     if not stored_used_columns:
         return {
             "validated_sql": stored_sql,
             "optimized_sql": stored_optimised_sql,
             "has_existing_tests": has_existing_tests,
+            "model_context": model_context,
         }
 
     from models.schemas import get_profile
@@ -67,6 +70,7 @@ async def pre_routing(state: QueryState):
         "optimized_sql": stored_optimised_sql,
         "history": history,
         "has_existing_tests": has_existing_tests,
+        "model_context": model_context,
     }
 
 
