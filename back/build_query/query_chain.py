@@ -45,7 +45,10 @@ async def pre_routing(state: QueryState):
 
     if incoming_query and stored_sql != incoming_query:
         print("not validated query")
-        return {"has_existing_tests": has_existing_tests, "model_context": model_context}
+        return {
+            "has_existing_tests": has_existing_tests,
+            "model_context": model_context,
+        }
 
     if not stored_used_columns:
         return {

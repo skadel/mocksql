@@ -116,6 +116,38 @@ export interface SqlHistoryEntry {
   parentMessageId: string; // ID of the last message when SQL was changed ('' for initial SQL)
 }
 
+export interface AssertionItem {
+  description: string;
+  sql?: string;
+  passed: boolean;
+  failing_rows?: Record<string, any>[];
+  error?: string;
+}
+
+export interface IntegrationStep {
+  sql: string;
+  produces: string;
+}
+
+export interface IntegrationTestItem {
+  title: string;
+  status: 'pass' | 'fail' | 'error';
+  rows_produced?: number;
+  assertion_results: AssertionItem[];
+  data?: Record<string, any[]>;
+  error?: string;
+}
+
+export interface IntegrationRunResult {
+  name: string;
+  file: string;
+  total: number;
+  passed: number;
+  failed: number;
+  tests: IntegrationTestItem[];
+  chain?: IntegrationStep[];
+}
+
 export interface BuildModelState {
     activeStep: number;
     selectedDatabases: string[];
