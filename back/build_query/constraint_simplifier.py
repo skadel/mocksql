@@ -393,12 +393,15 @@ class _LineageResolver:
 
         Calls sqlglot.lineage.lineage() for CTE-sourced columns;
         passes base-table columns through unchanged.
+        Uses real_table (the CTE definition name) rather than table (the FROM
+        alias) so that aliases like FROM raw AS r are resolved correctly.
         """
         key = (col.table, col.column)
         if key in self._cache:
             return self._cache[key]
+        cte_name = col.real_table or col.table
         resolved = (
-            self._resolve_via_lineage(col) if col.table in self._cte_names else col
+            self._resolve_via_lineage(col) if cte_name in self._cte_names else col
         )
         self._cache[key] = resolved
         return resolved
@@ -410,8 +413,10 @@ class _LineageResolver:
         For a computed expression (e.g. cte1.cte_mix where cte_mix = a.x1 + b.d2)
         returns [a.x1, b.d2] — all leaf base-table columns in the lineage tree.
         Non-CTE columns are returned as-is in a single-element list.
+        Uses real_table for the CTE check to handle FROM aliases correctly.
         """
-        if col.table not in self._cte_names:
+        cte_name = col.real_table or col.table
+        if cte_name not in self._cte_names:
             return [col]
         key = (col.table, col.column)
         if key in self._all_cache:
@@ -421,14 +426,15 @@ class _LineageResolver:
         return result
 
     def _make_lineage_stmt(self, col: ColumnRef) -> exp.Expression:
-        """Build WITH <all_ctes> SELECT col.column FROM col.table.
+        """Build WITH <all_ctes> SELECT col.column FROM <cte_definition_name>.
 
-        Ensures col.column always appears in the outermost SELECT so that
-        sqlglot lineage can trace it through multi-level CTEs, even when the
-        column is not projected by the original outer query.
+        Uses real_table (the CTE definition name) rather than table (the FROM
+        alias) so that sqlglot can find the CTE in the WITH clause even when
+        the query writes FROM raw AS r and col.table is "r".
         """
+        cte_name = col.real_table or col.table
         wrapper = sqlglot.parse_one(
-            f"SELECT {col.column} FROM {col.table}",
+            f"SELECT {col.column} FROM {cte_name}",
             dialect=self._dialect,
         )
         with_clause = self._statement.args.get("with_")
@@ -502,7 +508,9 @@ class _LineageResolver:
 
 def _collect_aliases(select: exp.Select, alias_map: dict[str, str]) -> None:
     """Populate alias_map with {alias_lower → real_table_lower} from FROM/JOINs."""
-    from_clause = select.args.get("from")
+    # sqlglot stores the FROM clause under "from_" (trailing underscore to avoid
+    # collision with Python's reserved word); fall back to "from" for older versions.
+    from_clause = select.args.get("from_") or select.args.get("from")
     joins = select.args.get("joins") or []
 
     sources = []
@@ -694,6 +702,9 @@ _FLIP_OP = {
     "neq": "neq",
 }
 
+# All pattern-matching predicate types — same .this / .expression structure as Like.
+_LIKE_TYPES = (exp.Like, exp.ILike, exp.Glob)
+
 
 def _extract_from_condition(
     cond: exp.Expression,
@@ -743,20 +754,28 @@ def _dispatch_pred(
                         column=ref, op="is_not_null", source_columns=src_cols
                     )
                 )
-        elif isinstance(inner, exp.Like) and _is_column(inner.this):
-            raw = _col_ref(inner.this, alias_map)
+        elif isinstance(inner, _LIKE_TYPES):
+            col_node = inner.this
             pat_node = inner.args.get("expression") or inner.args.get("pattern")
-            if raw and pat_node:
-                src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
-                filters.append(
-                    FilterConstraint(
-                        column=ref,
-                        op="not_like",
-                        value=_literal_value(pat_node) or _sql_of(pat_node),
-                        source_columns=src_cols,
+            if _is_column(col_node):
+                candidate = col_node
+            elif _func_name(col_node):
+                candidate = _find_column_in(col_node)
+            else:
+                candidate = None
+            if candidate and pat_node:
+                raw = _col_ref(candidate, alias_map)
+                if raw:
+                    src_cols = resolver.resolve_all(raw)
+                    ref = resolver.resolve(raw)
+                    filters.append(
+                        FilterConstraint(
+                            column=ref,
+                            op="not_like",
+                            value=_literal_value(pat_node) or _sql_of(pat_node),
+                            source_columns=src_cols,
+                        )
                     )
-                )
         elif isinstance(inner, exp.In) and _is_column(inner.this):
             raw = _col_ref(inner.this, alias_map)
             if raw:
@@ -770,8 +789,8 @@ def _dispatch_pred(
                 )
         return
 
-    # ── LIKE ──────────────────────────────────────────────────────────────────
-    if isinstance(pred, exp.Like):
+    # ── LIKE / ILIKE / GLOB ───────────────────────────────────────────────────
+    if isinstance(pred, _LIKE_TYPES):
         col_node = pred.this
         pat_node = pred.args.get("expression") or pred.args.get("pattern")
         if _is_column(col_node) and pat_node:
@@ -787,6 +806,22 @@ def _dispatch_pred(
                         source_columns=src_cols,
                     )
                 )
+        elif _func_name(col_node) and pat_node:
+            # func(col) LIKE pattern — e.g. UPPER(a.status) LIKE '%ACTIVE%'
+            inner_col = _find_column_in(col_node)
+            if inner_col:
+                raw = _col_ref(inner_col, alias_map)
+                if raw:
+                    src_cols = resolver.resolve_all(raw)
+                    ref = resolver.resolve(raw)
+                    filters.append(
+                        FilterConstraint(
+                            column=ref,
+                            op="like",
+                            value=_literal_value(pat_node) or _sql_of(pat_node),
+                            source_columns=src_cols,
+                        )
+                    )
         return
 
     # ── IN / NOT IN ───────────────────────────────────────────────────────────
@@ -830,6 +865,12 @@ def _dispatch_pred(
     # ── Binary comparisons ────────────────────────────────────────────────────
     op_str = _CMP_OP_MAP.get(type(pred))
     if op_str is None:
+        if isinstance(pred, exp.Predicate):
+            logger.debug(
+                "unhandled Predicate type %s: %s",
+                type(pred).__name__,
+                pred.sql(dialect="bigquery"),
+            )
         return
 
     left = pred.left if hasattr(pred, "left") else pred.args.get("this")
@@ -923,6 +964,44 @@ def _dispatch_pred(
                     source_columns=src_cols,
                 )
             )
+        return
+
+    # func(col) <op> literal  →  filter on the inner column
+    # e.g. UPPER(a.status) = 'ACTIVE', FORMAT_DATE('%Y-%m', a.dt) = '2024-01'
+    # Skip Case: CASE WHEN col = val THEN … END = lit — inner col ≠ outer literal.
+    if left_func and right_is_lit and not isinstance(left, exp.Case):
+        inner_col = _find_column_in(left)
+        if inner_col:
+            raw = _col_ref(inner_col, alias_map)
+            if raw:
+                src_cols = resolver.resolve_all(raw)
+                ref = resolver.resolve(raw)
+                filters.append(
+                    FilterConstraint(
+                        column=ref,
+                        op=op_str,
+                        value=_literal_value(right),
+                        source_columns=src_cols,
+                    )
+                )
+        return
+
+    # literal <op> func(col)  →  filter on the inner column, operator flipped
+    if right_func and left_is_lit and not isinstance(right, exp.Case):
+        inner_col = _find_column_in(right)
+        if inner_col:
+            raw = _col_ref(inner_col, alias_map)
+            if raw:
+                src_cols = resolver.resolve_all(raw)
+                ref = resolver.resolve(raw)
+                filters.append(
+                    FilterConstraint(
+                        column=ref,
+                        op=_FLIP_OP.get(op_str, op_str),
+                        value=_literal_value(left),
+                        source_columns=src_cols,
+                    )
+                )
         return
 
 
@@ -1182,12 +1261,10 @@ def simplify(
         uf.add(f.column)
 
     # Register functional columns (do NOT union — they are derived, not equivalent)
-    func_sources: set[ColumnRef] = set()
     func_derived: set[ColumnRef] = set()
     for fc in functional:
         uf.add(fc.source)
         uf.add(fc.derived)
-        func_sources.add(fc.source)
         func_derived.add(fc.derived)
 
     # Build filter index: col → [FilterConstraint]
@@ -1203,8 +1280,6 @@ def simplify(
     result.equivalence_classes = uf.groups()
 
     # For each equivalence class, pick a representative and mark others as derived
-    processed: set[ColumnRef] = set()
-
     for group in uf.all_groups():
         # Choose representative: prefer column with a filter; otherwise pick smallest
         candidates_with_filter = [c for c in group if c in filter_index]
@@ -1216,12 +1291,10 @@ def simplify(
             # Mark as derived from rep (simple propagation, no function)
             if col not in func_derived:
                 result.derived_columns[col] = (rep, str(rep))
-            processed.add(col)
 
         # The representative becomes a source (if not already a functional derived)
         if rep not in func_derived:
             result.source_columns[rep] = filter_index.get(rep, [])
-            processed.add(rep)
 
     # Handle functional constraints
     for fc in functional:

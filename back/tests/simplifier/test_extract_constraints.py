@@ -348,3 +348,197 @@ class TestNeedsLlm:
     def test_between_no_llm(self):
         f = FilterConstraint(column=col("a", "x"), op="between", value=(1, 10))
         assert f.needs_llm() is False
+
+
+# ─── func(col) <op> literal in WHERE ─────────────────────────────────────────
+
+
+class TestFuncColLiteralFilter:
+    """WHERE func(col) <op> literal — _dispatch_pred extracts a filter on the inner column."""
+
+    def test_upper_col_eq_literal(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE UPPER(a.status) = 'ACTIVE'
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        assert any(
+            f.column == col("a", "status") and f.op == "eq" and f.value == "ACTIVE"
+            for f in filters
+        ), "Expected filter on a.status from UPPER(a.status) = 'ACTIVE'"
+
+    def test_format_date_col_eq_literal(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE FORMAT_DATE('%Y-%m', a.dt) = '2024-01'
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        assert any(
+            f.column == col("a", "dt") and f.op == "eq" and f.value == "2024-01"
+            for f in filters
+        ), "Expected filter on a.dt from FORMAT_DATE(..., a.dt) = '2024-01'"
+
+    def test_func_col_gt_literal(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE YEAR(a.dt) > 2020
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        assert any(
+            f.column == col("a", "dt") and f.op == "gt" and f.value == 2020
+            for f in filters
+        ), "Expected filter on a.dt from YEAR(a.dt) > 2020"
+
+    def test_literal_eq_func_col_flipped(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE 'ACTIVE' = UPPER(a.status)
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        assert any(
+            f.column == col("a", "status") and f.op == "eq" and f.value == "ACTIVE"
+            for f in filters
+        ), "Expected filter on a.status from 'ACTIVE' = UPPER(a.status)"
+
+    def test_upper_col_like_pattern(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE UPPER(a.name) LIKE '%FOO%'
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        assert any(f.column == col("a", "name") and f.op == "like" for f in filters), (
+            "Expected like filter on a.name from UPPER(a.name) LIKE '%FOO%'"
+        )
+
+
+# ─── CTE lineage resolution in constraints ───────────────────────────────────
+
+
+class TestCteConstraintLineage:
+    """Tests for lineage resolution of columns referenced in CTE constraints.
+
+    Two behaviours are verified:
+      1. Passing ALL CTEs to the lineage engine (including those defined after
+         the target CTE) does NOT break resolution — extra CTEs are simply ignored
+         because the outer SELECT anchors to the specific CTE.
+      2. Known gap: when a CTE is referenced with a FROM alias (e.g. FROM raw AS r),
+         col.table equals the alias ("r"), which is NOT in _cte_names ({"raw"}).
+         Lineage is therefore skipped and the column stays unresolved as alias.col
+         instead of being traced back to the base table.
+    """
+
+    def test_constraint_in_cte_body_resolves_through_lineage(self):
+        """Constraint inside cte_b (WHERE cte_a.val > 5) is resolved to base_table.val.
+
+        Three CTEs are present: cte_a → cte_b → cte_c.
+        The WHERE predicate lives in cte_b; cte_c comes AFTER and must not interfere.
+        """
+        sql = """
+        WITH
+          cte_a AS (SELECT id, val FROM myproject.analytics.base_table AS bt),
+          cte_b AS (SELECT cte_a.val FROM cte_a WHERE cte_a.val > 5),
+          cte_c AS (SELECT cte_b.val FROM cte_b)
+        SELECT * FROM cte_c
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        val_gt_filters = [
+            f for f in filters if f.column.column == "val" and f.op == "gt"
+        ]
+        assert val_gt_filters, "Filter val > 5 must be extracted from cte_b's WHERE"
+        assert any(f.column.table == "base_table" for f in val_gt_filters), (
+            "Filter must be resolved to base_table.val through CTE lineage "
+            "(extra cte_c in WITH clause must not break resolution)"
+        )
+
+    def test_cte_referenced_by_name_resolves_lineage_in_outer_query(self):
+        """Outer WHERE using the CTE name directly → lineage is traced correctly."""
+        sql = """
+        WITH raw AS (SELECT id, val FROM myproject.analytics.base_table AS bt)
+        SELECT raw.val FROM raw WHERE raw.val > 5
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        val_gt_filters = [
+            f for f in filters if f.column.column == "val" and f.op == "gt"
+        ]
+        assert val_gt_filters, "Filter val > 5 must be extracted"
+        assert any(f.column.table == "base_table" for f in val_gt_filters), (
+            "Without FROM alias, 'raw' is in _cte_names → lineage is called "
+            "and the column is resolved to base_table.val"
+        )
+
+
+# ─── Known gap: CASE WHEN conditions ─────────────────────────────────────────
+
+
+class TestCaseWhenGap:
+    """CASE WHEN branch conditions are not walked — inner predicates are dropped."""
+
+    def test_case_when_eq_literal_currently_dropped(self):
+        sql = """
+        SELECT * FROM myproject.analytics.a AS a
+        WHERE CASE WHEN a.status = 'active' THEN 1 ELSE 0 END = 1
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        # The inner a.status = 'active' inside CASE WHEN is not walked.
+        status_filters = [f for f in filters if f.column == col("a", "status")]
+        assert status_filters == [], (
+            "Gap: CASE WHEN conditions are silently dropped — update when fixed."
+        )
+
+
+# ─── Failing tests: CTE FROM alias prevents lineage ──────────────────────────
+
+
+class TestCteFromAliasLineageGap:
+    """These tests FAIL with the current code to expose a lineage gap.
+
+    Root cause: _cte_names holds CTE definition names (e.g. "raw").
+    When a CTE is aliased in FROM (e.g. FROM raw AS r), col.table = "r",
+    which is NOT in _cte_names → resolver.resolve() returns the column unchanged
+    → the filter column stays as alias.col instead of being traced to base_table.col.
+
+    Fix direction: use real_table (stored in ColumnRef) instead of col.table
+    when checking _cte_names, or expand _cte_names to include FROM aliases.
+    """
+
+    def test_cte_from_alias_in_outer_query_should_resolve_lineage(self):
+        """Outer WHERE with 'FROM raw AS r' → val should resolve to base_table.val.
+
+        CURRENTLY FAILS: col.table='r' not in _cte_names={'raw'} → lineage skipped
+        → filter column stays as r.val.
+        """
+        sql = """
+        WITH raw AS (SELECT id, val FROM myproject.analytics.base_table AS bt)
+        SELECT r.val FROM raw AS r WHERE r.val > 5
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        val_gt_filters = [
+            f for f in filters if f.column.column == "val" and f.op == "gt"
+        ]
+        assert val_gt_filters, "Filter val > 5 must be extracted"
+        assert any(f.column.table == "base_table" for f in val_gt_filters), (
+            "Column should be resolved to base_table.val through CTE lineage. "
+            "Currently fails because alias 'r' is not in _cte_names={'raw'}."
+        )
+
+    def test_cte_from_alias_in_cte_body_should_resolve_lineage(self):
+        """CTE body WHERE with 'FROM raw AS r' → val should resolve to base_table.val.
+
+        CURRENTLY FAILS: col.table='r' not in _cte_names={'raw','filtered'}
+        → lineage skipped → filter column stays as r.val.
+        """
+        sql = """
+        WITH
+          raw AS (SELECT id, val FROM myproject.analytics.base_table AS bt),
+          filtered AS (SELECT r.val FROM raw AS r WHERE r.val > 5)
+        SELECT * FROM filtered
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        val_gt_filters = [
+            f for f in filters if f.column.column == "val" and f.op == "gt"
+        ]
+        assert val_gt_filters, "Filter val > 5 must be extracted from filtered's WHERE"
+        assert any(f.column.table == "base_table" for f in val_gt_filters), (
+            "Column should be resolved to base_table.val through CTE lineage. "
+            "Currently fails because alias 'r' is not in _cte_names={'raw','filtered'}."
+        )

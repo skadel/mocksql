@@ -2,11 +2,12 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
+import AccountTreeIcon from '@mui/icons-material/AccountTree';
 import { Box, Drawer, FormControl, IconButton, InputBase, InputLabel, MenuItem, Select, Tooltip, Typography } from '@mui/material';
 import { SelectChangeEvent } from '@mui/material/Select';
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Link as RouterLink } from 'react-router-dom';
+import { Link as RouterLink, useLocation } from 'react-router-dom';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { resetContext } from '../../buildModel/buildModelSlice';
 import { setCurrentId, toggleDrawer } from '../appBarSlice';
@@ -43,6 +44,8 @@ const DrawerComponent: React.FC = () => {
 
   const drawerOpen  = useAppSelector(s => s.appBarModel.drawerOpen);
   const testedCount = useAppSelector(s => s.appBarModel.models.filter(m => m.isTested).length);
+  const location    = useLocation();
+  const isIntegration = location.pathname === '/integration';
 
   useEffect(() => {
     dispatch(fetchModels());
@@ -229,6 +232,39 @@ const DrawerComponent: React.FC = () => {
           {activeTab === 'models'
             ? <SqlFileList search={search} />
             : <ModelExplorer search={search} />}
+        </Box>
+
+        {/* ── Integration link ─────────────────────────────────────── */}
+        <Box
+          sx={{
+            borderTop: `1px solid ${LINE}`,
+            px: '10px',
+            pt: '8px',
+            pb: '2px',
+          }}
+        >
+          <Box
+            component={RouterLink}
+            to="/integration"
+            sx={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              px: '10px',
+              py: '7px',
+              borderRadius: '8px',
+              bgcolor: isIntegration ? '#e4f5f4' : 'transparent',
+              color: isIntegration ? TEAL : MUTED,
+              textDecoration: 'none',
+              '&:hover': { bgcolor: '#e4f5f4', color: TEAL },
+              transition: 'all .12s',
+            }}
+          >
+            <AccountTreeIcon sx={{ fontSize: 15, flexShrink: 0 }} />
+            <Typography sx={{ fontSize: 12, fontWeight: isIntegration ? 700 : 500 }}>
+              Tests d'intégration
+            </Typography>
+          </Box>
         </Box>
 
         {/* ── Footer ───────────────────────────────────────────────── */}
