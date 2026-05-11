@@ -62,17 +62,17 @@ async def generate_suggestions(state: QueryState):
         [
             (
                 "system",
-                """Tu es un expert en assurance qualité et en tests unitaires SQL (dialecte: {}).
+                """Tu es un expert en assurance qualité et en tests unitaires SQL (dialecte: {dialect}).
 Ton objectif est de fournir des idées de cas de tests pertinents et non couverts pour garantir la robustesse de la requête.""",
             ),
             (
                 "user",
                 """Voici la requête SQL à analyser :
 <sql>
-{}
+{sql}
 </sql>
 
-{}
+{instruction_block}
 
 Voici les tests déjà générés (à ne pas reproduire) :
 <tests_existants>

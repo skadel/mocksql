@@ -150,6 +150,16 @@ async def get_messages_history(
     return messages_from_dict(filtered)
 
 
+async def delete_all_messages(session_id: str) -> Dict[str, Union[bool, str]]:
+    """Supprime tous les messages d'une session."""
+    try:
+        del_sql = f"DELETE FROM {COMMON_HISTORY_TABLE_NAME} WHERE session_id = $1"
+        await execute(del_sql, session_id)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 async def delete_messages_from_index(
     session_id: str, index: int
 ) -> Dict[str, Union[bool, str]]:

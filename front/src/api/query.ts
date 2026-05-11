@@ -76,8 +76,12 @@ export const chatQuery = createAsyncThunk(
 
     let step = '';
     const capturedSteps = ['parser', 'generator', 'executor'];
-    // Tracks the temp message id used for streaming conversational agent tokens
     let convStreamId: string | null = null;
+    // Accumulates the raw streaming text emitted by conversational_agent before the final
+    // message arrives — stored as `contents.reasoning` on the scenario message.
+    let convStreamText = '';
+    // ID of the generate_test_scenario message; used as parent for evaluation in conv flow.
+    let convGenerateParentId: string | null = null;
 
     dispatch(setError(''));
     const token = localStorage.getItem('jwt') || '';
@@ -171,6 +175,7 @@ export const chatQuery = createAsyncThunk(
 
             // Stream conversational agent tokens directly into the chat thread
             if (pd.metadata?.langgraph_node === 'conversational_agent') {
+              convStreamText += text;
               if (!convStreamId) {
                 convStreamId = uuidv4();
                 dispatch(appendQueryComponentMessage({
@@ -194,22 +199,78 @@ export const chatQuery = createAsyncThunk(
             }
           }
           else if (pd.event === 'on_chain_stream') {
-            // Replace the streaming placeholder with the final persisted message
-            if (pd.name === 'conversational_agent' && convStreamId) {
-              dispatch(removeMessage(convStreamId));
-              convStreamId = null;
-            }
-            (pd.data?.chunk.messages || []).forEach((m: any) => {
-              const nm = formatMessage(m);
-              if (nm.contents.tables !== undefined) {
-                if (testIndex !== undefined) {
-                  nm.testIndex = testIndex;
-                } else if (context === 'sql_update') {
-                  nm.context = 'sql_update';
+            const messages = pd.data?.chunk?.messages || [];
+
+            if (pd.name === 'conversational_agent') {
+              const formattedMsgs = messages.map((m: any) => formatMessage(m));
+              const scenarioMsg = formattedMsgs.find((m: any) => m.contentType === 'generate_test_scenario');
+
+              if (scenarioMsg) {
+                // Replace the streaming placeholder with the real persisted scenario message.
+                // Embed the accumulated reasoning text so MessageBody can render it as "Réflexion".
+                if (convStreamId) {
+                  dispatch(removeMessage(convStreamId));
+                  convStreamId = null;
                 }
+                const msgWithReasoning = convStreamText
+                  ? { ...scenarioMsg, contents: { ...scenarioMsg.contents, reasoning: convStreamText } }
+                  : scenarioMsg;
+                convStreamText = '';
+                console.log('[SSE] conv_agent: dispatching real scenario message', msgWithReasoning.id);
+                dispatch(appendQueryComponentMessage(msgWithReasoning));
+                convGenerateParentId = scenarioMsg.id;
+                // Dispatch any accompanying text messages (rare but possible).
+                formattedMsgs
+                  .filter((m: any) => m.contentType !== 'generate_test_scenario')
+                  .forEach((nm: any) => {
+                    console.log('[SSE] formatted message:', nm.contentType, nm);
+                    dispatch(appendQueryComponentMessage(nm));
+                  });
+              } else {
+                // Regular text response — replace streaming placeholder with persisted message.
+                if (convStreamId) {
+                  console.log('[SSE] conv_agent chain_stream: replacing placeholder', convStreamId);
+                  dispatch(removeMessage(convStreamId));
+                  convStreamId = null;
+                  convStreamText = '';
+                }
+                formattedMsgs.forEach((nm: any) => {
+                  console.log('[SSE] formatted message:', nm.contentType, nm);
+                  if (nm.contents.tables !== undefined) {
+                    if (testIndex !== undefined) nm.testIndex = testIndex;
+                    else if (context === 'sql_update') nm.context = 'sql_update';
+                  }
+                  dispatch(appendQueryComponentMessage(nm));
+                });
               }
-              dispatch(appendQueryComponentMessage(nm));
-            });
+            } else if (convGenerateParentId && (pd.name === 'executor' || pd.name === 'test_evaluator')) {
+              // Conversational generate_test flow:
+              // - results/examples → silent (TestsPanel handles display)
+              // - evaluation → visible as its own bubble, re-parented to the scenario message
+              messages.forEach((m: any) => {
+                const nm = formatMessage(m);
+                if (nm.contents.tables !== undefined && testIndex !== undefined) nm.testIndex = testIndex;
+                if (nm.contentType === 'evaluation' && pd.name === 'test_evaluator') {
+                  // Show evaluation as a visible bubble under the scenario message
+                  dispatch(appendQueryComponentMessage({ ...nm, parent: convGenerateParentId ?? undefined }));
+                } else {
+                  dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any));
+                }
+              });
+
+              if (pd.name === 'test_evaluator') {
+                convGenerateParentId = null;
+              }
+            } else {
+              messages.forEach((m: any) => {
+                const nm = formatMessage(m);
+                if (nm.contents.tables !== undefined) {
+                  if (testIndex !== undefined) nm.testIndex = testIndex;
+                  else if (context === 'sql_update') nm.context = 'sql_update';
+                }
+                dispatch(appendQueryComponentMessage(nm));
+              });
+            }
           }
         }
       },

@@ -1,7 +1,8 @@
 import React, { useRef, useEffect } from 'react';
-import { Alert, Box, IconButton, LinearProgress, Typography } from '@mui/material';
+import { Alert, Box, IconButton, LinearProgress, Tooltip, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
+import HistoryIcon from '@mui/icons-material/History';
 import DroppableTextField from '../../../shared/DroppableTextField';
 
 import MessageDisplay from './MessageDisplay';
@@ -16,6 +17,23 @@ function DbIcon() {
       <path d="M3 12c0 1.66 4.03 3 9 3s9-1.34 9-3" />
     </svg>
   );
+}
+
+const HISTORY_RESET_THRESHOLD = 100;
+
+function estimateTokens(messages: Message[]): number {
+  let chars = 0;
+  for (const msg of messages) {
+    chars += (msg.contents.text || '').length;
+    chars += (msg.contents.sql || '').length;
+    chars += (msg.contents.optimizedSql || '').length;
+    chars += (msg.contents.error || '').length;
+  }
+  return Math.round(chars / 4);
+}
+
+function formatTokenCount(n: number): string {
+  return n.toLocaleString('fr-FR');
 }
 
 interface ChatColumnProps {
@@ -42,6 +60,7 @@ interface ChatColumnProps {
   onStopStream: () => void;
   sendMessage: (...args: any[]) => void;
   sqlQuery: string;
+  onClearHistory: () => void;
 }
 
 const ChatColumn: React.FC<ChatColumnProps> = ({
@@ -68,7 +87,10 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   onStopStream,
   sendMessage,
   sqlQuery,
+  onClearHistory,
 }) => {
+  const showHistoryBanner = renderMessages.length > HISTORY_RESET_THRESHOLD;
+  const estimatedTokens = showHistoryBanner ? estimateTokens(renderMessages) : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -234,6 +256,49 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           >
             <CloseIcon sx={{ fontSize: 14 }} />
           </IconButton>
+        </Box>
+      )}
+
+      {/* History reset banner */}
+      {showHistoryBanner && (
+        <Box
+          sx={{
+            px: 1.75,
+            py: 0.75,
+            bgcolor: '#fffbeb',
+            borderBottom: '1px solid #fde68a',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 1,
+            flexShrink: 0,
+          }}
+        >
+          <HistoryIcon sx={{ fontSize: 14, color: '#b45309', flexShrink: 0 }} />
+          <Typography sx={{ fontSize: 11.5, color: '#92400e', flex: 1, minWidth: 0 }}>
+            {renderMessages.length} messages · ~{formatTokenCount(estimatedTokens)} tokens
+          </Typography>
+          <Tooltip title={`Vider l'historique du chat pour économiser ~${formatTokenCount(estimatedTokens)} tokens sur les prochains appels LLM`} arrow>
+            <Box
+              component="button"
+              onClick={onClearHistory}
+              sx={{
+                flexShrink: 0,
+                padding: '3px 9px',
+                fontSize: 11,
+                borderRadius: '6px',
+                border: '1px solid #fcd34d',
+                bgcolor: '#fef3c7',
+                color: '#92400e',
+                cursor: 'pointer',
+                fontWeight: 600,
+                fontFamily: 'inherit',
+                whiteSpace: 'nowrap',
+                '&:hover': { bgcolor: '#fde68a', borderColor: '#f59e0b' },
+              }}
+            >
+              Réinitialiser
+            </Box>
+          </Tooltip>
         </Box>
       )}
 

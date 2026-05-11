@@ -24,8 +24,8 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext } from '../buildModelSlice';
-import { getMessages, patchModelSql } from '../../../api/messages';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages } from '../buildModelSlice';
+import { getMessages, patchModelSql, clearHistoryApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
@@ -639,6 +639,12 @@ const ChatComponent: React.FC = () => {
 
   const handleStopStream = () => stopStream();
 
+  const handleClearHistory = async () => {
+    if (!currentModelId) return;
+    await clearHistoryApi(currentModelId);
+    dispatch(resetMessages());
+  };
+
   const handleRestoreState = useCallback((sql?: string, optimizedSql?: string, messageId?: string, restoredTestResults?: any[]) => {
     if (sql) { setSqlQuery(sql); dispatch(setQuery(sql)); setHistoryRestoreTrigger((n) => n + 1); }
     if (optimizedSql !== undefined) { setOptimizedSql(optimizedSql); dispatch(setOptimizedQuery(optimizedSql)); }
@@ -1001,6 +1007,7 @@ const ChatComponent: React.FC = () => {
             onStopStream={handleStopStream}
             sendMessage={sendMessage}
             sqlQuery={sqlQuery}
+            onClearHistory={handleClearHistory}
           />
 
           {/* Main area — tests + footer */}

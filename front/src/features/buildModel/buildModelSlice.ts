@@ -145,17 +145,19 @@ export const buildModelSlice = createSlice({
     },
     appendQueryComponentMessage(state, action: PayloadAction<Message>) {
       const msg = action.payload;
+      const silent = (msg as any).silent === true;
 
       if (msg.contentType === 'suggestions') {
         if (Array.isArray(msg.contents.suggestions)) state.suggestions = msg.contents.suggestions;
       }
 
-      state.queryComponentGraph[msg.id] = msg;
-
-      if (msg.parent && state.queryComponentGraph[msg.parent]) {
-        const parentMessage = state.queryComponentGraph[msg.parent];
-        parentMessage.children = parentMessage.children || [];
-        parentMessage.children.push(msg.id);
+      if (!silent) {
+        state.queryComponentGraph[msg.id] = msg;
+        if (msg.parent && state.queryComponentGraph[msg.parent]) {
+          const parentMessage = state.queryComponentGraph[msg.parent];
+          parentMessage.children = parentMessage.children || [];
+          parentMessage.children.push(msg.id);
+        }
       }
 
       // Keep state.testResults in sync as results arrive via SSE.

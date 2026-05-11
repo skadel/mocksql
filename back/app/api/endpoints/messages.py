@@ -4,6 +4,7 @@ from typing import List, Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from models.message_service import delete_all_messages
 from storage.config import is_initialized
 from storage.test_repository import get_test, update_test
 from utils.saver import common_history_retriever
@@ -15,6 +16,10 @@ router = APIRouter()
 
 class MessageRequest(BaseModel):
     modelId: str
+
+
+class ClearHistoryRequest(BaseModel):
+    sessionId: str
 
 
 class PatchTestsRequest(BaseModel):
@@ -112,3 +117,11 @@ async def patch_model_tests(body: PatchTestsRequest):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.post("/clearHistory")
+async def clear_history(body: ClearHistoryRequest):
+    result = await delete_all_messages(body.sessionId)
+    if not result.get("success"):
+        raise HTTPException(status_code=500, detail=result.get("error", "Failed to clear history"))
+    return {"ok": True}

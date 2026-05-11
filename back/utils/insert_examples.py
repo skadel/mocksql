@@ -285,8 +285,6 @@ def insert_examples(
             insert_stmt = build_insert_statement(
                 table_name_with_suffix, records, table_schema, used_cols=cols_to_use
             )
-            print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<insert_stmt")
-            print(insert_stmt)
             yield insert_stmt
         elif len(records) == 0:
             logger.debug("Table '%s' ignorée car elle est vide.", table_name)

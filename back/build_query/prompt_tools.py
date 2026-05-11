@@ -174,7 +174,6 @@ def _format_profile_block(profile: Optional[dict], used_columns: list) -> str:
     Formats the statistical profile into a concise block for injection into prompts.
     Only includes columns that are actually used in the query.
     """
-    print(profile)
     if not profile or not profile.get("tables"):
         return ""
 

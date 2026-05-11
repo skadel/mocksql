@@ -13,8 +13,6 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ReplayIcon from '@mui/icons-material/Replay';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import CommentIcon from '@mui/icons-material/Comment';
-import ViewListIcon from '@mui/icons-material/ViewList';
-import ViewAgendaIcon from '@mui/icons-material/ViewAgenda';
 import FilterListIcon from '@mui/icons-material/FilterList';
 import SyncIcon from '@mui/icons-material/Sync';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
@@ -1039,7 +1037,7 @@ function TestCard({
               }
             </Tooltip>
             {onRerunTest && (
-              <Tooltip title="Relancer ce test">
+              <Tooltip title="Regénérer ce test">
                 <MutedIconButton size="small" onClick={onRerunTest}><ReplayIcon sx={{ fontSize: 14 }} /></MutedIconButton>
               </Tooltip>
             )}
@@ -1462,15 +1460,13 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
-  const suggestions: string[] = useAppSelector((state) => state.buildModel.suggestions ?? []);
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
 
   const {
     editingIndex, setEditingIndex,
     editedDescriptions, setEditedDescriptions,
-    collapsed, setCollapsed,
+    expanded, setExpanded,
     filter, setFilter,
-    compact, setCompact,
     openComments, setOpenComments,
   } = useTestPanelState();
 
@@ -1493,7 +1489,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
 
   const handleDelete = (idx: number) => {
     persist(testResults.filter((_, i) => i !== idx));
-    setCollapsed(prev => { const next = new Set(prev); next.delete(idx); return next; });
+    setExpanded(prev => { const next = new Set(prev); next.delete(idx); return next; });
   };
 
   const handleSaveEdit = (idx: number) => {
@@ -1544,8 +1540,8 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     const prev = prevTestCountRef.current;
     const curr = testResults.length;
     if (curr > prev) {
-      // Collapse data sections of all previously existing tests so the new one is in focus
-      setCollapsed(new Set(Array.from({ length: prev }, (_, i) => i)));
+      // Collapse all previous tests so the new one is in focus
+      setExpanded(new Set());
       const targetId = `test-${curr}`;
       setTimeout(() => {
         const el = document.getElementById(targetId);
@@ -1630,36 +1626,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                 Demander à MockSQL
               </Box>
             )}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: 999, p: '2px' }}>
-              <Tooltip title="Vue détaillée">
-                <Box
-                  component="button"
-                  onClick={() => setCompact(false)}
-                  sx={{
-                    display: 'inline-flex', alignItems: 'center', gap: '4px', px: '10px', py: '4px',
-                    fontSize: 11.5, borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                    bgcolor: !compact ? TEAL_SUBTLE : 'transparent',
-                    color: !compact ? TEAL : MUTED, fontWeight: !compact ? 700 : 500,
-                  }}
-                >
-                  <ViewAgendaIcon sx={{ fontSize: 13 }} /> Détaillé
-                </Box>
-              </Tooltip>
-              <Tooltip title="Vue compacte">
-                <Box
-                  component="button"
-                  onClick={() => setCompact(true)}
-                  sx={{
-                    display: 'inline-flex', alignItems: 'center', gap: '4px', px: '10px', py: '4px',
-                    fontSize: 11.5, borderRadius: 999, border: 'none', cursor: 'pointer', fontFamily: 'inherit',
-                    bgcolor: compact ? TEAL_SUBTLE : 'transparent',
-                    color: compact ? TEAL : MUTED, fontWeight: compact ? 700 : 500,
-                  }}
-                >
-                  <ViewListIcon sx={{ fontSize: 13 }} /> Compact
-                </Box>
-              </Tooltip>
-            </Box>
           </Box>
         </Box>
       )}
@@ -1699,17 +1665,14 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
               const testKey = `${idx}`;
               const testComments = allComments[testKey] ?? [];
 
-              if (compact) {
+              if (!expanded.has(idx)) {
                 return (
                   <CompactRow
                     key={idx}
                     test={test}
                     idx={idx}
                     commentCount={testComments.length}
-                    onExpand={() => {
-                      setCompact(false);
-                      setCollapsed(prev => { const next = new Set(prev); next.delete(idx); return next; });
-                    }}
+                    onExpand={() => setExpanded(prev => { const next = new Set(prev); next.add(idx); return next; })}
                     onAsk={() => onSelectForModification(idx)}
                     onDelete={() => handleDelete(idx)}
                   />
@@ -1724,7 +1687,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   selectedTestIndex={selectedTestIndex}
                   isEditing={editingIndex === idx}
                   editedDescription={editedDescriptions[idx]}
-                  isCollapsed={collapsed.has(idx)}
+                  isCollapsed={false}
                   areCommentsOpen={!!openComments[testKey]}
                   comments={testComments}
                   isLoading={isLoading}
@@ -1732,11 +1695,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onSaveEdit={() => handleSaveEdit(idx)}
                   onEditDescription={(val) => setEditedDescriptions((prev) => ({ ...prev, [idx]: val }))}
                   onDelete={() => handleDelete(idx)}
-                  onToggleCollapse={() => setCollapsed(prev => {
-                    const next = new Set(prev);
-                    if (next.has(idx)) next.delete(idx); else next.add(idx);
-                    return next;
-                  })}
+                  onToggleCollapse={() => setExpanded(prev => { const next = new Set(prev); next.delete(idx); return next; })}
                   onToggleComments={() => setOpenComments((o) => ({ ...o, [testKey]: !o[testKey] }))}
                   onAddComment={(text) => addComment(testKey, text)}
                   onDeleteComment={(id) => deleteComment(testKey, id)}
@@ -1765,19 +1724,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
               sx={{ fontSize: 11, height: 24, bgcolor: '#f0fafa', color: TEAL, border: '1px solid #d0eeec', '&:hover': { bgcolor: '#d0eeec' } }}
             />
           </Box>
-
-          {suggestions.length > 0 && (
-            <Box sx={{ mt: 2 }}>
-              <Typography sx={{ fontSize: 10, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.7, mb: 1 }}>
-                Cas suggérés
-              </Typography>
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-                {suggestions.map((s, i) => (
-                  <SuggestionRow key={i} text={s} onFill={() => onSuggestionClick?.(s)} />
-                ))}
-              </Box>
-            </Box>
-          )}
         </Box>
       )}
     </Box>

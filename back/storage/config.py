@@ -59,7 +59,7 @@ def get_llm_streaming() -> bool:
     llm_cfg = cfg.get("llm", {})
     if "streaming" in llm_cfg:
         return bool(llm_cfg["streaming"])
-    return os.getenv("LLM_STREAMING", "false").lower() == "true"
+    return os.getenv("LLM_STREAMING", "true").lower() == "true"
 
 
 def get_preprocessor_fn() -> str | None:
