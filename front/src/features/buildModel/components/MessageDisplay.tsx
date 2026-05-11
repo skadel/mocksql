@@ -77,7 +77,28 @@ const SqlChangeDivider: React.FC<{ entry: SqlHistoryEntry; onRestore?: (e: SqlHi
 const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMessages, onRestoreState, restoredMessageId, alwaysFix, onAlwaysFixChange, sqlHistory, onSqlRestore }) => {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
-  const { queryComponentGraph } = useAppSelector((state) => state.buildModel);
+  const { queryComponentGraph, selectedChildIndices } = useAppSelector((state) => state.buildModel);
+
+  const getLastDisplayedMessageId = useCallback((): string | undefined => {
+    const findLastInItems = (items: AnyRenderable[]): string | undefined => {
+      for (let i = items.length - 1; i >= 0; i--) {
+        const item = items[i];
+        if ('type' in item && (item as any).type === 'group') {
+          const group = item as MessageGroup;
+          const branchIdx = selectedChildIndices?.[group.parentId] ?? (group.branches.length - 1);
+          const branch = group.branches[branchIdx];
+          if (branch) {
+            const id = findLastInItems(branch);
+            if (id) return id;
+          }
+        } else {
+          return (item as Message).id;
+        }
+      }
+      return undefined;
+    };
+    return findLastInItems(renderMessages);
+  }, [renderMessages, selectedChildIndices]);
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   useEffect(() => {
@@ -317,7 +338,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
                   onPageChange={handlePageChange}
                   onExecute={undefined}
                   onCreateClick={handleCreateClick}
-                  onSuggestionClick={(text) => sendMessage(text, undefined, (msg as any).id)}
+                  onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
                 />
               )}
             </CardContent>
