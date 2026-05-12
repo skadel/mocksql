@@ -130,18 +130,34 @@ const DrawerComponent: React.FC = () => {
           }}
         >
           <Box
+            component={RouterLink}
+            to="/"
+            onClick={() => {
+              dispatch(setCurrentId(''));
+              dispatch(resetContext());
+            }}
             sx={{
-              width: 30, height: 30, borderRadius: '8px',
-              bgcolor: TEAL, color: '#fff',
-              display: 'grid', placeItems: 'center', flexShrink: 0,
+              display: 'flex', alignItems: 'center', gap: '10px',
+              flex: 1, textDecoration: 'none',
+              '&:hover .mocksql-icon': { bgcolor: '#239e97' },
             }}
           >
-            <DbIcon />
-          </Box>
+            <Box
+              className="mocksql-icon"
+              sx={{
+                width: 30, height: 30, borderRadius: '8px',
+                bgcolor: TEAL, color: '#fff',
+                display: 'grid', placeItems: 'center', flexShrink: 0,
+                transition: 'background-color .15s',
+              }}
+            >
+              <DbIcon />
+            </Box>
 
-          <Typography sx={{ fontSize: 14, fontWeight: 700, color: INK, flex: 1, letterSpacing: '-0.2px' }}>
-            MockSQL
-          </Typography>
+            <Typography sx={{ fontSize: 14, fontWeight: 700, color: INK, flex: 1, letterSpacing: '-0.2px' }}>
+              MockSQL
+            </Typography>
+          </Box>
 
           <Tooltip title="Nouveau test" placement="right">
             <IconButton
