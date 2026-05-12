@@ -69,16 +69,27 @@ _OP_LABELS = {
 }
 
 
+_simplify_cache: dict[tuple[str, str], object] = {}
+_SIMPLIFY_CACHE_MAXSIZE = 64
+
+
 def _run_simplify(
     sql_query: str, schema: list[dict] | None = None, dialect: str = "bigquery"
 ):
     """Call constraint_simplifier.simplify() and return the result, or None on failure."""
     if not sql_query:
         return None
+    cache_key = (sql_query, dialect)
+    if cache_key in _simplify_cache:
+        return _simplify_cache[cache_key]
     try:
         from build_query.constraint_simplifier import simplify as _simplify_sql
 
-        return _simplify_sql(sql_query, schema=schema, dialect=dialect)
+        result = _simplify_sql(sql_query, schema=schema, dialect=dialect)
+        if len(_simplify_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
+            _simplify_cache.pop(next(iter(_simplify_cache)))
+        _simplify_cache[cache_key] = result
+        return result
     except Exception as exc:
         logger.warning(
             "constraint_simplifier failed (sql_hash=%s dialect=%s): %s",
