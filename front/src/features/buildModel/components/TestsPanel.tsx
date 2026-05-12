@@ -1483,8 +1483,9 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     const prev = prevTestCountRef.current;
     const curr = testResults.length;
     if (curr > prev) {
-      // Collapse all previous tests so the new one is in focus
-      setExpanded(new Set());
+      const newSet = new Set<number>();
+      for (let i = prev; i < curr; i++) newSet.add(i);
+      setExpanded(newSet);
       const targetId = `test-${curr}`;
       setTimeout(() => {
         const el = document.getElementById(targetId);
