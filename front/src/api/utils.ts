@@ -115,10 +115,19 @@ export async function streamThunk(
         dispatch(setError("Flux interrompu par l'utilisateur."));
       } else {
         const sseError: string | undefined = error?.error;
+        const networkHint = sseError || error?.message || '';
         if (sseError?.includes('Reauthentication') || sseError?.includes('application-default')) {
           dispatch(setError(
             "Session Google Cloud expirée. Relancez gcloud auth application-default login dans votre terminal, puis réessayez."
           ));
+        } else if (
+          networkHint.includes('getaddrinfo') ||
+          networkHint.includes('HTTPSConnectionPool') ||
+          networkHint.includes('ConnectionError') ||
+          networkHint.includes('Failed to fetch') ||
+          networkHint.includes('NetworkError')
+        ) {
+          dispatch(setError("Connexion perdue — vérifiez votre connexion réseau et réessayez."));
         } else {
           dispatch(setError("Une erreur est survenue lors de l'exécution"));
         }
