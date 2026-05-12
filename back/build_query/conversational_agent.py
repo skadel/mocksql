@@ -111,6 +111,7 @@ Réponds en français, de manière concise et naturelle."""
             id=str(uuid.uuid4()),
             additional_kwargs={
                 "type": MsgType.GENERATE_TEST_SCENARIO,
+                "reasoning": state.get("conv_reasoning") or "",
                 "parent": state.get("user_message_id"),
                 "request_id": state.get("request_id"),
             },
@@ -126,7 +127,7 @@ Réponds en français, de manière concise et naturelle."""
             if isinstance(part, dict) and part.get("type") == "text"
         )
 
-    if raw_content:
+    if raw_content and not agent_tool_call:
         update["messages"] = [
             AIMessage(
                 content=raw_content,

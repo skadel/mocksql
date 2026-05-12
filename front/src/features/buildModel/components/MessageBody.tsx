@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Alert, Box, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
@@ -40,7 +40,11 @@ const MessageBody: React.FC<MessageBodyProps> = ({
   onSuggestionClick,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [reasoningOpen, setReasoningOpen] = useState(false);
+  // Start open when streaming reasoning (no scenario text yet), close when scenario arrives.
+  const [reasoningOpen, setReasoningOpen] = useState(msg.contentType === 'reasoning');
+  useEffect(() => {
+    if (msg.contentType === 'generate_test_scenario') setReasoningOpen(false);
+  }, [msg.contentType]);
 
   const handleDownloadSQL = (sql: string) => {
     const blob = new Blob([sql], { type: 'text/plain' });
@@ -150,6 +154,28 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       )}
 
+      {/* Reasoning bubble — streaming thinking from the conversational agent */}
+      {msg.contentType === 'reasoning' && msg.contents.text && (
+        <Box>
+          <Box
+            onClick={() => setReasoningOpen(o => !o)}
+            sx={{
+              display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
+              color: '#aaa', fontSize: 12,
+              '&:hover': { color: '#666' },
+            }}
+          >
+            <ExpandMoreIcon sx={{ fontSize: 14, transform: reasoningOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+            Réflexion
+          </Box>
+          <Collapse in={reasoningOpen}>
+            <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: '#888', fontStyle: 'italic', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+              {msg.contents.text}
+            </Typography>
+          </Collapse>
+        </Box>
+      )}
+
       {/* Notification de génération de test sur scénario */}
       {msg.contentType === 'generate_test_scenario' && msg.contents.text && (
         <Box>
@@ -159,8 +185,8 @@ const MessageBody: React.FC<MessageBodyProps> = ({
                 onClick={() => setReasoningOpen(o => !o)}
                 sx={{
                   display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
-                  color: '#888', fontSize: 12,
-                  '&:hover': { color: '#555' },
+                  color: '#aaa', fontSize: 12,
+                  '&:hover': { color: '#666' },
                 }}
               >
                 <ExpandMoreIcon sx={{ fontSize: 14, transform: reasoningOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
@@ -194,7 +220,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
       )}
 
       {/* Texte */}
-      {msg.contents.text && msg.contentType !== 'evaluation' && msg.contentType !== 'generate_test_scenario' && (
+      {msg.contents.text && msg.contentType !== 'evaluation' && msg.contentType !== 'generate_test_scenario' && msg.contentType !== 'reasoning' && (
         msg.type === 'user' ? (
           <Typography
             variant="body2"
@@ -203,8 +229,16 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             {msg.contents.text}
           </Typography>
         ) : (
-          <div style={{ marginTop: '4px', overflowX: 'auto' }}>
-            <ReactMarkdown>{msg.contents.text}</ReactMarkdown>
+          <div style={{ marginTop: '4px', overflowX: 'auto', fontSize: 14, lineHeight: 1.6 }}>
+            <ReactMarkdown
+              components={{
+                h1: ({ children }) => <p style={{ fontWeight: 700, margin: '4px 0' }}>{children}</p>,
+                h2: ({ children }) => <p style={{ fontWeight: 700, margin: '4px 0' }}>{children}</p>,
+                h3: ({ children }) => <p style={{ fontWeight: 600, margin: '4px 0' }}>{children}</p>,
+                h4: ({ children }) => <p style={{ fontWeight: 600, margin: '4px 0' }}>{children}</p>,
+                p: ({ children }) => <p style={{ margin: '2px 0' }}>{children}</p>,
+              }}
+            >{msg.contents.text}</ReactMarkdown>
           </div>
         )
       )}

@@ -143,6 +143,13 @@ export const buildModelSlice = createSlice({
         state.queryComponentGraph[messageId] = action.payload;
       }
     },
+    patchMessage(state, action: PayloadAction<{ id: string; contentType?: string; contents: Partial<Message['contents']> }>) {
+      const msg = state.queryComponentGraph[action.payload.id];
+      if (msg) {
+        if (action.payload.contentType !== undefined) msg.contentType = action.payload.contentType;
+        msg.contents = { ...msg.contents, ...action.payload.contents };
+      }
+    },
     appendQueryComponentMessage(state, action: PayloadAction<Message>) {
       const msg = action.payload;
       const silent = (msg as any).silent === true;
@@ -541,7 +548,7 @@ export const buildModelSlice = createSlice({
 });
 
 export const { setError, resetMessages, setLoadingMessage, appendComponentToLastMessage,
-  appendQueryComponentMessage, setTransformationName, setQueryComponentGraph,
+  appendQueryComponentMessage, patchMessage, setTransformationName, setQueryComponentGraph,
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
   setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
   setTestResults, pushSqlHistory, setRestoredMessageId,

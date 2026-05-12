@@ -5,6 +5,7 @@ import {
   appendQueryComponentMessage,
   appendComponentToLastMessage,
   appendStreamingReasoning,
+  patchMessage,
   removeMessage,
   setError,
   setLoading,
@@ -167,20 +168,24 @@ export const chatQuery = createAsyncThunk(
           }
           else if (pd.event === 'on_chat_model_stream') {
             const rawContent = pd.data?.chunk?.content;
+            const node = pd.metadata?.langgraph_node;
+            console.log('[SSE] on_chat_model_stream node=', node, 'rawContent type=', typeof rawContent, Array.isArray(rawContent) ? 'array' : '');
             const text = Array.isArray(rawContent)
               ? rawContent.filter((c: any) => c.type === 'text').map((c: any) => c.text || '').join('')
               : typeof rawContent === 'string' ? rawContent : '';
 
+            console.log('[SSE] on_chat_model_stream text=', JSON.stringify(text.slice(0, 60)));
             if (!text) return;
 
-            // Stream conversational agent tokens directly into the chat thread
-            if (pd.metadata?.langgraph_node === 'conversational_agent') {
+            // Stream conv_reasoning_node tokens into a reasoning placeholder
+            if (node === 'conv_reasoning_node') {
               convStreamText += text;
               if (!convStreamId) {
                 convStreamId = uuidv4();
                 dispatch(appendQueryComponentMessage({
                   id: convStreamId,
                   type: 'bot',
+                  contentType: 'reasoning',
                   contents: { text },
                   parent: userMessageId,
                   children: [],
@@ -195,39 +200,47 @@ export const chatQuery = createAsyncThunk(
                 }));
               }
             } else {
+              console.log('[SSE] non-conv node streaming, node=', node);
               dispatch(appendStreamingReasoning(text));
             }
           }
           else if (pd.event === 'on_chain_stream') {
             const messages = pd.data?.chunk?.messages || [];
 
-            if (pd.name === 'conversational_agent') {
+            if (pd.name === 'conv_reasoning_node') {
+              // Reasoning already streamed token-by-token via on_chat_model_stream — skip.
+            } else if (pd.name === 'conversational_agent') {
               const formattedMsgs = messages.map((m: any) => formatMessage(m));
               const scenarioMsg = formattedMsgs.find((m: any) => m.contentType === 'generate_test_scenario');
 
               if (scenarioMsg) {
-                // Replace the streaming placeholder with the real persisted scenario message.
-                // Embed the accumulated reasoning text so MessageBody can render it as "Réflexion".
                 if (convStreamId) {
-                  dispatch(removeMessage(convStreamId));
-                  convStreamId = null;
+                  // Patch the streaming placeholder: promote it to the scenario message.
+                  dispatch(patchMessage({
+                    id: convStreamId,
+                    contentType: 'generate_test_scenario',
+                    contents: { text: scenarioMsg.contents.text, reasoning: convStreamText },
+                  }));
+                  convGenerateParentId = convStreamId;
+                } else {
+                  // No streaming placeholder (model didn't stream) — dispatch as new message.
+                  dispatch(appendQueryComponentMessage({
+                    ...scenarioMsg,
+                    parent: userMessageId,
+                  }));
+                  convGenerateParentId = scenarioMsg.id;
                 }
-                const msgWithReasoning = convStreamText
-                  ? { ...scenarioMsg, contents: { ...scenarioMsg.contents, reasoning: convStreamText } }
-                  : scenarioMsg;
+                convStreamId = null;
                 convStreamText = '';
-                console.log('[SSE] conv_agent: dispatching real scenario message', msgWithReasoning.id);
-                dispatch(appendQueryComponentMessage(msgWithReasoning));
-                convGenerateParentId = scenarioMsg.id;
-                // Dispatch any accompanying text messages (rare but possible).
-                formattedMsgs
-                  .filter((m: any) => m.contentType !== 'generate_test_scenario')
-                  .forEach((nm: any) => {
-                    console.log('[SSE] formatted message:', nm.contentType, nm);
-                    dispatch(appendQueryComponentMessage(nm));
-                  });
               } else {
-                // Regular text response — replace streaming placeholder with persisted message.
+                // Regular text response OR a late 2nd event after the scenario was already handled.
+                // If convGenerateParentId is set the scenario is done — skip 'other' text messages
+                // that would otherwise create a sibling branch hiding the reasoning bubble.
+                if (convGenerateParentId) {
+                  console.log('[SSE] conv_agent else-branch post-scenario: skipping', formattedMsgs.map((m: any) => `${m.contentType}:${m.id}`));
+                  return;
+                }
+
                 if (convStreamId) {
                   console.log('[SSE] conv_agent chain_stream: replacing placeholder', convStreamId);
                   dispatch(removeMessage(convStreamId));
@@ -235,7 +248,7 @@ export const chatQuery = createAsyncThunk(
                   convStreamText = '';
                 }
                 formattedMsgs.forEach((nm: any) => {
-                  console.log('[SSE] formatted message:', nm.contentType, nm);
+                  console.log('[SSE] formatted message (plain response):', nm.contentType, nm.id);
                   if (nm.contents.tables !== undefined) {
                     if (testIndex !== undefined) nm.testIndex = testIndex;
                     else if (context === 'sql_update') nm.context = 'sql_update';

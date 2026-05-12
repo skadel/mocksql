@@ -5,6 +5,7 @@ from langchain_core.messages import AIMessage
 
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
+from build_query.conv_reasoning_node import conv_reasoning_node
 from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
 from build_query.examples_executor import run_on_examples
@@ -146,6 +147,7 @@ def build_query_graph():
 
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
+    builder.add_node("conv_reasoning_node", conv_reasoning_node)
     builder.add_node("conversational_agent", conversational_agent)
     builder.add_node("debug_node", debug_test_node)
     builder.add_node("delete_test_node", delete_test_node)
@@ -162,7 +164,7 @@ def build_query_graph():
             return "history_saver"
         route = state.get("route", "").lower()
         if route == "conversational_agent":
-            return "conversational_agent"
+            return "conv_reasoning_node"
         if route == "assertion_modifier":
             return "assertion_modifier"
         if "executor" in route:
@@ -199,6 +201,7 @@ def build_query_graph():
     builder.add_edge(START, "pre_routing")
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
+    builder.add_edge("conv_reasoning_node", "conversational_agent")
     builder.add_conditional_edges("conversational_agent", route_agent_output)
     builder.add_edge("debug_node", "history_saver")
     builder.add_edge("delete_test_node", "history_saver")

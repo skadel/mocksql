@@ -123,6 +123,9 @@ export function formatMessage(message: any): Message {
 
     case 'generate_test_scenario':
       newMessage.contents.text = message.content;
+      if (message.additional_kwargs?.reasoning) {
+        newMessage.contents.reasoning = message.additional_kwargs.reasoning;
+      }
       break;
 
     case MsgType.DEBUG_RUN_CTE: {
