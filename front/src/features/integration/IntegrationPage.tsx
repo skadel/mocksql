@@ -6,9 +6,6 @@ import {
   Chip,
   CircularProgress,
   Divider,
-  Tab,
-  Tabs,
-  TextField,
   Tooltip,
   Typography,
 } from '@mui/material';
@@ -37,14 +34,67 @@ import { AssertionList } from '../../shared/AssertionRow';
 import DisplayTable from '../buildModel/components/DisplayTable';
 import {
   BORDER,
-  BODY,
   INK,
   MUTED,
   SURFACE,
   TEAL,
-  TEAL_BG,
   TEAL_SUBTLE,
 } from '../../theme/tokens';
+
+/* ─── ModeTabBtn ──────────────────────────────────────────────────── */
+function ModeTabBtn({
+  active,
+  onClick,
+  icon,
+  title,
+  sub,
+  badge,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  title: string;
+  sub: string;
+  badge?: string;
+}) {
+  return (
+    <Box
+      component="button"
+      onClick={onClick}
+      sx={{
+        flex: 1,
+        p: '11px 14px',
+        bgcolor: active ? TEAL_SUBTLE : 'transparent',
+        border: `1px solid ${active ? '#d2efec' : 'transparent'}`,
+        borderRadius: '9px',
+        cursor: 'pointer',
+        display: 'flex',
+        alignItems: 'center',
+        gap: '11px',
+        textAlign: 'left',
+        fontFamily: 'inherit',
+        '&:hover': { bgcolor: active ? TEAL_SUBTLE : '#f4f7f7' },
+      }}
+    >
+      <Box sx={{ width: 32, height: 32, borderRadius: '8px', bgcolor: active ? TEAL : '#eef2f3', color: active ? '#fff' : MUTED, display: 'grid', placeItems: 'center', flexShrink: 0 }}>
+        {icon}
+      </Box>
+      <Box sx={{ flex: 1, minWidth: 0 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+          <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: active ? '#1f948d' : INK }}>
+            {title}
+          </Typography>
+          {badge && (
+            <Box sx={{ fontSize: 9.5, fontWeight: 700, color: '#1f948d', bgcolor: '#d2efec', px: '6px', py: '1px', borderRadius: 999, letterSpacing: 0.3 }}>
+              {badge}
+            </Box>
+          )}
+        </Box>
+        <Typography sx={{ fontSize: 11.5, color: MUTED, mt: '1px' }}>{sub}</Typography>
+      </Box>
+    </Box>
+  );
+}
 
 /* ─── IntegrationTestCard ─────────────────────────────────────────── */
 function statusColor(status: string) {
@@ -297,7 +347,7 @@ function ExistingFileCard({
         borderRadius: '12px',
         bgcolor: '#fff',
         cursor: 'pointer',
-        '&:hover': { borderColor: TEAL, bgcolor: TEAL_BG },
+        '&:hover': { borderColor: TEAL, bgcolor: TEAL_SUBTLE },
         transition: 'all .12s',
       }}
     >
@@ -347,7 +397,7 @@ const IntegrationPage: React.FC = () => {
 
   // New chain builder state
   const [newName, setNewName] = useState('');
-  const [newChain, setNewChain] = useState<IntegrationStep[]>([{ sql: '', produces: '' }]);
+  const [newChain, setNewChain] = useState<IntegrationStep[]>([]);
 
   // Run results
   const [runResult, setRunResult] = useState<IntegrationRunResult | null>(null);
@@ -548,21 +598,24 @@ const IntegrationPage: React.FC = () => {
           </Box>
         )}
 
-        {/* Tabs */}
-        <Tabs
-          value={tab}
-          onChange={(_, v) => setTab(v)}
-          sx={{
-            mb: 2.5,
-            minHeight: 36,
-            '& .MuiTabs-indicator': { backgroundColor: TEAL },
-            '& .MuiTab-root': { textTransform: 'none', fontSize: 13, minHeight: 36, py: 0.5 },
-            '& .MuiTab-root.Mui-selected': { color: TEAL, fontWeight: 600 },
-          }}
-        >
-          <Tab value="existing" label={`Fichiers existants${integrationFiles.length > 0 ? ` (${integrationFiles.length})` : ''}`} icon={<FolderOpenIcon sx={{ fontSize: 15 }} />} iconPosition="start" />
-          <Tab value="build" label="Créer une chaîne" icon={<AddIcon sx={{ fontSize: 15 }} />} iconPosition="start" />
-        </Tabs>
+        {/* Mode switcher */}
+        <Box sx={{ mb: 2.5, display: 'flex', gap: 0, bgcolor: '#fff', border: `1px solid ${BORDER}`, borderRadius: '12px', p: '4px' }}>
+          <ModeTabBtn
+            active={tab === 'existing'}
+            onClick={() => setTab('existing')}
+            icon={<FolderOpenIcon sx={{ fontSize: 16 }} />}
+            title="Fichiers existants"
+            sub={integrationFiles.length > 0 ? `${integrationFiles.length} fichier${integrationFiles.length > 1 ? 's' : ''}` : 'Aucun fichier'}
+          />
+          <ModeTabBtn
+            active={tab === 'build'}
+            onClick={() => setTab('build')}
+            icon={<AddIcon sx={{ fontSize: 16 }} />}
+            title="Créer une chaîne"
+            sub="Enchaîner des scripts SQL"
+            badge="Nouveau"
+          />
+        </Box>
 
         {/* ── Existing files tab ──────────────────────────────── */}
         {tab === 'existing' && (
@@ -606,59 +659,45 @@ const IntegrationPage: React.FC = () => {
         {/* ── Build new chain tab ─────────────────────────────── */}
         {tab === 'build' && (
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2.5 }}>
-            <TextField
-              label="Nom de l'intégration"
-              placeholder="ex: pipeline_revenue"
+            {/* Name field */}
+            <Box
+              component="input"
+              placeholder="Nom de la chaîne (ex: pipeline_revenue)"
               value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              size="small"
-              fullWidth
-              sx={{ '& input': { fontSize: 13 } }}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) => setNewName(e.target.value)}
+              sx={{ p: '9px 13px', fontSize: 13, border: `1px solid ${BORDER}`, borderRadius: '9px', bgcolor: '#fff', color: INK, outline: 'none', fontFamily: 'inherit', '&:focus': { borderColor: TEAL, boxShadow: `0 0 0 2px ${TEAL_SUBTLE}` } }}
             />
 
+            {/* Explanation info card */}
+            <Box sx={{ fontSize: 12.5, color: '#3b4f52', lineHeight: 1.5, p: '10px 12px', bgcolor: '#eef1f7', border: '1px solid #d6def0', borderRadius: '10px', display: 'flex', alignItems: 'flex-start', gap: '9px' }}>
+              <AccountTreeIcon sx={{ fontSize: 14, color: '#5160a0', mt: '1px', flexShrink: 0 }} />
+              <Box>
+                Pour chaque script ajouté, indique la <strong>table</strong> ou la <strong>vue</strong> qu'il produit — les étapes suivantes pourront la référencer.
+                Le dernier script est considéré comme la sortie finale ; la chaîne entière est testée comme une seule requête.
+              </Box>
+            </Box>
+
+            {/* Chain builder */}
             <Box>
-              <Typography
-                sx={{
-                  fontSize: 11,
-                  fontWeight: 700,
-                  color: MUTED,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.6,
-                  mb: 1,
-                }}
-              >
+              <Typography sx={{ fontSize: 11, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 1 }}>
                 Étapes de la chaîne
               </Typography>
               <ChainBuilder steps={newChain} sqlFiles={sqlFiles} onChange={setNewChain} />
             </Box>
 
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', mt: 1 }}>
-              <Tooltip
-                title={
-                  newChain.every((s) => s.sql && s.produces)
-                    ? ''
-                    : 'Complétez toutes les étapes avant de lancer'
-                }
-              >
+            {/* Launch button */}
+            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 0.5 }}>
+              <Typography sx={{ fontSize: 11.5, color: MUTED, display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                Exécuté sur DuckDB en local — zéro coût BigQuery
+              </Typography>
+              <Tooltip title={newChain.filter(s => s.sql && s.produces).length >= 2 ? '' : 'Ajoutez au moins 2 étapes complètes avant de lancer'}>
                 <span>
                   <Button
                     variant="contained"
-                    startIcon={
-                      isLoading ? (
-                        <CircularProgress size={14} sx={{ color: '#fff' }} />
-                      ) : (
-                        <PlayArrowIcon />
-                      )
-                    }
+                    startIcon={isLoading ? <CircularProgress size={14} sx={{ color: '#fff' }} /> : <PlayArrowIcon />}
                     onClick={handleSaveAndRun}
-                    disabled={isLoading || !newChain.some((s) => s.sql && s.produces)}
-                    sx={{
-                      bgcolor: TEAL,
-                      '&:hover': { bgcolor: '#159e9a' },
-                      textTransform: 'none',
-                      borderRadius: 2,
-                      px: 3,
-                    }}
+                    disabled={isLoading || newChain.filter(s => s.sql && s.produces).length < 2}
+                    sx={{ bgcolor: TEAL, '&:hover': { bgcolor: '#159e9a' }, textTransform: 'none', borderRadius: 2, px: 3 }}
                   >
                     {saving ? 'Enregistrement…' : running ? 'Exécution…' : 'Enregistrer & Lancer'}
                   </Button>

@@ -6,7 +6,6 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
-  Tooltip,
   Typography,
 } from '@mui/material';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
@@ -15,7 +14,6 @@ import CancelIcon from '@mui/icons-material/Cancel';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import CodeIcon from '@mui/icons-material/Code';
 import CloseIcon from '@mui/icons-material/Close';
-import TableChartIcon from '@mui/icons-material/TableChart';
 import SqlEditor from '../../shared/SqlEditor';
 import { fetchModelSql } from '../../api/models';
 import { IntegrationStep } from '../../utils/types';
@@ -35,100 +33,18 @@ function stepBorderColor(status: StepStatus): string {
   return BORDER;
 }
 
-function StepCard({
-  step,
-  index,
-  status,
-  onClick,
-}: {
-  step: IntegrationStep;
-  index: number;
-  status: StepStatus;
-  onClick: () => void;
-}) {
-  const filename = step.sql.split('/').pop() ?? step.sql;
-  const borderColor = stepBorderColor(status);
+function stepBgColor(status: StepStatus): string {
+  if (status === 'pass') return '#e9f7f0';
+  if (status === 'fail') return '#fbeceb';
+  if (status === 'error') return '#fcf3e1';
+  return '#fff';
+}
 
-  return (
-    <Tooltip title="Cliquer pour voir le SQL" placement="top">
-      <Box
-        onClick={onClick}
-        sx={{
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 0.75,
-          p: '10px 14px',
-          border: `1.5px solid ${borderColor}`,
-          borderRadius: '10px',
-          bgcolor: '#fff',
-          cursor: 'pointer',
-          minWidth: 148,
-          maxWidth: 220,
-          flexShrink: 0,
-          '&:hover': { bgcolor: TEAL_SUBTLE, borderColor: TEAL },
-          transition: 'all .12s',
-        }}
-      >
-        {/* Header row: index + status icon */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
-          <Box
-            sx={{
-              width: 20,
-              height: 20,
-              borderRadius: '5px',
-              bgcolor: TEAL_SUBTLE,
-              color: TEAL,
-              display: 'grid',
-              placeItems: 'center',
-              fontSize: 10,
-              fontWeight: 700,
-              flexShrink: 0,
-            }}
-          >
-            {index + 1}
-          </Box>
-          {status === 'pass' && <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d', ml: 'auto' }} />}
-          {status === 'fail' && <CancelIcon sx={{ fontSize: 14, color: '#d0503f', ml: 'auto' }} />}
-          {status === 'error' && <ErrorOutlineIcon sx={{ fontSize: 14, color: '#d89323', ml: 'auto' }} />}
-        </Box>
-
-        {/* SQL file */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <CodeIcon sx={{ fontSize: 12, color: MUTED, flexShrink: 0 }} />
-          <Typography
-            sx={{
-              fontSize: 11.5,
-              color: INK,
-              fontWeight: 600,
-              fontFamily: 'monospace',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {filename}
-          </Typography>
-        </Box>
-
-        {/* Produces table */}
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-          <TableChartIcon sx={{ fontSize: 11, color: MUTED, flexShrink: 0 }} />
-          <Typography
-            sx={{
-              fontSize: 10.5,
-              color: MUTED,
-              fontFamily: 'monospace',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            {step.produces}
-          </Typography>
-        </Box>
-      </Box>
-    </Tooltip>
-  );
+function StepStatusIcon({ status }: { status: StepStatus }) {
+  if (status === 'pass') return <CheckCircleIcon sx={{ fontSize: 13, color: '#23a26d' }} />;
+  if (status === 'fail') return <CancelIcon sx={{ fontSize: 13, color: '#d0503f' }} />;
+  if (status === 'error') return <ErrorOutlineIcon sx={{ fontSize: 13, color: '#d89323' }} />;
+  return null;
 }
 
 export function IntegrationPipeline({ chain, stepStatuses }: IntegrationPipelineProps) {
@@ -149,30 +65,80 @@ export function IntegrationPipeline({ chain, stepStatuses }: IntegrationPipeline
 
   return (
     <>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, overflowX: 'auto', py: 1 }}>
-        {chain.map((step, i) => (
-          <React.Fragment key={i}>
-            <StepCard
-              step={step}
-              index={i}
-              status={stepStatuses?.[step.sql]}
-              onClick={() => handleStepClick(step)}
-            />
-            {i < chain.length - 1 && (
-              <ArrowForwardIcon sx={{ fontSize: 20, color: MUTED, flexShrink: 0 }} />
-            )}
-          </React.Fragment>
-        ))}
+      <Box sx={{ display: 'flex', alignItems: 'stretch', gap: 0, overflowX: 'auto', pb: '2px' }}>
+        {chain.map((step, i) => {
+          const status = stepStatuses?.[step.sql];
+          const isLast = i === chain.length - 1;
+          const filename = step.sql.split('/').pop() ?? step.sql;
+          const borderColor = stepBorderColor(status);
+          const bgColor = stepBgColor(status);
+
+          return (
+            <React.Fragment key={i}>
+              <Box
+                onClick={() => handleStepClick(step)}
+                sx={{
+                  flex: '0 0 auto',
+                  minWidth: 130,
+                  maxWidth: 200,
+                  p: '9px 12px',
+                  border: isLast ? `1.5px solid ${TEAL}` : `1px solid ${borderColor}`,
+                  bgcolor: status ? bgColor : isLast ? TEAL_SUBTLE : '#fff',
+                  borderRadius: '10px',
+                  cursor: 'pointer',
+                  textAlign: 'left',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '3px',
+                  '&:hover': { borderColor: TEAL, bgcolor: TEAL_SUBTLE },
+                  transition: 'all .12s',
+                }}
+              >
+                {/* Index + status */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <Box sx={{ width: 18, height: 18, borderRadius: '50%', bgcolor: isLast ? TEAL : '#eef2f3', color: isLast ? '#fff' : MUTED, display: 'grid', placeItems: 'center', fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
+                    {i + 1}
+                  </Box>
+                  <Box component="code" sx={{ fontSize: 11.5, color: INK, fontWeight: 600, flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {step.produces || filename}
+                  </Box>
+                  {isLast && (
+                    <Box sx={{ fontSize: 9, fontWeight: 700, color: '#fff', bgcolor: TEAL, px: '5px', py: '1px', borderRadius: 999, letterSpacing: 0.3, flexShrink: 0 }}>
+                      SORTIE
+                    </Box>
+                  )}
+                  {status && (
+                    <Box sx={{ ml: 'auto', flexShrink: 0 }}>
+                      <StepStatusIcon status={status} />
+                    </Box>
+                  )}
+                </Box>
+
+                {/* Filename */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <CodeIcon sx={{ fontSize: 11, color: MUTED, flexShrink: 0 }} />
+                  <Typography sx={{ fontSize: 10.5, color: MUTED, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {filename}
+                  </Typography>
+                </Box>
+              </Box>
+
+              {i < chain.length - 1 && (
+                <Box sx={{ display: 'flex', alignItems: 'center', px: '6px', color: MUTED }}>
+                  <ArrowForwardIcon sx={{ fontSize: 14 }} />
+                </Box>
+              )}
+            </React.Fragment>
+          );
+        })}
       </Box>
 
       {/* SQL viewer dialog */}
       <Dialog open={!!openStep} onClose={() => setOpenStep(null)} maxWidth="md" fullWidth>
-        <DialogTitle
-          sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1, borderBottom: `1px solid ${BORDER}` }}
-        >
+        <DialogTitle sx={{ display: 'flex', alignItems: 'center', gap: 1, pb: 1, borderBottom: `1px solid ${BORDER}` }}>
           <CodeIcon sx={{ fontSize: 16, color: TEAL }} />
           <Typography sx={{ fontFamily: 'monospace', fontSize: 13.5, fontWeight: 600, flex: 1, color: INK }}>
-            {openStep?.sql}
+            {openStep?.sql.split('/').pop()}
           </Typography>
           <Typography sx={{ fontSize: 11, color: MUTED, fontFamily: 'monospace', mr: 1 }}>
             → {openStep?.produces}
