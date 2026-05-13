@@ -779,7 +779,14 @@ const ChatComponent: React.FC = () => {
                 <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
                   <Box component="span" sx={{ fontSize: 11.5 }}>📁</Box>
                   <Typography component="code" sx={{ fontSize: 11, color: '#6b8287', fontFamily: 'monospace' }}>
-                    {sqlFiles[0]?.path ? sqlFiles[0].path.replace(/\/[^/]+$/, '') : t('generate.models_path')}
+                    {(() => {
+                      const f = sqlFiles[0];
+                      if (!f) return t('generate.models_path');
+                      const depth = f.name.split('/').length;
+                      let p = f.path.replace(/\\/g, '/');
+                      for (let i = 0; i < depth; i++) p = p.replace(/\/[^/]+$/, '');
+                      return p || t('generate.models_path');
+                    })()}
                   </Typography>
                 </Box>
               </Box>
