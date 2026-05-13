@@ -8,7 +8,6 @@ import { useSelector } from 'react-redux';
 import DrawerComponent from './features/appBar/components/DrawerComponent';
 import ChatComponent from './features/buildModel/components/QueryChatComponent';
 import ModelTestsPage from './features/buildModel/components/ModelTestsPage';
-import IntegrationPage from './features/integration/IntegrationPage';
 import { RootState } from './app/store';
 
 const theme = createTheme({
@@ -35,7 +34,6 @@ function App() {
               <Route path="/models" element={<ChatComponent />} />
               <Route path="/models/sql/:modelName" element={<ModelTestsPage />} />
               <Route path="/models/:modelID" element={<ChatComponent />} />
-              <Route path="/integration" element={<IntegrationPage />} />
               <Route path="/static/*" element={<Navigate to="/" replace />} />
             </Routes>
           </Box>

@@ -123,7 +123,7 @@ Les requêtes ne sont **jamais** exécutées sur BigQuery ou Postgres — unique
 
 ```
 back/
-  app/api/endpoints/   # routes FastAPI (query.py, models.py, projects.py, messages.py, integration.py)
+  app/api/endpoints/   # routes FastAPI (query.py, models.py, projects.py, messages.py)
   app/services/        # query_service.py
   build_query/         # cœur du système : graph LangGraph
     query_chain.py     # définition du graph (nœuds + edges)
@@ -134,7 +134,6 @@ back/
     examples_executor.py   # exécution DuckDB + CTE trace
     profile_checker.py     # validation/fusion du profil statistique
     constraint_simplifier.py
-    integration_runner.py  # exécution des tests d'intégration (chaînes de scripts)
   tests/               # pytest
 front/
   src/
@@ -396,85 +395,6 @@ App
 | `query` / `optimizedQuery` | SQL persisté (sync depuis messages, utilisé au chargement) |
 | `restoredMessageId` | Message à highlighter après restauration historique |
 | `lastError` | Dernière erreur backend (affiché dans UI) |
-
----
-
-## Tests d'intégration — chaînes de scripts
-
-Cas d'usage : un script SQL est splitté en plusieurs parties (refacto), ou plusieurs scripts se chaînent (`script1.sql` produit `a.a1` utilisé par `script2.sql`). Les tests d'intégration permettent de tester la chaîne bout en bout.
-
-### Format du fichier YAML
-
-Les tests d'intégration sont déclarés dans `.mocksql/integration/*.yml` :
-
-```yaml
-name: "Pipeline finance"
-chain:
-  - sql: finance/extract.sql       # chemin relatif à models_path
-    produces: staging.extract      # table DuckDB produite par ce script
-  - sql: finance/transform.sql
-    produces: marts.final
-
-tests:
-  - title: "Cas nominal"
-    data:                          # même structure que test_case.data — copier-coller direct
-      raw.events:
-        - user_id: 1
-          event_date: "2024-01-01"
-          amount: 100
-    assertions:                    # même structure que assertion_results — copier-coller direct
-      - description: "Total amount doit être 100"
-        sql: "SELECT * FROM __result__ WHERE total_amount != 100"
-  - title: "Pipeline vide"
-    data:
-      raw.events: []
-    expected_empty: true
-```
-
-### Workflow complet (même que les tests unitaires, script par script)
-
-```
-Pour chaque script de la chaîne :
-│
-├── Validation    GET /api/integration/{file}/validate
-│   → sqlglot parse + validate sur chaque script, verdict par étape
-│
-├── Import        GET /api/integration/{file}/source_tables
-│   → extrait les tables référencées via traverse_scope (sqlglot)
-│   → SOUSTRAIT les tables déclarées dans 'produces' (elles seront créées par les étapes précédentes)
-│   → retourne les tables réelles à importer, par script
-│
-├── Profiling     (endpoint existant, inchangé)
-│   → s'applique uniquement aux tables retournées par source_tables
-│
-├── Génération LLM  (graph LangGraph existant, inchangé)
-│   → génère les données pour les tables sources de la première étape
-│   → les étapes suivantes utilisent la sortie DuckDB des étapes précédentes (déjà créées)
-│
-└── Exécution     POST /api/integration/run
-    → crée les tables sources avec les données générées/importées
-    → exécute chaque script : CREATE TABLE {produces}_{suffix} AS (script_sql transpilé)
-    → évalue les assertions sur la sortie du dernier script
-```
-
-### Mécanique de nommage DuckDB
-
-`_to_duckdb_name("staging.extract", "int0")` → `staging_extract_int0`
-
-`parse_test_query` (via `strip_qualifiers_with_scope`) applique la même transformation quand le script suivant référence `staging.extract` → `staging_extract_int0`. Les étapes intermédiaires se branchent automatiquement sans logique supplémentaire.
-
-### Réutilisation des tests unitaires existants lors d'un split
-
-Les champs `data` (données d'entrée) et `assertions` (assertions sur `__result__`) sont structurellement identiques aux champs du même nom dans les tests unitaires — copier-coller direct depuis le JSON de test existant vers le YAML d'intégration.
-
-### Endpoints
-
-| Méthode | Route | Rôle |
-|---|---|---|
-| `GET` | `/api/integration` | Liste les fichiers `.yml` dans `.mocksql/integration/` |
-| `GET` | `/api/integration/{file}/source_tables?dialect=bigquery` | Tables sources à importer (hors `produces`) |
-| `GET` | `/api/integration/{file}/validate?dialect=bigquery` | Validation sqlglot de chaque script |
-| `POST` | `/api/integration/run` | Exécute tous les tests du fichier `{file, project, dialect}` |
 
 ---
 

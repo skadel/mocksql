@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.cors import CORSMiddleware
 
-from app.api.endpoints import query, messages, models, projects, users, integration
+from app.api.endpoints import query, messages, models, projects, users
 from models.database import db_pool
 from models.env_variables import validate_required_env
 
@@ -70,7 +70,6 @@ api_router.include_router(messages.router)
 api_router.include_router(models.router)
 api_router.include_router(projects.router)
 api_router.include_router(users.router)
-api_router.include_router(integration.router)
 
 app.include_router(api_router)
 
