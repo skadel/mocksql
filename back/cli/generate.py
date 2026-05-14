@@ -265,7 +265,29 @@ def _write_test_file(
 # ── Entrypoint ────────────────────────────────────────────────────────────────
 
 
-async def run_generate(model: Path, config: Path, output_dir: Path) -> None:
+def _run_profile_bq(
+    schemas: list[dict], sql: str, dialect: str, billing_project: str
+) -> dict:
+    """Run BigQuery profiling queries and return a normalized profile dict."""
+    from google.cloud import bigquery as _bq
+
+    from build_query.profile_checker import _to_profiler_schema
+    from build_query.profiler import profile_joins_for_query, profile_schema
+
+    client = _bq.Client(project=billing_project)
+
+    def executor(bq_sql: str) -> list[dict]:
+        return [dict(row) for row in client.query(bq_sql).result()]
+
+    schema_for_profiler = _to_profiler_schema(schemas)
+    profile = profile_schema(schema_for_profiler, executor, dialect=dialect)
+    profile["joins"] = profile_joins_for_query(
+        schema_for_profiler, sql, executor, dialect=dialect
+    )
+    return profile
+
+
+async def run_generate(model: Path, config: Path, output_dir: Path, profile: bool = False) -> None:
     import typer
 
     from init.init_db import run_migrations
@@ -293,17 +315,18 @@ async def run_generate(model: Path, config: Path, output_dir: Path) -> None:
         ref_names = [".".join(p for p in [r.catalog, r.db, r.name] if p) for r in refs]
         typer.echo(f"Found {len(refs)} source table(s): {ref_names}")
 
+    billing_project = (
+        os.getenv("BQ_TEST_PROJECT")
+        or os.getenv("VERTEX_PROJECT")
+        or cfg.get("billing_project")
+    )
+
     # Step 3 — resolve schemas from cache + fetch missing
     cached = load_schema_cache(cache_path)
     schemas, missing = match_refs_against_cache(refs, cached)
 
     if missing:
         typer.echo(f"Fetching schema for: {missing}")
-        billing_project = (
-            os.getenv("BQ_TEST_PROJECT")
-            or os.getenv("VERTEX_PROJECT")
-            or cfg.get("billing_project")
-        )
         if not billing_project:
             typer.echo(
                 "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
@@ -335,10 +358,32 @@ async def run_generate(model: Path, config: Path, output_dir: Path) -> None:
         typer.echo("[ERROR] No schemas available — cannot generate tests.")
         raise typer.Exit(1)
 
+    # Step 3.5 — profile (optional)
+    profile_data: dict | None = None
+    if profile:
+        if not billing_project:
+            typer.echo(
+                "[ERROR] --profile requires BQ_TEST_PROJECT. "
+                "Set it in your environment or add billing_project to mocksql.yml."
+            )
+            raise typer.Exit(1)
+        typer.echo("Profiling tables on BigQuery (this may take a moment)...")
+        try:
+            profile_data = _run_profile_bq(schemas, sql, dialect, billing_project)
+            typer.echo(
+                f"[OK] Profile complete ({len(profile_data.get('tables', {}))} table(s), "
+                f"{len(profile_data.get('joins', []))} join(s))."
+            )
+        except Exception as exc:
+            typer.echo(f"[WARN] Profiling failed: {exc}. Continuing without profile.")
+
     # Step 4 — build state + inject schemas into in-memory cache
     project_id = model.stem
     session_id = str(uuid.uuid4())
     state = build_initial_state(sql, dialect, schemas, project_id, session_id)
+    if profile_data:
+        state["profile"] = profile_data
+        state["profile_complete"] = True
 
     _inject_schemas_into_cache(project_id, schemas)
     _patch_db_calls()

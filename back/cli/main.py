@@ -194,13 +194,18 @@ def generate(
         "-o",
         help="Directory where test files will be written.",
     ),
+    profile: bool = typer.Option(
+        False,
+        "--profile",
+        help="Run BigQuery profiling before generation to improve data quality.",
+    ),
 ) -> None:
     """Parse a SQL model, fetch missing schemas, and generate test data."""
     import asyncio
 
     from cli.generate import run_generate
 
-    asyncio.run(run_generate(model, config, output_dir))
+    asyncio.run(run_generate(model, config, output_dir, profile=profile))
 
 
 @app.command()
