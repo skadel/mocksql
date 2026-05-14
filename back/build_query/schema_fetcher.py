@@ -116,28 +116,34 @@ async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
         bq_ref,
     ]
     print(f"[import-cli] {cmd}")
+    extra: dict = {}
+    if os.name == "nt":
+        extra["creationflags"] = subprocess.CREATE_NO_WINDOW
+    env = os.environ.copy()
+    env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
     try:
         result = await asyncio.to_thread(
             lambda c=cmd: subprocess.run(
                 c,
                 capture_output=True,
                 text=True,
-                shell=(os.name == "nt"),
+                shell=True,
                 stdin=subprocess.DEVNULL,
                 timeout=_CLI_TIMEOUT,
+                env=env,
+                **extra,
             )
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"bq CLI timed out after {_CLI_TIMEOUT}s for {bq_ref}")
+    _auth_kws = ("login", "credential", "auth", "password")
+    combined = (result.stdout + result.stderr).lower()
+    if any(kw in combined for kw in _auth_kws):
+        raise RuntimeError(
+            f"bq CLI not authenticated for {bq_ref}. Run: gcloud auth login"
+        )
     if result.returncode != 0:
-        stderr = result.stderr.strip()
-        if any(
-            kw in stderr.lower() for kw in ("login", "credential", "auth", "password")
-        ):
-            raise RuntimeError(
-                f"bq CLI not authenticated for {bq_ref}. Run: gcloud auth login"
-            )
-        raise RuntimeError(f"bq show failed for {bq_ref}: {stderr}")
+        raise RuntimeError(f"bq show failed for {bq_ref}: {result.stderr.strip()}")
     fields = json.loads(result.stdout)
     return [
         {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}

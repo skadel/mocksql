@@ -25,6 +25,7 @@ type MessageBodyProps = {
   onExecute?: (id: string) => void;
   onCreateClick?: (id: string) => void;
   onSuggestionClick?: (text: string) => void;
+  onRequestProfile?: () => void;
 };
 
 const MessageBody: React.FC<MessageBodyProps> = ({
@@ -38,6 +39,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
   onExecute,
   onCreateClick,
   onSuggestionClick,
+  onRequestProfile,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
@@ -355,6 +357,22 @@ const MessageBody: React.FC<MessageBodyProps> = ({
               </Box>
             ))}
           </Box>
+          {msg.contents.profileAvailable === false && (
+            <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, p: '7px 10px', borderRadius: '8px', bgcolor: '#fdf6e3', border: '1px solid #f0d080' }}>
+              <Typography sx={{ fontSize: 12, color: '#7a5f00', flex: 1 }}>
+                Profil non disponible — suggestions génériques uniquement.
+              </Typography>
+              {onRequestProfile && (
+                <Box
+                  component="button"
+                  onClick={onRequestProfile}
+                  sx={{ fontSize: 12, color: '#2BB0A8', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', p: 0, fontFamily: 'inherit', '&:hover': { textDecoration: 'underline' } }}
+                >
+                  Lancer le profil
+                </Box>
+              )}
+            </Box>
+          )}
           </Box>
       )}
 

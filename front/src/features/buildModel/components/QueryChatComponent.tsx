@@ -639,6 +639,32 @@ const ChatComponent: React.FC = () => {
 
   const handleStopStream = () => stopStream();
 
+  const handleRequestProfile = useCallback(async () => {
+    if (!currentModelId || !sqlQuery.trim()) return;
+    try {
+      const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [] });
+      if (!result.profile_complete && result.profile_request?.profile_query && result.auto_profile_available) {
+        const req = result.profile_request;
+        const doStream = () => dispatch(chatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' }));
+        setPendingAutoProfile({
+          profileRequest: req,
+          onConfirm: async () => {
+            setIsAutoProfileRunning(true);
+            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
+            setIsAutoProfileRunning(false);
+            setPendingAutoProfile(null);
+            doStream();
+          },
+          onSkip: async () => {
+            setPendingAutoProfile(null);
+            try { await skipProfilingApi({ session: currentModelId }); } catch {}
+            doStream();
+          },
+        });
+      }
+    } catch {}
+  }, [currentModelId, sqlQuery, dispatch, t]);
+
   const handleClearHistory = async () => {
     if (!currentModelId) return;
     await clearHistoryApi(currentModelId);
@@ -1015,6 +1041,7 @@ const ChatComponent: React.FC = () => {
             sendMessage={sendMessage}
             sqlQuery={sqlQuery}
             onClearHistory={handleClearHistory}
+            onRequestProfile={handleRequestProfile}
           />
 
           {/* Main area — tests + footer */}

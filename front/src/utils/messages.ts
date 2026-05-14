@@ -118,6 +118,7 @@ export function formatMessage(message: any): Message {
       } catch {
         newMessage.contents.suggestions = [];
       }
+      newMessage.contents.profileAvailable = message.additional_kwargs?.profile_available ?? true;
       break;
     }
 

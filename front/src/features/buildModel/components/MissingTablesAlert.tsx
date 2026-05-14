@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
-import { Box, Checkbox, FormControlLabel, LinearProgress, Tooltip, Typography } from '@mui/material'; // Tooltip kept for onDismiss button
+import { Box, Checkbox, FormControlLabel, LinearProgress, Tooltip, Typography } from '@mui/material';
 import TableChartIcon from '@mui/icons-material/TableChart';
 import DownloadIcon from '@mui/icons-material/Download';
 import StorageIcon from '@mui/icons-material/Storage';
 import SecurityIcon from '@mui/icons-material/Security';
 import ScienceIcon from '@mui/icons-material/Science';
 import CloseIcon from '@mui/icons-material/Close';
+import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { WarningContainedButton } from '../../../style/AppButtons';
 import { updateProjectAutoImport } from '../../../api/preferences';
 
@@ -14,6 +16,7 @@ interface MissingTablesAlertProps {
   projectId: string;
   onImport?: () => void;
   importing?: boolean;
+  importError?: string | null;
   onDismiss?: () => void;
 }
 
@@ -22,8 +25,10 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
   projectId,
   onImport,
   importing,
+  importError,
   onDismiss,
 }) => {
+  const failed = !!importError && !importing;
   const projectKey = `autoImport_project_${projectId}`;
 
   const [alwaysForProject, setAlwaysForProject] = useState(
@@ -42,8 +47,8 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
       {/* Main import card — amber/duck theme */}
       <Box
         sx={{
-          bgcolor: '#fff8e4',
-          border: '1px solid #f2d98b',
+          bgcolor: failed ? '#fff5f5' : '#fff8e4',
+          border: `1px solid ${failed ? '#f5c2c2' : '#f2d98b'}`,
           borderRadius: '14px',
           p: '18px 20px',
         }}
@@ -52,20 +57,26 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
         <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.5 }}>
           <Box
             sx={{
-              width: 36, height: 36, borderRadius: '10px', bgcolor: '#f7e3a0',
-              color: '#8a5a00', display: 'grid', placeItems: 'center', flexShrink: 0,
+              width: 36, height: 36, borderRadius: '10px',
+              bgcolor: failed ? '#fde8e8' : '#f7e3a0',
+              color: failed ? '#b91c1c' : '#8a5a00',
+              display: 'grid', placeItems: 'center', flexShrink: 0,
             }}
           >
-            <TableChartIcon sx={{ fontSize: 18 }} />
+            {failed ? <ErrorOutlineIcon sx={{ fontSize: 18 }} /> : <TableChartIcon sx={{ fontSize: 18 }} />}
           </Box>
           <Box sx={{ flex: 1 }}>
-            <Typography sx={{ fontSize: 15, fontWeight: 700, color: '#8a5a00' }}>
-              Tables introuvables dans l'index local
+            <Typography sx={{ fontSize: 15, fontWeight: 700, color: failed ? '#b91c1c' : '#8a5a00' }}>
+              {failed ? 'Échec de l\'import' : 'Tables introuvables dans l\'index local'}
             </Typography>
-            <Typography sx={{ fontSize: 12.5, color: '#8a6914', mt: 0.5, lineHeight: 1.55 }}>
-              MockSQL transpile ta requête BigQuery et l'exécute en local via{' '}
-              <Box component="strong" sx={{ color: '#8a5a00' }}>DuckDB</Box>{' '}
-              — aucune requête facturée sur BigQuery. C'est uniquement le schéma qui est importé.
+            <Typography sx={{ fontSize: 12.5, color: failed ? '#c53030' : '#8a6914', mt: 0.5, lineHeight: 1.55 }}>
+              {failed ? importError : (
+                <>
+                  MockSQL transpile ta requête BigQuery et l'exécute en local via{' '}
+                  <Box component="strong" sx={{ color: '#8a5a00' }}>DuckDB</Box>{' '}
+                  — aucune requête facturée sur BigQuery. C'est uniquement le schéma qui est importé.
+                </>
+              )}
             </Typography>
           </Box>
           {onDismiss && (
@@ -104,6 +115,8 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                 <Box sx={{ display: 'inline-flex', animation: 'spin .8s linear infinite', color: '#8a5a00' }}>
                   <DownloadIcon sx={{ fontSize: 16 }} />
                 </Box>
+              ) : failed ? (
+                <ErrorOutlineIcon sx={{ fontSize: 16, color: '#b91c1c' }} />
               ) : (
                 <TableChartIcon sx={{ fontSize: 16, color: '#b89a4a' }} />
               )}
@@ -121,8 +134,11 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                   />
                 </Box>
               )}
-              <Typography sx={{ fontSize: 11, fontWeight: 600, color: importing ? '#8a5a00' : '#b89a4a', flexShrink: 0, minWidth: 60, textAlign: 'right' }}>
-                {importing ? 'Import…' : 'En attente'}
+              <Typography sx={{
+                fontSize: 11, fontWeight: 600, flexShrink: 0, minWidth: 60, textAlign: 'right',
+                color: importing ? '#8a5a00' : failed ? '#b91c1c' : '#b89a4a',
+              }}>
+                {importing ? 'Import…' : failed ? 'Erreur' : 'En attente'}
               </Typography>
             </Box>
           ))}
@@ -166,14 +182,22 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                 startIcon={
                   importing
                     ? <Box component="span" sx={{ display: 'inline-block', width: 14, height: 14, border: '2px solid rgba(255,255,255,.45)', borderTop: '2px solid #fff', borderRadius: '50%', animation: 'spin .7s linear infinite' }} />
-                    : <DownloadIcon fontSize="small" />
+                    : failed
+                      ? <RefreshIcon fontSize="small" />
+                      : <DownloadIcon fontSize="small" />
                 }
                 onClick={onImport}
                 disabled={importing}
+                sx={failed ? {
+                  bgcolor: '#b91c1c', '&:hover': { bgcolor: '#991b1b' },
+                  borderColor: '#b91c1c',
+                } : {}}
               >
                 {importing
                   ? `Import en cours… (${missingTables.length} table${missingTables.length > 1 ? 's' : ''})`
-                  : `Importer les tables (${missingTables.length})`
+                  : failed
+                    ? 'Réessayer'
+                    : `Importer les tables (${missingTables.length})`
                 }
               </WarningContainedButton>
             )}

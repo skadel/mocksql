@@ -44,6 +44,7 @@ interface MessageDisplayProps {
   onAlwaysFixChange: (value: boolean) => void;
   sqlHistory?: SqlHistoryEntry[];
   onSqlRestore?: (entry: SqlHistoryEntry) => void;
+  onRequestProfile?: () => void;
 }
 
 const SqlChangeDivider: React.FC<{ entry: SqlHistoryEntry; onRestore?: (e: SqlHistoryEntry) => void }> = ({ entry, onRestore }) => {
@@ -74,7 +75,7 @@ const SqlChangeDivider: React.FC<{ entry: SqlHistoryEntry; onRestore?: (e: SqlHi
   );
 };
 
-const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMessages, onRestoreState, restoredMessageId, alwaysFix, onAlwaysFixChange, sqlHistory, onSqlRestore }) => {
+const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMessages, onRestoreState, restoredMessageId, alwaysFix, onAlwaysFixChange, sqlHistory, onSqlRestore, onRequestProfile }) => {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { queryComponentGraph, selectedChildIndices } = useAppSelector((state) => state.buildModel);
@@ -339,6 +340,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
                   onExecute={undefined}
                   onCreateClick={handleCreateClick}
                   onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
+                  onRequestProfile={onRequestProfile}
                 />
               )}
             </CardContent>

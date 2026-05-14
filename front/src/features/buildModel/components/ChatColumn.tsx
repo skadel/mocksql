@@ -61,6 +61,7 @@ interface ChatColumnProps {
   sendMessage: (...args: any[]) => void;
   sqlQuery: string;
   onClearHistory: () => void;
+  onRequestProfile?: () => void;
 }
 
 const ChatColumn: React.FC<ChatColumnProps> = ({
@@ -88,6 +89,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   sendMessage,
   sqlQuery,
   onClearHistory,
+  onRequestProfile,
 }) => {
   const showHistoryBanner = renderMessages.length > HISTORY_RESET_THRESHOLD;
   const estimatedTokens = showHistoryBanner ? estimateTokens(renderMessages) : 0;
@@ -337,6 +339,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           onAlwaysFixChange={onAlwaysFixChange}
           sqlHistory={sqlHistory}
           onSqlRestore={onSqlRestore}
+          onRequestProfile={onRequestProfile}
         />
 
         {isLoading && (

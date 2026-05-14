@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
 from build_query.examples_generator import retrieve_existing_tests
+from build_query.prompt_tools import _format_profile_block
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -34,6 +35,9 @@ async def generate_suggestions(state: QueryState):
 
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
     dialect = state.get("dialect", "bigquery")
+    profile = state.get("profile")
+    used_columns = state.get("used_columns") or []
+    profile_block = _format_profile_block(profile, used_columns) if profile else ""
 
     raw_instructions = (state.get("agent_tool_args") or {}).get(
         "instructions", ""
@@ -79,8 +83,11 @@ Voici les tests déjà générés (à ne pas reproduire) :
 {existing_tests_block}
 </tests_existants>
 
+{profile_section}
+
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
-Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").""",
+Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").
+Si un profil statistique est fourni, au moins une suggestion doit cibler un cas qui existe réellement dans les données — formule-la ainsi : "[PROD] Vérifie que..." pour la distinguer des suggestions génériques.""",
             ),
         ]
     )
@@ -90,14 +97,20 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
     structured_llm = llm.with_structured_output(TestSuggestionsOutput)
     chain = prompt_template | structured_llm
 
+    profile_section = (
+        f"Profil statistique réel des données (distributions mesurées en production) :\n{profile_block}"
+        if profile_block
+        else ""
+    )
+
     try:
-        # L'IA renvoie directement l'objet Python formaté !
         result = await chain.ainvoke(
             {
                 "dialect": dialect,
                 "sql": sql,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,
+                "profile_section": profile_section,
             }
         )
         suggestions = result.suggestions[:3]
@@ -137,6 +150,7 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
                     "type": MsgType.SUGGESTIONS,
                     "parent": parent_id,
                     "request_id": state.get("request_id"),
+                    "profile_available": bool(profile_block),
                 },
             )
         ]

@@ -54,6 +54,7 @@ export interface MessageContents {
   error?: string;
   profileRequest?: ProfileRequest;
   suggestions?: string[];
+  profileAvailable?: boolean;
   reasoning?: string;
   debugRunCte?: DebugRunCteResult;
   debugCountSteps?: DebugCountStepsResult;
