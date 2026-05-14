@@ -204,7 +204,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
           </Box>
         </Box>
 
-        {importing && (
+        {importing && !failed && (
           <Typography sx={{ mt: 1, fontSize: 11.5, color: '#8a6914' }}>
             Import en cours — les tests se lanceront automatiquement à la fin.
           </Typography>

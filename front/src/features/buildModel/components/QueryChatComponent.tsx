@@ -54,6 +54,7 @@ const ChatComponent: React.FC = () => {
   const [missingTables, setMissingTables] = useState<string[] | null>(null);
   const [tablesToImport, setTablesToImport] = useState<string[] | null>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
   const [pendingAutoProfile, setPendingAutoProfile] = useState<{
     profileRequest: ProfileRequest;
     onConfirm: () => Promise<void>;
@@ -490,6 +491,7 @@ const ChatComponent: React.FC = () => {
   const handleAutoImport = useCallback(async () => {
     if (!tablesToImport) return;
     setIsImporting(true);
+    setImportError(null);
     try {
       await importMissingTablesApi({
         tables_to_import: tablesToImport,
@@ -502,9 +504,9 @@ const ChatComponent: React.FC = () => {
     } catch (err: any) {
       const detail = err?.detail;
       if (detail && typeof detail === 'object' && detail.needs_manual_config) {
-        setSubmitError(detail.message || t('errors.unqualified_tables'));
+        setImportError(detail.message || t('errors.unqualified_tables'));
       } else {
-        setSubmitError(typeof detail === 'string' ? detail : t('errors.import_error'));
+        setImportError(typeof detail === 'string' ? detail : t('errors.import_error'));
       }
     } finally {
       setIsImporting(false);
@@ -770,6 +772,7 @@ const ChatComponent: React.FC = () => {
                 projectId={currentProjectId}
                 onImport={tablesToImport ? handleAutoImport : undefined}
                 importing={isImporting}
+                importError={importError}
               />
             </Box>
           )}
@@ -999,6 +1002,7 @@ const ChatComponent: React.FC = () => {
                   projectId={currentProjectId}
                   onImport={tablesToImport ? handleAutoImport : undefined}
                   importing={isImporting}
+                  importError={importError}
                 />
               </Box>
             )}
