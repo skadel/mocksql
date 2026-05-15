@@ -174,6 +174,143 @@ def _is_orderable(col_type: str) -> bool:
     return col_type.upper() in _ORDERABLE_TYPES
 
 
+# ─── Temporal regularity detection ───────────────────────────────────────────
+
+_TEMPORAL_TYPES = frozenset({"DATE", "TIMESTAMP", "DATETIME", "TIME"})
+
+
+def _is_temporal(col_type: str) -> bool:
+    """Return True if *col_type* is a date or time type.
+
+    Examples:
+        >>> _is_temporal("DATE")
+        True
+        >>> _is_temporal("TIMESTAMP")
+        True
+        >>> _is_temporal("STRING")
+        False
+        >>> _is_temporal("timestamp")
+        True
+    """
+    return col_type.upper().strip() in _TEMPORAL_TYPES
+
+
+def _regularity_case_days(dialect: str) -> str:
+    """Return a SQL CASE expression classifying a day-diff into a regularity label."""
+    if dialect == "bigquery":
+        cast_s = "CAST(CAST(mode_diff AS INT64) AS STRING)"
+    else:
+        cast_s = "CAST(CAST(mode_diff AS INTEGER) AS VARCHAR)"
+    return (
+        "CASE"
+        "  WHEN ratio < 0.8 THEN 'irregular'"
+        "  WHEN mode_diff = 1 THEN 'daily'"
+        "  WHEN mode_diff = 7 THEN 'weekly'"
+        "  WHEN mode_diff BETWEEN 28 AND 31 THEN 'monthly'"
+        "  WHEN mode_diff BETWEEN 89 AND 92 THEN 'quarterly'"
+        "  WHEN mode_diff BETWEEN 365 AND 366 THEN 'yearly'"
+        f"  ELSE CONCAT('every_', {cast_s}, 'd')"
+        " END"
+    )
+
+
+def _regularity_case_seconds(dialect: str) -> str:
+    """Return a SQL CASE expression classifying a second-diff into a regularity label."""
+    if dialect == "bigquery":
+        cast_s = "CAST(CAST(mode_diff AS INT64) AS STRING)"
+        cast_m = "CAST(CAST(CAST(mode_diff AS INT64) / 60 AS INT64) AS STRING)"
+        cast_h = "CAST(CAST(CAST(mode_diff AS INT64) / 3600 AS INT64) AS STRING)"
+    else:
+        cast_s = "CAST(CAST(mode_diff AS INTEGER) AS VARCHAR)"
+        cast_m = "CAST(CAST(mode_diff / 60 AS INTEGER) AS VARCHAR)"
+        cast_h = "CAST(CAST(mode_diff / 3600 AS INTEGER) AS VARCHAR)"
+    return (
+        "CASE"
+        "  WHEN ratio < 0.8 THEN 'irregular'"
+        "  WHEN mode_diff BETWEEN 59 AND 61 THEN 'minutely'"
+        "  WHEN mode_diff BETWEEN 3599 AND 3601 THEN 'hourly'"
+        "  WHEN mode_diff BETWEEN 86399 AND 86401 THEN 'daily'"
+        "  WHEN mode_diff BETWEEN 604799 AND 604801 THEN 'weekly'"
+        "  WHEN mode_diff BETWEEN 2419200 AND 2678400 THEN 'monthly'"
+        "  WHEN mode_diff BETWEEN 31536000 AND 31622400 THEN 'yearly'"
+        f"  WHEN mode_diff < 60 THEN CONCAT('every_', {cast_s}, 's')"
+        f"  WHEN mode_diff < 3600 THEN CONCAT('every_', {cast_m}, 'min')"
+        f"  ELSE CONCAT('every_', {cast_h}, 'h')"
+        " END"
+    )
+
+
+def _build_regularity_query(
+    table_name: str, col: str, col_type: str, dialect: str = "bigquery"
+) -> str | None:
+    """Build a SQL query that returns a single ``date_regularity`` string.
+
+    Uses LAG to compute consecutive diffs between sorted non-null values, finds
+    the modal diff, and classifies it (``"daily"``, ``"weekly"``, ``"monthly"``,
+    ``"hourly"``, ``"irregular"``, …).  Returns ``None`` for non-temporal types.
+
+    Examples:
+        >>> q = _build_regularity_query("events", "event_date", "DATE")
+        >>> q is not None and "DATE_DIFF" in q and "date_regularity" in q
+        True
+        >>> _build_regularity_query("events", "name", "STRING") is None
+        True
+    """
+    if not _is_temporal(col_type):
+        return None
+
+    # These helpers are defined later in the file but resolved at call time.
+    col_q = exp.to_identifier(col, quoted=True).sql(dialect=dialect)
+    tbl_sql = _table_expr(table_name).sql(dialect=dialect)  # type: ignore[name-defined]
+    upper = col_type.upper().strip()
+    is_date_only = upper == "DATE"
+
+    if is_date_only:
+        if dialect == "bigquery":
+            diff_expr = f"DATE_DIFF({col_q}, LAG({col_q}) OVER (ORDER BY {col_q}), DAY)"
+        elif dialect == "duckdb":
+            diff_expr = f"DATEDIFF('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+        else:
+            diff_expr = f"({col_q} - LAG({col_q}) OVER (ORDER BY {col_q}))"
+        case_sql = _regularity_case_days(dialect)
+    else:
+        if dialect == "bigquery":
+            diff_expr = (
+                f"TIMESTAMP_DIFF(CAST({col_q} AS TIMESTAMP),"
+                f" LAG(CAST({col_q} AS TIMESTAMP)) OVER (ORDER BY {col_q}), SECOND)"
+            )
+        elif dialect == "duckdb":
+            diff_expr = f"DATEDIFF('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+        else:
+            diff_expr = (
+                f"EXTRACT(EPOCH FROM ({col_q} - LAG({col_q}) OVER (ORDER BY {col_q})))"
+            )
+        case_sql = _regularity_case_seconds(dialect)
+
+    float_t = "FLOAT64" if dialect == "bigquery" else "DOUBLE"
+
+    return (
+        f"SELECT {case_sql} AS date_regularity"
+        f" FROM ("
+        f"  SELECT mode_diff,"
+        f"         CAST(mode_count AS {float_t}) / NULLIF(total_count, 0) AS ratio"
+        f"  FROM ("
+        f"    SELECT diff AS mode_diff, COUNT(*) AS mode_count,"
+        f"           SUM(COUNT(*)) OVER () AS total_count,"
+        f"           ROW_NUMBER() OVER (ORDER BY COUNT(*) DESC) AS rn"
+        f"    FROM ("
+        f"      SELECT {diff_expr} AS diff"
+        f"      FROM {tbl_sql}"
+        f"      WHERE {col_q} IS NOT NULL"
+        f"    ) _d"
+        f"    WHERE diff IS NOT NULL AND diff > 0"
+        f"    GROUP BY 1"
+        f"  ) _m"
+        f"  WHERE rn = 1"
+        f" ) _r"
+    )
+
+
 # ─── Per-column profiling ─────────────────────────────────────────────────────
 
 
@@ -300,6 +437,11 @@ def build_column_profile_queries(
             .sql(dialect=dialect)
         )
 
+    if _is_temporal(col.get("type", "")):
+        reg_q = _build_regularity_query(table_name, col_name, col.get("type", ""), dialect)
+        if reg_q:
+            queries["regularity"] = reg_q
+
     return queries
 
 
@@ -420,6 +562,16 @@ def build_column_profile(
             min_value = mm_rows[0].get("min_value")
             max_value = mm_rows[0].get("max_value")
 
+    # Temporal regularity
+    date_regularity: str | None = None
+    if "regularity" in queries:
+        try:
+            reg_rows = sql_executor(queries["regularity"])
+            if reg_rows:
+                date_regularity = reg_rows[0].get("date_regularity") or None
+        except Exception:
+            pass
+
     return {
         "type": col_type,
         "nullable_ratio": nullable_ratio,
@@ -436,6 +588,7 @@ def build_column_profile(
         "top_values_frequency": top_values_frequency,
         "min_value": min_value,
         "max_value": max_value,
+        "date_regularity": date_regularity,
     }
 
 
@@ -1218,6 +1371,16 @@ def _build_col_query(
         min_expr = exp.Null()
         max_expr = exp.Null()
 
+    # Temporal regularity scalar subquery
+    reg_expr: exp.Expression = exp.Null()
+    if _is_temporal(col_type) and not complex_col:
+        try:
+            _reg_raw = _build_regularity_query(table, col, col_type, dialect)
+            if _reg_raw:
+                reg_expr = sqlglot.parse_one(f"({_reg_raw})", dialect=dialect)
+        except Exception:
+            pass
+
     return (
         exp.select(
             exp.alias_(exp.Literal.string("column"), "row_type"),
@@ -1249,6 +1412,8 @@ def _build_col_query(
             exp.alias_(exp.Null(), "avg_right_per_left_key"),
             exp.alias_(exp.Null(), "max_right_per_left_key"),
             exp.alias_(exp.Null(), "left_key_sample"),
+            exp.alias_(exp.Null(), "right_where_sql"),
+            exp.alias_(reg_expr, "date_regularity"),
         )
         .from_(_table_expr(table))
         .sql(dialect=dialect)
@@ -1548,6 +1713,12 @@ def _build_join_query(
         ),
     )
 
+    right_where_val: exp.Expression = (
+        exp.Literal.string(r_source["where_sql"])
+        if r_source and r_source.get("where_sql")
+        else exp.Null()
+    )
+
     return (
         exp.select(
             exp.alias_(exp.Literal.string("join"), "row_type"),
@@ -1570,6 +1741,8 @@ def _build_join_query(
             exp.alias_(exp.Avg(this=_rcnt()), "avg_right_per_left_key"),
             exp.alias_(exp.Max(this=_rcnt()), "max_right_per_left_key"),
             exp.alias_(ks_outer.subquery(), "left_key_sample"),
+            exp.alias_(right_where_val, "right_where_sql"),
+            exp.alias_(exp.Null(), "date_regularity"),
         )
         .from_(l_sub.subquery(l_alias))
         .join(
@@ -1745,6 +1918,8 @@ def _build_static_join_row(
         exp.alias_(exp.Null(), "avg_right_per_left_key"),
         exp.alias_(exp.Null(), "max_right_per_left_key"),
         exp.alias_(exp.Null(), "left_key_sample"),
+        exp.alias_(exp.Null(), "right_where_sql"),
+        exp.alias_(exp.Null(), "date_regularity"),
     ).sql(dialect=dialect)
 
 
@@ -1991,6 +2166,17 @@ def build_profile_query(
                 except Exception:
                     pass
 
+        # Derived-expression profile branches (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …)
+        derived_branches = _build_derived_expr_profile_branches(
+            sql_query,
+            used_columns,
+            dialect,
+            top_k=5,
+            start_idx=idx,
+        )
+        parts.extend(derived_branches)
+        idx += len(derived_branches)
+
     union_sql = "\n\nUNION ALL\n\n".join(parts)
 
     # Prepend CTE definitions so that any SQL-based join branches can reference them.
@@ -1999,6 +2185,263 @@ def build_profile_query(
         return f"WITH {cte_defs}\n\n{union_sql}"
 
     return union_sql
+
+
+# ─── Derived-expression profiling ────────────────────────────────────────────
+
+
+def _sql_table_alias_map(sql: str, dialect: str) -> dict[str, str]:
+    """Return {alias: full_table_name} for all tables referenced in *sql*.
+
+    Handles BigQuery-style ``project.dataset.table`` names.  Both the alias
+    and the bare table name (last segment) are included as keys so callers
+    can look up by either.
+
+    Examples:
+        >>> m = _sql_table_alias_map("SELECT * FROM proj.ds.orders AS o", "bigquery")
+        >>> m.get("o")
+        'proj.ds.orders'
+        >>> m = _sql_table_alias_map("SELECT * FROM t", "duckdb")
+        >>> m.get("t")
+        't'
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN)
+    except Exception:
+        return {}
+
+    result: dict[str, str] = {}
+    for tbl in tree.find_all(exp.Table):
+        parts: list[str] = []
+        catalog = tbl.args.get("catalog")
+        db = tbl.args.get("db")
+        if catalog:
+            parts.append(catalog.name if hasattr(catalog, "name") else str(catalog))
+        if db:
+            parts.append(db.name if hasattr(db, "name") else str(db))
+        parts.append(tbl.name)
+        full = ".".join(parts)
+        if tbl.alias:
+            result[tbl.alias] = full
+        result[tbl.name] = full
+    return result
+
+
+def _build_derived_expr_profile_branches(
+    sql_query: str,
+    used_columns: list[dict],
+    dialect: str,
+    top_k: int = 5,
+    start_idx: int = 0,
+) -> list[str]:
+    """Build UNION ALL branches profiling derived expressions found in *sql_query*.
+
+    Delegates expression detection with CTE-lineage resolution to
+    :func:`~build_query.constraint_simplifier.detect_select_derived_expressions`,
+    then constructs one SQL branch per expression that computes the top-k distinct
+    output values using only the joins needed to connect the expression's source
+    tables.
+
+    The row uses ``row_type='derived_expr'``, ``table_name``=comma-joined
+    resolved base-table names, ``col_name``=expression SQL,
+    ``top_values``=STRING_AGG of top-k non-null values.  Other stat columns
+    are NULL.
+
+    Never raises — per-expression failures are silently skipped.
+
+    Examples:
+        >>> branches = _build_derived_expr_profile_branches(
+        ...     "SELECT TRY_CAST(t.v AS INT) FROM tbl t",
+        ...     [{"table": "tbl", "used_columns": ["v"]}],
+        ...     "duckdb",
+        ... )
+        >>> len(branches) == 1
+        True
+        >>> "derived_expr" in branches[0]
+        True
+    """
+    from build_query.constraint_simplifier import detect_select_derived_expressions
+
+    expressions = detect_select_derived_expressions(sql_query, dialect)
+    if not expressions:
+        return []
+
+    # Build {alias: full_table_name} from the SQL for query construction.
+    # This is separate from 'source_tables' (which uses resolved lineage) and is
+    # needed to reconstruct the correct FROM / JOIN aliases in the inner query.
+    alias_map = _sql_table_alias_map(sql_query, dialect)
+
+    # Reverse alias map: full_table → first alias seen (for FROM clause)
+    table_to_alias: dict[str, str] = {}
+    for alias, full_tbl in alias_map.items():
+        if full_tbl not in table_to_alias:
+            table_to_alias[full_tbl] = alias
+
+    # Build join graph: {(left_full, right_full): [condition_str, ...]} from SQL
+    from collections import defaultdict as _dd
+
+    join_conds: dict[tuple[str, str], list[str]] = _dd(list)
+    join_nbrs: dict[str, set[str]] = _dd(set)
+    for spec in _collect_join_specs(sql_query, dialect):
+        lt = spec.get("left_table", "")
+        rt = spec.get("right_table", "")
+        le = spec.get("left_expr_sql", "")
+        re_ = spec.get("right_expr_sql", "")
+        if lt and rt and le and re_:
+            join_conds[(lt, rt)].append(f"{le} = {re_}")
+            join_conds[(rt, lt)].append(f"{re_} = {le}")
+            join_nbrs[lt].add(rt)
+            join_nbrs[rt].add(lt)
+
+    str_t = _str_type(dialect)
+    parts: list[str] = []
+    idx = start_idx
+
+    for expr_info in expressions:
+        try:
+            branch = _build_one_derived_expr_branch(
+                expr_info,
+                alias_map,
+                table_to_alias,
+                join_conds,
+                join_nbrs,
+                dialect,
+                str_t,
+                top_k,
+                idx,
+            )
+            if branch:
+                parts.append(branch)
+                idx += 1
+        except Exception:
+            pass
+
+    return parts
+
+
+def _build_one_derived_expr_branch(
+    expr_info: dict,
+    alias_map: dict[str, str],
+    table_to_alias: dict[str, str],
+    join_conds: dict[tuple[str, str], list[str]],
+    join_nbrs: dict[str, set[str]],
+    dialect: str,
+    str_t: str,
+    top_k: int,
+    idx: int,
+) -> str | None:
+    """Build one UNION ALL row for a single derived expression.
+
+    Returns a raw SQL SELECT string or None if the expression can't be profiled
+    (source tables unresolvable, join path missing, …).
+
+    ``expr_info`` has keys: ``expr_sql`` (str), ``source_tables`` (list[str] of
+    resolved base-table names), ``col_refs`` (list[(alias, col_name)]).
+    """
+    expr_sql = expr_info["expr_sql"]
+    # source_tables: base-table names resolved via lineage (for table_name column)
+    source_tables: list[str] = expr_info.get("source_tables") or []
+    # col_refs: original alias+col pairs from the expression (for query construction)
+    col_refs: list[tuple[str, str]] = expr_info.get("col_refs") or []
+
+    if not source_tables:
+        return None
+
+    # Determine the query-level tables to JOIN (using original aliases from the SQL)
+    # These may be CTE names or base-table aliases — the WITH preamble handles CTEs.
+    query_tables: set[str] = set()
+    for alias, _col in col_refs:
+        if alias:
+            tbl = alias_map.get(alias, alias)
+            query_tables.add(tbl)
+    if not query_tables:
+        # Fallback: use source_tables directly
+        query_tables = set(source_tables)
+
+    # Build minimal FROM + JOIN chain to connect all query_tables
+    tables_list = list(query_tables)
+    primary = tables_list[0]
+    primary_alias = table_to_alias.get(primary, primary.split(".")[-1])
+    from_clause = f"{primary} AS {primary_alias}"
+    join_parts: list[str] = []
+
+    if len(tables_list) > 1:
+        connected: set[str] = {primary}
+        remaining = set(tables_list[1:])
+
+        # BFS: expand from connected set, following join graph edges
+        for _ in range(min(len(tables_list) * 3, 9)):
+            if not remaining:
+                break
+            progress = False
+            for src in list(connected):
+                for tgt in list(join_nbrs.get(src, set())):
+                    if tgt in connected:
+                        continue
+                    conds = (
+                        join_conds.get((src, tgt)) or join_conds.get((tgt, src)) or []
+                    )
+                    if not conds:
+                        continue
+                    tgt_alias = table_to_alias.get(tgt, tgt.split(".")[-1])
+                    join_parts.append(
+                        f"JOIN {tgt} AS {tgt_alias} ON {' AND '.join(conds)}"
+                    )
+                    connected.add(tgt)
+                    remaining.discard(tgt)
+                    progress = True
+            if not progress:
+                break
+
+        if remaining:
+            return None  # can't connect all query-level tables
+
+    join_clause = "\n".join(join_parts)
+    join_part = f"\n{join_clause}" if join_clause else ""
+
+    inner = (
+        f"SELECT DISTINCT CAST(({expr_sql}) AS {str_t}) AS _v"
+        f"\nFROM {from_clause}"
+        f"{join_part}"
+        f"\nWHERE ({expr_sql}) IS NOT NULL"
+        f"\nLIMIT {top_k}"
+    )
+
+    if dialect == "postgres":
+        top_values_scalar = (
+            f"(SELECT STRING_AGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
+        )
+    else:
+        top_values_scalar = f"(SELECT STRING_AGG(_v) FROM ({inner}) AS _tv_{idx})"
+
+    src_str = ",".join(sorted(source_tables))
+    expr_lit = exp.Literal.string(expr_sql).sql(dialect=dialect)
+    src_lit = exp.Literal.string(src_str).sql(dialect=dialect)
+
+    return (
+        f"SELECT 'derived_expr' AS row_type,"
+        f" {src_lit} AS table_name,"
+        f" {expr_lit} AS col_name,"
+        f" NULL AS total_count,"
+        f" NULL AS null_count,"
+        f" NULL AS non_null_count,"
+        f" NULL AS distinct_count,"
+        f" NULL AS dup_count,"
+        f" NULL AS min_val,"
+        f" NULL AS max_val,"
+        f" {top_values_scalar} AS top_values,"
+        f" NULL AS left_table,"
+        f" NULL AS right_table,"
+        f" NULL AS left_expr,"
+        f" NULL AS right_expr,"
+        f" NULL AS join_type,"
+        f" NULL AS left_match_rate,"
+        f" NULL AS avg_right_per_left_key,"
+        f" NULL AS max_right_per_left_key,"
+        f" NULL AS left_key_sample,"
+        f" NULL AS right_where_sql,"
+        f" NULL AS date_regularity"
+    )
 
 
 def detect_fk_candidates(profile: dict, used_columns: list[dict]) -> list[dict]:
@@ -2150,6 +2593,9 @@ def describe_join(join_info: dict) -> str:
 
     if extras:
         desc += f" ({', '.join(extras)})"
+    right_filter = join_info.get("right_filter")
+    if right_filter:
+        desc += f" — right side filtered: {right_filter}"
     return desc
 
 
@@ -2240,9 +2686,10 @@ def parse_profile_query_result(
         for tbl in norm["tables_by_name"]
     }
 
-    # Separate join rows from column rows
-    col_rows = [r for r in rows if r.get("row_type") != "join"]
+    # Separate row types: column stats, join stats, derived-expression stats
+    col_rows = [r for r in rows if r.get("row_type") not in ("join", "derived_expr")]
     join_rows = [r for r in rows if r.get("row_type") == "join"]
+    derived_rows = [r for r in rows if r.get("row_type") == "derived_expr"]
 
     # Index column rows by (table_name, col_name)
     row_map: dict[tuple, dict] = {}
@@ -2278,6 +2725,10 @@ def parse_profile_query_result(
             # Sample of actual left key values → FK value pool for the generator
             "left_key_sample": _sa(r.get("left_key_sample")),
         }
+        if r.get("right_where_sql"):
+            # WHERE filter applied to the right side (e.g. "status = 'active'")
+            # Tells the generator why left_match_rate < 1.0
+            j["right_filter"] = r["right_where_sql"]
         j["description"] = describe_join(j)
         _joins.append(j)
 
@@ -2323,6 +2774,8 @@ def parse_profile_query_result(
             is_unique_non_null = distinct == non_null and non_null > 0
             is_categorical = 0 < distinct <= threshold
 
+            date_regularity = row.get("date_regularity") or None
+
             col_profiles[col] = {
                 "type": col_type,
                 "nullable_ratio": nullable_ratio,
@@ -2338,6 +2791,7 @@ def parse_profile_query_result(
                 "top_values": top_values,
                 "min_value": min_value,
                 "max_value": max_value,
+                "date_regularity": date_regularity,
             }
 
         profile["tables"][table] = {
@@ -2347,4 +2801,26 @@ def parse_profile_query_result(
         }
 
     profile["fk_candidates"] = detect_fk_candidates(profile, used_columns)
+
+    # Attach derived-expression top-values to each source table's profile
+    for row in derived_rows:
+        src_str = row.get("table_name") or ""
+        expr_sql_stored = row.get("col_name") or ""
+        top_raw = row.get("top_values") or ""
+        if not (src_str and expr_sql_stored):
+            continue
+        top_vals = [v.strip() for v in top_raw.split(",") if v.strip()]
+        for tbl in src_str.split(","):
+            tbl = tbl.strip()
+            if not tbl:
+                continue
+            tbl_key = next(
+                (k for k in (tbl, tbl.split(".")[-1]) if k in profile["tables"]),
+                None,
+            )
+            if tbl_key:
+                profile["tables"][tbl_key].setdefault(
+                    "derived_expressions", []
+                ).append({"expr_sql": expr_sql_stored, "top_values": top_vals})
+
     return profile

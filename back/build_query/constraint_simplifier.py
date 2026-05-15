@@ -1292,3 +1292,150 @@ def simplify(
         result.or_paths_truncated,
     )
     return result
+
+
+# ─── Derived-expression detection (for profiler) ─────────────────────────────
+
+# sqlglot expression types that are too trivial to profile (output is a
+# predictable/semantic-free transformation of input columns already profiled).
+_TRIVIAL_FUNC_TYPES: frozenset[type] = frozenset(
+    {
+        exp.Cast,             # regular CAST — column already profiled
+        exp.Upper,
+        exp.Lower,
+        exp.Trim,
+        exp.Substring,
+        exp.Concat,
+        exp.DPipe,            # || string concat
+        exp.Length,
+        exp.Abs,
+        exp.Round,
+        exp.Floor,
+        exp.Ceil,
+        exp.Mod,
+    }
+)
+
+# Same exclusion list for Anonymous nodes (function names sqlglot doesn't
+# map to a named expression type).
+_TRIVIAL_FUNC_NAMES: frozenset[str] = frozenset(
+    {
+        "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM",
+        "LENGTH", "LEN", "CHAR_LENGTH", "CHARACTER_LENGTH",
+        "SUBSTR", "SUBSTRING",
+        "CONCAT", "CONCAT_WS",
+        "ROUND", "FLOOR", "CEIL", "CEILING", "ABS", "MOD",
+        "REPLACE", "LPAD", "RPAD", "LEFT", "RIGHT",
+        "REPEAT", "REVERSE", "SPACE", "ASCII", "CHR", "CHAR",
+        "TO_STRING", "TO_VARCHAR", "CAST", "CONVERT",
+    }
+)
+
+
+def detect_select_derived_expressions(
+    sql: str,
+    dialect: str = "bigquery",
+) -> list[dict]:
+    """Find interesting derived expressions in SQL SELECT projections.
+
+    Reuses the CTE lineage resolver and alias infrastructure from
+    :func:`extract_constraints` so CTE-sourced columns are traced back to their
+    real base tables.
+
+    Returns a list (capped at 10) of::
+
+        {
+          "expr_sql":      str,        — expression as SQL in *dialect*
+          "source_tables": list[str],  — resolved base-table names (alias stripped)
+          "col_refs":      list[(alias, col_name)],  — raw column refs in expression
+        }
+
+    Expressions with no column references (constants) are skipped.
+    Deduplication is by ``expr_sql``.
+
+    Detects any ``exp.Func`` node in a SELECT projection, excluding trivial
+    transformations listed in :data:`_TRIVIAL_FUNC_TYPES` /
+    :data:`_TRIVIAL_FUNC_NAMES` (``UPPER``, ``LOWER``, ``ROUND``, arithmetic,
+    etc.). Covers ``COALESCE``, ``SAFE_CAST``, ``REGEXP_EXTRACT``, date parsers,
+    and any other non-trivial function call.
+
+    Examples:
+        >>> exprs = detect_select_derived_expressions(
+        ...     "SELECT SAFE_CAST(t.v AS INT64), COALESCE(t.x, t.y) FROM tbl t"
+        ... )
+        >>> len(exprs) >= 1
+        True
+        >>> any("COALESCE" in e["expr_sql"].upper() for e in exprs)
+        True
+        >>> exprs[0]["source_tables"]
+        ['tbl']
+    """
+    try:
+        statement = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return []
+
+    resolver = _LineageResolver(statement, None, dialect)
+
+    # Build alias map from every Table node in the AST — more robust than
+    # _collect_aliases which relies on "from" key (renamed "from_" in newer sqlglot).
+    alias_map: dict[str, str] = {}
+    for tbl in statement.find_all(exp.Table):
+        real = tbl.name.lower()
+        alias = tbl.alias.lower() if tbl.alias else real
+        alias_map[alias] = real
+        alias_map[real] = real
+
+    seen: set[str] = set()
+    results: list[dict] = []
+
+    def _source_tables_for(node: exp.Expression) -> list[str]:
+        tables: set[str] = set()
+        for col in node.find_all(exp.Column):
+            if not col.name:
+                continue
+            ref = _col_ref(col, alias_map)
+            if ref is None:
+                continue
+            for resolved in resolver.resolve_all(ref):
+                tbl = resolved.real_table or resolved.table
+                if tbl and tbl != "__unknown__":
+                    tables.add(tbl)
+        return sorted(tables)
+
+    def _col_refs_for(node: exp.Expression) -> list[tuple[str, str]]:
+        return [
+            (c.table or "", c.name)
+            for c in node.find_all(exp.Column)
+            if c.name
+        ]
+
+    def _register(node: exp.Expression) -> None:
+        src_tables = _source_tables_for(node)
+        if not src_tables:
+            return
+        sql_repr = node.sql(dialect=dialect)
+        if sql_repr in seen:
+            return
+        seen.add(sql_repr)
+        results.append(
+            {
+                "expr_sql": sql_repr,
+                "source_tables": src_tables,
+                "col_refs": _col_refs_for(node),
+            }
+        )
+
+    # Walk every SELECT projection — register any function call that isn't trivial.
+    for sel in statement.find_all(exp.Select):
+        for projection in sel.expressions:
+            for node in projection.find_all(exp.Func):
+                if type(node) in _TRIVIAL_FUNC_TYPES:
+                    continue
+                if isinstance(node, exp.Anonymous) and (node.name or "").upper() in _TRIVIAL_FUNC_NAMES:
+                    continue
+                _register(node)
+
+    return results[:10]
