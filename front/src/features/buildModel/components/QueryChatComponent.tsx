@@ -516,7 +516,11 @@ const ChatComponent: React.FC = () => {
   // -------- Silent auto-import when user preference is set
   useEffect(() => {
     if (!tablesToImport) return;
-    if (localStorage.getItem('autoImport_always') === 'true') {
+    const globalAuto = localStorage.getItem('autoImport_always') === 'true';
+    const projectAuto = currentProjectId
+      ? localStorage.getItem(`autoImport_project_${currentProjectId}`) === 'true'
+      : false;
+    if (globalAuto || projectAuto) {
       handleAutoImport();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1114,6 +1118,7 @@ const ChatComponent: React.FC = () => {
         <Dialog open maxWidth="sm" fullWidth>
           <DialogTitle sx={{ fontWeight: 700 }}>{t('profiling.title')}</DialogTitle>
           <DialogContent>
+            {/* Validated badge */}
             <Box
               sx={{
                 display: 'flex',
@@ -1132,45 +1137,47 @@ const ChatComponent: React.FC = () => {
                 {t('profiling.query_validated')}
               </Typography>
             </Box>
-            <Typography variant="body2" sx={{ mb: 2 }}>
-              <Trans i18nKey="profiling.description" components={{ bold: <strong /> }} />
-            </Typography>
-            {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
-              <Box
-                sx={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 1.5,
-                  bgcolor: '#fffbe6',
-                  border: '1px solid #ffe082',
-                  borderRadius: 2,
-                  px: 2,
-                  py: 1.5,
-                  mb: 2,
-                }}
-              >
-                <Typography variant="body2" sx={{ color: '#7a5f00', flex: 1 }}>
-                  <Trans
-                    i18nKey="profiling.billing_info"
-                    values={{
-                      tb: pendingAutoProfile.profileRequest.billing_tb < 0.001
-                        ? '< 0,001'
-                        : pendingAutoProfile.profileRequest.billing_tb.toFixed(3),
-                    }}
-                    components={{ bold: <strong /> }}
-                  />
+
+            {/* Sans / Avec comparison */}
+            <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5, mb: 2 }}>
+              <Box sx={{ bgcolor: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 2, p: 2 }}>
+                <Typography variant="caption" sx={{ fontWeight: 700, color: '#bbb', display: 'block', mb: 1.5, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {t('profiling.without_label')}
                 </Typography>
+                {(['without_item_1', 'without_item_2', 'without_item_3'] as const).map((key) => (
+                  <Typography key={key} variant="body2" sx={{ color: '#ccc', fontSize: 12.5, mb: 0.75 }}>
+                    — {t(`profiling.${key}`)}
+                  </Typography>
+                ))}
+              </Box>
+              <Box sx={{ bgcolor: '#f0faf5', border: '1px solid #a5d6b7', borderRadius: 2, p: 2 }}>
+                <Typography variant="caption" sx={{ fontWeight: 700, color: '#1ca8a4', display: 'block', mb: 1.5, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                  {t('profiling.with_label')}
+                </Typography>
+                {(['with_item_1', 'with_item_2', 'with_item_3'] as const).map((key) => (
+                  <Typography key={key} variant="body2" sx={{ color: '#1e5c38', fontSize: 12.5, mb: 0.75, fontWeight: 500 }}>
+                    ✓ {t(`profiling.${key}`)}
+                  </Typography>
+                ))}
+              </Box>
+            </Box>
+
+            {/* Billing — inline, non-obtrusive */}
+            {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                <Typography variant="caption" sx={{ color: '#aaa' }}>Scan estimé :</Typography>
                 <Chip
                   label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
-                    ? '< 0.001'
-                    : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To`}
+                    ? '< 0,001'
+                    : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · BigQuery`}
                   size="small"
-                  sx={{ bgcolor: '#fff3cd', color: '#7a5f00', border: '1px solid #ffe082', fontWeight: 700 }}
+                  sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
                 />
               </Box>
             )}
+
             {isAutoProfileRunning && (
-              <Box sx={{ px: 3, pb: 1 }}>
+              <Box sx={{ mt: 1, pb: 1 }}>
                 <LinearProgress
                   variant="indeterminate"
                   sx={{ height: 6, borderRadius: 3, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }}
@@ -1188,7 +1195,7 @@ const ChatComponent: React.FC = () => {
               disabled={isAutoProfileRunning}
               sx={{ textTransform: 'none', color: '#999', borderColor: '#ddd', '&:hover': { borderColor: '#aaa', bgcolor: 'transparent' } }}
             >
-              {t('action.skip')}
+              {t('profiling.skip_label')}
             </Button>
             <Button
               variant="contained"

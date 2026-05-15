@@ -83,10 +83,20 @@
     "add_constraints": "Demander une modification, ajouter des contraintes…"
   },
   "profiling": {
-    "title": "Profiling optionnel",
+    "title": "Des tests plus réalistes en 1 clic",
     "query_validated": "Requête validée avec succès",
     "description": "MockSQL peut lancer automatiquement le profiling de vos colonnes. Cela <bold>améliore la précision des tests générés</bold> en permettant de mieux comprendre la distribution réelle des données.",
-    "billing_info": "Cette opération va scanner environ <bold>{{tb}} To</bold> de données"
+    "billing_info": "Cette opération va scanner environ <bold>{{tb}} To</bold> de données",
+    "without_label": "Sans profiling",
+    "with_label": "Avec profiling",
+    "without_item_1": "Valeurs génériques",
+    "without_item_2": "Dates arbitraires",
+    "without_item_3": "Cardinalité inventée",
+    "with_item_1": "Min / max réels",
+    "with_item_2": "Plages de dates réelles",
+    "with_item_3": "Énumérations exactes",
+    "skip_label": "Continuer sans profiling",
+    "billing_chip": "~{{tb}} To · BigQuery"
   },
   "notifications": {
     "generation_failed": "La génération a échoué.",
