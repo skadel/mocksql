@@ -73,6 +73,7 @@ const ChatComponent: React.FC = () => {
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
+  const [genCount, setGenCount] = useState(1);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
 
@@ -101,6 +102,8 @@ const ChatComponent: React.FC = () => {
   const pendingSessionRef = useRef<string | null>(null);
   const prevLoadingRef = useRef<boolean | null>(null);
   const isGeneratingRef = useRef(false);
+  const suggestionsRef = useRef<string[]>([]);
+  const lastSuggestionsIdRef = useRef<string>('');
 
   const {
     queryComponentGraph: messages,
@@ -115,7 +118,12 @@ const ChatComponent: React.FC = () => {
     restoredMessageId: storedRestoredMessageId,
     lastError,
     testResults,
+    suggestions,
+    lastSuggestionsMessageId,
   } = useAppSelector((state) => state.buildModel);
+
+  suggestionsRef.current = suggestions;
+  lastSuggestionsIdRef.current = lastSuggestionsMessageId ?? '';
 
   const messagesRef = useRef(messages);
   const { currentModelId, drawerOpen, models: allModels } = useAppSelector((state) => state.appBarModel);
@@ -324,7 +332,7 @@ const ChatComponent: React.FC = () => {
   );
 
   // -------- Shared validate → profile → generate flow
-  const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
+  const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string, totalGens: number = 1) => {
     setSubmissionStep(t('loading.validating_sql'));
     let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
     try {
@@ -415,10 +423,33 @@ const ChatComponent: React.FC = () => {
       })).unwrap?.();
     } catch {}
 
+    // Générations supplémentaires : on utilise les suggestions de la génération précédente
+    for (let gen = 2; gen <= totalGens; gen++) {
+      const currentSuggestions = suggestionsRef.current;
+      if (!currentSuggestions?.length) break;
+
+      const userInput = `Génère des tests pour ces cas non couverts :\n${currentSuggestions.map((s: string) => `- ${s}`).join('\n')}`;
+      setSubmissionStep(`Génération ${gen}/${totalGens}…`);
+
+      try {
+        isGeneratingRef.current = true;
+        await dispatch(chatQuery({
+          userInput,
+          sessionId,
+          project: '',
+          dialect: DIALECT,
+          query: sql,
+          t,
+          parentMessageId: lastSuggestionsIdRef.current || '',
+          forceRoute: 'generator',
+        })).unwrap?.();
+      } catch {}
+    }
+
     pendingSessionRef.current = null;
     setSubmissionStep(null);
     setIsSending(false);
-  }, [dispatch, navigate, t]);
+  }, [dispatch, navigate, t, suggestionsRef, lastSuggestionsIdRef]);
 
   // -------- Submission from SQL file selector
   const handleFileSubmit = useCallback(async () => {
@@ -457,7 +488,7 @@ const ChatComponent: React.FC = () => {
     setModelName(selectedModelName);
     pendingSessionRef.current = testId;
 
-    await runSqlSubmissionFlow(fileSql, testId);
+    await runSqlSubmissionFlow(fileSql, testId, genCount);
     dispatch(fetchModels());
   }, [selectedModelName, isSending, navigate, t, runSqlSubmissionFlow, dispatch]);
 
@@ -962,6 +993,35 @@ const ChatComponent: React.FC = () => {
                 <Box component="span" sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#f7c948', display: 'inline-block', mr: '2px' }} />
                 <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>Exécuté sur DuckDB en local — zéro coût BigQuery</Typography>
               </Box>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: '3px' }}>
+                  {[1, 2, 3, 4, 5].map((n) => (
+                    <Box
+                      key={n}
+                      component="button"
+                      onClick={() => setGenCount(n)}
+                      disabled={isSending}
+                      sx={{
+                        width: 30,
+                        height: 28,
+                        border: '1.5px solid',
+                        borderColor: genCount === n ? '#2BB0A8' : '#d0dfe0',
+                        borderRadius: '7px',
+                        bgcolor: genCount === n ? '#e8f8f7' : 'transparent',
+                        color: genCount === n ? '#2BB0A8' : '#6b8287',
+                        fontSize: 11.5,
+                        fontWeight: genCount === n ? 700 : 400,
+                        cursor: isSending ? 'not-allowed' : 'pointer',
+                        transition: 'all .15s',
+                        p: 0,
+                        lineHeight: 1,
+                        '&:hover:not(:disabled)': { borderColor: '#2BB0A8', color: '#2BB0A8' },
+                      }}
+                    >
+                      ×{n}
+                    </Box>
+                  ))}
+                </Box>
               <Button
                 variant="contained"
                 disabled={!selectedModelName || isSending}
@@ -983,6 +1043,7 @@ const ChatComponent: React.FC = () => {
               >
                 {isSending ? t('generate.generating') : t('generate.generate_tests')}
               </Button>
+              </Box>
             </Box>
 
             {/* Feedback zone — loading bar, errors, import (below the button) */}

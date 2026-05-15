@@ -154,6 +154,7 @@ export interface BuildModelState {
     lastError?: string;
     workspaceMode: boolean;
     suggestions: string[];
+    lastSuggestionsMessageId?: string;
 }
 
 
