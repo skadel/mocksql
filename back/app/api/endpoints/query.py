@@ -278,6 +278,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         _load_model_profile,
         _merge_profiles,
         _save_model_profile,
+        enrich_joins_with_cte_context,
     )
 
     billing_project = BQ_SCHEMA_BILLING_PROJECT
@@ -296,6 +297,18 @@ async def auto_profile_route(body: AutoProfileRequest):
         raise HTTPException(
             status_code=400, detail="Le profiling n'a retourné aucun résultat"
         )
+
+    # Enrich join entries with their CTE SQL (phase 1) so the profile is self-contained
+    if incoming_profile.get("joins"):
+        from storage.test_repository import get_test
+        test = get_test(body.session)
+        if test:
+            model_sql = test.get("optimized_sql") or test.get("sql") or ""
+            dialect = test.get("dialect", "bigquery")
+            if model_sql:
+                incoming_profile["joins"] = enrich_joins_with_cte_context(
+                    incoming_profile["joins"], model_sql, dialect
+                )
 
     stored_profile = _normalize_profile(_load_model_profile())
     merged = _merge_profiles(stored_profile, incoming_profile)
