@@ -11,6 +11,8 @@ Des tests de non-régression vérifient que des requêtes déjà valides ne sont
 Des tests de redondance documentent les cas que sqlglot traduit déjà correctement.
 """
 
+import re
+
 import duckdb
 import pytest
 import sqlglot
@@ -280,3 +282,61 @@ class TestNoRegression:
         fixed = fix_duck_db_sql(raw)
         result_after = con.execute(fixed).fetchall()
         assert result_before == result_after
+
+
+# ===========================================================================
+# Section 7 : SUBSTR avec position 0 (divergence sémantique BigQuery / DuckDB)
+# ===========================================================================
+
+
+class TestSubstrZeroIndex:
+    """
+    BigQuery : SUBSTR('ABCD', 0, 2)  → 'AB'  (position 0 clampée à 1)
+    DuckDB   : SUBSTR('ABCD', 0, 2)  → 'A'   (position 0 = avant le 1er char → 1 char perdu)
+
+    fix_duck_db_sql remplace SUBSTR(expr, 0, n) → SUBSTR(expr, 1, n).
+    """
+
+    def test_canary_sqlglot_still_broken(self, con):
+        """
+        CANARY — échoue si sqlglot corrige un jour SUBSTR(str, 0, n) côté DuckDB.
+        Si ce test échoue, la correction dans fix_duck_db_sql est devenue redondante.
+        """
+        raw = transpile("SELECT SUBSTR('ABCD', 0, 2)")
+        result = con.execute(raw).fetchone()[0]
+        assert result == "A", (
+            f"CANARY: sqlglot a corrigé SUBSTR(str, 0, n) — résultat DuckDB: {result!r} "
+            "(attendu 'A' tant que le bug existe). "
+            "La correction dans fix_duck_db_sql est désormais redondante."
+        )
+
+    def test_fix_corrects_substr_zero_start_literal(self, con):
+        """SUBSTR sur littéral string : position 0 → 1, résultat 'AB' comme BigQuery."""
+        raw = transpile("SELECT SUBSTR('ABCD', 0, 2)")
+        fixed = fix_duck_db_sql(raw)
+
+        assert re.search(r"SUBSTR\('ABCD',\s*1,", fixed, re.IGNORECASE), fixed
+        assert con.execute(fixed).fetchone()[0] == "AB"
+
+    def test_fix_corrects_substr_zero_start_column(self, con):
+        """SUBSTR sur colonne : SUBSTR(s, 0, 4) → SUBSTR(s, 1, 4), retourne '2024'."""
+        raw = "SELECT SUBSTR(s, 0, 4) FROM events"
+        fixed = fix_duck_db_sql(raw)
+
+        assert re.search(r"SUBSTR\(s,\s*1,", fixed, re.IGNORECASE)
+        assert con.execute(fixed).fetchone()[0] == "2024"
+
+    def test_fix_preserves_nonzero_start(self, con):
+        """SUBSTR avec position non nulle ne doit pas être modifié."""
+        raw = transpile("SELECT SUBSTR('ABCD', 2, 2)")
+        fixed = fix_duck_db_sql(raw)
+
+        assert con.execute(fixed).fetchone()[0] == "BC"
+
+    def test_fix_does_not_alter_position_10(self, con):
+        """SUBSTR(str, 10, n) — le '0' dans '10' ne doit pas déclencher le fix."""
+        raw = "SELECT SUBSTR('ABCDEFGHIJKLMNOP', 10, 3)"
+        fixed = fix_duck_db_sql(raw)
+
+        assert fixed == raw
+        assert con.execute(fixed).fetchone()[0] == "JKL"

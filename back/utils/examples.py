@@ -621,6 +621,17 @@ def fix_duck_db_sql(duckdb_sql: str) -> str:
         flags=re.IGNORECASE,
     )
 
+    # === SUBSTR(expr, 0, n) → SUBSTR(expr, 1, n) ===
+    # BigQuery : position 0 est clampée à 1 → SUBSTR('ABCD', 0, 2) = 'AB'
+    # DuckDB   : position 0 = avant le 1er char → SUBSTR('ABCD', 0, 2) = 'A' (un char perdu)
+    # Limitation : ne couvre pas les premiers arguments contenant une virgule (ex: CONCAT(a, b)).
+    s = re.sub(
+        r"\bSUBSTR(?:ING)?\s*\(([^,]+),\s*0\s*,",
+        lambda m: f"SUBSTR({m.group(1).strip()}, 1,",
+        s,
+        flags=re.IGNORECASE,
+    )
+
     # === SAFE_CAST → TRY_CAST (sqlglot le fait déjà, correction défensive) ===
     s = s.replace("SAFE_CAST", "TRY_CAST")
 
