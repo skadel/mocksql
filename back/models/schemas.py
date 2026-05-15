@@ -6,6 +6,7 @@ from typing import Dict, List, Any, Optional
 from models.env_variables import SCHEMA_CACHE_PATH
 
 _cache: Optional[List[Dict[str, Any]]] = None
+_cache_by_name: Optional[Dict[str, Dict[str, Any]]] = None
 _cache_time: Optional[datetime] = None
 _profile_cache: Optional[Dict[str, Any]] = None
 CACHE_EXPIRATION = timedelta(minutes=10)
@@ -49,15 +50,29 @@ def _save_to_file(tables: List[Dict[str, Any]]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _build_name_index(tables: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Index tables by full name and short name (last segment after '.')."""
+    index: Dict[str, Dict[str, Any]] = {}
+    for t in tables:
+        full = t.get("table_name") or t.get("name", "")
+        if full:
+            index[full] = t
+            short = full.split(".")[-1]
+            if short != full:
+                index.setdefault(short, t)
+    return index
+
+
 async def get_schemas(
     project_id: str = None, root_only: bool = False, **_
 ) -> List[Dict[str, Any]]:
-    global _cache, _cache_time
+    global _cache, _cache_by_name, _cache_time
     if _cache is not None and _cache_time is not None:
         if datetime.now() - _cache_time < CACHE_EXPIRATION:
             data = _cache
         else:
             _cache = None
+            _cache_by_name = None
             _cache_time = None
             data = None
     else:
@@ -66,6 +81,7 @@ async def get_schemas(
     if data is None:
         data = _load_from_file()
         _cache = data
+        _cache_by_name = _build_name_index(data)
         _cache_time = datetime.now()
 
     if root_only:
@@ -81,20 +97,34 @@ async def get_schemas(
     return data
 
 
+def get_schema_by_name(name: str) -> Optional[Dict[str, Any]]:
+    """Return a table dict by full or short name, or None if not found.
+
+    Uses the in-memory index — O(1) vs O(n) scan over the list.
+    Falls back to disk if the cache has not been populated yet.
+    """
+    global _cache_by_name
+    if _cache_by_name is None:
+        _cache_by_name = _build_name_index(_load_from_file())
+    return _cache_by_name.get(name)
+
+
 def save_schemas(new_tables: List[Dict[str, Any]]) -> None:
-    global _cache, _cache_time
+    global _cache, _cache_by_name, _cache_time
     existing = _load_from_file()
     by_name = {t["table_name"]: t for t in existing}
     for tbl in new_tables:
         by_name[tbl["table_name"]] = tbl
     _save_to_file(list(by_name.values()))
     _cache = None
+    _cache_by_name = None
     _cache_time = None
 
 
 def invalidate_project_cache(project_id: str = None):
-    global _cache, _cache_time
+    global _cache, _cache_by_name, _cache_time
     _cache = None
+    _cache_by_name = None
     _cache_time = None
 
 
