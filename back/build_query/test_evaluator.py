@@ -1,20 +1,32 @@
 import json
 import uuid
+from typing import Literal, Optional
 
 from langchain_core.messages import AIMessage
+from pydantic import BaseModel
 
 from build_query.state import QueryState
-from utils.llm_errors import is_vertex_permission_error, normalize_llm_content
+from utils.llm_errors import is_vertex_permission_error
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
 from utils.test_utils import build_test_detail, find_current_test
 
 
+class _EvaluationOutput(BaseModel):
+    verdict: Literal["Excellent", "Bon", "Insuffisant"]
+    reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
+    explanation: str
+
+
 async def evaluate_tests(state: QueryState):
     """
     Évalue la qualité de la suite de tests unitaires après exécution et produit
     un verdict + commentaire via le LLM.
+
+    Quand le verdict est Insuffisant, classifie la cause :
+    - bad_data       : données d'entrée incorrectes → déclenche une relance via l'agent conversationnel
+    - bad_assertions : assertions/résultats attendus mal définis
     """
     if state.get("error"):
         return {}
@@ -55,32 +67,47 @@ Tu reçois une requête SQL et les détails d'un test unitaire qui vient d'être
 {json.dumps(test_detail, ensure_ascii=False, indent=2)}
 
 **Mission :**
-Réponds en une seule phrase ultra-concise (max 20 mots) en français.
-Format strict : `**Verdict** — <ce que le test couvre> + <données/résultat valides ou problème>.`
-Verdicts possibles : **Excellent**, **Bon**, **Insuffisant**.
-Exemple : `**Bon** — Couvre la jointure sur clé manquante. Données et résultat valides.`"""
+Évalue la qualité du test et retourne un objet JSON structuré avec :
+- `verdict` : "Excellent", "Bon", ou "Insuffisant"
+- `reason_type` (uniquement si Insuffisant) :
+  - "bad_data" : les données d'entrée sont incorrectes (mauvais types, contraintes non respectées,
+    valeurs incohérentes, jointures impossibles, résultat inattendu dû aux données générées)
+  - "bad_assertions" : les assertions ou résultats attendus sont trop permissifs, incorrects ou
+    mal définis — les données elles-mêmes sont valides
+- `explanation` : une phrase ultra-concise (max 20 mots) en français expliquant le verdict
+
+Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Couvre la jointure sur clé manquante. Données et résultat valides."}}"""
 
     llm = make_llm()
+    structured_llm = llm.with_structured_output(_EvaluationOutput)
 
     try:
-        result = await llm.ainvoke(prompt)
-        content = normalize_llm_content(result.content)
+        result: _EvaluationOutput = await structured_llm.ainvoke(prompt)
     except Exception as exc:
         if is_vertex_permission_error(exc):
             return {}
         raise
 
+    content = f"**{result.verdict}** — {result.explanation}"
+
     eval_test_index = current_test.get("test_index")
     gen_retries = (
         state.get("gen_retries") if state.get("gen_retries") is not None else 2
     )
-    is_insuffisant = "Insuffisant" in content
-    # Skip auto-retry when in assertion-only mode — the input data hasn't changed
-    should_retry = (
-        is_insuffisant and gen_retries > 0 and not state.get("assertion_only")
+
+    evaluation_feedback = (
+        result.reason_type
+        if result.verdict == "Insuffisant" and result.reason_type
+        else None
+    )
+    # Déclencher une relance via l'agent quand les données sont en cause et qu'il reste des retries
+    triggers_agent_retry = (
+        evaluation_feedback == "bad_data"
+        and gen_retries > 0
+        and not state.get("assertion_only")
     )
 
-    return {
+    state_update: dict = {
         "messages": [
             AIMessage(
                 content=content,
@@ -93,6 +120,10 @@ Exemple : `**Bon** — Couvre la jointure sur clé manquante. Données et résul
                 },
             )
         ],
-        "status": "empty_results" if should_retry else "complete",
-        **({"gen_retries": gen_retries - 1} if should_retry else {}),
+        "evaluation_feedback": evaluation_feedback,
+        "status": "empty_results" if triggers_agent_retry else "complete",
     }
+    if triggers_agent_retry:
+        state_update["gen_retries"] = gen_retries - 1
+
+    return state_update

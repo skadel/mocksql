@@ -7,7 +7,7 @@ from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
-from utils.saver import get_history_from_state
+from utils.saver import get_history_from_state, get_message_type
 
 
 async def conversational_agent(state: QueryState):
@@ -21,6 +21,35 @@ async def conversational_agent(state: QueryState):
         or "Aucun test pour l'instant."
     )
 
+    # Contexte injecté quand l'agent est appelé après un verdict "bad_data" de l'évaluateur
+    evaluation_feedback = state.get("evaluation_feedback")
+    eval_context = ""
+    eval_test_idx = None
+    if evaluation_feedback == "bad_data":
+        eval_msgs = [
+            m
+            for m in state.get("messages", [])
+            if get_message_type(m) == MsgType.EVALUATION
+        ]
+        if eval_msgs:
+            latest_eval = eval_msgs[-1]
+            eval_test_idx = latest_eval.additional_kwargs.get("test_index")
+            eval_verdict_text = latest_eval.content
+            retries_left = state.get("gen_retries", 0)
+            eval_context = f"""
+
+⚠️ CONTEXTE AUTOMATIQUE — Le test {eval_test_idx} a été jugé **Insuffisant à cause des données d'entrée**.
+Verdict de l'évaluateur : {eval_verdict_text}
+Tentatives de correction restantes : {retries_left}
+
+Ta mission : analyser pourquoi les données d'entrée posent problème, puis les corriger.
+Tu as à ta disposition :
+- `count_cte_steps` pour diagnostiquer où les données bloquent dans les CTEs
+- `run_cte` pour inspecter le contenu d'une CTE intermédiaire
+- `generate_test` pour regénérer le test avec des données corrigées et une instruction précise
+
+Choisis librement l'outil le plus adapté à ce que tu observes dans les données du test."""
+
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
@@ -32,7 +61,7 @@ Tests existants :
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
-Réponds en français, de manière concise et naturelle."""
+Réponds en français, de manière concise et naturelle.{eval_context}"""
 
     @tool
     def generate_test(scenario: str) -> str:
@@ -77,6 +106,13 @@ Réponds en français, de manière concise et naturelle."""
     messages = [SystemMessage(content=system_content)] + history
     if user_input:
         messages = messages + [HumanMessage(content=user_input)]
+    elif evaluation_feedback == "bad_data":
+        # Déclenchement automatique : aucune saisie utilisateur, l'agent vient de l'évaluateur
+        trigger = (
+            f"Le test {eval_test_idx} a été jugé Insuffisant à cause des données d'entrée. "
+            "Analyse le problème et prends les mesures nécessaires pour le corriger."
+        )
+        messages = messages + [HumanMessage(content=trigger)]
 
     result = await llm.ainvoke(messages)
     tool_calls = getattr(result, "tool_calls", [])

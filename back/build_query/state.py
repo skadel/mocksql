@@ -59,3 +59,6 @@ class QueryState(TypedDict):
     model_context: Optional[
         str
     ]  # concatenated mocksql.md files (global → file-specific)
+    evaluation_feedback: Optional[
+        str
+    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions"

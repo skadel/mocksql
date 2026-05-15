@@ -194,6 +194,12 @@ def build_query_graph():
         # Skip suggestions for assertion-only edits (data didn't change)
         if state.get("assertion_only"):
             return "history_saver"
+        # Données incorrectes et retries restants → l'agent corrige ou débogue
+        if (
+            state.get("evaluation_feedback") == "bad_data"
+            and state.get("gen_retries", 0) > 0
+        ):
+            return "conversational_agent"
         return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")
