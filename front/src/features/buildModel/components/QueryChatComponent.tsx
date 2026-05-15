@@ -645,9 +645,11 @@ const ChatComponent: React.FC = () => {
     if (!currentModelId || !sqlQuery.trim()) return;
     try {
       const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [] });
-      if (!result.profile_complete && result.profile_request?.profile_query && result.auto_profile_available) {
+      const doStream = () => dispatch(chatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' }));
+      if (result.profile_complete) {
+        doStream();
+      } else if (result.profile_request?.profile_query && result.auto_profile_available) {
         const req = result.profile_request;
-        const doStream = () => dispatch(chatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' }));
         setPendingAutoProfile({
           profileRequest: req,
           onConfirm: async () => {
