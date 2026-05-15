@@ -801,13 +801,20 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
         # Right-side table
         jt = join_node.this
         if isinstance(jt, exp.Alias):
-            right_table = (
-                resolve(jt.alias) or _full_table_name(jt.this)
-                if isinstance(jt.this, exp.Table)
-                else jt.this.name
-            )
+            if isinstance(jt.this, exp.Table):
+                right_table = resolve(jt.alias) or _full_table_name(jt.this)
+            else:
+                # CTE or inline subquery — keep the alias; build_profile_query resolves it
+                right_table = jt.alias or ""
+            if not right_table:
+                continue
         elif isinstance(jt, exp.Table):
             right_table = _full_table_name(jt)
+        elif isinstance(jt, exp.Subquery):
+            # sqlglot represents JOIN (SELECT ...) AS alias as exp.Subquery with .alias set
+            right_table = jt.alias or ""
+            if not right_table:
+                continue
         else:
             continue
 
@@ -1554,8 +1561,8 @@ def _build_join_query(
             exp.alias_(exp.Null(), "min_val"),
             exp.alias_(exp.Null(), "max_val"),
             exp.alias_(exp.Null(), "top_values"),
-            exp.alias_(exp.Literal.string(left_table), "left_table"),
-            exp.alias_(exp.Literal.string(right_table), "right_table"),
+            exp.alias_(exp.Literal.string(l_src_table), "left_table"),
+            exp.alias_(exp.Literal.string(r_src_table), "right_table"),
             exp.alias_(exp.Literal.string(left_expr_str), "left_expr"),
             exp.alias_(exp.Literal.string(right_expr_str), "right_expr"),
             exp.alias_(join_case, "join_type"),
@@ -1602,6 +1609,81 @@ def _extract_ctes(sql_query: str, dialect: str = "bigquery") -> list[tuple[str, 
         ]
     except Exception:
         return []
+
+
+def _extract_subquery_aliases(
+    sql_query: str, dialect: str = "bigquery"
+) -> dict[str, str]:
+    """Return {alias: body_sql} for every inline subquery in a JOIN clause.
+
+    Examples:
+        >>> q = "SELECT * FROM t JOIN (SELECT id FROM s WHERE active = 1) AS sub ON t.id = sub.id"
+        >>> aliases = _extract_subquery_aliases(q, dialect="duckdb")
+        >>> list(aliases.keys())
+        ['sub']
+        >>> "SELECT" in aliases["sub"]
+        True
+    """
+    try:
+        tree = sqlglot.parse_one(
+            sql_query, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return {}
+    result: dict[str, str] = {}
+    for join_node in tree.find_all(exp.Join):
+        jt = join_node.this
+        # sqlglot represents JOIN (SELECT ...) AS alias as exp.Subquery (jt.this = Select)
+        if isinstance(jt, exp.Subquery) and jt.alias:
+            result[jt.alias] = jt.this.sql(dialect=dialect)
+        elif isinstance(jt, exp.Alias) and isinstance(jt.this, exp.Subquery):
+            alias = jt.alias
+            if alias:
+                result[alias] = jt.this.this.sql(dialect=dialect)
+    return result
+
+
+def _resolve_alias_to_table(
+    alias: str, alias_map: dict[str, str], dialect: str = "bigquery"
+) -> str:
+    """Return the base real-table name for a CTE or subquery alias.
+
+    Parses the alias body and returns the first real table found in its FROM
+    clause.  Falls back to *alias* on any parse error.
+
+    Examples:
+        >>> body = "SELECT id FROM myproject.mydataset.stations WHERE status = 'active'"
+        >>> _resolve_alias_to_table("s", {"s": body})
+        'myproject.mydataset.stations'
+
+        >>> _resolve_alias_to_table("unknown", {})
+        'unknown'
+    """
+    body_sql = alias_map.get(alias)
+    if not body_sql:
+        return alias
+    try:
+        tree = sqlglot.parse_one(
+            body_sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+        from_node = tree.find(exp.From)
+        if from_node:
+            tbl = from_node.find(exp.Table)
+            if tbl:
+                parts: list[str] = []
+                catalog = tbl.args.get("catalog")
+                db = tbl.args.get("db")
+                if catalog:
+                    parts.append(
+                        catalog.name if hasattr(catalog, "name") else str(catalog)
+                    )
+                if db:
+                    parts.append(db.name if hasattr(db, "name") else str(db))
+                parts.append(tbl.name)
+                return ".".join(parts)
+    except Exception:
+        pass
+    return alias
 
 
 def _is_one_side(table: str, join_keys: set, cte_grain_map: dict) -> Optional[bool]:
@@ -1790,6 +1872,11 @@ def build_profile_query(
         ctes = _extract_ctes(sql_query, dialect=dialect)
         cte_map = dict(ctes)
 
+        # Also extract inline JOIN subquery aliases, e.g. JOIN (...) AS s.
+        # Merged with cte_map so _resolve_cte_source handles both transparently.
+        subquery_alias_map = _extract_subquery_aliases(sql_query, dialect=dialect)
+        full_alias_map = {**cte_map, **subquery_alias_map}
+
         # Build CTE grain map for static inference.
         # If cte1 has grain (a, b) and the outer join is ON (a, b), the cte1 side is
         # definitively "one" — no need to run an expensive GROUP BY query.
@@ -1828,6 +1915,20 @@ def build_profile_query(
             left_is_one = _is_one_side(left_table, all_left_keys, cte_grain_map)
             right_is_one = _is_one_side(right_table, all_right_keys, cte_grain_map)
 
+            # Resolve CTE/subquery aliases to real base table names for storage
+            l_short = left_table.split(".")[-1]
+            r_short = right_table.split(".")[-1]
+            l_real = (
+                _resolve_alias_to_table(l_short, full_alias_map, dialect)
+                if l_short in full_alias_map
+                else left_table
+            )
+            r_real = (
+                _resolve_alias_to_table(r_short, full_alias_map, dialect)
+                if r_short in full_alias_map
+                else right_table
+            )
+
             if left_is_one is not None or right_is_one is not None:
                 # At least one CTE side has a deterministic cardinality from grain analysis.
                 # Unknown/real-table sides default to "many" (conservative).
@@ -1846,8 +1947,8 @@ def build_profile_query(
                 try:
                     parts.append(
                         _build_static_join_row(
-                            left_table,
-                            right_table,
+                            l_real,
+                            r_real,
                             left_expr_str,
                             right_expr_str,
                             join_type,
@@ -1858,26 +1959,28 @@ def build_profile_query(
                 except Exception:
                     pass
             else:
-                # Both sides are real tables (or CTEs whose grain is unknown) —
+                # Both sides are real tables (or CTEs/subqueries whose grain is unknown) —
                 # measure cardinality via SQL.  One query per (left, right) pair
                 # using all compound key conditions together.
-                # For CTE sides, use lineage to resolve the real source table and apply
-                # the CTE's WHERE conditions so the profiling query runs against actual data.
+                # For CTE/subquery sides, use lineage to resolve the real source table and
+                # apply the WHERE conditions so the profiling query runs against actual data.
                 l_src: dict | None = None
                 r_src: dict | None = None
-                if cte_map:
-                    l_cte = left_table.split(".")[-1]
-                    r_cte = right_table.split(".")[-1]
+                if full_alias_map:
                     all_l_keys = [
                         k for s in pair_specs for k in (s.get("left_keys") or [])
                     ]
                     all_r_keys = [
                         k for s in pair_specs for k in (s.get("right_keys") or [])
                     ]
-                    if l_cte in cte_map:
-                        l_src = _resolve_cte_source(l_cte, all_l_keys, cte_map, dialect)
-                    if r_cte in cte_map:
-                        r_src = _resolve_cte_source(r_cte, all_r_keys, cte_map, dialect)
+                    if l_short in full_alias_map:
+                        l_src = _resolve_cte_source(
+                            l_short, all_l_keys, full_alias_map, dialect
+                        )
+                    if r_short in full_alias_map:
+                        r_src = _resolve_cte_source(
+                            r_short, all_r_keys, full_alias_map, dialect
+                        )
                 try:
                     parts.append(
                         _build_join_query(
@@ -1981,6 +2084,73 @@ def detect_fk_candidates(profile: dict, used_columns: list[dict]) -> list[dict]:
                 )
 
     return candidates
+
+
+def describe_join(join_info: dict) -> str:
+    """Return a concise natural-language sentence describing a join's cardinality.
+
+    Replaces raw numeric fields with an actionable sentence for the LLM prompt
+    and the UI.  Uses only the last dotted component of table names.
+
+    Examples:
+        >>> describe_join({
+        ...     "left_table": "project.dataset.orders",
+        ...     "right_table": "project.dataset.users",
+        ...     "join_type_profiled": "many-to-one",
+        ...     "left_match_rate": 1.0,
+        ...     "avg_right_per_left_key": 1.0,
+        ...     "max_right_per_left_key": 1,
+        ... })
+        'Multiple orders rows can share the same users row'
+
+        >>> describe_join({
+        ...     "left_table": "trips",
+        ...     "right_table": "stations",
+        ...     "join_type_profiled": "one-to-many",
+        ...     "left_match_rate": 0.95,
+        ...     "avg_right_per_left_key": 2.3,
+        ...     "max_right_per_left_key": 5,
+        ... })
+        'Each trips row can match up to 5 rows in stations (95.0% match rate, avg 2.3 per key)'
+
+        >>> describe_join({
+        ...     "left_table": "t",
+        ...     "right_table": "s",
+        ...     "join_type_profiled": "one-to-one",
+        ...     "left_match_rate": 1.0,
+        ...     "avg_right_per_left_key": 1.0,
+        ...     "max_right_per_left_key": 1,
+        ... })
+        'Each t row matches exactly 1 row in s'
+    """
+    left = join_info.get("left_table", "").split(".")[-1]
+    right = join_info.get("right_table", "").split(".")[-1]
+    jt = join_info.get("join_type_profiled", "many-to-many")
+    avg_r = join_info.get("avg_right_per_left_key")
+    max_r = join_info.get("max_right_per_left_key")
+    match_rate = join_info.get("left_match_rate")
+
+    if jt == "one-to-one":
+        desc = f"Each {left} row matches exactly 1 row in {right}"
+    elif jt == "many-to-one":
+        desc = f"Multiple {left} rows can share the same {right} row"
+    elif jt == "one-to-many":
+        if max_r and max_r > 1:
+            desc = f"Each {left} row can match up to {max_r} rows in {right}"
+        else:
+            desc = f"Each {left} row can match multiple rows in {right}"
+    else:
+        desc = f"Multiple {left} rows can match multiple {right} rows"
+
+    extras: list[str] = []
+    if match_rate is not None and match_rate < 0.99:
+        extras.append(f"{round(match_rate * 100, 1)}% match rate")
+    if jt in ("one-to-many", "many-to-many") and avg_r and avg_r > 1.0:
+        extras.append(f"avg {round(avg_r, 1)} per key")
+
+    if extras:
+        desc += f" ({', '.join(extras)})"
+    return desc
 
 
 def parse_profile_query_result(
@@ -2089,27 +2259,31 @@ def parse_profile_query_result(
     def _sa(v: Any) -> list[str]:
         return [x.strip() for x in str(v).split(",") if x.strip()] if v else []
 
+    _joins: list[dict] = []
+    for r in join_rows:
+        if not r.get("join_type"):
+            continue
+        j: dict = {
+            "left_table": r["left_table"],
+            "right_table": r["right_table"],
+            "left_expr": r["left_expr"],
+            "right_expr": r["right_expr"],
+            "join_type_profiled": r["join_type"],
+            # How many FK values exist in the PK table (1.0 = perfect integrity)
+            "left_match_rate": _f(r.get("left_match_rate")),
+            # Average right-table row count per left key value (fanout)
+            "avg_right_per_left_key": _f(r.get("avg_right_per_left_key")),
+            # Max right-table row count for any single left key value
+            "max_right_per_left_key": _i(r.get("max_right_per_left_key")),
+            # Sample of actual left key values → FK value pool for the generator
+            "left_key_sample": _sa(r.get("left_key_sample")),
+        }
+        j["description"] = describe_join(j)
+        _joins.append(j)
+
     profile: dict = {
         "tables": {},
-        "joins": [
-            {
-                "left_table": r["left_table"],
-                "right_table": r["right_table"],
-                "left_expr": r["left_expr"],
-                "right_expr": r["right_expr"],
-                "join_type_profiled": r["join_type"],
-                # How many FK values exist in the PK table (1.0 = perfect integrity)
-                "left_match_rate": _f(r.get("left_match_rate")),
-                # Average right-table row count per left key value (fanout)
-                "avg_right_per_left_key": _f(r.get("avg_right_per_left_key")),
-                # Max right-table row count for any single left key value
-                "max_right_per_left_key": _i(r.get("max_right_per_left_key")),
-                # Sample of actual left key values → FK value pool for the generator
-                "left_key_sample": _sa(r.get("left_key_sample")),
-            }
-            for r in join_rows
-            if r.get("join_type")
-        ],
+        "joins": _joins,
         "fk_candidates": [],
     }
     threshold = 20  # categorical distinct threshold

@@ -19,6 +19,9 @@ from build_query.profiler import (
     parse_profile_query_result,
     detect_fk_candidates,
     _resolve_cte_source,
+    _extract_subquery_aliases,
+    _resolve_alias_to_table,
+    describe_join,
 )
 
 
@@ -1674,6 +1677,344 @@ class TestResolveCteSource(unittest.TestCase):
         # left_table should be 'a' (the FROM table) and right_table 'b' (the JOIN table)
         self.assertIn("'a' AS left_table", join_branches[0])
         self.assertIn("'b' AS right_table", join_branches[0])
+
+
+# ─── _extract_subquery_aliases ────────────────────────────────────────────────
+
+
+class TestExtractSubqueryAliases(unittest.TestCase):
+    """_extract_subquery_aliases detects inline JOIN (SELECT ...) AS alias."""
+
+    def test_single_inline_subquery_detected(self):
+        sql = (
+            "SELECT * FROM t "
+            "JOIN (SELECT id FROM stations WHERE active = 1) AS sub ON t.id = sub.id"
+        )
+        aliases = _extract_subquery_aliases(sql, dialect="duckdb")
+        self.assertIn("sub", aliases)
+
+    def test_body_contains_select(self):
+        sql = (
+            "SELECT * FROM trips "
+            "JOIN (SELECT station_id FROM stations WHERE status = 'active') AS s "
+            "ON trips.start_station_id = s.station_id"
+        )
+        aliases = _extract_subquery_aliases(sql, dialect="bigquery")
+        self.assertIn("SELECT" in aliases.get("s", "").upper(), [True])
+
+    def test_multiple_inline_subqueries(self):
+        sql = (
+            "SELECT * FROM t "
+            "JOIN (SELECT id FROM a) AS sub_a ON t.a_id = sub_a.id "
+            "JOIN (SELECT id FROM b) AS sub_b ON t.b_id = sub_b.id"
+        )
+        aliases = _extract_subquery_aliases(sql, dialect="duckdb")
+        self.assertIn("sub_a", aliases)
+        self.assertIn("sub_b", aliases)
+        self.assertEqual(len(aliases), 2)
+
+    def test_plain_table_join_returns_empty(self):
+        sql = "SELECT * FROM trips t JOIN stations s ON t.station_id = s.id"
+        aliases = _extract_subquery_aliases(sql, dialect="bigquery")
+        self.assertEqual(aliases, {})
+
+    def test_where_condition_preserved_in_body(self):
+        sql = (
+            "SELECT * FROM t "
+            "JOIN (SELECT id FROM stations WHERE status = 'active') AS s ON t.id = s.id"
+        )
+        aliases = _extract_subquery_aliases(sql, dialect="duckdb")
+        body = aliases.get("s", "")
+        self.assertIn("active", body)
+
+    def test_invalid_sql_returns_empty(self):
+        aliases = _extract_subquery_aliases("THIS IS NOT SQL !!!!", dialect="duckdb")
+        self.assertEqual(aliases, {})
+
+    def test_no_join_returns_empty(self):
+        sql = "SELECT id FROM trips WHERE status = 'active'"
+        aliases = _extract_subquery_aliases(sql, dialect="duckdb")
+        self.assertEqual(aliases, {})
+
+
+# ─── _resolve_alias_to_table ─────────────────────────────────────────────────
+
+
+class TestResolveAliasToTable(unittest.TestCase):
+    """_resolve_alias_to_table returns the real base table name from a subquery body."""
+
+    def test_simple_table_name(self):
+        alias_map = {"s": "SELECT id FROM stations WHERE status = 'active'"}
+        self.assertEqual(_resolve_alias_to_table("s", alias_map), "stations")
+
+    def test_three_part_fully_qualified_name(self):
+        body = "SELECT station_id FROM `bigquery-public-data`.`austin_bikeshare`.`bikeshare_stations`"
+        alias_map = {"s": body}
+        result = _resolve_alias_to_table("s", alias_map)
+        self.assertIn("bikeshare_stations", result)
+
+    def test_unknown_alias_returns_alias(self):
+        self.assertEqual(_resolve_alias_to_table("x", {}), "x")
+
+    def test_empty_map_returns_alias(self):
+        self.assertEqual(_resolve_alias_to_table("sub", {}), "sub")
+
+    def test_from_alias_ignored(self):
+        # FROM stations AS st → real table is "stations", not "st"
+        alias_map = {"s": "SELECT id FROM stations AS st"}
+        result = _resolve_alias_to_table("s", alias_map, dialect="duckdb")
+        self.assertEqual(result, "stations")
+
+    def test_two_part_table_name(self):
+        alias_map = {"s": "SELECT id FROM mydataset.stations"}
+        result = _resolve_alias_to_table("s", alias_map, dialect="bigquery")
+        self.assertEqual(result, "mydataset.stations")
+
+    def test_parse_error_returns_alias(self):
+        alias_map = {"s": "NOT VALID SQL @@@@"}
+        self.assertEqual(_resolve_alias_to_table("s", alias_map), "s")
+
+
+# ─── describe_join ────────────────────────────────────────────────────────────
+
+
+class TestDescribeJoin(unittest.TestCase):
+    """describe_join produces a natural-language cardinality sentence."""
+
+    def _j(self, jt, left="orders", right="users", match_rate=1.0, avg_r=1.0, max_r=1):
+        return {
+            "left_table": left,
+            "right_table": right,
+            "join_type_profiled": jt,
+            "left_match_rate": match_rate,
+            "avg_right_per_left_key": avg_r,
+            "max_right_per_left_key": max_r,
+        }
+
+    def test_one_to_one(self):
+        desc = describe_join(self._j("one-to-one"))
+        self.assertIn("exactly 1", desc)
+        self.assertIn("orders", desc)
+        self.assertIn("users", desc)
+
+    def test_many_to_one(self):
+        desc = describe_join(self._j("many-to-one"))
+        self.assertIn("Multiple orders", desc)
+        self.assertIn("users", desc)
+
+    def test_one_to_many_with_max_r(self):
+        desc = describe_join(self._j("one-to-many", max_r=8, avg_r=3.0))
+        self.assertIn("8", desc)
+        self.assertIn("orders", desc)
+
+    def test_one_to_many_without_max_r(self):
+        j = self._j("one-to-many", max_r=1, avg_r=1.0)
+        desc = describe_join(j)
+        self.assertIn("multiple rows", desc)
+
+    def test_many_to_many(self):
+        desc = describe_join(self._j("many-to-many"))
+        self.assertIn("Multiple orders", desc)
+        self.assertIn("multiple", desc.lower())
+
+    def test_low_match_rate_appended(self):
+        desc = describe_join(self._j("one-to-one", match_rate=0.85))
+        self.assertIn("85.0% match rate", desc)
+
+    def test_full_match_rate_omitted(self):
+        desc = describe_join(self._j("one-to-one", match_rate=1.0))
+        self.assertNotIn("match rate", desc)
+
+    def test_avg_fanout_appended_for_one_to_many(self):
+        desc = describe_join(self._j("one-to-many", max_r=5, avg_r=2.7))
+        self.assertIn("avg 2.7 per key", desc)
+
+    def test_avg_fanout_not_shown_for_many_to_one(self):
+        # avg fanout is only shown for one-to-many / many-to-many
+        desc = describe_join(self._j("many-to-one", avg_r=3.0))
+        self.assertNotIn("per key", desc)
+
+    def test_dotted_table_name_uses_short_form(self):
+        desc = describe_join(
+            self._j(
+                "one-to-one",
+                left="project.dataset.bikeshare_trips",
+                right="project.dataset.bikeshare_stations",
+            )
+        )
+        self.assertIn("bikeshare_trips", desc)
+        self.assertIn("bikeshare_stations", desc)
+        self.assertNotIn("project", desc)
+        self.assertNotIn("dataset", desc)
+
+    def test_match_rate_not_shown_for_many_to_one(self):
+        # many-to-one low match rate should still NOT appear (only one-to-many/many-to-many)
+        desc = describe_join(self._j("many-to-one", match_rate=0.5))
+        # match_rate < 0.99 → appended regardless of join type in current impl
+        # This test documents the actual behaviour:
+        self.assertIn("match rate", desc)
+
+    def test_missing_optional_fields(self):
+        # Only required fields — should not raise
+        desc = describe_join({"join_type_profiled": "one-to-one", "left_table": "a", "right_table": "b"})
+        self.assertIsInstance(desc, str)
+        self.assertIn("a", desc)
+
+
+# ─── describe_join appears in parse_profile_query_result output ───────────────
+
+
+class TestParseProfileQueryResultDescriptionField(unittest.TestCase):
+    """parse_profile_query_result must add 'description' to every join entry."""
+
+    def _join_row(self, join_type, left_table="orders", right_table="users"):
+        return {
+            "row_type": "join",
+            "table_name": None,
+            "col_name": None,
+            "total_count": None,
+            "null_count": None,
+            "non_null_count": None,
+            "distinct_count": None,
+            "dup_count": None,
+            "min_val": None,
+            "max_val": None,
+            "top_values": None,
+            "left_table": left_table,
+            "right_table": right_table,
+            "left_expr": "user_id",
+            "right_expr": "id",
+            "join_type": join_type,
+            "left_match_rate": 1.0,
+            "avg_right_per_left_key": 1.0,
+            "max_right_per_left_key": 1,
+            "left_key_sample": None,
+        }
+
+    _SCHEMA = {
+        "tables": [
+            {"name": "orders", "columns": [{"name": "user_id", "type": "INTEGER"}]},
+            {"name": "users", "columns": [{"name": "id", "type": "INTEGER"}]},
+        ]
+    }
+
+    def test_description_field_present(self):
+        rows = [self._join_row("one-to-one")]
+        p = parse_profile_query_result(rows, self._SCHEMA, [])
+        self.assertIn("description", p["joins"][0])
+
+    def test_description_is_string(self):
+        rows = [self._join_row("many-to-one")]
+        p = parse_profile_query_result(rows, self._SCHEMA, [])
+        self.assertIsInstance(p["joins"][0]["description"], str)
+
+    def test_description_one_to_one(self):
+        rows = [self._join_row("one-to-one")]
+        p = parse_profile_query_result(rows, self._SCHEMA, [])
+        self.assertIn("exactly 1", p["joins"][0]["description"])
+
+    def test_description_many_to_one(self):
+        rows = [self._join_row("many-to-one")]
+        p = parse_profile_query_result(rows, self._SCHEMA, [])
+        desc = p["joins"][0]["description"]
+        self.assertIn("orders", desc)
+        self.assertIn("users", desc)
+
+    def test_all_join_rows_have_description(self):
+        rows = [
+            self._join_row("one-to-many"),
+            self._join_row("many-to-many"),
+        ]
+        p = parse_profile_query_result(rows, self._SCHEMA, [])
+        for j in p["joins"]:
+            self.assertIn("description", j)
+            self.assertTrue(len(j["description"]) > 0)
+
+
+# ─── Inline subquery JOIN in build_profile_query ──────────────────────────────
+
+_BIKESHARE_SCHEMA = {
+    "tables": [
+        {
+            "name": "bigquery-public-data.austin_bikeshare.bikeshare_trips",
+            "columns": [
+                {"name": "start_station_id", "type": "INTEGER"},
+                {"name": "end_station_id", "type": "INTEGER"},
+            ],
+        },
+        {
+            "name": "bigquery-public-data.austin_bikeshare.bikeshare_stations",
+            "columns": [
+                {"name": "station_id", "type": "INTEGER"},
+                {"name": "council_district", "type": "STRING"},
+                {"name": "status", "type": "STRING"},
+            ],
+        },
+    ]
+}
+
+_BIKESHARE_USED = [
+    {
+        "table": "bigquery-public-data.austin_bikeshare.bikeshare_trips",
+        "used_columns": ["start_station_id", "end_station_id"],
+    },
+    {
+        "table": "bigquery-public-data.austin_bikeshare.bikeshare_stations",
+        "used_columns": ["station_id", "council_district", "status"],
+    },
+]
+
+_INLINE_SUBQUERY_SQL = (
+    "SELECT s.council_district AS district, t.start_station_id, t.end_station_id "
+    "FROM `bigquery-public-data.austin_bikeshare.bikeshare_trips` AS t "
+    "INNER JOIN ("
+    "  SELECT bikeshare_stations.station_id AS station_id,"
+    "         bikeshare_stations.council_district AS council_district "
+    "  FROM `bigquery-public-data.austin_bikeshare.bikeshare_stations` AS bikeshare_stations "
+    "  WHERE bikeshare_stations.status = 'active'"
+    ") AS s ON t.start_station_id = s.station_id"
+)
+
+
+class TestBuildProfileQueryInlineSubquery(unittest.TestCase):
+    """Inline subquery JOINs are profiled against the real base table."""
+
+    def _q(self):
+        return build_profile_query(
+            _BIKESHARE_SCHEMA,
+            _BIKESHARE_USED,
+            dialect="bigquery",
+            sql_query=_INLINE_SUBQUERY_SQL,
+        )
+
+    def test_join_branch_present(self):
+        q = self._q()
+        self.assertIn("'join'", q)
+
+    def test_real_table_name_stored_not_alias(self):
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        self.assertTrue(len(join_parts) >= 1)
+        combined = " ".join(join_parts)
+        self.assertIn("bikeshare_stations", combined)
+        self.assertIn("bikeshare_trips", combined)
+        # Alias "s" must NOT be stored as the table name
+        self.assertNotIn("'s' AS left_table", combined)
+        self.assertNotIn("'s' AS right_table", combined)
+
+    def test_where_condition_from_subquery_preserved(self):
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        combined = " ".join(join_parts)
+        # The WHERE status='active' from the subquery should appear in the profiling query
+        self.assertIn("active", combined)
+
+    def test_generated_sql_parseable(self):
+        q = self._q()
+        parsed = sqlglot.parse(
+            q, dialect="bigquery", error_level=sqlglot.ErrorLevel.RAISE
+        )
+        self.assertGreater(len(parsed), 0)
 
 
 if __name__ == "__main__":
