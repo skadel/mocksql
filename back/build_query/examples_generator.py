@@ -447,7 +447,6 @@ async def generate_examples_(
         "unit_test_description": generated_data.unit_test_description,
         "unit_test_build_reasoning": generated_data.unit_test_build_reasoning,
         "tags": generated_data.tags,
-        "suggestions": generated_data.suggestions,
         "data": filled_data,
     }
 
@@ -497,16 +496,6 @@ def get_generation_output_type(data_model, existing_tests):
                     "Labels décrivant les types de cas couverts. "
                     "Choisir parmi : 'Logique métier', 'Null checks', 'Cas limites', 'Intégration', 'Valeurs dupliquées', 'Performance'. "
                     "Inclure tous les labels pertinents."
-                )
-            ),
-        ),
-        suggestions=(
-            List[str],
-            Field(
-                description=(
-                    "Exactement 2 suggestions de tests complémentaires à générer ensuite, "
-                    "sous forme d'assertions actionnables courtes commençant par un verbe. "
-                    "Exemple : ['Vérifie que le revenu total est non nul', 'S'assure que year >= 2000']."
                 )
             ),
         ),

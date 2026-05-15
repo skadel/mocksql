@@ -169,7 +169,10 @@ Réponds uniquement avec le JSON demandé sans autres explications.
     )
 
 
-def _format_profile_block(profile: Optional[dict], used_columns: list) -> str:
+def _format_profile_block(
+    profile: Optional[dict],
+    used_columns: list,
+) -> str:
     """
     Formats the statistical profile into a concise block for injection into prompts.
     Only includes columns that are actually used in the query.
@@ -189,29 +192,54 @@ def _format_profile_block(profile: Optional[dict], used_columns: list) -> str:
     for tbl_key, tbl_data in profile["tables"].items():
         short_key = tbl_key.split(".")[-1]
         wanted_cols = requested.get(tbl_key) or requested.get(short_key)
-        if not wanted_cols:
+        derived_exprs = tbl_data.get("derived_expressions", [])
+        if not wanted_cols and not derived_exprs:
             continue
         cols = tbl_data.get("columns", {})
         col_lines: List[str] = []
-        for col_name, stats in cols.items():
-            if col_name not in wanted_cols:
-                continue
-            parts: List[str] = []
-            min_v, max_v = stats.get("min_value"), stats.get("max_value")
-            if min_v is not None and max_v is not None:
-                parts.append(f"min={min_v}, max={max_v}")
-            dc = stats.get("distinct_count")
-            if dc is not None:
-                parts.append(f"distinct={dc}")
-                if stats.get("is_categorical") and dc <= 20:
-                    parts.append("(catégoriel)")
-            if stats.get("is_never_null"):
-                parts.append("never_null")
-            elif stats.get("nullable_ratio", 0) > 0:
-                pct = round(stats["nullable_ratio"] * 100, 1)
-                parts.append(f"null={pct}%")
-            if parts:
-                col_lines.append(f"    - `{col_name}`: {', '.join(parts)}")
+        if wanted_cols:
+            for col_name, stats in cols.items():
+                if col_name not in wanted_cols:
+                    continue
+                parts: List[str] = []
+                # Support both computed field names (parse_profile_query_result)
+                # and raw BigQuery field names (_normalize_profile)
+                min_v = stats.get("min_value") or stats.get("min_val")
+                max_v = stats.get("max_value") or stats.get("max_val")
+                if min_v is not None and max_v is not None:
+                    parts.append(f"min={min_v}, max={max_v}")
+                dc = stats.get("distinct_count")
+                total = stats.get("total_count")
+                null_count = stats.get("null_count")
+                nullable_ratio = stats.get("nullable_ratio") or (
+                    null_count / total if null_count is not None and total else 0
+                )
+                is_never_null = stats.get("is_never_null") or (null_count == 0 and total)
+                is_categorical = stats.get("is_categorical") or (
+                    dc is not None and dc <= 20
+                )
+                if dc is not None:
+                    parts.append(f"distinct={dc}")
+                    if is_categorical and dc <= 20:
+                        parts.append("(catégoriel)")
+                if is_never_null:
+                    parts.append("never_null")
+                elif nullable_ratio > 0:
+                    pct = round(nullable_ratio * 100, 1)
+                    parts.append(f"null={pct}%")
+                top_values = stats.get("top_values", [])
+                if top_values and is_categorical:
+                    top_str = ", ".join(str(v) for v in top_values[:10])
+                    parts.append(f"valeurs=[{top_str}]")
+                if parts:
+                    col_lines.append(f"    - `{col_name}`: {', '.join(parts)}")
+        # Derived expressions (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …) profiled on real data
+        for de in derived_exprs:
+            de_sql = de.get("expr_sql", "")
+            de_top = de.get("top_values", [])
+            if de_sql and de_top:
+                tv_str = ", ".join(str(v) for v in de_top[:5])
+                col_lines.append(f"    - expr `{de_sql}` → top=[{tv_str}]")
         if col_lines:
             lines.append(f"  table `{short_key}`:")
             lines.extend(col_lines)
@@ -220,9 +248,36 @@ def _format_profile_block(profile: Optional[dict], used_columns: list) -> str:
     join_lines: List[str] = []
     for j in joins:
         lt, rt = j.get("left_table", ""), j.get("right_table", "")
-        lk, rk = j.get("left_key", ""), j.get("right_key", "")
-        if lt and rt and lk and rk:
-            join_lines.append(f"  - {lt}.{lk} ↔ {rt}.{rk}")
+        lk, rk = j.get("left_expr", ""), j.get("right_expr", "")
+        if not (lt and rt and lk and rk):
+            continue
+        line = f"  - {lt}.{lk} ↔ {rt}.{rk}"
+        stats_parts: List[str] = []
+        match_rate = j.get("left_match_rate")
+        if match_rate is not None:
+            stats_parts.append(f"match={match_rate:.0%}")
+        fanout = j.get("avg_right_per_left_key")
+        if fanout is not None:
+            stats_parts.append(f"fanout_avg={fanout}")
+        max_fanout = j.get("max_right_per_left_key")
+        if max_fanout is not None:
+            stats_parts.append(f"fanout_max={max_fanout}")
+        key_sample = j.get("left_key_sample", [])
+        if key_sample:
+            sample_str = ", ".join(str(v) for v in key_sample[:5])
+            stats_parts.append(f"exemples=[{sample_str}]")
+        if stats_parts:
+            line += f" ({', '.join(stats_parts)})"
+        if j.get("right_filter"):
+            line += f" [filtre: {j['right_filter']}]"
+        join_lines.append(line)
+        # CTE SQL stored at profile-build time (phase 1) — display if present
+        for side_cte_key, label in (("left_cte_sql", "gauche"), ("right_cte_sql", "droite")):
+            cte_sql = j.get(side_cte_key)
+            if cte_sql:
+                short = (lt if label == "gauche" else rt).split(".")[-1]
+                indented = "\n".join(f"      {l}" for l in cte_sql.splitlines())
+                join_lines.append(f"    [CTE côté {label} — `{short}`]\n{indented}")
 
     if not lines and not join_lines:
         return ""
@@ -345,10 +400,6 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
   "unit_test_description": "Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat métier attendu]",
   "unit_test_build_reasoning": "...",
   "tags": ["Logique métier", "..."],
-  "suggestions": [
-    "Pour [sujet] [contexte spécifique] → [résultat attendu dans les données de sortie]",
-    "Pour [sujet] [autre contexte] → [résultat attendu dans les données de sortie]"
-  ],
   "data": {
     "Table1Name": [
       { "ColA": "...", "ColB": "..." }
@@ -362,7 +413,6 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
 - `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
 - `unit_test_build_reasoning`: Expliquez brièvement la logique de génération des données en vous concentrant sur les contraintes.
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
-- `suggestions`: Exactement 2 **scénarios métier** complémentaires au format *"Pour [sujet] [contexte] → [résultat attendu]"*. Les suggestions doivent cibler des cas métier distincts avec des valeurs concrètes — pas le comportement technique des fonctions SQL. Exemple à éviter : "S'assure que STRING_AGG trie correctement les valeurs" → Exemple correct : "Pour un client NO_SIRET NS ayant souscrit aux contrats C1, C2, C3 avec des type_operation différents → le champ type_operation de sortie contient toutes les valeurs séparées par '·'".
 - `data`: Données cohérentes, correctes pour la requête.
 
 ⚠️ **Toute casse incorrecte dans les noms de tables sera considérée comme une erreur.**
@@ -398,15 +448,14 @@ Ne produisez qu'une seule réponse en JSON conforme, sans texte additionnel."""
     final_human_message_content = f"""
 Génère un test unitaire conforme aux consignes ci-dessus, avec :
 - Un seul test
-- Résultat JSON uniquement (champs dans l'ordre : unit_test_description, unit_test_build_reasoning, tags, suggestions, data)
+- Résultat JSON uniquement (champs dans l'ordre : unit_test_description, unit_test_build_reasoning, tags, data)
 - `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
-- `suggestions` : exactement 2 scénarios métier au format "Pour [sujet] [contexte] → [résultat]" — viser des cas métier distincts avec des valeurs concrètes, pas le comportement interne des fonctions SQL
 - Pas de requête SQL source dans la sortie
 - Données complètes, sans colonnes nulles ni vides (sauf si l'instruction le demande explicitement)
 - Attention stricte à la **casse exacte** des noms de tables dans le JSON
 - Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
-- Si le SQL a des conditions OR ou plusieurs branches CASE, choisir **une seule branche** et nommer explicitement la branche dans la description (les autres branches vont dans les suggestions)
+- Si le SQL a des conditions OR ou plusieurs branches CASE, choisir **une seule branche** et nommer explicitement la branche dans la description
 {non_empty_constraint}
 Voici les colonnes qui doivent être générées (les clés `data` doivent utiliser exactement le format `{{dataset}}_{{table}}` ci-dessous) :
 {[{"table_key": f"{u.get('database', '')}_{u.get('table', '')}" if u.get("database") else u.get("table", ""), "columns": u.get("used_columns", [])} for u in used_columns]}
@@ -495,10 +544,9 @@ Modifie les données JSON selon l'instruction ci-dessous :
 </Instruction>
 
 Génère un unique test unitaire modifié selon l'instruction ci-dessus.
-Respecte l'ordre des champs : unit_test_description, unit_test_build_reasoning, tags, suggestions, data.
+Respecte l'ordre des champs : unit_test_description, unit_test_build_reasoning, tags, data.
 - `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
-- `suggestions` : exactement 2 scénarios métier au format "Pour [sujet] [contexte] → [résultat]" — cibler des cas métier distincts avec des valeurs concrètes, pas le comportement interne des fonctions SQL
 - Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
 
 {format_instructions}
@@ -551,12 +599,11 @@ def query_change_data_prompt(
     system_message_content = (
         "The query has been changed. Generate a single unit test adapted to the new query.\n\n"
         f"{format_instructions}\n\n"
-        "Field order: unit_test_description, unit_test_build_reasoning, tags, suggestions, data.\n"
+        "Field order: unit_test_description, unit_test_build_reasoning, tags, data.\n"
         "- unit_test_description: business-contextualized description in the format 'Pour [subject with concrete values] [condition/situation] → [expected business result]'. Mention concrete values (IDs, dates, statuses). Avoid generic formulations like 'Vérifie que le calcul est correct'.\n"
         "- tags: relevant labels among Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance.\n"
-        "- suggestions: exactly 2 business scenarios in format 'Pour [subject] [context] → [expected result]'. Target distinct business cases with concrete values — not the internal behavior of SQL functions (avoid: 'S'assure que STRING_AGG trie correctement' → prefer: 'Pour un client avec contrats C1/C2/C3 de types différents → le champ type_operation agrège toutes les valeurs séparées par \"·\"').\n"
         "- Do NOT test constant expressions, pure aggregates (SUM/AVG/COUNT), or internal SQL function behavior — these are guaranteed correct by the warehouse engine.\n"
-        "- If the SQL has OR conditions or multiple CASE branches, pick ONE branch per test and name it explicitly in the description. Other branches go into suggestions.\n\n"
+        "- If the SQL has OR conditions or multiple CASE branches, pick ONE branch per test and name it explicitly in the description.\n\n"
         "old query :\n"
         "{old_query}\n\n"
         "New query :\n"
