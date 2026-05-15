@@ -44,6 +44,17 @@ def _normalize_profile(raw) -> Optional[dict]:
     if isinstance(raw, dict):
         return raw
     # Raw list from BigQuery profiler
+    _COL_SKIP = {
+        "row_type", "table_name", "col_name",
+        "left_table", "right_table", "left_expr", "right_expr",
+        "join_type", "left_match_rate", "avg_right_per_left_key",
+        "max_right_per_left_key", "left_key_sample", "right_where_sql",
+    }
+    # Fields that belong to column profiling and are NULL noise in join rows
+    _JOIN_COL_NOISE = {
+        "row_type", "table_name", "col_name", "total_count", "null_count",
+        "non_null_count", "distinct_count", "dup_count", "min_val", "max_val", "top_values",
+    }
     tables: dict = {}
     joins: list = []
     for row in raw:
@@ -56,17 +67,21 @@ def _normalize_profile(raw) -> Optional[dict]:
             if tbl not in tables:
                 tables[tbl] = {"columns": {}}
             tables[tbl]["columns"][col] = {
-                k: v
-                for k, v in row.items()
-                if k not in ("row_type", "table_name", "col_name")
+                k: v for k, v in row.items() if k not in _COL_SKIP
             }
         elif row_type == "join":
-            joins.append({k: v for k, v in row.items() if k != "row_type"})
+            joins.append({k: v for k, v in row.items() if k not in _JOIN_COL_NOISE})
     return {"tables": tables, "joins": joins}
 
 
 def _merge_profiles(base: Optional[dict], incoming: Optional[dict]) -> dict:
-    """Merge two profile dicts (incoming overrides base at column level)."""
+    """Merge two profile dicts.
+
+    - Columns: incoming overrides base at column level.
+    - Joins: accumulated by (left_table, right_table, left_expr, right_expr) key.
+      Different join variants between the same tables (e.g. direct vs CTE-deduplicated)
+      are kept as separate entries in the list.
+    """
     if not base and not incoming:
         return {"tables": {}, "joins": []}
     if not base:
@@ -75,6 +90,7 @@ def _merge_profiles(base: Optional[dict], incoming: Optional[dict]) -> dict:
         return base
 
     merged = json.loads(json.dumps(base))  # deep copy
+
     for tbl, tbl_data in incoming.get("tables", {}).items():
         if tbl not in merged["tables"]:
             merged["tables"][tbl] = tbl_data
@@ -83,7 +99,63 @@ def _merge_profiles(base: Optional[dict], incoming: Optional[dict]) -> dict:
             for col, col_data in tbl_data.get("columns", {}).items():
                 existing_cols[col] = col_data
             merged["tables"][tbl]["columns"] = existing_cols
+
+    # Accumulate joins: deduplicate by the four-key signature, keep all variants
+    existing_join_keys: set[tuple] = {
+        (j.get("left_table"), j.get("right_table"), j.get("left_expr"), j.get("right_expr"))
+        for j in merged.get("joins", [])
+    }
+    for j in incoming.get("joins", []):
+        key = (j.get("left_table"), j.get("right_table"), j.get("left_expr"), j.get("right_expr"))
+        if key not in existing_join_keys:
+            merged.setdefault("joins", []).append(j)
+            existing_join_keys.add(key)
+
     return merged
+
+
+def _extract_cte_map(sql: str, dialect: str = "bigquery") -> dict[str, str]:
+    """Return {cte_name_lower: cte_sql_pretty} for all CTEs found in *sql*."""
+    if not sql:
+        return {}
+    try:
+        import sqlglot
+        import sqlglot.expressions as _exp
+
+        tree = sqlglot.parse_one(sql, dialect=dialect)
+        ctes: dict[str, str] = {}
+        for cte in tree.find_all(_exp.CTE):
+            name = cte.alias_or_name.lower()
+            ctes[name] = cte.this.sql(dialect=dialect, pretty=True)
+        return ctes
+    except Exception:
+        return {}
+
+
+def enrich_joins_with_cte_context(
+    joins: list, sql: str, dialect: str = "bigquery"
+) -> list:
+    """Add left_cte_sql / right_cte_sql to join entries whose table is a CTE.
+
+    Called once at profile-storage time (phase 1) so the profile is self-contained
+    and the CTE context is available at format time without re-parsing the SQL.
+    """
+    if not joins or not sql:
+        return joins
+    cte_map = _extract_cte_map(sql, dialect)
+    if not cte_map:
+        return joins
+    enriched = []
+    for j in joins:
+        j = dict(j)
+        for side in ("left", "right"):
+            tbl = j.get(f"{side}_table", "")
+            short = tbl.split(".")[-1].lower()
+            cte_sql = cte_map.get(short)
+            if cte_sql:
+                j[f"{side}_cte_sql"] = cte_sql
+        enriched.append(j)
+    return enriched
 
 
 def _to_profiler_schema(schemas: list) -> dict:
@@ -111,21 +183,26 @@ def _resolve_full_table_names(used_columns: list, schemas: list) -> list:
     The validator stores short names (e.g. "country_summary") in used_columns,
     but the SQL FROM clause needs the full name ("project.dataset.country_summary").
     """
-    name_map: dict[str, str] = {}
-    for t in schemas:
-        full = t.get("table_name") or t.get("name", "")
-        short = full.split(".")[-1]
-        name_map[short] = full
-        name_map[full] = full  # identity mapping so full names pass through
+    from models.schemas import get_schema_by_name
+
+    def _full_name(tbl: str) -> str:
+        t = get_schema_by_name(tbl)
+        if t:
+            return t.get("table_name") or t.get("name", tbl)
+        # fallback: scan the passed-in list (e.g. root_only filtered schemas)
+        for s in schemas:
+            full = s.get("table_name") or s.get("name", "")
+            if full == tbl or full.split(".")[-1] == tbl:
+                return full
+        return tbl
 
     resolved = []
     for entry in used_columns:
         if isinstance(entry, str):
             entry = json.loads(entry)
-        tbl = entry["table"]
         resolved.append(
             {
-                "table": name_map.get(tbl, tbl),
+                "table": _full_name(entry["table"]),
                 "used_columns": list(dict.fromkeys(entry["used_columns"])),
             }
         )
