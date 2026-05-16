@@ -41,7 +41,7 @@ def run_eval(
     filter_models: list[str] | None,
     gcp_project: str | None,
     out_path: Path,
-    gemini_model: str,
+    gemini_model: str | None = None,
 ) -> None:
     tests_dir = project_dir / ".mocksql" / "tests"
     test_files = collect_models(tests_dir, filter_models)
@@ -113,7 +113,7 @@ def run_eval(
         "meta": {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "project": project_dir.name,
-            "gemini_model": gemini_model,
+            "gemini_model": gemini_model or os.environ.get("DEFAULT_MODEL_NAME", "auto"),
             "n_models": n_total,
             "n_valid": n_valid,
             "pass_rate": pass_rate,
@@ -134,7 +134,7 @@ def main() -> None:
     parser.add_argument("--models", nargs="*", help="Subset de modèles (ex: bq282 bq199)")
     parser.add_argument("--out", help="Chemin du rapport JSON de sortie")
     parser.add_argument("--gcp-project", help="GCP project ID pour VertexAI")
-    parser.add_argument("--gemini-model", default="gemini-2.0-flash", help="Modèle Gemini à utiliser")
+    parser.add_argument("--gemini-model", default=None, help="Modèle à utiliser (défaut : DEFAULT_MODEL_NAME ou config mocksql)")
     args = parser.parse_args()
 
     project_dir = Path(args.project).resolve()

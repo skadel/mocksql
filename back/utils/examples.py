@@ -842,6 +842,36 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
+    """
+    Add to GROUP BY any SELECT column not wrapped in an aggregate and not already present.
+    DuckDB requires strict GROUP BY (no functional-dependency shortcut like BigQuery).
+    Modifies the tree in-place.
+    """
+    for select in tree.find_all(exp.Select):
+        group = select.args.get("group")
+        if not group:
+            continue
+
+        grouped_sqls = {g.sql(dialect="duckdb").lower() for g in group.expressions}
+
+        to_add = []
+        for sel_expr in select.expressions:
+            inner = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
+            if isinstance(inner, (exp.Star, exp.Literal)):
+                continue
+            if inner.find(exp.AggFunc):
+                continue
+            for col in inner.find_all(exp.Column):
+                col_sql = col.sql(dialect="duckdb").lower()
+                if col_sql not in grouped_sqls:
+                    to_add.append(col.copy())
+                    grouped_sqls.add(col_sql)
+
+        if to_add:
+            group.set("expressions", list(group.expressions) + to_add)
+
+
 def _qualify_group_order_by_aliases(tree: exp.Expression) -> None:
     """
     Replace bare column refs in GROUP BY / ORDER BY with their qualified form
@@ -898,6 +928,7 @@ async def parse_test_query(query, suffix, dialect):
     )
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     _qualify_group_order_by_aliases(tree)
+    _fix_group_by_strict_mode(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 

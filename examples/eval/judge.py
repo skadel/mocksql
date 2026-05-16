@@ -1,5 +1,8 @@
 """
-Juge Gemini pour l'évaluation de la première génération de tests MockSQL.
+Juge pour l'évaluation de la première génération de tests MockSQL.
+
+Utilise make_llm() du backend (Vertex AI via ChatGoogleGenerativeAI(vertexai=True))
+si VERTEX_PROJECT est configuré — même pattern que les autres agents MockSQL.
 
 Évalue un seul test (happy path) sur 2 critères :
   - cohérence_données : les données injectées sont-elles plausibles ?
@@ -8,10 +11,17 @@ Juge Gemini pour l'évaluation de la première génération de tests MockSQL.
 
 import json
 import os
+import sys
 import time
+from pathlib import Path
 
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_core.messages import HumanMessage
+# Rend les modules back/ importables (poetry run positionne déjà le venv back)
+_BACK_DIR = Path(__file__).parent.parent.parent / "back"
+if str(_BACK_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACK_DIR))
+
+from utils.llm_factory import make_llm  # noqa: E402
+from langchain_core.messages import HumanMessage  # noqa: E402
 
 _PROMPT = """\
 Tu es un data engineer expérimenté. Évalue la qualité du premier test généré \
@@ -56,17 +66,12 @@ def judge_first_test(
     sql: str,
     test_case: dict,
     gcp_project: str | None = None,
-    location: str = "us-central1",
-    model_name: str = "gemini-2.0-flash",
+    model_name: str | None = None,
 ) -> dict:
     if gcp_project:
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", gcp_project)
 
-    llm = ChatGoogleGenerativeAI(
-        model=model_name,
-        vertexai=True,
-        temperature=0.1,
-    )
+    llm = make_llm(temperature=0.1, model=model_name)
 
     exec_status = (
         test_case.get("exec_status")
