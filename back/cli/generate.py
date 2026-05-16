@@ -202,9 +202,9 @@ def _inject_schemas_into_cache(project_id: str, schemas: list[dict]) -> None:
     """Pre-populate the in-memory schema cache so generator/executor skip the DB."""
     import models.schemas as _s
 
-    _s._cache[project_id] = schemas
-    # Set TTL far in the future so it won't expire during the run
-    _s._cache_time[project_id] = datetime.now() + timedelta(hours=1)
+    _s._cache = schemas
+    _s._cache_by_name = {t["table_name"]: t for t in schemas}
+    _s._cache_time = datetime.now() + timedelta(hours=1)
 
 
 def _patch_db_calls() -> None:
@@ -293,7 +293,7 @@ async def run_generate(
     import typer
 
     from init.init_db import run_migrations
-    from models.db_pool import db_pool
+    from models.database import db_pool
 
     await db_pool.init_pool()
     await run_migrations()

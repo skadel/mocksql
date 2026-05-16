@@ -242,9 +242,43 @@ Le générateur reçoit ces informations et sait qu'il doit :
 
 ---
 
+---
+
+## `detect_select_derived_expressions` — Détection des expressions non-triviales pour le profiler
+
+### Rôle
+
+Identifie dans les CTEs d'une requête les **expressions non-triviales** (appels de fonctions SQL utiles à profiler sur des données réelles) et retourne pour chacune : le SQL de l'expression, les colonnes sources, et la ou les tables sources.
+
+Utilisé par le profiler (`profiler.py`) pour construire la requête de profiling des expressions dérivées (`SAFE_CAST`, `REGEXP_EXTRACT`, `COALESCE`, `DATE_DIFF`, `IF`, etc.) en complément du profiling colonne classique.
+
+```python
+from build_query.constraint_simplifier import detect_select_derived_expressions
+
+exprs = detect_select_derived_expressions(sql, dialect="bigquery")
+# → [
+#     {
+#       "expr_sql": "SAFE_CAST(raw.orders.amount AS INT64)",
+#       "source_columns": [{"table": "raw.orders", "column": "amount"}],
+#       "source_tables": ["raw.orders"]
+#     },
+#     ...
+# ]
+```
+
+### Expressions exclues (triviales)
+
+Les transformations dont le résultat est prévisible depuis les colonnes sources déjà profilées sont ignorées :
+- Fonctions de manipulation de chaînes sans sémantique : `UPPER`, `LOWER`, `TRIM`, `SUBSTR`, `CONCAT`, `LENGTH`…
+- Fonctions arithmétiques pures : `ROUND`, `FLOOR`, `CEIL`, `ABS`, `MOD`…
+- `CAST` / `CONVERT` directs (sans logique conditionnelle)
+- Fonctions d'agrégation (`SUM`, `COUNT`, `AVG`…) — les colonnes sources sont déjà profilées
+
+Les expressions **retenues** incluent notamment : `SAFE_CAST`, `COALESCE`, `IF`, `IIF`, `IFNULL`, `NULLIF`, `REGEXP_EXTRACT`, `REGEXP_REPLACE`, `DATE_DIFF`, `DATE_TRUNC`, `TIMESTAMP_DIFF`, `FORMAT_DATE`, `PARSE_DATE`, `JSON_VALUE`, `STRUCT`, et toute fonction anonyme non dans la liste d'exclusion.
+
 ## Debug
 
-Le module affiche `print(">>>>>>><result\n", result)` à la fin de `simplify()` (ligne 1064) — à retirer avant la mise en production.
+Le module affiche `print(">>>>>>><result\n", result)` à la fin de `simplify()` — à retirer avant la mise en production.
 
 Pour inspecter les contraintes brutes sans simplification :
 

@@ -11,9 +11,9 @@ Ce document décrit le flux complet, du formulaire frontend jusqu'à l'exécutio
         │
         ▼
   validate-query ──── tables manquantes ? ──► import-missing-tables ──► (retry)
-        │ valid
+        │ valid                                (auto-import global ou par projet)
         ▼
-  check-profile ──── profil incomplet ? ──► [dialog auto-profile / skip]
+  check-profile ──── profil incomplet ? ──► [dialog sans/avec comparison + skip]
         │ complet
         ▼
   chatQuery (stream SSE)
@@ -43,7 +43,14 @@ Ce document décrit le flux complet, du formulaire frontend jusqu'à l'exécutio
                                        │ oui → generator (boucle)
                                        │ non
                                           ▼
-                                    history_saver → [FIN]
+                                    evaluate_tests (verdict structuré : bad_data / bad_assertions)
+                                          │
+                                 evaluation_feedback == "bad_data" + retries > 0 ?
+                                       │ oui → conversational_agent (correction données)
+                                       │ assertion_only → history_saver
+                                       │ sinon
+                                          ▼
+                                    suggestions_generator → history_saver → [FIN]
 ```
 
 ---
@@ -72,6 +79,7 @@ Fichier : [QueryChatComponent.tsx](../front/src/features/buildModel/components/Q
 - Si `auto_import_available` → bouton « Importer automatiquement » disponible
   - `importMissingTablesApi` appelle le backend pour ajouter les tables au catalogue
   - Après succès → `handleNewChatSubmit()` est relancé (même `pendingSessionRef`)
+- **Auto-import silencieux** : déclenché automatiquement si `localStorage.autoImport_always === 'true'` (global) **ou** `localStorage.autoImport_project_{projectId} === 'true'` (par projet). Le réglage par projet permet d'activer l'auto-import uniquement pour certains projets.
 
 #### 1.3 `check-profile`
 - Appel : `checkProfileApi({ sql, project, dialect, session, used_columns })`
@@ -80,6 +88,7 @@ Fichier : [QueryChatComponent.tsx](../front/src/features/buildModel/components/Q
   - `profile_complete: true` → on passe directement au stream
   - `profile_complete: false` + `profile_request` :
     - Si `auto_profile_available` → dialog [ProfilingStep.tsx](../front/src/features/buildModel/components/ProfilingStep.tsx) :
+      - Le dialog affiche une **comparaison sans/avec profil** (grille à deux colonnes) pour contextualiser la valeur du profiling, et une chip discrète indiquant la taille de scan estimée (To · BigQuery).
       - **Confirmer** → `autoProfileApi` exécute la requête de profiling, puis stream
       - **Passer** → `skipProfilingApi` marque la session comme `profile_skipped`, puis stream
 
@@ -220,7 +229,55 @@ def route_executor(state):
 
 ---
 
-## 5. Chemins alternatifs
+## 5. `evaluate_tests` & `suggestions_generator`
+
+### 5.1 `evaluate_tests` — Verdict structuré
+
+Fichier : [test_evaluator.py](../back/build_query/test_evaluator.py)
+
+Appelé après `executor` (quand tous les tests ont un statut `complete`). Évalue la qualité de chaque test via un LLM structuré (`with_structured_output`).
+
+#### Sortie Pydantic `_EvaluationOutput`
+
+| Champ | Type | Description |
+|---|---|---|
+| `verdict` | `"Excellent" \| "Bon" \| "Insuffisant"` | Qualité globale du test |
+| `reason_type` | `"bad_data" \| "bad_assertions" \| null` | Cause du verdict Insuffisant uniquement |
+| `explanation` | `str` | Phrase courte (≤ 20 mots) en français |
+
+**Logique de route après évaluation (`route_after_evaluate`) :**
+
+| Condition | Nœud suivant |
+|---|---|
+| `assertion_only` | `history_saver` |
+| `evaluation_feedback == "bad_data"` et `gen_retries > 0` | `conversational_agent` |
+| Sinon | `suggestions_generator` |
+
+**`evaluation_feedback`** est positionné dans le state LangGraph (`Optional[str]`) et vaut `"bad_data"` ou `"bad_assertions"` uniquement si le verdict est `Insuffisant`. Cela découple la cause de l'échec du mécanisme de retry.
+
+#### Classification `bad_data` vs `bad_assertions`
+
+- **`bad_data`** : données d'entrée incorrectes (mauvais types, contraintes non respectées, jointures impossibles) → déclenche une correction automatique via `conversational_agent` si des retries restent
+- **`bad_assertions`** : assertions/résultats attendus trop permissifs ou incorrects → les données elles-mêmes sont valides, pas de relance automatique
+
+### 5.2 `suggestions_generator` — Suggestions contextualisées
+
+Fichier : [suggestions_node.py](../back/build_query/suggestions_node.py)
+
+Génère 3 suggestions de cas de tests non encore couverts. Depuis le dernier refactoring, le contexte injecté dans le prompt est **enrichi avec les données réelles** des tests exécutés :
+
+- Descriptions + tags + statut d'exécution de chaque test
+- Données d'entrée (jusqu'à 3 lignes par table)
+- Résultats DuckDB (jusqu'à 3 lignes)
+- Verdict LLM de chaque test (extrait des messages `EVALUATION`)
+
+Le LLM opère en **chain-of-thought en 2 étapes** :
+1. Identifie l'algorithme ou le pattern métier implémenté par le SQL (détection d'anomalie, classement, agrégation multi-niveaux…)
+2. Liste les hypothèses implicites que cet algorithme fait sur les données, puis propose les cas où ces hypothèses peuvent être violées
+
+---
+
+## 6. Chemins alternatifs
 
 ### 5.1 Modification de requête SQL (`handleSQLUpdate`)
 
@@ -234,19 +291,27 @@ Fichier : [QueryChatComponent.tsx:584](../front/src/features/buildModel/componen
 
 **Restore depuis l'historique :** `handleHistorySelect` positionne `skipValidationRef = true` pour éviter une re-validation inutile.
 
-### 5.2 `profile_checker` — Upload du profil utilisateur
+### 6.2 `profile_checker` — Upload du profil utilisateur
 
 Déclenché quand `profile_result` est présent dans le state (résultat d'une requête de profiling exécutée manuellement par l'utilisateur).
 
 Fichier : [profile_checker.py](../back/build_query/profile_checker.py)
 
-1. Normalise le profil entrant (format flat BigQuery → `{tables: {...}, joins: [...]}`)
+1. Normalise le profil entrant (format flat BigQuery → `{tables: {...}, joins: [...]}`) via `_normalize_profile`
 2. Valide qu'il couvre bien les colonnes et les paires de JOINs attendus
 3. Fusionne avec le profil projet existant (`_merge_profiles`)
 4. Persiste en base (`PROJECTS_TABLE_NAME`)
 5. Retourne `profile_complete: True` → le générateur peut utiliser le profil enrichi
 
-### 5.3 `other` — Question hors-sujet
+#### Nouvelles capacités de normalisation
+
+**Expressions dérivées (`derived_expressions`)** : le profil peut contenir des lignes de type `row_type = "derived_expr"` (générées par le profiler pour les `SAFE_CAST`, `REGEXP_EXTRACT`, `COALESCE`…). `_normalize_profile` les stocke dans `tables[tbl]["derived_expressions"]` sous forme de liste `{expr_sql, top_values}`.
+
+**Déduplication des JOINs** : `_merge_profiles` accumule les jointures par signature `(left_table, right_table, left_expr, right_expr)`. Différentes variantes entre les mêmes tables (jointure directe vs via CTE) sont conservées comme entrées distinctes dans la liste.
+
+**Filtrage du bruit JOIN** : les champs de colonnes (`total_count`, `null_count`, `min_val`, etc.) sont filtrés des lignes de type `join` pour ne pas polluer les stats de jointure avec du bruit NULL.
+
+### 6.3 `other` — Question hors-sujet
 
 Fichier : [query_chain.py:68](../back/build_query/query_chain.py#L68)
 
@@ -254,7 +319,7 @@ Fichier : [query_chain.py:68](../back/build_query/query_chain.py#L68)
 - Inclut l'historique de messages (SQL, questions, résultats)
 - Retourne un `AIMessage` de type `MsgType.OTHER`
 
-### 5.4 `__fix_error__` — Auto-correction SQL
+### 6.4 `__fix_error__` — Auto-correction SQL
 
 Déclenché automatiquement si `alwaysFix` est activé (localStorage) et que le dernier message contient une erreur.
 
@@ -264,14 +329,14 @@ Fichier : [QueryChatComponent.tsx:654](../front/src/features/buildModel/componen
 - `routing` charge l'historique des messages `ERROR_SQL`, `ERROR`, `SQL`
 - Route vers `fixer` (non détaillé dans ce doc)
 
-### 5.5 Modification ciblée d'un test (`test_index`)
+### 6.5 Modification ciblée d'un test (`test_index`)
 
 - L'utilisateur clique sur un test dans [TestsPanel.tsx](../front/src/features/buildModel/components/TestsPanel.tsx)
 - `selectedTestIndex` est transmis dans `sendMessage`
 - `state.test_index` est passé au backend
 - `_resolve_target_key` utilise cet index pour écraser le bon test dans la liste mergée
 
-### 5.6 Données utilisateur custom (`user_tables`)
+### 6.6 Données utilisateur custom (`user_tables`)
 
 - L'utilisateur peut glisser-déposer ses propres données dans le panneau de tests
 - `user_tables` est envoyé directement au backend
@@ -280,7 +345,7 @@ Fichier : [QueryChatComponent.tsx:654](../front/src/features/buildModel/componen
 
 ---
 
-## 6. State LangGraph (`QueryState`)
+## 7. State LangGraph (`QueryState`)
 
 Fichier : [state.py](../back/build_query/state.py)
 
@@ -300,10 +365,11 @@ Fichier : [state.py](../back/build_query/state.py)
 | `profile_result` | Résultat JSON uploadé par l'utilisateur |
 | `test_index` | Index du test à modifier (0-based, optionnel) |
 | `user_tables` | Données de test custom fournies par l'utilisateur |
+| `evaluation_feedback` | Cause d'un verdict Insuffisant : `"bad_data"` ou `"bad_assertions"` (sinon `null`) |
 
 ---
 
-## 7. Validation SQL (`validator.py`)
+## 8. Validation SQL (`validator.py`)
 
 Fichier : [validator.py](../back/build_query/validator.py)
 
@@ -331,7 +397,7 @@ Fichier : [validator.py](../back/build_query/validator.py)
 
 ---
 
-## 8. Résumé des API endpoints impliqués
+## 9. Résumé des API endpoints impliqués
 
 | Endpoint | Méthode | Rôle |
 |---|---|---|

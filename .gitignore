@@ -84,15 +84,24 @@ Thumbs.db
 *.sqlite3
 *.duckdb
 
-# SQL scripts (migrations locales)
-*.sql
+# SQL scripts (migrations locales — back uniquement)
+back/**/*.sql
 
 # Data directory (DuckDB files, FAISS index, etc.)
 back/data/
 
 # IDE / tooling
 .vscode/
-.claude/
+.claude/settings.local.json
+
+################################## Examples
+
+# État local généré par MockSQL (DuckDB, cache schéma, tests générés)
+examples/**/.mocksql/
+examples/**/data/
+
+# Résultats d'éval (régénérables — garder .gitkeep pour le dossier)
+examples/eval/results/*.json
 
 # Terraform state & secrets
 terraform/*.tfvars

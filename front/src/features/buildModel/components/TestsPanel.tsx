@@ -1635,8 +1635,26 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       {/* SQL strip */}
       {sqlProps?.sql && <SqlStrip {...sqlProps} />}
 
+      {/* Loading skeleton */}
+      {testResults.length === 0 && isLoading && (
+        <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, pt: 1.5, pb: 1 }}>
+          <Skeleton variant="rounded" height={16} width="55%" sx={{ mb: 2, borderRadius: 999 }} />
+          {[0, 1, 2].map((i) => (
+            <Box key={i} sx={{ border: `1px solid ${BORDER}`, borderRadius: 2, p: 1.5, mb: 1 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                <Skeleton variant="circular" width={14} height={14} />
+                <Skeleton variant="text" width="60%" height={16} />
+                <Skeleton variant="rounded" width={48} height={18} sx={{ ml: 'auto', borderRadius: 999 }} />
+              </Box>
+              <Skeleton variant="text" width="80%" height={13} />
+              <Skeleton variant="text" width="50%" height={13} />
+            </Box>
+          ))}
+        </Box>
+      )}
+
       {/* Empty state */}
-      {testResults.length === 0 && (
+      {testResults.length === 0 && !isLoading && (
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 2 }}>
           <Typography variant="body2" sx={{ color: '#999', textAlign: 'center' }}>
             Aucun test généré pour l'instant.

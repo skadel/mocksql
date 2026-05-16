@@ -235,13 +235,36 @@ def _format_profile_block(
                     parts.append(f"valeurs=[{top_str}]")
                 if parts:
                     col_lines.append(f"    - `{col_name}`: {', '.join(parts)}")
-        # Derived expressions (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …) profiled on real data
+        # Derived expressions (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …) profiled on real data.
+        # Keep only expressions whose source columns overlap with wanted_cols.
         for de in derived_exprs:
+            if wanted_cols:
+                src_cols = {sc.get("column") for sc in de.get("source_columns", [])}
+                if not (src_cols & wanted_cols):
+                    continue
             de_sql = de.get("expr_sql", "")
+            if not de_sql:
+                continue
+            de_parts: List[str] = []
+            de_min = de.get("min_val")
+            de_max = de.get("max_val")
+            if de_min is not None and de_max is not None:
+                de_parts.append(f"min={de_min}, max={de_max}")
+            de_distinct = de.get("distinct_count")
+            if de_distinct is not None:
+                de_parts.append(f"distinct={de_distinct}")
+            de_null = de.get("null_count")
+            de_total = de.get("total_count")
+            if de_null is not None and de_total:
+                pct = round(de_null / de_total * 100, 1)
+                if pct > 0:
+                    de_parts.append(f"null={pct}%")
             de_top = de.get("top_values", [])
-            if de_sql and de_top:
+            if de_top:
                 tv_str = ", ".join(str(v) for v in de_top[:5])
-                col_lines.append(f"    - expr `{de_sql}` → top=[{tv_str}]")
+                de_parts.append(f"top=[{tv_str}]")
+            stat_str = f" ({', '.join(de_parts)})" if de_parts else ""
+            col_lines.append(f"    - expr `{de_sql}`{stat_str}")
         if col_lines:
             lines.append(f"  table `{short_key}`:")
             lines.extend(col_lines)

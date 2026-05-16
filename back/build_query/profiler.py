@@ -2424,17 +2424,25 @@ def _build_one_derived_expr_branch(
     expr_lit = exp.Literal.string(expr_sql).sql(dialect=dialect)
     src_lit = exp.Literal.string(src_str).sql(dialect=dialect)
 
+    # Encode source column lineage as "col@table,col@table,..." in left_key_sample
+    src_cols_items: list[str] = []
+    for alias, col_name in col_refs:
+        tbl = alias_map.get(alias, alias) if alias else None
+        src_cols_items.append(f"{col_name}@{tbl}" if tbl else col_name)
+    src_cols_lit = exp.Literal.string(",".join(src_cols_items)).sql(dialect=dialect)
+
     return (
         f"SELECT 'derived_expr' AS row_type,"
         f" {src_lit} AS table_name,"
         f" {expr_lit} AS col_name,"
-        f" NULL AS total_count,"
-        f" NULL AS null_count,"
-        f" NULL AS non_null_count,"
-        f" NULL AS distinct_count,"
-        f" NULL AS dup_count,"
-        f" NULL AS min_val,"
-        f" NULL AS max_val,"
+        f" COUNT(*) AS total_count,"
+        f" SUM(CASE WHEN ({expr_sql}) IS NULL THEN 1 ELSE 0 END) AS null_count,"
+        f" SUM(CASE WHEN ({expr_sql}) IS NOT NULL THEN 1 ELSE 0 END) AS non_null_count,"
+        f" COUNT(DISTINCT ({expr_sql})) AS distinct_count,"
+        f" SUM(CASE WHEN ({expr_sql}) IS NOT NULL THEN 1 ELSE 0 END)"
+        f" - COUNT(DISTINCT ({expr_sql})) AS dup_count,"
+        f" MIN(CAST(({expr_sql}) AS {str_t})) AS min_val,"
+        f" MAX(CAST(({expr_sql}) AS {str_t})) AS max_val,"
         f" {top_values_scalar} AS top_values,"
         f" NULL AS left_table,"
         f" NULL AS right_table,"
@@ -2444,9 +2452,11 @@ def _build_one_derived_expr_branch(
         f" NULL AS left_match_rate,"
         f" NULL AS avg_right_per_left_key,"
         f" NULL AS max_right_per_left_key,"
-        f" NULL AS left_key_sample,"
+        f" {src_cols_lit} AS left_key_sample,"
         f" NULL AS right_where_sql,"
         f" NULL AS date_regularity"
+        f"\nFROM {from_clause}"
+        f"{join_part}"
     )
 
 
@@ -2808,7 +2818,7 @@ def parse_profile_query_result(
 
     profile["fk_candidates"] = detect_fk_candidates(profile, used_columns)
 
-    # Attach derived-expression top-values to each source table's profile
+    # Attach derived-expression stats to each source table's profile
     for row in derived_rows:
         src_str = row.get("table_name") or ""
         expr_sql_stored = row.get("col_name") or ""
@@ -2816,6 +2826,33 @@ def parse_profile_query_result(
         if not (src_str and expr_sql_stored):
             continue
         top_vals = [v.strip() for v in top_raw.split(",") if v.strip()]
+
+        # Parse source column lineage from left_key_sample ("col@table,col@table,...")
+        src_cols_raw = row.get("left_key_sample") or ""
+        source_columns: list[dict] = []
+        for item in src_cols_raw.split(","):
+            item = item.strip()
+            if not item:
+                continue
+            if "@" in item:
+                col, tbl_ref = item.split("@", 1)
+                source_columns.append({"table": tbl_ref.strip(), "column": col.strip()})
+            else:
+                source_columns.append({"column": item})
+
+        derived_entry: dict = {
+            "expr_sql": expr_sql_stored,
+            "top_values": top_vals,
+            "source_columns": source_columns,
+            "total_count": _i(row.get("total_count")),
+            "null_count": _i(row.get("null_count")),
+            "non_null_count": _i(row.get("non_null_count")),
+            "distinct_count": _i(row.get("distinct_count")),
+            "dup_count": _i(row.get("dup_count")),
+            "min_val": row.get("min_val"),
+            "max_val": row.get("max_val"),
+        }
+
         for tbl in src_str.split(","):
             tbl = tbl.strip()
             if not tbl:
@@ -2826,7 +2863,7 @@ def parse_profile_query_result(
             )
             if tbl_key:
                 profile["tables"][tbl_key].setdefault("derived_expressions", []).append(
-                    {"expr_sql": expr_sql_stored, "top_values": top_vals}
+                    derived_entry
                 )
 
     return profile

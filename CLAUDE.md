@@ -132,8 +132,12 @@ back/
     validator.py       # dry-run BigQuery/Postgres/DuckDB + sqlglot
     examples_generator.py  # génération LLM des données de test
     examples_executor.py   # exécution DuckDB + CTE trace
-    profile_checker.py     # validation/fusion du profil statistique
-    constraint_simplifier.py
+    profile_checker.py     # validation/fusion du profil (colonnes + joins + exprs dérivées)
+    profiler.py            # moteur de profiling : requêtes SQL, régularité temporelle, exprs dérivées
+    test_evaluator.py      # verdict structuré (Excellent/Bon/Insuffisant + bad_data/bad_assertions)
+    suggestions_node.py    # suggestions contextualisées avec données réelles + verdicts
+    conversational_agent.py # correction de données incorrectes (bad_data retry)
+    constraint_simplifier.py  # extraction contraintes SQL + detect_select_derived_expressions
   tests/               # pytest
 front/
   src/
@@ -203,28 +207,32 @@ npx prettier --write src/
 ## Architecture du graph LangGraph
 
 ```
-START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → history_saver → END
-                                              ↘ executor  (used_columns vides)
-                                              ↘ other     (question hors-sujet)
+START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → evaluate_tests → [route_after_evaluate] → suggestions_generator → history_saver → END
+                                              ↘ executor  (used_columns vides)                                                    ↘ conversational_agent (bad_data + retries)
+                                              ↘ other     (question hors-sujet)                                                   ↘ history_saver (assertion_only)
 ```
 
 Voir le détail complet dans [docs/workflow-query-generation.md](docs/workflow-query-generation.md).
 
 ### Nœuds clés
 
-| Nœud              | Fichier                      | Rôle                                              |
-| ----------------- | ---------------------------- | ------------------------------------------------- |
-| `pre_routing`     | `query_chain.py:19`          | Court-circuit si même requête (cache session)     |
-| `routing`         | `routing.py`                 | Choisit le nœud suivant selon le contenu du state |
-| `generator`       | `examples_generator.py`      | Génère les données de test via LLM                |
-| `executor`        | `examples_executor.py`       | Exécute la requête sur DuckDB, trace les CTEs     |
-| `profile_checker` | `profile_checker.py`         | Valide et fusionne le profil statistique          |
-| `history_saver`   | `query_chain.py`             | Persiste l'historique en base                     |
+| Nœud                   | Fichier                      | Rôle                                                                |
+| ---------------------- | ---------------------------- | ------------------------------------------------------------------- |
+| `pre_routing`          | `query_chain.py:19`          | Court-circuit si même requête (cache session)                       |
+| `routing`              | `routing.py`                 | Choisit le nœud suivant selon le contenu du state                   |
+| `generator`            | `examples_generator.py`      | Génère les données de test via LLM                                  |
+| `executor`             | `examples_executor.py`       | Exécute la requête sur DuckDB, trace les CTEs                       |
+| `profile_checker`      | `profile_checker.py`         | Valide et fusionne le profil statistique (colonnes + joins + exprs dérivées) |
+| `evaluate_tests`       | `test_evaluator.py`          | Verdict structuré : Excellent / Bon / Insuffisant + cause (bad_data / bad_assertions) |
+| `suggestions_generator`| `suggestions_node.py`        | 3 suggestions contextualisées avec données réelles + verdicts       |
+| `conversational_agent` | `conversational_agent.py`    | Corrige les données incorrectes quand `evaluation_feedback == "bad_data"` |
+| `history_saver`        | `query_chain.py`             | Persiste l'historique en base                                       |
 
-### Boucle de retry
+### Boucles de retry
 
-`executor` → `route_executor` → `generator` (si `status == "empty_results"` et `gen_retries > 0`)
-— maximum 2 régénérations automatiques (`gen_retries` commence à 2).
+**Boucle executor → generator** : si `status == "empty_results"` et `gen_retries > 0` → `generator` re-tourne (max 2 fois).
+
+**Boucle evaluate → conversational_agent** : si `evaluation_feedback == "bad_data"` et `gen_retries > 0` → `conversational_agent` corrige les données → `generator` → `executor` (même compteur `gen_retries`).
 
 ---
 
@@ -425,6 +433,9 @@ App
 - La route `__fix_error__` est déclenchée automatiquement si `alwaysFix` est activé côté client (localStorage).
 - `failing_cte` : quand DuckDB retourne 0 lignes, un **CTE trace** identifie la première CTE vide — le générateur cible alors uniquement cette CTE pour la correction.
 - **Verdict vs statut d'exécution** : `verdict` (`good`/`warn`/`bad`) mesure la *qualité du test* (logique, assertions), `execStatus` (`pass`/`fail`) mesure si DuckDB a retourné le résultat attendu. Ne pas confondre — les deux coexistent sur le même test.
+- **`evaluation_feedback`** : quand le verdict est `Insuffisant`, `test_evaluator` classifie la cause en `"bad_data"` (données incorrectes → relance via `conversational_agent`) ou `"bad_assertions"` (assertions mal définies → pas de relance automatique). Ce champ est dans `QueryState` et est utilisé par `route_after_evaluate`.
+- **Profil statistique enrichi** : le profil stocké peut désormais contenir des `derived_expressions` (expressions SQL non-triviales profilées sur les données réelles, ex : `SAFE_CAST`, `REGEXP_EXTRACT`) injectées dans le prompt de génération via `_format_profile_block`. Les JOINs profilés peuvent inclure un `right_filter` et des `left_cte_sql`/`right_cte_sql` pour contextualiser les cardinalités.
+- **Auto-import per projet** : l'auto-import silencieux de tables manquantes peut être activé globalement (`localStorage.autoImport_always`) ou par projet (`localStorage.autoImport_project_{projectId}`). Les deux flags sont vérifiés dans `QueryChatComponent`.
 - **Coverage score** : calculé côté front à partir des titres/tags des tests ; le backend n'a pas à le connaître. Les 6 axes sont des heuristiques regex sur le texte des tests.
 - **DuckDB positionné comme économie de coût** : toute mention de l'exécution dans l'UI doit souligner "0 € facturé sur BigQuery" — c'est un argument commercial, pas juste un détail technique.
 - **Import de tables manquantes** : l'`ImportView` est une étape intermédiaire entre `GenerateView` et `TestsView` — elle s'affiche uniquement si des tables référencées dans le SQL ne sont pas disponibles localement. Chaque table a son propre état (`pending` / `importing` / `done`).
