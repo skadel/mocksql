@@ -45,15 +45,33 @@ def _normalize_profile(raw) -> Optional[dict]:
         return raw
     # Raw list from BigQuery profiler
     _COL_SKIP = {
-        "row_type", "table_name", "col_name",
-        "left_table", "right_table", "left_expr", "right_expr",
-        "join_type", "left_match_rate", "avg_right_per_left_key",
-        "max_right_per_left_key", "left_key_sample", "right_where_sql",
+        "row_type",
+        "table_name",
+        "col_name",
+        "left_table",
+        "right_table",
+        "left_expr",
+        "right_expr",
+        "join_type",
+        "left_match_rate",
+        "avg_right_per_left_key",
+        "max_right_per_left_key",
+        "left_key_sample",
+        "right_where_sql",
     }
     # Fields that belong to column profiling and are NULL noise in join rows
     _JOIN_COL_NOISE = {
-        "row_type", "table_name", "col_name", "total_count", "null_count",
-        "non_null_count", "distinct_count", "dup_count", "min_val", "max_val", "top_values",
+        "row_type",
+        "table_name",
+        "col_name",
+        "total_count",
+        "null_count",
+        "non_null_count",
+        "distinct_count",
+        "dup_count",
+        "min_val",
+        "max_val",
+        "top_values",
     }
     tables: dict = {}
     joins: list = []
@@ -71,6 +89,22 @@ def _normalize_profile(raw) -> Optional[dict]:
             }
         elif row_type == "join":
             joins.append({k: v for k, v in row.items() if k not in _JOIN_COL_NOISE})
+        elif row_type == "derived_expr":
+            src_str = row.get("table_name") or ""
+            expr_sql = row.get("col_name") or ""
+            top_raw = row.get("top_values") or ""
+            if not (src_str and expr_sql):
+                continue
+            top_vals = [v.strip() for v in top_raw.split(",") if v.strip()]
+            for tbl in src_str.split(","):
+                tbl = tbl.strip()
+                if not tbl:
+                    continue
+                if tbl not in tables:
+                    tables[tbl] = {"columns": {}}
+                tables[tbl].setdefault("derived_expressions", []).append(
+                    {"expr_sql": expr_sql, "top_values": top_vals}
+                )
     return {"tables": tables, "joins": joins}
 
 
@@ -99,14 +133,27 @@ def _merge_profiles(base: Optional[dict], incoming: Optional[dict]) -> dict:
             for col, col_data in tbl_data.get("columns", {}).items():
                 existing_cols[col] = col_data
             merged["tables"][tbl]["columns"] = existing_cols
+            incoming_derived = tbl_data.get("derived_expressions")
+            if incoming_derived is not None:
+                merged["tables"][tbl]["derived_expressions"] = incoming_derived
 
     # Accumulate joins: deduplicate by the four-key signature, keep all variants
     existing_join_keys: set[tuple] = {
-        (j.get("left_table"), j.get("right_table"), j.get("left_expr"), j.get("right_expr"))
+        (
+            j.get("left_table"),
+            j.get("right_table"),
+            j.get("left_expr"),
+            j.get("right_expr"),
+        )
         for j in merged.get("joins", [])
     }
     for j in incoming.get("joins", []):
-        key = (j.get("left_table"), j.get("right_table"), j.get("left_expr"), j.get("right_expr"))
+        key = (
+            j.get("left_table"),
+            j.get("right_table"),
+            j.get("left_expr"),
+            j.get("right_expr"),
+        )
         if key not in existing_join_keys:
             merged.setdefault("joins", []).append(j)
             existing_join_keys.add(key)

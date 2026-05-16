@@ -63,8 +63,12 @@ def _format_test_block(tc: dict, verdict: str | None, max_rows: int = 3) -> str:
         for table_name, rows in input_data.items():
             if isinstance(rows, list):
                 shown = rows[:max_rows]
-                extra = f" (+{len(rows) - max_rows} autres)" if len(rows) > max_rows else ""
-                parts.append(f"    {table_name}: {json.dumps(shown, ensure_ascii=False)}{extra}")
+                extra = (
+                    f" (+{len(rows) - max_rows} autres)" if len(rows) > max_rows else ""
+                )
+                parts.append(
+                    f"    {table_name}: {json.dumps(shown, ensure_ascii=False)}{extra}"
+                )
 
     result_rows = detail.get("result_rows") or []
     row_count = detail.get("row_count", 0)

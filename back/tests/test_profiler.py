@@ -1856,7 +1856,9 @@ class TestDescribeJoin(unittest.TestCase):
 
     def test_missing_optional_fields(self):
         # Only required fields — should not raise
-        desc = describe_join({"join_type_profiled": "one-to-one", "left_table": "a", "right_table": "b"})
+        desc = describe_join(
+            {"join_type_profiled": "one-to-one", "left_table": "a", "right_table": "b"}
+        )
         self.assertIsInstance(desc, str)
         self.assertIn("a", desc)
 

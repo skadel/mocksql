@@ -1300,19 +1300,24 @@ def simplify(
 # predictable/semantic-free transformation of input columns already profiled).
 _TRIVIAL_FUNC_TYPES: frozenset[type] = frozenset(
     {
-        exp.Cast,             # regular CAST — column already profiled
         exp.Upper,
         exp.Lower,
         exp.Trim,
-        exp.Substring,
         exp.Concat,
-        exp.DPipe,            # || string concat
+        exp.DPipe,  # || string concat
         exp.Length,
+        exp.ByteLength,
+        exp.BitLength,
         exp.Abs,
         exp.Round,
         exp.Floor,
         exp.Ceil,
         exp.Mod,
+        # sqlglot makes And/Or/Xor inherit from both Connector and Func — exclude them
+        # so find_all(exp.Func) doesn't surface logical operators as function calls.
+        exp.Connector,
+        # aggregate functions (SUM, COUNT, AVG…) — input columns are already profiled
+        exp.AggFunc,
     }
 )
 
@@ -1320,14 +1325,40 @@ _TRIVIAL_FUNC_TYPES: frozenset[type] = frozenset(
 # map to a named expression type).
 _TRIVIAL_FUNC_NAMES: frozenset[str] = frozenset(
     {
-        "UPPER", "LOWER", "TRIM", "LTRIM", "RTRIM",
-        "LENGTH", "LEN", "CHAR_LENGTH", "CHARACTER_LENGTH",
-        "SUBSTR", "SUBSTRING",
-        "CONCAT", "CONCAT_WS",
-        "ROUND", "FLOOR", "CEIL", "CEILING", "ABS", "MOD",
-        "REPLACE", "LPAD", "RPAD", "LEFT", "RIGHT",
-        "REPEAT", "REVERSE", "SPACE", "ASCII", "CHR", "CHAR",
-        "TO_STRING", "TO_VARCHAR", "CAST", "CONVERT",
+        "UPPER",
+        "LOWER",
+        "TRIM",
+        "LTRIM",
+        "RTRIM",
+        "LENGTH",
+        "LEN",
+        "CHAR_LENGTH",
+        "CHARACTER_LENGTH",
+        "SUBSTR",
+        "SUBSTRING",
+        "CONCAT",
+        "CONCAT_WS",
+        "ROUND",
+        "FLOOR",
+        "CEIL",
+        "CEILING",
+        "ABS",
+        "MOD",
+        "REPLACE",
+        "LPAD",
+        "RPAD",
+        "LEFT",
+        "RIGHT",
+        "REPEAT",
+        "REVERSE",
+        "SPACE",
+        "ASCII",
+        "CHR",
+        "CHAR",
+        "TO_STRING",
+        "TO_VARCHAR",
+        "CAST",
+        "CONVERT",
     }
 )
 
@@ -1383,13 +1414,21 @@ def detect_select_derived_expressions(
     # _collect_aliases which relies on "from" key (renamed "from_" in newer sqlglot).
     alias_map: dict[str, str] = {}
     for tbl in statement.find_all(exp.Table):
-        real = tbl.name.lower()
-        alias = tbl.alias.lower() if tbl.alias else real
-        alias_map[alias] = real
-        alias_map[real] = real
+        parts = [p for p in [tbl.catalog, tbl.db, tbl.name] if p]
+        real_full = ".".join(parts).lower()
+        real_short = tbl.name.lower()
+        alias = tbl.alias.lower() if tbl.alias else real_full
+        alias_map[alias] = real_full
+        alias_map[real_short] = real_full
+        alias_map[real_full] = real_full
 
     seen: set[str] = set()
     results: list[dict] = []
+
+    # Exclude CTEs — they are virtual, not base tables
+    unique_real_tables: frozenset[str] = frozenset(
+        t for t in alias_map.values() if t not in resolver._cte_names
+    )
 
     def _source_tables_for(node: exp.Expression) -> list[str]:
         tables: set[str] = set()
@@ -1399,22 +1438,24 @@ def detect_select_derived_expressions(
             ref = _col_ref(col, alias_map)
             if ref is None:
                 continue
-            for resolved in resolver.resolve_all(ref):
+            if ref.table == "__unknown__":
+                # Unqualified column — infer source table only when unambiguous
+                if len(unique_real_tables) == 1:
+                    tables.update(unique_real_tables)
+                continue
+            resolved_list = resolver.resolve_all(ref)
+            for resolved in resolved_list:
                 tbl = resolved.real_table or resolved.table
                 if tbl and tbl != "__unknown__":
                     tables.add(tbl)
         return sorted(tables)
 
     def _col_refs_for(node: exp.Expression) -> list[tuple[str, str]]:
-        return [
-            (c.table or "", c.name)
-            for c in node.find_all(exp.Column)
-            if c.name
-        ]
+        return [(c.table or "", c.name) for c in node.find_all(exp.Column) if c.name]
 
     def _register(node: exp.Expression) -> None:
-        src_tables = _source_tables_for(node)
-        if not src_tables:
+        col_refs = _col_refs_for(node)
+        if not col_refs:  # pure constant — no column references
             return
         sql_repr = node.sql(dialect=dialect)
         if sql_repr in seen:
@@ -1423,19 +1464,30 @@ def detect_select_derived_expressions(
         results.append(
             {
                 "expr_sql": sql_repr,
-                "source_tables": src_tables,
-                "col_refs": _col_refs_for(node),
+                "source_tables": _source_tables_for(node),
+                "col_refs": col_refs,
             }
         )
 
-    # Walk every SELECT projection — register any function call that isn't trivial.
-    for sel in statement.find_all(exp.Select):
-        for projection in sel.expressions:
-            for node in projection.find_all(exp.Func):
-                if type(node) in _TRIVIAL_FUNC_TYPES:
-                    continue
-                if isinstance(node, exp.Anonymous) and (node.name or "").upper() in _TRIVIAL_FUNC_NAMES:
-                    continue
+    def _is_trivial(node: exp.Func) -> bool:
+        if isinstance(node, tuple(_TRIVIAL_FUNC_TYPES)):
+            return True
+        return (
+            isinstance(node, exp.Anonymous)
+            and (node.name or "").upper() in _TRIVIAL_FUNC_NAMES
+        )
+
+    def _scan_clause(clause: exp.Expression) -> None:
+        for node in clause.find_all(exp.Func):
+            if not _is_trivial(node):
                 _register(node)
 
+    # Walk every SELECT — projections + WHERE, GROUP BY, QUALIFY, HAVING.
+    for sel in statement.find_all(exp.Select):
+        for projection in sel.expressions:
+            _scan_clause(projection)
+        for clause_key in ("where", "group", "qualify", "having"):
+            clause = sel.args.get(clause_key)
+            if clause is not None:
+                _scan_clause(clause)
     return results[:10]

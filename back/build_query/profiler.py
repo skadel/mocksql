@@ -269,7 +269,9 @@ def _build_regularity_query(
         if dialect == "bigquery":
             diff_expr = f"DATE_DIFF({col_q}, LAG({col_q}) OVER (ORDER BY {col_q}), DAY)"
         elif dialect == "duckdb":
-            diff_expr = f"DATEDIFF('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            diff_expr = (
+                f"DATEDIFF('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            )
         else:
             diff_expr = f"({col_q} - LAG({col_q}) OVER (ORDER BY {col_q}))"
         case_sql = _regularity_case_days(dialect)
@@ -280,7 +282,9 @@ def _build_regularity_query(
                 f" LAG(CAST({col_q} AS TIMESTAMP)) OVER (ORDER BY {col_q}), SECOND)"
             )
         elif dialect == "duckdb":
-            diff_expr = f"DATEDIFF('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            diff_expr = (
+                f"DATEDIFF('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            )
         else:
             diff_expr = (
                 f"EXTRACT(EPOCH FROM ({col_q} - LAG({col_q}) OVER (ORDER BY {col_q})))"
@@ -438,7 +442,9 @@ def build_column_profile_queries(
         )
 
     if _is_temporal(col.get("type", "")):
-        reg_q = _build_regularity_query(table_name, col_name, col.get("type", ""), dialect)
+        reg_q = _build_regularity_query(
+            table_name, col_name, col.get("type", ""), dialect
+        )
         if reg_q:
             queries["regularity"] = reg_q
 
@@ -2206,7 +2212,9 @@ def _sql_table_alias_map(sql: str, dialect: str) -> dict[str, str]:
         't'
     """
     try:
-        tree = sqlglot.parse_one(sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN)
+        tree = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
     except Exception:
         return {}
 
@@ -2408,9 +2416,7 @@ def _build_one_derived_expr_branch(
     )
 
     if dialect == "postgres":
-        top_values_scalar = (
-            f"(SELECT STRING_AGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
-        )
+        top_values_scalar = f"(SELECT STRING_AGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
     else:
         top_values_scalar = f"(SELECT STRING_AGG(_v) FROM ({inner}) AS _tv_{idx})"
 
@@ -2819,8 +2825,8 @@ def parse_profile_query_result(
                 None,
             )
             if tbl_key:
-                profile["tables"][tbl_key].setdefault(
-                    "derived_expressions", []
-                ).append({"expr_sql": expr_sql_stored, "top_values": top_vals})
+                profile["tables"][tbl_key].setdefault("derived_expressions", []).append(
+                    {"expr_sql": expr_sql_stored, "top_values": top_vals}
+                )
 
     return profile

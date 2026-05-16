@@ -287,7 +287,9 @@ def _run_profile_bq(
     return profile
 
 
-async def run_generate(model: Path, config: Path, output_dir: Path, profile: bool = False) -> None:
+async def run_generate(
+    model: Path, config: Path, output_dir: Path, profile: bool = False
+) -> None:
     import typer
 
     from init.init_db import run_migrations

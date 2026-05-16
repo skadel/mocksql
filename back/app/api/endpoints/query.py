@@ -301,6 +301,7 @@ async def auto_profile_route(body: AutoProfileRequest):
     # Enrich join entries with their CTE SQL (phase 1) so the profile is self-contained
     if incoming_profile.get("joins"):
         from storage.test_repository import get_test
+
         test = get_test(body.session)
         if test:
             model_sql = test.get("optimized_sql") or test.get("sql") or ""

@@ -25,9 +25,9 @@ from utils.examples import fix_duck_db_sql
 # ---------------------------------------------------------------------------
 
 
-def transpile(bq_sql: str) -> str:
-    """Transpile BigQuery SQL → DuckDB SQL via sqlglot."""
-    return sqlglot.parse_one(bq_sql, dialect="bigquery").sql(dialect="duckdb")
+def transpile(bq_sql: str, source: str = "bigquery") -> str:
+    """Transpile SQL d'un dialecte source → DuckDB via sqlglot."""
+    return sqlglot.parse_one(bq_sql, dialect=source).sql(dialect="duckdb")
 
 
 @pytest.fixture
@@ -340,3 +340,42 @@ class TestSubstrZeroIndex:
 
         assert fixed == raw
         assert con.execute(fixed).fetchone()[0] == "JKL"
+
+
+# ===========================================================================
+# Section 8 : Garde source_dialect — fixes BigQuery non appliqués hors BigQuery
+# ===========================================================================
+
+
+class TestSourceDialectGuard:
+    """
+    Les corrections BigQuery ne doivent pas s'appliquer quand source_dialect != "bigquery".
+    """
+
+    def test_postgres_safe_cast_not_altered(self):
+        """SAFE_CAST dans du SQL postgres-transpilé ne doit pas être remplacé par TRY_CAST."""
+        sql = "SELECT SAFE_CAST(x AS INTEGER)"
+        assert fix_duck_db_sql(sql, source_dialect="postgres") == sql
+
+    def test_postgres_st_geogpoint_not_altered(self):
+        """ST_GEOGPOINT dans du SQL postgres-transpilé ne doit pas être remplacé."""
+        sql = "SELECT ST_GEOGPOINT(1.0, 2.0)"
+        assert fix_duck_db_sql(sql, source_dialect="postgres") == sql
+
+    def test_postgres_substr_zero_not_altered(self):
+        """SUBSTR(expr, 0, n) dans du SQL postgres-transpilé ne doit pas être modifié."""
+        sql = "SELECT SUBSTR('ABCD', 0, 2)"
+        assert fix_duck_db_sql(sql, source_dialect="postgres") == sql
+
+    def test_bigquery_default_still_applies_fixes(self):
+        """Sans source_dialect explicite (défaut bigquery), les fixes s'appliquent."""
+        sql = "SELECT SAFE_CAST(x AS INTEGER)"
+        assert fix_duck_db_sql(sql) == "SELECT TRY_CAST(x AS INTEGER)"
+
+    def test_bigquery_explicit_applies_fixes(self):
+        """Avec source_dialect='bigquery' explicite, les fixes s'appliquent."""
+        sql = "SELECT ST_GEOGPOINT(1.0, 2.0)"
+        assert (
+            fix_duck_db_sql(sql, source_dialect="bigquery")
+            == "SELECT ST_POINT(1.0, 2.0)"
+        )

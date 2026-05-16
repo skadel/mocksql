@@ -456,17 +456,18 @@ def execute_queries(queries: list[str], con: duckdb.DuckDBPyConnection):
         logger.error("Error establishing database connection: %s", e)
 
 
-def fix_duck_db_sql(duckdb_sql: str) -> str:
+def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
     """
     Applique des corrections et des traductions sémantiques pour les requêtes DuckDB
-    transpilées par sqlglot, notamment depuis BigQuery.
+    transpilées par sqlglot.
 
-    Cette fonction corrige les incompatibilités de syntaxe et de sémantique entre
-    les dialectes SQL, particulièrement pour les fonctions de date, géospatiales,
-    et les fonctions "safe" de BigQuery.
+    Les corrections BigQuery (fonctions SAFE.*, géospatiales ST_GEOG*, DATE_TRUNC WEEK,
+    SUBSTR position 0…) ne sont appliquées que si source_dialect == "bigquery".
 
     Args:
         duckdb_sql (str): Requête SQL générée par sqlglot pour DuckDB
+        source_dialect (str): Dialecte source de la transpilation ("bigquery", "postgres"…).
+            Défaut : "bigquery".
 
     Returns:
         str: Requête SQL corrigée et compatible avec DuckDB
@@ -512,133 +513,134 @@ def fix_duck_db_sql(duckdb_sql: str) -> str:
     """
     s = duckdb_sql
 
-    # === DATE_TRUNC avec WEEK(jour) ===
-    # sqlglot produit : DATE_TRUNC('WEEK(MONDAY)', col)
-    # DuckDB attend   : DATE_TRUNC('week', col)
-    # Pour les jours autres que lundi, un offset est ajouté à l'intérieur de l'expression.
+    if source_dialect == "bigquery":
+        # === DATE_TRUNC avec WEEK(jour) ===
+        # sqlglot produit : DATE_TRUNC('WEEK(MONDAY)', col)
+        # DuckDB attend   : DATE_TRUNC('week', col)
+        # Pour les jours autres que lundi, un offset est ajouté à l'intérieur de l'expression.
 
-    _day_offsets = {
-        "MONDAY": 0,
-        "TUESDAY": 1,
-        "WEDNESDAY": 2,
-        "THURSDAY": 3,
-        "FRIDAY": 4,
-        "SATURDAY": 5,
-        "SUNDAY": 6,
-    }
+        _day_offsets = {
+            "MONDAY": 0,
+            "TUESDAY": 1,
+            "WEDNESDAY": 2,
+            "THURSDAY": 3,
+            "FRIDAY": 4,
+            "SATURDAY": 5,
+            "SUNDAY": 6,
+        }
 
-    def _fix_date_trunc_week(match):
-        jour = match.group(1).upper()
-        date_expr = match.group(2).strip()
-        offset = _day_offsets.get(jour, 0)
-        if offset == 0:
-            return f"DATE_TRUNC('week', {date_expr})"
-        return f"(DATE_TRUNC('week', {date_expr}) + INTERVAL '{offset}' DAY)"
+        def _fix_date_trunc_week(match):
+            jour = match.group(1).upper()
+            date_expr = match.group(2).strip()
+            offset = _day_offsets.get(jour, 0)
+            if offset == 0:
+                return f"DATE_TRUNC('week', {date_expr})"
+            return f"(DATE_TRUNC('week', {date_expr}) + INTERVAL '{offset}' DAY)"
 
-    s = re.sub(
-        r"DATE_TRUNC\('WEEK\((\w+)\)',\s*([^)]+)\)",
-        _fix_date_trunc_week,
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    # DATE_TRUNC('WEEK', ...) sans jour spécifié
-    s = re.sub(r"DATE_TRUNC\('WEEK',", "DATE_TRUNC('week',", s, flags=re.IGNORECASE)
-
-    # === SAFE.PARSE_DATE / SAFE.PARSE_TIMESTAMP ===
-    # sqlglot <30 : SAFE.PARSE_DATE('%fmt', col)
-    # sqlglot 30+ : SAFE.CAST(STRPTIME(col, '%fmt') AS DATE)
-    # DuckDB attend : TRY_STRPTIME(col, '%fmt')
-
-    s = re.sub(
-        r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(\s*([^,]+?)\s*,\s*'([^']+)'\s*\)\s*AS\s+\w+\s*\)",
-        r"TRY_STRPTIME(\1, '\2')",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    s = re.sub(
-        r"SAFE\.PARSE_DATE\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
-        r"TRY_STRPTIME(\2, '\1')",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    s = re.sub(
-        r"SAFE\.PARSE_TIMESTAMP\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
-        r"TRY_STRPTIME(\2, '\1')",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    # === PARSE_DATETIME ===
-    # sqlglot <30 : PARSE_DATETIME('%fmt', col)  — format first
-    # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first
-    # DuckDB attend : TRY_STRPTIME(col, '%fmt')
-
-    s = re.sub(
-        r"PARSE_DATETIME\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
-        r"TRY_STRPTIME(\2, '\1')",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    s = re.sub(
-        r"PARSE_DATETIME\s*\(\s*([^',][^,]*?)\s*,\s*'([^']+)'\s*\)",
-        r"TRY_STRPTIME(\1, '\2')",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    # === EXTRACT(DATE FROM ...) ===
-    s = re.sub(
-        r"EXTRACT\s*\(\s*DATE\s+FROM\s+([^)]+)\)",
-        r"CAST(\1 AS DATE)",
-        s,
-        flags=re.IGNORECASE,
-    )
-
-    # === EXTRACT(DAYOFWEEK FROM ...) ===
-    def _fix_dayofweek(match):
-        expr = match.group(1).strip()
-        return (
-            f"(CASE WHEN EXTRACT(ISODOW FROM {expr}) = 7 "
-            f"THEN 1 ELSE EXTRACT(ISODOW FROM {expr}) + 1 END)"
+        s = re.sub(
+            r"DATE_TRUNC\('WEEK\((\w+)\)',\s*([^)]+)\)",
+            _fix_date_trunc_week,
+            s,
+            flags=re.IGNORECASE,
         )
 
-    s = re.sub(
-        r"EXTRACT\s*\(\s*DAYOFWEEK\s+FROM\s+([^)]+)\)",
-        _fix_dayofweek,
-        s,
-        flags=re.IGNORECASE,
-    )
+        # DATE_TRUNC('WEEK', ...) sans jour spécifié
+        s = re.sub(r"DATE_TRUNC\('WEEK',", "DATE_TRUNC('week',", s, flags=re.IGNORECASE)
 
-    # === FORMAT_DATE ===
-    s = re.sub(
-        r"FORMAT_DATE\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
-        r"STRFTIME(\2, '\1')",
-        s,
-        flags=re.IGNORECASE,
-    )
+        # === SAFE.PARSE_DATE / SAFE.PARSE_TIMESTAMP ===
+        # sqlglot <30 : SAFE.PARSE_DATE('%fmt', col)
+        # sqlglot 30+ : SAFE.CAST(STRPTIME(col, '%fmt') AS DATE)
+        # DuckDB attend : TRY_STRPTIME(col, '%fmt')
 
-    # === SUBSTR(expr, 0, n) → SUBSTR(expr, 1, n) ===
-    # BigQuery : position 0 est clampée à 1 → SUBSTR('ABCD', 0, 2) = 'AB'
-    # DuckDB   : position 0 = avant le 1er char → SUBSTR('ABCD', 0, 2) = 'A' (un char perdu)
-    # Limitation : ne couvre pas les premiers arguments contenant une virgule (ex: CONCAT(a, b)).
-    s = re.sub(
-        r"\bSUBSTR(?:ING)?\s*\(([^,]+),\s*0\s*,",
-        lambda m: f"SUBSTR({m.group(1).strip()}, 1,",
-        s,
-        flags=re.IGNORECASE,
-    )
+        s = re.sub(
+            r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(\s*([^,]+?)\s*,\s*'([^']+)'\s*\)\s*AS\s+\w+\s*\)",
+            r"TRY_STRPTIME(\1, '\2')",
+            s,
+            flags=re.IGNORECASE,
+        )
 
-    # === SAFE_CAST → TRY_CAST (sqlglot le fait déjà, correction défensive) ===
-    s = s.replace("SAFE_CAST", "TRY_CAST")
+        s = re.sub(
+            r"SAFE\.PARSE_DATE\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
+            r"TRY_STRPTIME(\2, '\1')",
+            s,
+            flags=re.IGNORECASE,
+        )
 
-    # === Fonctions géospatiales ===
-    s = s.replace("ST_GEOGPOINT", "ST_POINT")
-    s = s.replace("ST_GEOGFROMTEXT", "ST_GEOMFROMTEXT")
-    s = s.replace("ST_GEOGFROMWKT", "ST_GEOMFROMTEXT")
+        s = re.sub(
+            r"SAFE\.PARSE_TIMESTAMP\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
+            r"TRY_STRPTIME(\2, '\1')",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === PARSE_DATETIME ===
+        # sqlglot <30 : PARSE_DATETIME('%fmt', col)  — format first
+        # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first
+        # DuckDB attend : TRY_STRPTIME(col, '%fmt')
+
+        s = re.sub(
+            r"PARSE_DATETIME\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
+            r"TRY_STRPTIME(\2, '\1')",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        s = re.sub(
+            r"PARSE_DATETIME\s*\(\s*([^',][^,]*?)\s*,\s*'([^']+)'\s*\)",
+            r"TRY_STRPTIME(\1, '\2')",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === EXTRACT(DATE FROM ...) ===
+        s = re.sub(
+            r"EXTRACT\s*\(\s*DATE\s+FROM\s+([^)]+)\)",
+            r"CAST(\1 AS DATE)",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === EXTRACT(DAYOFWEEK FROM ...) ===
+        def _fix_dayofweek(match):
+            expr = match.group(1).strip()
+            return (
+                f"(CASE WHEN EXTRACT(ISODOW FROM {expr}) = 7 "
+                f"THEN 1 ELSE EXTRACT(ISODOW FROM {expr}) + 1 END)"
+            )
+
+        s = re.sub(
+            r"EXTRACT\s*\(\s*DAYOFWEEK\s+FROM\s+([^)]+)\)",
+            _fix_dayofweek,
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === FORMAT_DATE ===
+        s = re.sub(
+            r"FORMAT_DATE\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
+            r"STRFTIME(\2, '\1')",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === SUBSTR(expr, 0, n) → SUBSTR(expr, 1, n) ===
+        # BigQuery : position 0 est clampée à 1 → SUBSTR('ABCD', 0, 2) = 'AB'
+        # DuckDB   : position 0 = avant le 1er char → SUBSTR('ABCD', 0, 2) = 'A' (un char perdu)
+        # Limitation : ne couvre pas les premiers arguments contenant une virgule (ex: CONCAT(a, b)).
+        s = re.sub(
+            r"\bSUBSTR(?:ING)?\s*\(([^,]+),\s*0\s*,",
+            lambda m: f"SUBSTR({m.group(1).strip()}, 1,",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # === SAFE_CAST → TRY_CAST (sqlglot le fait déjà, correction défensive) ===
+        s = s.replace("SAFE_CAST", "TRY_CAST")
+
+        # === Fonctions géospatiales ===
+        s = s.replace("ST_GEOGPOINT", "ST_POINT")
+        s = s.replace("ST_GEOGFROMTEXT", "ST_GEOMFROMTEXT")
+        s = s.replace("ST_GEOGFROMWKT", "ST_GEOMFROMTEXT")
 
     return s
 
@@ -713,7 +715,7 @@ async def run_query_on_test_dataset(
             and the DuckDB SQL that was actually executed.
     """
     duckdb_sql = await parse_test_query(query, session, dialect)
-    current_sql = fix_duck_db_sql(duckdb_sql)
+    current_sql = fix_duck_db_sql(duckdb_sql, dialect)
 
     for _ in range(10):
         try:
@@ -756,7 +758,7 @@ async def create_tables_on_test_dataset(
     duckdb_sql = await parse_test_query(query, suffix, dialect)
 
     # Apply fixes to the generated DuckDB SQL
-    fixed_duckdb_sql = fix_duck_db_sql(duckdb_sql)
+    fixed_duckdb_sql = fix_duck_db_sql(duckdb_sql, dialect)
 
     # Modify the query to create a table
     create_table_sql = (

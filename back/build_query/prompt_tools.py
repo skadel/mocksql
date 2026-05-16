@@ -214,7 +214,9 @@ def _format_profile_block(
                 nullable_ratio = stats.get("nullable_ratio") or (
                     null_count / total if null_count is not None and total else 0
                 )
-                is_never_null = stats.get("is_never_null") or (null_count == 0 and total)
+                is_never_null = stats.get("is_never_null") or (
+                    null_count == 0 and total
+                )
                 is_categorical = stats.get("is_categorical") or (
                     dc is not None and dc <= 20
                 )
@@ -272,11 +274,14 @@ def _format_profile_block(
             line += f" [filtre: {j['right_filter']}]"
         join_lines.append(line)
         # CTE SQL stored at profile-build time (phase 1) — display if present
-        for side_cte_key, label in (("left_cte_sql", "gauche"), ("right_cte_sql", "droite")):
+        for side_cte_key, label in (
+            ("left_cte_sql", "gauche"),
+            ("right_cte_sql", "droite"),
+        ):
             cte_sql = j.get(side_cte_key)
             if cte_sql:
                 short = (lt if label == "gauche" else rt).split(".")[-1]
-                indented = "\n".join(f"      {l}" for l in cte_sql.splitlines())
+                indented = "\n".join(f"      {line}" for line in cte_sql.splitlines())
                 join_lines.append(f"    [CTE côté {label} — `{short}`]\n{indented}")
 
     if not lines and not join_lines:
