@@ -71,6 +71,10 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
     if used_columns:
         file_updates["used_columns"] = used_columns
 
+    query_decomposed = state.get("query_decomposed")
+    if query_decomposed:
+        file_updates["query_decomposed"] = query_decomposed
+
     file_updates["last_error"] = state.get("error") or ""
 
     if file_updates:

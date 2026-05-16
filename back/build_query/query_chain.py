@@ -42,12 +42,14 @@ async def pre_routing(state: QueryState):
     stored_sql = (test.get("sql") or "").strip()
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
     stored_used_columns = test.get("used_columns") or []
+    stored_query_decomposed = test.get("query_decomposed") or ""
 
     if incoming_query and stored_sql != incoming_query:
         print("not validated query")
         return {
             "has_existing_tests": has_existing_tests,
             "model_context": model_context,
+            "query_decomposed": stored_query_decomposed,
         }
 
     if not stored_used_columns:
@@ -56,6 +58,7 @@ async def pre_routing(state: QueryState):
             "optimized_sql": stored_optimised_sql,
             "has_existing_tests": has_existing_tests,
             "model_context": model_context,
+            "query_decomposed": stored_query_decomposed,
         }
 
     from models.schemas import get_profile
@@ -74,6 +77,7 @@ async def pre_routing(state: QueryState):
         "history": history,
         "has_existing_tests": has_existing_tests,
         "model_context": model_context,
+        "query_decomposed": stored_query_decomposed,
     }
 
 
