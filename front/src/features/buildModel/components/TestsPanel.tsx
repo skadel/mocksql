@@ -1636,7 +1636,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       {sqlProps?.sql && <SqlStrip {...sqlProps} />}
 
       {/* Loading skeleton */}
-      {testResults.length === 0 && isLoading && (
+      {testResults.length === 0 && (isLoading || !!sqlProps?.loading) && (
         <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, pt: 1.5, pb: 1 }}>
           <Skeleton variant="rounded" height={16} width="55%" sx={{ mb: 2, borderRadius: 999 }} />
           {[0, 1, 2].map((i) => (
@@ -1654,7 +1654,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       )}
 
       {/* Empty state */}
-      {testResults.length === 0 && !isLoading && (
+      {testResults.length === 0 && !isLoading && !sqlProps?.loading && (
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 2 }}>
           <Typography variant="body2" sx={{ color: '#999', textAlign: 'center' }}>
             Aucun test généré pour l'instant.
