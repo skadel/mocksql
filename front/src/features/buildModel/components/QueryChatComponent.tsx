@@ -30,7 +30,8 @@ import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
 
-const DIALECT = 'bigquery';
+// Dialect is read from the current project — fallback to bigquery for backward compat.
+
 
 
 const ChatComponent: React.FC = () => {
@@ -120,6 +121,8 @@ const ChatComponent: React.FC = () => {
   const messagesRef = useRef(messages);
   const { currentModelId, drawerOpen, models: allModels } = useAppSelector((state) => state.appBarModel);
   const currentProjectId = useAppSelector((state) => state.appBarModel.currentProjectId);
+  const currentProject = useAppSelector((state) => state.appBarModel.currentProject);
+  const DIALECT = currentProject?.dialect ?? 'bigquery';
   const currentModel = useMemo(
     () => allModels.find(m => m.session_id === currentModelId),
     [allModels, currentModelId],
@@ -496,6 +499,7 @@ const ChatComponent: React.FC = () => {
       await importMissingTablesApi({
         tables_to_import: tablesToImport,
         project: '',
+        dialect: DIALECT,
       });
       setMissingTables(null);
       setTablesToImport(null);
@@ -650,6 +654,10 @@ const ChatComponent: React.FC = () => {
     try {
       const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [] });
       const doStream = () => dispatch(chatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' }));
+      if (result.profile_error) {
+        dispatch(setError(result.profile_error));
+        return;
+      }
       if (result.profile_complete) {
         doStream();
       } else if (result.profile_request?.profile_query && result.auto_profile_available) {
@@ -669,8 +677,13 @@ const ChatComponent: React.FC = () => {
             doStream();
           },
         });
+      } else {
+        doStream();
       }
-    } catch {}
+    } catch (e) {
+      console.error('[handleRequestProfile]', e);
+      dispatch(setError('Erreur lors de la vérification du profil.'));
+    }
   }, [currentModelId, sqlQuery, dispatch, t]);
 
   const handleClearHistory = async () => {
@@ -776,6 +789,7 @@ const ChatComponent: React.FC = () => {
               <MissingTablesAlert
                 missingTables={missingTables}
                 projectId={currentProjectId}
+                dialect={DIALECT}
                 onImport={tablesToImport ? handleAutoImport : undefined}
                 importing={isImporting}
                 importError={importError}
@@ -944,7 +958,7 @@ const ChatComponent: React.FC = () => {
                     </Box>
                     <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#16746e', letterSpacing: 0.6, fontFamily: 'monospace' }}>SQL</Typography>
                     <Typography sx={{ ml: 'auto', fontSize: 11.5, color: '#6b8287' }}>
-                      BigQuery · {previewSql ? `${previewSql.split('\n').length} lignes` : '…'}
+                      {DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)} · {previewSql ? `${previewSql.split('\n').length} lignes` : '…'}
                     </Typography>
                   </Box>
                   <Box sx={{ opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
@@ -964,7 +978,7 @@ const ChatComponent: React.FC = () => {
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', mt: selectedModelName ? 0 : '18px' }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
                 <Box component="span" sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#f7c948', display: 'inline-block', mr: '2px' }} />
-                <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>Exécuté sur DuckDB en local — zéro coût BigQuery</Typography>
+                <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>Exécuté sur DuckDB en local — zéro coût {DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}</Typography>
               </Box>
               <Button
                 variant="contained"
@@ -1006,6 +1020,7 @@ const ChatComponent: React.FC = () => {
                 <MissingTablesAlert
                   missingTables={missingTables}
                   projectId={currentProjectId}
+                  dialect={DIALECT}
                   onImport={tablesToImport ? handleAutoImport : undefined}
                   importing={isImporting}
                   importError={importError}
@@ -1169,7 +1184,7 @@ const ChatComponent: React.FC = () => {
                 <Chip
                   label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
                     ? '< 0,001'
-                    : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · BigQuery`}
+                    : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
                   size="small"
                   sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
                 />

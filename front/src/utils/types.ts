@@ -210,7 +210,7 @@ export interface ExploreModel {
 export interface Project {
     project_id: string;
     name: string;
-    dialect: 'bigquery' | 'postgres';
+    dialect: 'bigquery' | 'postgres' | 'snowflake';
     description: string;
     schema?: Record<string, any[]>;
     service_account_key?: string;
@@ -352,7 +352,7 @@ export interface ProjectState {
   statistics?: string;
   train: Example;
   cost?: number;
-  dialect: 'bigquery' | 'postgres';
+  dialect: 'bigquery' | 'postgres' | 'snowflake';
   serviceAccountKey?: string;
 }
 

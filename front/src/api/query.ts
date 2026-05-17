@@ -333,6 +333,7 @@ export interface CheckProfileParams {
 
 export interface CheckProfileResult {
   profile_complete: boolean;
+  profile_error?: string;
   auto_profile_available?: boolean;
   profile_request?: import('../utils/types').ProfileRequest;
 }
@@ -445,6 +446,7 @@ export const autoProfileApi = async (params: AutoProfileParams): Promise<void> =
 export interface ImportMissingTablesParams {
   tables_to_import: string[];
   project: string;
+  dialect?: string;
   user?: string;
 }
 

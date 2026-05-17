@@ -14,6 +14,7 @@ import { updateProjectAutoImport } from '../../../api/preferences';
 interface MissingTablesAlertProps {
   missingTables: string[];
   projectId: string;
+  dialect?: string;
   onImport?: () => void;
   importing?: boolean;
   importError?: string | null;
@@ -23,11 +24,13 @@ interface MissingTablesAlertProps {
 const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
   missingTables,
   projectId,
+  dialect = 'bigquery',
   onImport,
   importing,
   importError,
   onDismiss,
 }) => {
+  const dialectLabel = dialect.charAt(0).toUpperCase() + dialect.slice(1);
   const failed = !!importError && !importing;
   const projectKey = `autoImport_project_${projectId}`;
 
@@ -72,9 +75,9 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
             <Typography sx={{ fontSize: 12.5, color: failed ? '#c53030' : '#8a6914', mt: 0.5, lineHeight: 1.55 }}>
               {failed ? importError : (
                 <>
-                  MockSQL transpile ta requête BigQuery et l'exécute en local via{' '}
+                  MockSQL transpile ta requête {dialectLabel} et l'exécute en local via{' '}
                   <Box component="strong" sx={{ color: '#8a5a00' }}>DuckDB</Box>{' '}
-                  — aucune requête facturée sur BigQuery. C'est uniquement le schéma qui est importé.
+                  — aucune requête facturée sur {dialectLabel}. C'est uniquement le schéma qui est importé.
                 </>
               )}
             </Typography>
@@ -215,7 +218,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
       <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1.25 }}>
         {[
           { icon: <StorageIcon sx={{ fontSize: 16 }} />, title: 'Exécution locale', desc: 'DuckDB exécute la requête sur ton poste. Aucune donnée réelle ne quitte ton infra.' },
-          { icon: <SecurityIcon sx={{ fontSize: 16 }} />, title: '0 € facturé', desc: 'Aucune requête n\'atteint BigQuery — itère librement sans coup de facture.' },
+          { icon: <SecurityIcon sx={{ fontSize: 16 }} />, title: '0 € facturé', desc: `Aucune requête n'atteint ${dialectLabel} — itère librement sans coup de facture.` },
           { icon: <ScienceIcon sx={{ fontSize: 16 }} />, title: 'Données synthétiques', desc: 'Seul le schéma est importé. Les valeurs utilisées pour les tests sont générées — zéro fuite de données prod.' },
         ].map(({ icon, title, desc }) => (
           <Box key={title} sx={{ bgcolor: '#f4f7f7', border: '1px solid #e4eaec', borderRadius: '12px', p: '12px 14px' }}>
