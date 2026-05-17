@@ -30,7 +30,15 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
     Raises:
         sqlglot.ParseError: Si le SQL est syntaxiquement incorrect.
     """
-    parsed = sg.parse_one(sql, dialect=dialect)
+    statements = sg.parse(sql, dialect=dialect)
+    # parse_one only returns the first statement, which may be a DECLARE in BigQuery scripts.
+    # Find the actual query (WITH/SELECT) among all parsed statements.
+    parsed = next(
+        (s for s in statements if isinstance(s, (sg.exp.Query, sg.exp.With))),
+        None,
+    )
+    if parsed is None:
+        return []
 
     real_tables: list[sg.exp.Table] = []
 
