@@ -1,6 +1,7 @@
 import datetime
 import difflib
 import json
+import re
 from typing import Literal, Optional, List
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
@@ -369,6 +370,24 @@ def generate_data_prompt(
         else ""
     )
 
+    _has_unnest = sql and "unnest" in sql.lower()
+    unnest_block = (
+        "\n⚠️ **Structure UNNEST détectée** : cette requête déplie des colonnes imbriquées (ARRAY/STRUCT BigQuery). "
+        "Génère les données **sous forme APLATIE** — une ligne par élément déplié (ex: une ligne par hit, ou par produit). "
+        "Tous les champs doivent être des scalaires (pas de tableaux ni d'objets JSON imbriqués). "
+        "Les tables sources représentent les données **déjà dépliées** : ne simule pas le mécanisme UNNEST lui-même.\n"
+        if _has_unnest
+        else ""
+    )
+
+    _ntile_match = re.search(r"\bNTILE\s*\(\s*(\d+)\s*\)", sql, re.IGNORECASE) if sql else None
+    ntile_block = (
+        f"\n⚠️ **NTILE({_ntile_match.group(1)}) détecté** : génère au minimum **{_ntile_match.group(1)} lignes** "
+        f"dans la table principale pour que la fonction de quantile produise des buckets distincts.\n"
+        if _ntile_match
+        else ""
+    )
+
     if user_instruction:
         consignes_1_2 = """\
 1. **Respectez l'instruction utilisateur** : le test doit implémenter exactement le scénario décrit
@@ -387,7 +406,7 @@ Vous êtes un data QA, testeur de requêtes SQL et expert en génération de don
 Analysez la requête SQL et le schéma des données sources fournis,
 puis générez un unique test unitaire en format JSON.
 
-{context_block}{sql_block}{constraints_block}{profile_block}
+{context_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{ntile_block}
 
 **Consignes principales :**
 """
