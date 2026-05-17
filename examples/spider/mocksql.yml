@@ -1,6 +1,7 @@
 version: '2'
 dialect: bigquery
 models_path: ./models
+preprocessor_fn: "preprocessors:clean_ga_sql"
 duckdb_path: .mocksql/mocksql.duckdb
 llm:
   provider: vertexai
