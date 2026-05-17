@@ -79,9 +79,9 @@ app.include_router(api_router)
 async def on_startup():
     logging.info("Démarrage de l'application…")
     await db_pool.init_pool()
-    from init.init_db import run_migrations
+    from init.init_db import main as init_db
 
-    await run_migrations()
+    await init_db()
 
 
 @app.on_event("shutdown")
