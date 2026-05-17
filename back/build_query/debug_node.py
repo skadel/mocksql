@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage
 
 from build_query.debug_executor import execute_run_cte, execute_count_cte_steps
 from build_query.examples_executor import filter_schemas_by_used_columns
+from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
 from utils.msg_types import MsgType
 
@@ -29,6 +30,7 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
         for c in (state.get("used_columns") or [])
     ]
     schemas = filter_schemas_by_used_columns(schemas_raw, used_columns)
+    test_cases = await retrieve_existing_tests(state["session"], state)
 
     common = dict(
         session_id=state["session"],
@@ -39,6 +41,7 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
         dialect=state["dialect"],
         schemas=schemas,
         used_columns=used_columns,
+        test_cases=test_cases or None,
     )
 
     if tool_call == "run_cte":

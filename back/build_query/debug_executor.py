@@ -50,18 +50,17 @@ async def _setup_test_tables(
     used_columns: List[Dict[str, Any]],
     dialect: str,
     con: duckdb.DuckDBPyConnection,
+    test_cases: Optional[List[Dict[str, Any]]] = None,
 ) -> str:
     """Create DuckDB tables for the given test case. Returns the suffix used."""
-    test = get_test(session_id)
-    if not test:
-        raise ValueError(f"Test not found for session {session_id}")
+    # Use in-state test cases first (not yet persisted), fall back to filesystem
+    cases = test_cases
+    if not cases:
+        test = get_test(session_id)
+        cases = test.get("test_cases") or [] if test else []
 
     test_case = next(
-        (
-            tc
-            for tc in (test.get("test_cases") or [])
-            if str(tc.get("test_index")) == str(test_index)
-        ),
+        (tc for tc in cases if str(tc.get("test_index")) == str(test_index)),
         None,
     )
     if not test_case:
@@ -102,6 +101,7 @@ async def execute_run_cte(
     dialect: str,
     schemas: List[Dict[str, Any]],
     used_columns: List[Dict[str, Any]],
+    test_cases: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Execute SQL up to and including `cte_name` with the test's data. Returns rows."""
     ctes = json.loads(query_decomposed or "[]")
@@ -140,7 +140,7 @@ async def execute_run_cte(
 
     with initialize_duckdb(DB_PATH) as con:
         suffix = await _setup_test_tables(
-            session_id, test_index, schemas, used_columns, dialect, con
+            session_id, test_index, schemas, used_columns, dialect, con, test_cases
         )
         df, _ = await run_query_on_test_dataset(
             debug_sql, suffix, project, dialect, con
@@ -237,6 +237,7 @@ async def execute_count_cte_steps(
     dialect: str,
     schemas: List[Dict[str, Any]],
     used_columns: List[Dict[str, Any]],
+    test_cases: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Count rows step-by-step (per JOIN then per WHERE condition) for a CTE.
 
@@ -260,7 +261,7 @@ async def execute_count_cte_steps(
 
     with initialize_duckdb(DB_PATH) as con:
         suffix = await _setup_test_tables(
-            session_id, test_index, schemas, used_columns, dialect, con
+            session_id, test_index, schemas, used_columns, dialect, con, test_cases
         )
         try:
             df, _ = await run_query_on_test_dataset(
