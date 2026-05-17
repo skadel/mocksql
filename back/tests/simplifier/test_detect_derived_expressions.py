@@ -293,9 +293,54 @@ class TestUnqualifiedColumns:
         assert r is not None
         assert r["source_tables"] == ["hud_pit_by_coc"]
 
+
+# ─── UNNEST exclusion ─────────────────────────────────────────────────────────
+
+
+class TestUnnestExcluded:
+    def test_unnest_in_from_clause_excluded(self):
+        # UNNEST in a FROM clause (BigQuery array expansion) must not be picked up
+        # as a derived expression — it is a table-valued function, not a scalar one,
+        # and using it as a column expression produces invalid SQL.
+        sql = """
+        SELECT v2ProductName, SUM(productQuantity) AS qty
+        FROM `project.dataset.ga_sessions`,
+        UNNEST(hits) AS hits,
+        UNNEST(hits.product) AS product
+        GROUP BY v2ProductName
+        """
+        results = detect_select_derived_expressions(sql, dialect="bigquery")
+        assert not any("UNNEST" in e for e in expr_sqls(results))
+
+    def test_unnest_in_in_subquery_excluded(self):
+        # UNNEST inside an IN subquery (BigQuery): _scan_clause on the outer WHERE
+        # recursively descends into the subquery's FROM clause and would previously
+        # find UNNEST(hits.product) AS a non-trivial exp.Func.
+        sql = """
+        WITH cte AS (
+            SELECT DISTINCT v2ProductName, SUM(productQuantity) AS qty
+            FROM `project.dataset.ga_sessions`,
+            UNNEST(hits) AS hits,
+            UNNEST(hits.product) AS product
+            WHERE fullVisitorID IN (
+                SELECT DISTINCT fullVisitorId
+                FROM `project.dataset.ga_sessions`,
+                UNNEST(hits) AS hits,
+                UNNEST(hits.product) AS product
+                WHERE REGEXP_CONTAINS(LOWER(v2ProductName), 'youtube')
+            )
+            GROUP BY v2ProductName
+        )
+        SELECT v2ProductName FROM cte ORDER BY qty DESC LIMIT 1
+        """
+        results = detect_select_derived_expressions(sql, dialect="bigquery")
+        assert not any("UNNEST" in e for e in expr_sqls(results))
+
     def test_unqualified_multi_table_ambiguous(self):
         # With a JOIN and no table qualifier, we can't determine the source → empty
-        sql = "SELECT COALESCE(amount, 0) FROM orders o JOIN items i ON o.id = i.order_id"
+        sql = (
+            "SELECT COALESCE(amount, 0) FROM orders o JOIN items i ON o.id = i.order_id"
+        )
         results = detect_select_derived_expressions(sql)
         r = find_expr(results, "COALESCE")
         assert r is not None
