@@ -16,6 +16,7 @@ from utils.examples import (
     create_pydantic_models,
     filter_columns,
 )
+from utils.faker_fill import generate_faker_rows
 from utils.llm_factory import make_llm
 from storage.config import get_llm_model
 from utils.msg_types import MsgType
@@ -415,12 +416,42 @@ async def generate_examples_(
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
 
-    # TODO(#XXX): filtrer uniquement les colonnes contraintes (mandatory) pour réduire
-    # le contexte LLM — en attente de stabilisation de sim_result.
     filtered_schema = filter_columns(schema, used_columns)
-    excluded_col_names = []
 
-    data_model = create_pydantic_models(filtered_schema)
+    # Compute Faker-eligible columns only when constraint extraction fully succeeded
+    # and all ColumnRefs resolved to known base tables (no silent lineage failure).
+    # UNNEST queries are skipped: array-of-struct constraints are not reliably captured.
+    base_tables = {entry["table"].lower() for entry in used_columns}
+    faker_cols: dict[str, set[str]] = {}
+    _has_unnest = "unnest" in optimized_sql.lower()
+    if sim_result is not None and not _has_unnest and _all_refs_resolved(sim_result, base_tables):
+        faker_cols = _compute_faker_columns(sim_result, used_columns, base_tables)
+
+    # Build LLM schema with Faker-eligible columns removed to shrink the prompt
+    llm_filtered_schema = filtered_schema
+    excluded_col_names: list[str] = []
+    if faker_cols:
+        llm_filtered_schema = []
+        for table_entry in filtered_schema:
+            uc_key = table_entry["table_name"]
+            if uc_key not in faker_cols:
+                llm_filtered_schema.append(table_entry)
+            else:
+                remaining = [
+                    c
+                    for c in table_entry["columns"]
+                    if c["name"].lower() not in faker_cols[uc_key]
+                ]
+                if remaining:
+                    llm_filtered_schema.append({**table_entry, "columns": remaining})
+                excluded_col_names.extend(f"{uc_key}.{c}" for c in faker_cols[uc_key])
+        logger.debug(
+            "Faker pre-fill: %d column(s) across %d table(s) removed from LLM schema",
+            sum(len(cols) for cols in faker_cols.values()),
+            len(faker_cols),
+        )
+
+    data_model = create_pydantic_models(llm_filtered_schema)
     output_type = get_generation_output_type(data_model, existing_tests)
     parser = create_output_fixing_parser(
         PydanticOutputParser(pydantic_object=output_type)
@@ -441,6 +472,19 @@ async def generate_examples_(
     generated_data = await (prompt | llm | parser).ainvoke({})
 
     filled_data = _convert_datetime_fields(generated_data.data.dict())
+
+    # Merge Faker-generated values into LLM output
+    if faker_cols:
+        faker_data = generate_faker_rows(schema, faker_cols, filled_data)
+        for uc_key, faker_rows in faker_data.items():
+            llm_rows = filled_data.get(uc_key) or []
+            if llm_rows:
+                filled_data[uc_key] = [
+                    {**(row or {}), **faker_row}
+                    for row, faker_row in zip(llm_rows, faker_rows)
+                ]
+            else:
+                filled_data[uc_key] = faker_rows
 
     generated = {
         "test_name": generated_data.test_name,
@@ -567,6 +611,50 @@ async def create_appropriate_prompt(
         )
     else:
         return None
+
+
+def _all_refs_resolved(sim_result, base_tables: set[str]) -> bool:
+    """Return True iff every ColumnRef in sim_result maps to a known base table.
+
+    A ColumnRef whose table is NOT in base_tables indicates that lineage resolution
+    silently fell back to an unresolved CTE alias — in that case Faker must not be
+    activated because we cannot tell which base-table columns are constrained.
+    """
+    all_refs = (
+        list(sim_result.source_columns.keys())
+        + list(sim_result.derived_columns.keys())
+        + [ref for eq_class in sim_result.equivalence_classes for ref in eq_class]
+    )
+    return all(ref.table.lower() in base_tables for ref in all_refs)
+
+
+def _compute_faker_columns(
+    sim_result, used_columns: list, base_tables: set[str]
+) -> dict[str, set[str]]:
+    """Return {uc_key: {col_names}} for columns safe to Faker-fill.
+
+    Only called when sim_result is not None and _all_refs_resolved() is True.
+    uc_key matches the table_name produced by filter_columns() (database_table).
+    """
+    constrained: set[tuple[str, str]] = set()
+    for ref in sim_result.source_columns:
+        constrained.add((ref.table.lower(), ref.column.lower()))
+    for ref in sim_result.derived_columns:
+        constrained.add((ref.table.lower(), ref.column.lower()))
+    for eq_class in sim_result.equivalence_classes:
+        for ref in eq_class:
+            constrained.add((ref.table.lower(), ref.column.lower()))
+
+    faker_cols: dict[str, set[str]] = {}
+    for entry in used_columns:
+        db = entry.get("database", "")
+        table = entry["table"]
+        uc_key = f"{db}_{table}" if db else table
+        table_lower = table.lower()
+        for col in entry["used_columns"]:
+            if (table_lower, col.lower()) not in constrained:
+                faker_cols.setdefault(uc_key, set()).add(col.lower())
+    return faker_cols
 
 
 async def create_combined_model(used_columns, schemas):
