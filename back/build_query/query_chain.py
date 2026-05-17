@@ -18,9 +18,46 @@ from models.message_service import get_messages_history
 from utils.llm_factory import make_llm
 from storage.config import get_llm_model
 from storage.context_loader import load_model_context
-from storage.test_repository import get_test
+from storage.test_repository import get_test, update_test
 from utils.msg_types import MsgType
 from utils.saver import history_saver, get_history_from_state
+
+
+def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
+    """Derive query_decomposed from SQL (sqlglot only, no BigQuery call).
+    Produces {name, code} entries sufficient for debug_executor.
+    Used as a fallback for old tests that predate query_decomposed persistence."""
+    try:
+        import sqlglot
+
+        statements = sqlglot.parse(sql, read=dialect)
+        final_ast = next(
+            (s for s in statements if isinstance(s, (sqlglot.exp.Query, sqlglot.exp.With))),
+            None,
+        )
+        if final_ast is None:
+            return "[]"
+        ctes = []
+        with_clause = final_ast.ctes
+        if with_clause:
+            for cte in with_clause:
+                ctes.append({
+                    "name": cte.alias_or_name,
+                    "code": cte.this.sql(dialect=dialect, pretty=True),
+                    "dependencies": [],
+                    "sources": [],
+                })
+        final_ast.ctes.clear()
+        ctes.append({
+            "name": "final_query",
+            "code": final_ast.sql(dialect=dialect, pretty=True),
+            "dependencies": [],
+            "sources": [],
+        })
+        return json.dumps(ctes)
+    except Exception as exc:
+        print(f"[pre_routing] _lightweight_query_decomposed failed: {exc}")
+        return "[]"
 
 
 async def pre_routing(state: QueryState):
@@ -43,6 +80,11 @@ async def pre_routing(state: QueryState):
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
     stored_used_columns = test.get("used_columns") or []
     stored_query_decomposed = test.get("query_decomposed") or ""
+    if not stored_query_decomposed and (stored_optimised_sql or stored_sql):
+        stored_query_decomposed = _lightweight_query_decomposed(
+            stored_optimised_sql or stored_sql, state.get("dialect", "bigquery")
+        )
+        update_test(state["session"], {"query_decomposed": stored_query_decomposed})
 
     if incoming_query and stored_sql != incoming_query:
         print("not validated query")
