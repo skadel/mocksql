@@ -100,9 +100,13 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
         if result.verdict == "Insuffisant" and result.reason_type
         else None
     )
-    # Déclencher une relance via l'agent quand les données sont en cause et qu'il reste des retries
     triggers_agent_retry = (
         evaluation_feedback == "bad_data"
+        and gen_retries > 0
+        and not state.get("assertion_only")
+    )
+    triggers_assertion_fix = (
+        evaluation_feedback == "bad_assertions"
         and gen_retries > 0
         and not state.get("assertion_only")
     )
@@ -123,7 +127,7 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
         "evaluation_feedback": evaluation_feedback,
         "status": "empty_results" if triggers_agent_retry else "complete",
     }
-    if triggers_agent_retry:
+    if triggers_agent_retry or triggers_assertion_fix:
         state_update["gen_retries"] = gen_retries - 1
 
     return state_update

@@ -3,6 +3,7 @@ import uuid
 
 from langchain_core.messages import AIMessage
 
+from build_query.assertion_fixer import fix_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
 from build_query.debug_node import debug_test_node
@@ -48,9 +49,27 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
                     "sources": [],
                 })
         final_ast.ctes.clear()
+        final_code = final_ast.sql(dialect=dialect, pretty=True)
+
+        # Extract inline subqueries (FROM (SELECT ...) AS alias) as inspectable steps
+        existing_names = {c["name"] for c in ctes}
+        for node in final_ast.walk():
+            if (
+                isinstance(node, sqlglot.exp.Subquery)
+                and node.alias
+                and node.alias not in existing_names
+            ):
+                existing_names.add(node.alias)
+                ctes.append({
+                    "name": node.alias,
+                    "code": node.this.sql(dialect=dialect, pretty=True),
+                    "dependencies": [],
+                    "sources": [],
+                })
+
         ctes.append({
             "name": "final_query",
-            "code": final_ast.sql(dialect=dialect, pretty=True),
+            "code": final_code,
             "dependencies": [],
             "sources": [],
         })
@@ -193,6 +212,7 @@ def build_query_graph():
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
     builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("assertion_fixer", fix_assertions)
     builder.add_node("debug_node", debug_test_node)
     builder.add_node("delete_test_node", delete_test_node)
     builder.add_node("generator", generate_examples)
@@ -232,32 +252,37 @@ def build_query_graph():
         return "history_saver"
 
     def route_executor(state: QueryState):
-        if state.get("error"):
+        if state.get("error") or state.get("status") == "error":
             return "history_saver"
         return "test_evaluator"
 
     def route_evaluator(state: QueryState):
-        # Skip suggestions for assertion-only edits (data didn't change)
+        # Skip retries and suggestions for assertion-only edits (user-initiated)
         if state.get("assertion_only"):
             return "history_saver"
-        # Données incorrectes et retries restants → l'agent corrige ou débogue
         if (
             state.get("evaluation_feedback") == "bad_data"
             and state.get("gen_retries", 0) > 0
         ):
             return "conversational_agent"
+        if (
+            state.get("evaluation_feedback") == "bad_assertions"
+            and state.get("gen_retries", 0) > 0
+        ):
+            return "assertion_fixer"
         return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
     builder.add_conditional_edges("conversational_agent", route_agent_output)
-    builder.add_edge("debug_node", "history_saver")
+    builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("assertion_fixer", "executor")
     builder.add_edge("suggestions_generator", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

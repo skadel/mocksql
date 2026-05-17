@@ -170,30 +170,47 @@ def build_initial_state(
 
 
 def _build_cli_graph():
-    """Stripped graph: generator → executor → END (no DB nodes)."""
+    """CLI graph: generator → executor → test_evaluator, with bad_data and bad_assertions retry loops."""
     from langgraph.graph import END, START, StateGraph
 
+    from build_query.assertion_fixer import fix_assertions
+    from build_query.conversational_agent import conversational_agent
     from build_query.examples_executor import run_on_examples
     from build_query.examples_generator import generate_examples
     from build_query.state import QueryState
+    from build_query.test_evaluator import evaluate_tests
 
     builder = StateGraph(QueryState)
     builder.add_node("generator", generate_examples)
     builder.add_node("executor", run_on_examples)
+    builder.add_node("test_evaluator", evaluate_tests)
+    builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("assertion_fixer", fix_assertions)
 
     def route_executor(state: QueryState):
-        if state.get("error"):
+        if state.get("error") or state.get("status") == "error":
             return END
+        return "test_evaluator"
+
+    def route_evaluator(state: QueryState):
         if (
-            state.get("status") == "empty_results"
-            and (state.get("gen_retries") or 0) > 0
+            state.get("evaluation_feedback") == "bad_data"
+            and state.get("gen_retries", 0) > 0
         ):
-            return "generator"
+            return "conversational_agent"
+        if (
+            state.get("evaluation_feedback") == "bad_assertions"
+            and state.get("gen_retries", 0) > 0
+        ):
+            return "assertion_fixer"
         return END
 
     builder.add_edge(START, "generator")
     builder.add_edge("generator", "executor")
     builder.add_conditional_edges("executor", route_executor)
+    builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("conversational_agent", "generator")
+    builder.add_edge("assertion_fixer", "executor")
 
     return builder.compile()
 
