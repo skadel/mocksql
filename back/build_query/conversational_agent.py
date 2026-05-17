@@ -1,3 +1,4 @@
+import json
 import uuid
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -50,10 +51,16 @@ Tu as à ta disposition :
 
 Choisis librement l'outil le plus adapté à ce que tu observes dans les données du test."""
 
+    ctes = json.loads(state.get("query_decomposed") or "[]")
+    cte_names = [c["name"] for c in ctes]
+    cte_names_str = ", ".join(f'"{n}"' for n in cte_names) if cte_names else "aucune"
+
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
 {state.get("optimized_sql") or state.get("query", "")}
+
+Étapes inspectables avec run_cte / count_cte_steps : {cte_names_str}
 
 Tests existants :
 {tests_summary}
@@ -100,7 +107,14 @@ Réponds en français, de manière concise et naturelle.{eval_context}"""
     )
     history = get_history_from_state(
         state,
-        msg_type=[MsgType.QUERY, MsgType.OTHER, MsgType.RESULTS, MsgType.EXAMPLES],
+        msg_type=[
+            MsgType.QUERY,
+            MsgType.OTHER,
+            MsgType.RESULTS,
+            MsgType.EXAMPLES,
+            MsgType.DEBUG_RUN_CTE,
+            MsgType.DEBUG_COUNT_STEPS,
+        ],
     )
     user_input = state.get("input", "")
     messages = [SystemMessage(content=system_content)] + history

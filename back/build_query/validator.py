@@ -537,6 +537,25 @@ async def split_query(
     final_query_expr = sqlglot.parse_one(
         remove_with_start(final_query), dialect=dialect
     )
+
+    # Extract inline subqueries (FROM (SELECT ...) AS alias) as inspectable steps
+    existing_names = {c["name"] for c in ctes}
+    for node in final_query_expr.walk():
+        if (
+            isinstance(node, sqlglot.exp.Subquery)
+            and node.alias
+            and node.alias not in existing_names
+        ):
+            existing_names.add(node.alias)
+            ctes.append(
+                {
+                    "name": node.alias,
+                    "code": node.this.sql(dialect=dialect, pretty=True),
+                    "dependencies": [],
+                    "sources": [],
+                }
+            )
+
     sources = await get_source_columns(final_query_expr, source_tables)
     # Add the final query step
     ctes.append(

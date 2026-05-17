@@ -56,17 +56,17 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
     else:
         return {}
 
+    debug_msg = AIMessage(
+        content=json.dumps(result, ensure_ascii=False, default=str),
+        id=str(uuid.uuid4()),
+        additional_kwargs={
+            "type": msg_type,
+            "parent": state.get("user_message_id"),
+            "request_id": state.get("request_id"),
+            "test_index": test_index,
+        },
+    )
     return {
-        "messages": [
-            AIMessage(
-                content=json.dumps(result, ensure_ascii=False, default=str),
-                id=str(uuid.uuid4()),
-                additional_kwargs={
-                    "type": msg_type,
-                    "parent": state.get("user_message_id"),
-                    "request_id": state.get("request_id"),
-                    "test_index": test_index,
-                },
-            )
-        ]
+        "messages": [debug_msg],
+        "history": [debug_msg],
     }

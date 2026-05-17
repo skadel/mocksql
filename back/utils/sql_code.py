@@ -6,6 +6,26 @@ from sqlglot.optimizer.scope import traverse_scope
 from utils.examples import strip_qualifiers_with_scope
 
 
+def extract_select_statement(sql: str, dialect: str) -> str | None:
+    """
+    Extrait le premier SELECT/WITH d'un script SQL pouvant contenir des DECLARE, SET, etc.
+    Retourne None si aucun SELECT n'est trouvé.
+    """
+    parsed = _parse_select_ast(sql, dialect)
+    if parsed is None:
+        return None
+    return parsed.sql(dialect=dialect, pretty=True)
+
+
+def _parse_select_ast(sql: str, dialect: str) -> sg.exp.Expression | None:
+    """Retourne l'AST du premier SELECT/WITH, en skippant les DECLARE/SET."""
+    statements = sg.parse(sql, dialect=dialect)
+    return next(
+        (s for s in statements if isinstance(s, (sg.exp.Query, sg.exp.With))),
+        None,
+    )
+
+
 def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
     """
     Extrait les références de tables réelles (physiques ou logiques) d'une requête SQL.
@@ -30,13 +50,8 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
     Raises:
         sqlglot.ParseError: Si le SQL est syntaxiquement incorrect.
     """
-    statements = sg.parse(sql, dialect=dialect)
-    # parse_one only returns the first statement, which may be a DECLARE in BigQuery scripts.
-    # Find the actual query (WITH/SELECT) among all parsed statements.
-    parsed = next(
-        (s for s in statements if isinstance(s, (sg.exp.Query, sg.exp.With))),
-        None,
-    )
+    # Skips DECLARE/SET statements — finds the actual SELECT/WITH.
+    parsed = _parse_select_ast(sql, dialect)
     if parsed is None:
         return []
 
