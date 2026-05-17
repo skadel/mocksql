@@ -92,6 +92,7 @@ back/data/
 
 # IDE / tooling
 .vscode/
+.claude/settings.json
 .claude/settings.local.json
 
 ################################## Examples
