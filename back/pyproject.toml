@@ -54,6 +54,9 @@ langchain-google-genai = "^4.0.0"
 google-cloud-secret-manager = "^2.20.1"
 google-cloud-bigquery-storage = "^2.25.0"
 
+snowflake-connector-python = {version = "^3.0", extras = ["pandas"]}
+faker = "^37.0"
+
 # sécurité et hashing
 passlib = "^1.7.4"
 bcrypt = "^4.2.0"

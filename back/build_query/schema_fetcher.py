@@ -202,3 +202,92 @@ async def fetch_tables_schema(
             schema_rows.extend(rows)
 
     return schema_rows, failed
+
+
+async def fetch_tables_schema_snowflake(
+    refs: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """Fetch Snowflake schema for a list of table refs (schema.table or database.schema.table).
+
+    Returns (schema_rows, failed) in the same INFORMATION_SCHEMA-style format as
+    fetch_tables_schema(), so generate_tables_and_columns_from_project_schema() can
+    consume it unchanged.
+    """
+    from utils.snowflake_connector import run_sf_query
+
+    schema_rows: list[dict] = []
+    failed: list[dict] = []
+
+    for ref in refs:
+        parts = ref.split(".")
+        if len(parts) == 2:
+            schema_name, table_name = parts
+            database_name = ""
+        elif len(parts) >= 3:
+            database_name, schema_name, table_name = parts[0], parts[1], parts[2]
+        else:
+            failed.append(
+                {
+                    "table": ref,
+                    "error": "Invalid ref (expected schema.table or db.schema.table)",
+                }
+            )
+            continue
+
+        schema_filter = (
+            f"AND TABLE_SCHEMA = '{schema_name.upper()}'" if schema_name else ""
+        )
+        db_filter = (
+            f"AND TABLE_CATALOG = '{database_name.upper()}'" if database_name else ""
+        )
+
+        sql = f"""
+            SELECT
+                TABLE_CATALOG,
+                TABLE_SCHEMA,
+                TABLE_NAME,
+                COLUMN_NAME    AS field_path,
+                DATA_TYPE      AS data_type,
+                IS_NULLABLE,
+                COMMENT        AS description
+            FROM INFORMATION_SCHEMA.COLUMNS
+            WHERE TABLE_NAME = '{table_name.upper()}'
+            {schema_filter}
+            {db_filter}
+            ORDER BY ORDINAL_POSITION
+        """
+        try:
+            rows = await asyncio.to_thread(run_sf_query, sql)
+            if not rows:
+                failed.append(
+                    {
+                        "table": ref,
+                        "error": "Table not found in Snowflake INFORMATION_SCHEMA",
+                    }
+                )
+                continue
+            for row in rows:
+                schema_rows.append(
+                    {
+                        "table_catalog": (
+                            row.get("TABLE_CATALOG") or database_name
+                        ).lower(),
+                        "table_schema": (
+                            row.get("TABLE_SCHEMA") or schema_name
+                        ).lower(),
+                        "table_name": (row.get("TABLE_NAME") or table_name).lower(),
+                        "field_path": row.get("field_path")
+                        or row.get("COLUMN_NAME", ""),
+                        "data_type": row.get("data_type") or row.get("DATA_TYPE", ""),
+                        "mode": "NULLABLE"
+                        if (row.get("IS_NULLABLE") or "YES") == "YES"
+                        else "REQUIRED",
+                        "description": row.get("description")
+                        or row.get("COMMENT")
+                        or "",
+                    }
+                )
+        except Exception as exc:
+            failed.append({"table": ref, "error": str(exc)})
+
+    return schema_rows, failed

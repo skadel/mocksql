@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from collections import defaultdict
@@ -172,6 +173,13 @@ async def compile_query(sql_code, project, dialect):
             return await dk.run_query(sql=q, dry=True)
         finally:
             await dk.close()
+
+    elif dialect == "snowflake":
+        from utils.snowflake_connector import run_sf_query
+
+        await asyncio.to_thread(run_sf_query, sql_code, True)
+        return 0
+
     else:
         raise ValueError(f"Unsupported dialect: {dialect}")
 
@@ -278,7 +286,12 @@ async def get_source_columns(optimized, tables):
         qualified = f"{database}.{table}" if database else table
         lookup_key = qualified if qualified in tables else table
 
-        if lookup_key in tables:
+        in_mapping = lookup_key in tables
+        # Include if found in schema mapping, OR if it's a real external table (has a database prefix).
+        # Without this fallback, an empty schema cache would filter out all real tables.
+        is_real_table = bool(database)
+
+        if in_mapping or is_real_table:
             used_columns.append(
                 {
                     "project": project,
@@ -373,11 +386,12 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
             print(f"Optimisation complète échouée ({e}), fallback sur qualify.")
             parsed = pre_optimize
 
-    from utils.examples import _fix_unnest_alias_conflicts
+    from utils.examples import _fix_unnest_alias_conflicts, _fix_unnest_scope_leak
 
     expr = qualify_tables(parsed)
     expr = qualify_columns(expr, schema, infer_schema=True)
-    return _fix_unnest_alias_conflicts(expr)
+    expr = _fix_unnest_alias_conflicts(expr)
+    return _fix_unnest_scope_leak(expr)
 
 
 def get_all_columns_with_sources(sql_expression):

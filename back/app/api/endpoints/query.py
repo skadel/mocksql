@@ -212,7 +212,14 @@ class CheckProfileRequest(BaseModel):
 
 @router.post("/check-profile")
 async def check_profile_route(body: CheckProfileRequest):
+    import logging
     from build_query.profile_checker import check_profile, build_profile_request
+
+    used_columns = body.used_columns
+    if not used_columns and body.session:
+        test = get_test(body.session)
+        if test:
+            used_columns = test.get("used_columns") or []
 
     state = {
         "project": body.project,
@@ -220,19 +227,27 @@ async def check_profile_route(body: CheckProfileRequest):
         "dialect": body.dialect,
         "session": body.session,
         "query": body.sql,
-        "used_columns": body.used_columns,
+        "used_columns": used_columns,
         "schemas": [],
         "messages": [],
         "parent_message_id": "",
         "request_id": "",
     }
 
-    checked = await check_profile(state)
+    try:
+        checked = await check_profile(state)
+    except Exception as exc:
+        logging.getLogger(__name__).error("[check_profile] profiler error: %s", exc)
+        return {"profile_complete": False, "profile_error": str(exc)}
 
     if checked["profile_complete"]:
         return {"profile_complete": True}
 
-    request = await build_profile_request(state, checked["missing_columns"])
+    try:
+        request = await build_profile_request(state, checked["missing_columns"])
+    except Exception as exc:
+        logging.getLogger(__name__).error("[build_profile_request] error: %s", exc)
+        return {"profile_complete": False, "profile_error": str(exc)}
 
     profile_request: dict = {
         "profile_query": request.get("profile_sql", ""),
@@ -321,31 +336,40 @@ async def auto_profile_route(body: AutoProfileRequest):
 class ImportMissingTablesRequest(BaseModel):
     tables_to_import: List[str]
     project: str
+    dialect: str = "bigquery"
 
 
 @router.post("/import-missing-tables")
 async def import_missing_tables_route(body: ImportMissingTablesRequest):
-    from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
+    from build_query.schema_fetcher import (
+        fetch_tables_schema,
+        fetch_tables_schema_snowflake,
+        validate_bq_ref,
+    )
     from utils.schema_utils import generate_tables_and_columns_from_project_schema
 
-    unqualified = [t for t in body.tables_to_import if not validate_bq_ref(t)]
-    if unqualified:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "needs_manual_config": True,
-                "unqualified_tables": unqualified,
-                "message": (
-                    f"Tables sans qualification complète (project.dataset.table) : "
-                    f"{', '.join(unqualified)}. Configurez-les manuellement dans les paramètres du projet."
-                ),
-            },
+    if body.dialect == "snowflake":
+        schema_data, failed = await fetch_tables_schema_snowflake(body.tables_to_import)
+        source_label = "Snowflake"
+    else:
+        unqualified = [t for t in body.tables_to_import if not validate_bq_ref(t)]
+        if unqualified:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "needs_manual_config": True,
+                    "unqualified_tables": unqualified,
+                    "message": (
+                        f"Tables sans qualification complète (project.dataset.table) : "
+                        f"{', '.join(unqualified)}. Configurez-les manuellement dans les paramètres du projet."
+                    ),
+                },
+            )
+        billing_project = BQ_SCHEMA_BILLING_PROJECT
+        schema_data, failed = await fetch_tables_schema(
+            body.tables_to_import, billing_project
         )
-
-    billing_project = BQ_SCHEMA_BILLING_PROJECT
-    schema_data, failed = await fetch_tables_schema(
-        body.tables_to_import, billing_project
-    )
+        source_label = "BigQuery"
 
     if failed and not schema_data:
         raise HTTPException(
@@ -358,7 +382,8 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
 
     if not schema_data:
         raise HTTPException(
-            status_code=400, detail="Aucune donnée de schéma retournée depuis BigQuery"
+            status_code=400,
+            detail=f"Aucune donnée de schéma retournée depuis {source_label}",
         )
 
     new_schema = generate_tables_and_columns_from_project_schema({"data": schema_data})

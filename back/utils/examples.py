@@ -642,6 +642,66 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         s = s.replace("ST_GEOGFROMTEXT", "ST_GEOMFROMTEXT")
         s = s.replace("ST_GEOGFROMWKT", "ST_GEOMFROMTEXT")
 
+    if source_dialect == "snowflake":
+        # IFF(cond, a, b) → IF(cond, a, b)
+        s = re.sub(r"\bIFF\s*\(", "IF(", s, flags=re.IGNORECASE)
+
+        # ZEROIFNULL(x) → COALESCE(x, 0)
+        s = re.sub(
+            r"\bZEROIFNULL\s*\(([^)]+)\)",
+            lambda m: f"COALESCE({m.group(1)}, 0)",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # NULLIFZERO(x) → NULLIF(x, 0)
+        s = re.sub(
+            r"\bNULLIFZERO\s*\(([^)]+)\)",
+            lambda m: f"NULLIF({m.group(1)}, 0)",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # LISTAGG(x, sep) → STRING_AGG(x, sep)
+        s = re.sub(r"\bLISTAGG\s*\(", "STRING_AGG(", s, flags=re.IGNORECASE)
+
+        # EQUAL_NULL(a, b) → (a IS NOT DISTINCT FROM b)
+        s = re.sub(
+            r"\bEQUAL_NULL\s*\(([^,]+),\s*([^)]+)\)",
+            lambda m: (
+                f"({m.group(1).strip()} IS NOT DISTINCT FROM {m.group(2).strip()})"
+            ),
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # DATEADD(unit, n, date) → date + INTERVAL n UNIT
+        s = re.sub(
+            r"\bDATEADD\s*\(\s*(\w+)\s*,\s*(-?\d+)\s*,\s*([^)]+)\)",
+            lambda m: (
+                f"({m.group(3).strip()} + INTERVAL '{m.group(2)}' {m.group(1).upper()})"
+            ),
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # TO_DATE(x) → CAST(x AS DATE)  /  TO_TIMESTAMP(x) → CAST(x AS TIMESTAMP)
+        s = re.sub(
+            r"\bTO_DATE\s*\(([^)]+)\)",
+            lambda m: f"CAST({m.group(1)} AS DATE)",
+            s,
+            flags=re.IGNORECASE,
+        )
+        s = re.sub(
+            r"\bTO_TIMESTAMP\s*\(([^)]+)\)",
+            lambda m: f"CAST({m.group(1)} AS TIMESTAMP)",
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # STRTOK_TO_ARRAY(str, delim) → STRING_SPLIT(str, delim)
+        s = re.sub(r"\bSTRTOK_TO_ARRAY\s*\(", "STRING_SPLIT(", s, flags=re.IGNORECASE)
+
     return s
 
 
@@ -723,6 +783,13 @@ async def run_query_on_test_dataset(
             return result, current_sql
         except duckdb.BinderException as e:
             patched = _fix_bare_unnest_col_refs(current_sql, str(e))
+            if patched is None and "Referenced table" in str(e) and "not found" in str(e):
+                try:
+                    tree = sqlglot.parse_one(current_sql, dialect="duckdb")
+                    fixed = _fix_unnest_scope_leak(tree).sql(dialect="duckdb")
+                    patched = fixed if fixed != current_sql else None
+                except Exception:
+                    patched = None
             if patched is None:
                 logger.error("Failed to run query: %s\nSQL:\n%s", e, current_sql)
                 raise
@@ -771,6 +838,83 @@ async def create_tables_on_test_dataset(
     except Exception as e:
         logger.error("Failed to create table %s: %s", table_name, e)
         raise
+
+
+def _fix_unnest_scope_leak(tree: exp.Expression) -> exp.Expression:
+    """
+    Fix column refs that reference a _tN alias from an inner scope.
+
+    qualify_columns may resolve `product.v2productname` in the outer scope to _t3
+    (the inner subquery's UNNEST alias) instead of _t1 (the outer one).  DuckDB
+    then raises "Referenced table '_t3' not found".
+
+    Two Column representations handled:
+      Case 1: Column(table="_t3", this="_product_u")           → table is wrong _tN
+      Case 2: Column(db="_t3", table="_product_u", this="field") → db is wrong _tN
+
+    Algorithm (per scope):
+      1. Build {col_alias → _tN} from UNNEST sources defined in THIS scope only.
+      2. For every Column in scope.columns:
+         Case 1: table_ref not in local scope → look up col.name in local_unnest
+         Case 2: db_ref not in local scope → look up col.table in local_unnest
+    """
+    from sqlglot.optimizer.scope import traverse_scope
+
+    for scope in traverse_scope(tree):
+        local_unnest: dict[str, str] = {}
+        local_tables: set[str] = set(scope.sources.keys())
+
+        for alias, source in scope.sources.items():
+            unnest = (
+                source.expression
+                if hasattr(source, "expression") and isinstance(source.expression, exp.Unnest)
+                else source if isinstance(source, exp.Unnest)
+                else None
+            )
+            if unnest is None:
+                continue
+            tbl_alias_node = unnest.find(exp.TableAlias)
+            if not tbl_alias_node:
+                continue
+            for col_id in tbl_alias_node.args.get("columns") or []:
+                local_unnest[col_id.name.lower()] = alias
+
+        if not local_unnest:
+            continue
+
+        # scope.columns may include Column refs from nested IN-subqueries (because
+        # sqlglot treats them as correlated outer refs when the table is not found
+        # in the inner scope).  We must exclude them: only fix columns that appear
+        # directly in this scope's expression, not inside a Subquery node.
+        subquery_col_ids: set[int] = {
+            id(col)
+            for sq in scope.expression.find_all(exp.Subquery)
+            for col in sq.find_all(exp.Column)
+        }
+        direct_cols = [
+            col
+            for col in scope.expression.find_all(exp.Column)
+            if id(col) not in subquery_col_ids
+        ]
+
+        for col in direct_cols:
+            # Case 1: Column(table="_t3", this="_product_u") — table is wrong _tN
+            table_ref = col.text("table")
+            if table_ref and table_ref not in local_tables:
+                correct = local_unnest.get(col.name.lower())
+                if correct:
+                    col.set("table", exp.to_identifier(correct))
+                    continue
+
+            # Case 2: Column(db="_t3", table="_product_u", this="field")
+            # — db is the wrong _tN; table is the UNNEST column alias
+            db_ref = col.text("db")
+            if db_ref and db_ref not in local_tables:
+                correct = local_unnest.get(col.text("table").lower())
+                if correct:
+                    col.set("db", exp.to_identifier(correct))
+
+    return tree
 
 
 def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:

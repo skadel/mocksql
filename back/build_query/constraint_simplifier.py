@@ -280,8 +280,8 @@ def _find_column_in(node: exp.Expression) -> exp.Column | None:
     return None
 
 
-def _sql_of(node: exp.Expression) -> str:
-    return node.sql(dialect="bigquery")
+def _sql_of(node: exp.Expression, dialect: str = "bigquery") -> str:
+    return node.sql(dialect=dialect)
 
 
 # ─── Schema conversion ────────────────────────────────────────────────────────
@@ -637,7 +637,7 @@ def _collect_safe_cast_constraints(
         src_cols = resolver.resolve_all(ref)
         ref = resolver.resolve(ref)
         to_type = try_cast.args.get("to")
-        type_str = to_type.sql(dialect="bigquery").upper() if to_type else ""
+        type_str = to_type.sql(dialect=resolver._dialect).upper() if to_type else ""
         key = (ref.table, ref.column, type_str)
         if key not in seen:
             seen.add(key)
@@ -1318,6 +1318,9 @@ _TRIVIAL_FUNC_TYPES: frozenset[type] = frozenset(
         exp.Connector,
         # aggregate functions (SUM, COUNT, AVG…) — input columns are already profiled
         exp.AggFunc,
+        # table-valued functions used in FROM clauses — not usable as scalar column
+        # expressions; including these produces invalid SQL in profiling queries
+        exp.Unnest,
     }
 )
 

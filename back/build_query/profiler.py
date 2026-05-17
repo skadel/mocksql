@@ -268,7 +268,7 @@ def _build_regularity_query(
     if is_date_only:
         if dialect == "bigquery":
             diff_expr = f"DATE_DIFF({col_q}, LAG({col_q}) OVER (ORDER BY {col_q}), DAY)"
-        elif dialect == "duckdb":
+        elif dialect in ("duckdb", "snowflake"):
             diff_expr = (
                 f"DATEDIFF('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
             )
@@ -281,7 +281,7 @@ def _build_regularity_query(
                 f"TIMESTAMP_DIFF(CAST({col_q} AS TIMESTAMP),"
                 f" LAG(CAST({col_q} AS TIMESTAMP)) OVER (ORDER BY {col_q}), SECOND)"
             )
-        elif dialect == "duckdb":
+        elif dialect in ("duckdb", "snowflake"):
             diff_expr = (
                 f"DATEDIFF('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
             )
@@ -291,7 +291,12 @@ def _build_regularity_query(
             )
         case_sql = _regularity_case_seconds(dialect)
 
-    float_t = "FLOAT64" if dialect == "bigquery" else "DOUBLE"
+    if dialect == "bigquery":
+        float_t = "FLOAT64"
+    elif dialect == "snowflake":
+        float_t = "FLOAT"
+    else:
+        float_t = "DOUBLE"
 
     return (
         f"SELECT {case_sql} AS date_regularity"
@@ -1538,6 +1543,7 @@ def _build_join_query(
     idx: int,
     l_source: dict | None = None,
     r_source: dict | None = None,
+    cte_names: set[str] | None = None,
 ) -> str:
     """Build one SELECT that profiles the cardinality of a join between two tables.
 
@@ -1570,6 +1576,14 @@ def _build_join_query(
 
     l_src_table = l_source["source_table"] if l_source else left_table
     r_src_table = r_source["source_table"] if r_source else right_table
+
+    def _table_ref(name: str) -> exp.Expression:
+        # CTE names resolved via the WITH clause must not be backtick-quoted in
+        # BigQuery — quoted identifiers are treated as table literals requiring a
+        # dataset qualifier, while unquoted names are resolved as CTE references.
+        if cte_names and name in cte_names:
+            return exp.Table(this=exp.Identifier(this=name, quoted=False))
+        return _table_expr(name)
 
     # Build one key expression node per spec, stripped of table qualifiers.
     # If CTE lineage resolved a source column, use that; otherwise strip the
@@ -1627,7 +1641,7 @@ def _build_join_query(
             exp.alias_(l_key_expr, "join_key"),
             exp.alias_(exp.Count(this=exp.Star()), "cnt"),
         )
-        .from_(_table_expr(l_src_table))
+        .from_(_table_ref(l_src_table))
         .group_by(exp.Literal.number(1)),
         l_source,
     )
@@ -1636,7 +1650,7 @@ def _build_join_query(
             exp.alias_(r_key_expr, "join_key"),
             exp.alias_(exp.Count(this=exp.Star()), "cnt"),
         )
-        .from_(_table_expr(r_src_table))
+        .from_(_table_ref(r_src_table))
         .group_by(exp.Literal.number(1)),
         r_source,
     )
@@ -1644,7 +1658,7 @@ def _build_join_query(
     # Key-sample subquery: up to 100 distinct left key values, STRING_AGG'd into one string
     ks_inner = _apply_where(
         exp.select(exp.alias_(l_key_expr, "join_key"))
-        .from_(_table_expr(l_src_table))
+        .from_(_table_ref(l_src_table))
         .group_by(exp.Literal.number(1))
         .limit(100),
         l_source,
@@ -1793,7 +1807,7 @@ def _extract_ctes(sql_query: str, dialect: str = "bigquery") -> list[tuple[str, 
 def _extract_subquery_aliases(
     sql_query: str, dialect: str = "bigquery"
 ) -> dict[str, str]:
-    """Return {alias: body_sql} for every inline subquery in a JOIN clause.
+    """Return {alias: body_sql} for every inline subquery in a FROM or JOIN clause.
 
     Examples:
         >>> q = "SELECT * FROM t JOIN (SELECT id FROM s WHERE active = 1) AS sub ON t.id = sub.id"
@@ -1801,6 +1815,13 @@ def _extract_subquery_aliases(
         >>> list(aliases.keys())
         ['sub']
         >>> "SELECT" in aliases["sub"]
+        True
+
+        FROM-clause subqueries are also captured:
+
+        >>> q2 = "SELECT * FROM (SELECT id FROM s WHERE active = 1) src JOIN t ON src.id = t.id"
+        >>> aliases2 = _extract_subquery_aliases(q2, dialect="duckdb")
+        >>> "src" in aliases2
         True
     """
     try:
@@ -1810,6 +1831,14 @@ def _extract_subquery_aliases(
     except Exception:
         return {}
     result: dict[str, str] = {}
+
+    # FROM-clause subqueries: FROM (SELECT ...) AS alias
+    from_node = tree.find(exp.From)
+    if from_node:
+        src = from_node.this
+        if isinstance(src, exp.Subquery) and src.alias:
+            result[src.alias] = src.this.sql(dialect=dialect)
+
     for join_node in tree.find_all(exp.Join):
         jt = join_node.this
         # sqlglot represents JOIN (SELECT ...) AS alias as exp.Subquery (jt.this = Select)
@@ -2158,14 +2187,39 @@ def build_profile_query(
                         l_src = _resolve_cte_source(
                             l_short, all_l_keys, full_alias_map, dialect
                         )
+                        if l_src is None:
+                            real = _resolve_alias_to_table(
+                                l_short, full_alias_map, dialect
+                            )
+                            if real != l_short:
+                                l_src = {
+                                    "source_table": real,
+                                    "source_cols": all_l_keys,
+                                    "where_sql": None,
+                                }
                     if r_short in full_alias_map:
                         r_src = _resolve_cte_source(
                             r_short, all_r_keys, full_alias_map, dialect
                         )
+                        if r_src is None:
+                            real = _resolve_alias_to_table(
+                                r_short, full_alias_map, dialect
+                            )
+                            if real != r_short:
+                                r_src = {
+                                    "source_table": real,
+                                    "source_cols": all_r_keys,
+                                    "where_sql": None,
+                                }
                 try:
                     parts.append(
                         _build_join_query(
-                            pair_specs, dialect, idx, l_source=l_src, r_source=r_src
+                            pair_specs,
+                            dialect,
+                            idx,
+                            l_source=l_src,
+                            r_source=r_src,
+                            cte_names=set(full_alias_map) if full_alias_map else None,
                         )
                     )
                     idx += 1
@@ -2417,6 +2471,8 @@ def _build_one_derived_expr_branch(
 
     if dialect == "postgres":
         top_values_scalar = f"(SELECT STRING_AGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
+    elif dialect == "snowflake":
+        top_values_scalar = f"(SELECT LISTAGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
     else:
         top_values_scalar = f"(SELECT STRING_AGG(_v) FROM ({inner}) AS _tv_{idx})"
 

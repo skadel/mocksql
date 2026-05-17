@@ -80,3 +80,13 @@ LANGCHAIN_TRACING = get_langchain_tracing()
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "true" if LANGCHAIN_TRACING else "false")
 if LANGCHAIN_API_KEY:
     os.environ.setdefault("LANGCHAIN_API_KEY", LANGCHAIN_API_KEY)
+
+# ---------------------------------------------------------------------------
+# Snowflake (source optionnelle)
+# ---------------------------------------------------------------------------
+SNOWFLAKE_ACCOUNT = os.getenv("SNOWFLAKE_ACCOUNT", "")
+SNOWFLAKE_USER = os.getenv("SNOWFLAKE_USER", "")
+SNOWFLAKE_PASSWORD = os.getenv("SNOWFLAKE_PASSWORD", "")
+SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", "")
+SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "")
+SNOWFLAKE_SCHEMA_NAME = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
