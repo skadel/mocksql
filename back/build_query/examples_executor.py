@@ -795,7 +795,17 @@ def _evaluate_assertions(
 ) -> List[Dict[str, Any]]:
     """
     Évalue chaque assertion dbt-style contre le DataFrame résultat enregistré sous view_name.
-    Chaque assertion SQL doit retourner 0 ligne pour passer.
+
+    Convention dbt-style : une assertion SQL doit retourner les lignes ÉCHOUANTES.
+      - 0 ligne retournée → assertion passée (passed=True)
+      - ≥1 ligne retournée → assertion échouée (passed=False), les lignes sont des contre-exemples
+
+    Exemple : pour vérifier que `start_station_name` vaut toujours 'Central Park' :
+      SELECT * FROM __result__ WHERE start_station_name != 'Central Park'
+      → retourne les lignes où la station est incorrecte ; 0 ligne = OK.
+
+    Ne pas confondre avec une assertion positive (WHERE col = 'X') qui retournerait
+    des lignes quand la condition est vraie — ce serait l'inverse de la convention.
     """
     results = []
     for a in assertions:
@@ -1024,8 +1034,15 @@ def _determine_global_status(all_tests_results: List[Dict[str, Any]]) -> str:
     Seul le premier test (cas standard sans instruction utilisateur) peut déclencher
     un retry : si son résultat est vide, on renvoie 'empty_results'.
     Les tests suivants (avec instruction utilisateur) peuvent légitimement être vides.
+    Une erreur DuckDB (parsing, binder…) n'est pas corrigeable par les données : on
+    renvoie 'error' pour stopper les boucles de retry.
     """
-    if all_tests_results and all_tests_results[0].get("status") == "empty_results":
+    if not all_tests_results:
+        return "complete"
+    first = all_tests_results[0]
+    if first.get("status") == "error":
+        return "error"
+    if first.get("status") == "empty_results":
         return "empty_results"
     return "complete"
 
