@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -15,6 +16,8 @@ app = typer.Typer(
 @app.callback()
 def _callback() -> None:
     """MockSQL — TDD engine for Analytics Engineering."""
+    log_level = os.getenv("LOG_LEVEL", "WARNING").upper()
+    logging.basicConfig(level=log_level, format="%(name)s %(levelname)s %(message)s")
 
 
 CONFIG_FILE = "mocksql.yml"

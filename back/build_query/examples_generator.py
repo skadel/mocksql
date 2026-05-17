@@ -416,6 +416,13 @@ async def generate_examples_(
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
 
+    logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
+    if sim_result is not None:
+        logger.debug(
+            "[generator] sim_result.source_columns: %s",
+            [(str(r), [str(c) for c in cs]) for r, cs in sim_result.source_columns.items()],
+        )
+
     filtered_schema = filter_columns(schema, used_columns)
 
     # Compute Faker-eligible columns only when constraint extraction fully succeeded
@@ -424,8 +431,11 @@ async def generate_examples_(
     base_tables = {entry["table"].lower() for entry in used_columns}
     faker_cols: dict[str, set[str]] = {}
     _has_unnest = "unnest" in optimized_sql.lower()
+    logger.debug("[generator] _has_unnest=%s  sim_result=%s", _has_unnest, sim_result is not None)
     if sim_result is not None and not _has_unnest and _all_refs_resolved(sim_result, base_tables):
         faker_cols = _compute_faker_columns(sim_result, used_columns, base_tables)
+
+    logger.debug("[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()})
 
     # Build LLM schema with Faker-eligible columns removed to shrink the prompt
     llm_filtered_schema = filtered_schema
@@ -446,9 +456,10 @@ async def generate_examples_(
                     llm_filtered_schema.append({**table_entry, "columns": remaining})
                 excluded_col_names.extend(f"{uc_key}.{c}" for c in faker_cols[uc_key])
         logger.debug(
-            "Faker pre-fill: %d column(s) across %d table(s) removed from LLM schema",
+            "[generator] Faker pre-fill: %d col(s) across %d table(s) removed from LLM schema — %s",
             sum(len(cols) for cols in faker_cols.values()),
             len(faker_cols),
+            excluded_col_names,
         )
 
     data_model = create_pydantic_models(llm_filtered_schema)
@@ -644,6 +655,13 @@ def _compute_faker_columns(
     for eq_class in sim_result.equivalence_classes:
         for ref in eq_class:
             constrained.add((ref.table.lower(), ref.column.lower()))
+
+    # If the simplifier found no constraints at all (e.g. filters inside an anonymous
+    # subquery that it can't propagate), don't Faker-fill anything — the LLM sees the
+    # full SQL and will respect the WHERE clause on its own.
+    if not constrained:
+        logger.debug("[faker] source_columns empty — skipping Faker fill, delegating to LLM")
+        return {}
 
     faker_cols: dict[str, set[str]] = {}
     for entry in used_columns:
