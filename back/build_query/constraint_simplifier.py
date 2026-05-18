@@ -986,6 +986,21 @@ def _walk_select(
     # Scan SELECT projections, WHERE, and JOIN-ON for SAFE_CAST occurrences
     _collect_safe_cast_constraints(select, alias_map, resolver, filters)
 
+    # Scalar subqueries in projections carry real constraints on the outer tables
+    # (e.g. correlated COUNT(*) with WHERE prcp > 0).  Walk them recursively so
+    # their WHERE predicates are captured alongside the rest of the query's filters.
+    for projection in select.expressions:
+        for subq in projection.find_all(exp.Subquery):
+            _walk_tree(
+                subq.this,
+                dict(alias_map),
+                resolver,
+                filters,
+                equalities,
+                functional,
+                col_inequalities,
+            )
+
 
 def _walk_tree(
     node: exp.Expression,
@@ -1111,6 +1126,219 @@ def extract_constraints(
         len(col_inequalities),
     )
     return filters, equalities, functional, col_inequalities
+
+
+# ─── HAVING cardinality guard ─────────────────────────────────────────────────
+
+_HAVING_MAX_ROWS = 20
+
+
+def check_having_cardinality(
+    sql: str,
+    dialect: str = "bigquery",
+    threshold: int = _HAVING_MAX_ROWS,
+) -> None:
+    """Raise ValueError if the SQL has a HAVING clause that requires more than *threshold* rows.
+
+    Detects patterns like ``HAVING COUNT(*) > 150`` or ``HAVING rainy_days > 150``
+    (where rainy_days is an alias of COUNT(*)).  Both > and >= are handled.
+    Raises early — before any LLM call — so the user gets a clear message instead
+    of a bad test that silently produces 0 results.
+    """
+    try:
+        statement = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return  # unparseable SQL — let downstream handle it
+
+    for having in statement.find_all(exp.Having):
+        for pred in _flatten_and(having.this):
+            _check_having_threshold_pred(pred, threshold, dialect)
+
+
+def _check_having_threshold_pred(
+    pred: exp.Expression, threshold: int, dialect: str
+) -> None:
+    op_type = type(pred)
+    if op_type not in (exp.GT, exp.GTE, exp.LT, exp.LTE):
+        return
+
+    left = pred.args.get("this")
+    right = pred.args.get("expression")
+    if left is None or right is None:
+        return
+
+    # Normalise to  expr <effective_op> literal  (flip when literal is on the left)
+    _flip = {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE}
+    if _is_literal(right) and not _is_literal(left):
+        expr_node, lit_node, effective_op = left, right, op_type
+    elif _is_literal(left) and not _is_literal(right):
+        expr_node, lit_node, effective_op = right, left, _flip[op_type]
+    else:
+        return
+
+    if effective_op not in (exp.GT, exp.GTE):
+        return  # LT / LTE on expr side → no minimum rows imposed
+
+    val = _literal_value(lit_node)
+    if not isinstance(val, (int, float)) or isinstance(val, bool):
+        return
+
+    # Minimum rows required to satisfy the predicate.
+    # threshold + 1 is the effective limit: HAVING x > threshold needs threshold+1 rows,
+    # which the user confirmed still passes ("having >20 ça passe au max").
+    rows_needed = int(val) + (1 if effective_op is exp.GT else 0)
+    if rows_needed <= threshold + 1:
+        return
+
+    cond_sql = pred.sql(dialect=dialect)
+    raise ValueError(
+        f"Ce script demande la génération de beaucoup trop de lignes : "
+        f"la condition HAVING `{cond_sql}` requiert au moins {rows_needed} ligne(s) par groupe, "
+        f"mais MockSQL est limité à {threshold} lignes max. "
+        f"Simplifiez la requête ou abaissez le seuil du HAVING."
+    )
+
+
+# ─── Correlated-aggregate cardinality guard ───────────────────────────────────
+
+
+def _find_aggregate_cte_columns(
+    statement: exp.Expression,
+) -> dict[tuple[str, str], str]:
+    """Return {(cte_alias, col_name): agg_func} for CTE columns defined as scalar subquery aggregates.
+
+    Detects patterns like:
+        cte AS (SELECT (SELECT COUNT(*) FROM t WHERE ...) AS col_name FROM ...)
+    where the column's value is the result of an aggregate function — meaning
+    the number of rows in t must satisfy any threshold applied to col_name.
+    """
+    result: dict[tuple[str, str], str] = {}
+    with_clause = statement.args.get("with_") if hasattr(statement, "args") else None
+    if not with_clause:
+        return result
+
+    for cte in with_clause.expressions or []:
+        cte_name = (cte.alias or "").lower()
+        if not cte_name:
+            continue
+        inner = cte.this
+        if not isinstance(inner, exp.Select):
+            continue
+
+        for proj in inner.expressions:
+            if not isinstance(proj, exp.Alias):
+                continue
+            alias_name = (proj.alias or "").lower()
+            expr = proj.this
+
+            if not isinstance(expr, exp.Subquery):
+                continue
+            inner_sel = expr.this
+            if not isinstance(inner_sel, exp.Select):
+                continue
+
+            for inner_proj in inner_sel.expressions:
+                agg_expr = (
+                    inner_proj.this if isinstance(inner_proj, exp.Alias) else inner_proj
+                )
+                for agg_node in agg_expr.find_all(exp.AggFunc):
+                    result[(cte_name, alias_name)] = type(agg_node).__name__.upper()
+                    break
+                if (cte_name, alias_name) in result:
+                    break
+
+    return result
+
+
+def _check_aggregate_col_threshold(
+    pred: exp.Expression,
+    agg_cols: dict[tuple[str, str], str],
+    threshold: int,
+    dialect: str,
+) -> None:
+    op_type = type(pred)
+    if op_type not in (exp.GT, exp.GTE, exp.LT, exp.LTE):
+        return
+
+    left = pred.args.get("this")
+    right = pred.args.get("expression")
+    if left is None or right is None:
+        return
+
+    _flip = {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE}
+    if _is_literal(right) and _is_column(left):
+        col_node, lit_node, effective_op = left, right, op_type
+    elif _is_literal(left) and _is_column(right):
+        col_node, lit_node, effective_op = right, left, _flip[op_type]
+    else:
+        return
+
+    if effective_op not in (exp.GT, exp.GTE):
+        return
+
+    val = _literal_value(lit_node)
+    if not isinstance(val, (int, float)) or isinstance(val, bool):
+        return
+
+    rows_needed = int(val) + (1 if effective_op is exp.GT else 0)
+    if rows_needed <= threshold + 1:
+        return
+
+    table_alias = (col_node.table or "").lower()
+    col_name = (col_node.name or "").lower()
+
+    agg_func = agg_cols.get((table_alias, col_name))
+    if agg_func is None and not table_alias:
+        for (_, cn), func in agg_cols.items():
+            if cn == col_name:
+                agg_func = func
+                break
+
+    if agg_func is None:
+        return
+
+    cte_label = table_alias or col_name
+    cond_sql = pred.sql(dialect=dialect)
+    raise ValueError(
+        f"Ce script demande la génération de beaucoup trop de lignes : "
+        f"la condition `{cond_sql}` requiert au moins {rows_needed} ligne(s) de données "
+        f"car `{col_name}` dans la CTE `{cte_label}` est calculé par {agg_func}(*), "
+        f"mais MockSQL est limité à {threshold} lignes max. "
+        f"Simplifiez la requête ou abaissez le seuil."
+    )
+
+
+def check_correlated_aggregate_cardinality(
+    sql: str,
+    dialect: str = "bigquery",
+    threshold: int = _HAVING_MAX_ROWS,
+) -> None:
+    """Raise ValueError if a WHERE filters on a CTE aggregate column above the row threshold.
+
+    Detects patterns like:
+        WITH cte AS (SELECT (SELECT COUNT(*) FROM t WHERE ...) AS n FROM ...)
+        SELECT ... WHERE cte.n > 150
+    where satisfying the WHERE would require more than *threshold* rows in t.
+    """
+    try:
+        statement = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return
+
+    agg_cols = _find_aggregate_cte_columns(statement)
+    if not agg_cols:
+        return
+
+    for sel in statement.find_all(exp.Select):
+        where = sel.args.get("where")
+        if not where:
+            continue
+        for pred in _flatten_and(where.this):
+            _check_aggregate_col_threshold(pred, agg_cols, threshold, dialect)
 
 
 # ─── UNION branch splitter ────────────────────────────────────────────────────

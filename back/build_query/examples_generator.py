@@ -23,6 +23,8 @@ from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
+
 logger = logging.getLogger(__name__)
 
 
@@ -343,6 +345,23 @@ async def generate_examples(state: QueryState):
         generated_test, generated_test_index = await generate_examples_(
             state, used_columns, existing_tests, history
         )
+    except ValueError as exc:
+        error_msg = str(exc)
+        return {
+            "messages": [
+                AIMessage(
+                    content=error_msg,
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.ERROR,
+                        "parent": parent,
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            ],
+            "error": error_msg,
+            "status": "error",
+        }
     except Exception as exc:
         if is_vertex_permission_error(exc):
             error_msg = format_vertex_permission_message(get_llm_model())
@@ -412,6 +431,11 @@ async def generate_examples_(
     dialect = state.get("dialect", "bigquery")
     optimized_sql = state.get("optimized_sql", "")
 
+    # Fail fast if the query has an unsatisfiable HAVING threshold
+    from build_query.constraint_simplifier import check_having_cardinality
+
+    check_having_cardinality(optimized_sql, dialect)
+
     # Single simplify() call — result reused for hint + mandatory set + unconstrained
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
     constraints = _simplification_to_hint(sim_result)
@@ -479,10 +503,25 @@ async def generate_examples_(
     )
     if prompt is None:
         return None, None
+
+    logger.diag("\n%s", "="*60)
+    logger.diag("[generator] constraints_hint:\n%s", constraints or "(vide — sous-requêtes corrélées non capturées ?)")
+    logger.diag("[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()})
+    try:
+        formatted_msgs = prompt.format_messages()
+        logger.diag("[generator] PROMPT LLM (dernier message):\n%s", formatted_msgs[-1].content[:3000])
+    except Exception:
+        logger.diag("[generator] PROMPT LLM (template):\n%s", str(prompt.messages[-1])[:3000])
+    logger.diag("%s\n", "="*60)
+
     llm = make_llm()
     generated_data = await (prompt | llm | parser).ainvoke({})
 
     filled_data = _convert_datetime_fields(generated_data.data.dict())
+
+    logger.diag("[generator] données générées par le LLM:")
+    for table_name, rows in filled_data.items():
+        logger.diag("  %s: %s ligne(s)", table_name, len(rows) if isinstance(rows, list) else "?")
 
     # Merge Faker-generated values into LLM output
     if faker_cols:

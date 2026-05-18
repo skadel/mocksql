@@ -260,6 +260,9 @@ def build_query_graph():
         # Skip retries and suggestions for assertion-only edits (user-initiated)
         if state.get("assertion_only"):
             return "history_saver"
+        # SQL structurally requires too many rows — no retry can fix this
+        if state.get("evaluation_feedback") == "too_many_rows":
+            return "history_saver"
         if (
             state.get("evaluation_feedback") == "bad_data"
             and state.get("gen_retries", 0) > 0

@@ -8,6 +8,7 @@ Couvre :
 - duckdb_typed_tables ne retourne que les colonnes racines
 - INSERT sans "Duplicate column name"
 - Chaîne complète : create → insert → SELECT
+- Colonnes nommées avec des mots réservés DuckDB (begin, end)
 """
 
 import os
@@ -248,3 +249,74 @@ class TestEndToEnd:
         table_name = duckdb_tables[0]["table_name"]
         count = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
         assert count == 5
+
+
+# ---------------------------------------------------------------------------
+# Mots réservés DuckDB comme noms de colonnes (begin, end, …)
+# ---------------------------------------------------------------------------
+
+RESERVED_WORDS_TABLE = {
+    "table_name": "bigquery-public-data.noaa_gsod.stations",
+    "description": "",
+    "columns": [
+        {"name": "usaf", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "name", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "state", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "begin", "type": "STRING", "mode": "NULLABLE"},
+        {"name": "end", "type": "STRING", "mode": "NULLABLE"},
+    ],
+    "primary_keys": [],
+}
+
+RESERVED_SUFFIX = "reserved_test"
+
+
+class TestReservedWordColumns:
+    @pytest.fixture
+    def reserved_tables(self, con):
+        return create_test_tables(
+            tables=[RESERVED_WORDS_TABLE],
+            suffix=RESERVED_SUFFIX,
+            con=con,
+            dialect="bigquery",
+        )
+
+    def test_create_table_with_reserved_words(self, reserved_tables):
+        assert len(reserved_tables) == 1
+
+    def test_insert_with_reserved_word_columns(self, con, reserved_tables):
+        data = {
+            "bigquery-public-data.noaa_gsod.stations": [
+                {
+                    "usaf": "727930",
+                    "name": "SEATTLE TACOMA INTL AP",
+                    "state": "WA",
+                    "begin": "19490101",
+                    "end": "20231231",
+                }
+            ]
+        }
+        stmts = list(insert_examples(data, reserved_tables, RESERVED_SUFFIX))
+        assert len(stmts) == 1
+        con.execute(stmts[0])
+
+    def test_select_reserved_word_columns(self, con, reserved_tables):
+        data = {
+            "bigquery-public-data.noaa_gsod.stations": [
+                {
+                    "usaf": "727930",
+                    "name": "SEATTLE TACOMA INTL AP",
+                    "state": "WA",
+                    "begin": "19490101",
+                    "end": "20231231",
+                }
+            ]
+        }
+        stmts = list(insert_examples(data, reserved_tables, RESERVED_SUFFIX))
+        con.execute(stmts[0])
+
+        table_name = reserved_tables[0]["table_name"]
+        row = con.execute(
+            f'SELECT "begin", "end" FROM {table_name}'
+        ).fetchone()
+        assert row == ("19490101", "20231231")

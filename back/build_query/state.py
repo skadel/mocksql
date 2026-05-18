@@ -61,4 +61,4 @@ class QueryState(TypedDict):
     ]  # concatenated mocksql.md files (global → file-specific)
     evaluation_feedback: Optional[
         str
-    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions"
+    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows"

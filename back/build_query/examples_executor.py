@@ -25,6 +25,8 @@ from storage.test_repository import get_test
 from utils.saver import examples_state_retriever
 
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
+
 logger = logging.getLogger(__name__)
 
 
@@ -483,35 +485,6 @@ async def _run_cte_trace(
     return trace
 
 
-async def _is_empty_result_expected(
-    test_description: str,
-    duckdb_sql: str,
-) -> bool:
-    """
-    Demande au LLM si un résultat vide est intentionnel pour ce test.
-    Retourne True si vide attendu (ex : cas "plage vide", filtre qui exclut tout),
-    False si le résultat vide est probablement une erreur de génération de données.
-    """
-    prompt = f"""Description du test : {test_description}
-
-Requête SQL :
-```sql
-{duckdb_sql}
-```
-
-L'exécution de cette requête sur les données de test a produit 0 ligne.
-Est-ce que ce résultat vide est **intentionnel** (le test vérifie justement qu'aucune ligne ne ressort) ?
-
-Réponds UNIQUEMENT par `true` ou `false`."""
-
-    llm = make_llm()
-    try:
-        result = await llm.ainvoke(prompt)
-        content = normalize_llm_content(result.content).strip().lower()
-        return content.startswith("true")
-    except Exception:
-        return False
-
 
 async def _run_single_test_case(
     state: QueryState,
@@ -550,6 +523,10 @@ async def _run_single_test_case(
 
         logger.debug("Creating temp tables for suffix=%s", suffix)
 
+        logger.diag("[executor] tables dans les données: %s", list(test_case.get("data", {}).keys()))
+        for tname, rows in test_case.get("data", {}).items():
+            logger.diag("  %s: %s ligne(s)", tname, len(rows) if isinstance(rows, list) else "?")
+
         # Création des tables de test dans DuckDB + insertion
         duckdb_tables_schema = create_test_tables(
             tables=schemas,
@@ -569,6 +546,8 @@ async def _run_single_test_case(
         final_res_df, final_duckdb_sql = await run_query_on_test_dataset(
             query, suffix, state["project"], dialect, con
         )
+        logger.diag("[executor] DuckDB SQL exécuté:\n%s", final_duckdb_sql[:2000])
+        logger.diag("[executor] résultat: %s ligne(s)", len(final_res_df))
 
         if final_res_df.empty:
             ctes = json.loads(state.get("query_decomposed") or "[]")
@@ -579,35 +558,13 @@ async def _run_single_test_case(
                 (name for name, info in cte_trace.items() if info["row_count"] == 0),
                 None,
             )
-            empty_intended = await _is_empty_result_expected(
-                test_description=test_case.get("unit_test_description", ""),
-                duckdb_sql=final_duckdb_sql,
-            )
-            if not empty_intended:
-                return {
-                    **base,
-                    "status": "empty_results",
-                    "results_json": await format_result(final_res_df),
-                    "cte_trace": cte_trace,
-                    "failing_cte": failing_cte,
-                    "assertion_results": [],
-                }
-            # Résultat vide intentionnel : on pose une assertion count = 0
-            assertion_results = [
-                {
-                    "description": "Le résultat doit être vide (0 ligne attendue)",
-                    "sql": "SELECT * FROM (SELECT COUNT(*) AS cnt FROM __result__) WHERE cnt > 0",
-                    "passed": True,
-                    "failing_rows": [],
-                }
-            ]
             return {
                 **base,
-                "status": "complete",
+                "status": "empty_results",
                 "results_json": await format_result(final_res_df),
                 "cte_trace": cte_trace,
                 "failing_cte": failing_cte,
-                "assertion_results": assertion_results,
+                "assertion_results": [],
             }
 
         view_name = f"__result__{suffix}"
@@ -778,15 +735,19 @@ Réponds UNIQUEMENT avec un tableau JSON (aucun texte autour) :
 
     llm = make_llm()
     try:
+        logger.diag("[generate_assertions] prompt (extrait):\n%s", prompt[:1500])
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content)
+        logger.diag("[generate_assertions] réponse brute:\n%s", content[:1000])
         # Greedy match captures the outermost [...] even when the LLM adds surrounding text
         json_match = re.search(r"\[[\s\S]*\]", content)
         if json_match:
             parsed = json.loads(json_match.group())
-            return [a for a in parsed if isinstance(a, dict) and a.get("sql")]
-    except Exception:
-        pass
+            assertions = [a for a in parsed if isinstance(a, dict) and a.get("sql")]
+            logger.diag("[generate_assertions] %s assertion(s) parsée(s)", len(assertions))
+            return assertions
+    except Exception as e:
+        logger.diag("[generate_assertions] ERREUR: %s", e)
     return []
 
 
@@ -881,15 +842,18 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
 
     llm = make_llm()
     try:
+        logger.diag("[regen_assertion] assertion à corriger: %r", original.get("description", ""))
+        logger.diag("[regen_assertion] erreur: %s", error)
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content)
+        logger.diag("[regen_assertion] réponse brute:\n%s", content[:500])
         json_match = re.search(r"\{[\s\S]*\}", content)
         if json_match:
             parsed = json.loads(json_match.group())
             if isinstance(parsed, dict) and parsed.get("sql"):
                 return parsed
-    except Exception:
-        pass
+    except Exception as e:
+        logger.diag("[regen_assertion] ERREUR: %s", e)
     return None
 
 
@@ -906,12 +870,15 @@ async def _evaluate_assertions_with_retry(
     Évalue les assertions et retente la régénération (jusqu'à REGEN_ASSERTION_LIMIT fois)
     de celles qui produisent une erreur d'exécution (pas juste un échec métier).
     """
+    logger.diag("[assertion_retry] évaluation de %s assertion(s)", len(assertions))
     results = _evaluate_assertions(assertions, view_name, con)
+    logger.diag("[assertion_retry] résultats initiaux: %s", [{"passed": r.get("passed"), "error": bool(r.get("error"))} for r in results])
 
-    for _ in range(REGEN_ASSERTION_LIMIT):
+    for attempt in range(REGEN_ASSERTION_LIMIT):
         errored_indices = [i for i, r in enumerate(results) if r.get("error")]
         if not errored_indices:
             break
+        logger.diag("[assertion_retry] tentative %s/%s — %s assertion(s) en erreur", attempt+1, REGEN_ASSERTION_LIMIT, len(errored_indices))
         for i in errored_indices:
             new_assertion = await _regenerate_assertion(
                 original=results[i],
@@ -950,12 +917,14 @@ async def _fix_logically_failing_assertions(
     failing_indices = [
         i for i, r in enumerate(results) if not r.get("passed") and not r.get("error")
     ]
+    logger.diag("[assertion_fixer] %s assertion(s) logiquement échouée(s) sur %s", len(failing_indices), len(assertion_results))
     if not failing_indices:
         return results
 
     for i in failing_indices:
         a = results[i]
         failing_rows = a.get("failing_rows", [])
+        logger.diag("[assertion_fixer] correction assertion %s: %r", i, a.get("description", ""))
 
         prompt = f"""Tu es un expert en tests SQL DuckDB dbt-style.
 
@@ -1005,6 +974,7 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour)."""
         try:
             result = await llm.ainvoke(prompt)
             content = normalize_llm_content(result.content)
+            logger.diag("[assertion_fixer] réponse LLM:\n%s", content[:500])
             json_match = re.search(r"\{[\s\S]*\}", content)
             if not json_match:
                 continue

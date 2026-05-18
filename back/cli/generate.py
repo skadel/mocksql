@@ -193,6 +193,8 @@ def _build_cli_graph():
         return "test_evaluator"
 
     def route_evaluator(state: QueryState):
+        if state.get("evaluation_feedback") == "too_many_rows":
+            return END
         if (
             state.get("evaluation_feedback") == "bad_data"
             and state.get("gen_retries", 0) > 0
@@ -325,6 +327,19 @@ async def run_generate(
     # Step 1 — read SQL
     typer.echo(f"Reading {model}...")
     sql = read_sql(model, preprocessor_fn, config.parent)
+
+    # Step 1.5 — fail fast if the query requires generating too many rows
+    from build_query.constraint_simplifier import (
+        check_correlated_aggregate_cardinality,
+        check_having_cardinality,
+    )
+
+    try:
+        check_having_cardinality(sql, dialect)
+        check_correlated_aggregate_cardinality(sql, dialect)
+    except ValueError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
 
     # Step 2 — extract table refs
     refs = extract_real_table_refs(sql, dialect)

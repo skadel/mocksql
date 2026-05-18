@@ -398,13 +398,13 @@ def build_column_profile_queries(
                 exp.Count(this=exp.Distinct(expressions=[_cref()])), "distinct_count"
             ),
         )
-        .from_(table_name)
+        .from_(_table_expr(table_name))
         .sql(dialect=dialect)
     )
 
     dup_inner = (
         exp.select(_cref(), exp.alias_(exp.Count(this=exp.Star()), "cnt"))
-        .from_(table_name)
+        .from_(_table_expr(table_name))
         .where(_not_null())
         .group_by(exp.Literal.number(1))
         .having(
@@ -422,7 +422,7 @@ def build_column_profile_queries(
             exp.alias_(_cref(), "val"),
             exp.alias_(exp.Count(this=exp.Star()), "cnt"),
         )
-        .from_(table_name)
+        .from_(_table_expr(table_name))
         .group_by(exp.Literal.number(1))
         .order_by(exp.Ordered(this=exp.column("cnt"), desc=True))
         .limit(top_k)
@@ -441,7 +441,7 @@ def build_column_profile_queries(
                 exp.alias_(exp.Min(this=_cref()), "min_value"),
                 exp.alias_(exp.Max(this=_cref()), "max_value"),
             )
-            .from_(table_name)
+            .from_(_table_expr(table_name))
             .where(_not_null())
             .sql(dialect=dialect)
         )
@@ -716,7 +716,7 @@ def detect_correlations(
                         "target_distinct_count",
                     ),
                 )
-                .from_(table_name)
+                .from_(_table_expr(table_name))
                 .group_by(exp.Literal.number(1))
                 .sql(dialect=dialect)
             )
@@ -832,7 +832,7 @@ def profile_schema(
         try:
             rc_rows = sql_executor(
                 exp.select(exp.alias_(exp.Count(this=exp.Star()), "row_count"))
-                .from_(table_name)
+                .from_(_table_expr(table_name))
                 .sql(dialect=dialect)
             )
             row_count = int((rc_rows[0].get("row_count") or 0)) if rc_rows else 0
@@ -842,13 +842,17 @@ def profile_schema(
         # Column profiles
         col_profiles: dict[str, dict] = {}
         for col in columns:
+            col_type = col.get("type", "UNKNOWN")
+            if _is_unprofilable(col_type) or "." in col["name"]:
+                col_profiles[col["name"]] = {"type": col_type, "skipped": "unprofilable type"}
+                continue
             try:
                 col_profiles[col["name"]] = build_column_profile(
                     table_name, col, sql_executor, options, dialect=dialect
                 )
             except Exception as exc:
                 col_profiles[col["name"]] = {
-                    "type": col.get("type", "UNKNOWN"),
+                    "type": col_type,
                     "error": str(exc),
                 }
 
@@ -1100,7 +1104,7 @@ def profile_joins_for_query(
                 exp.alias_(left_expr_node, "join_key"),
                 exp.alias_(exp.Count(this=exp.Star()), "cnt"),
             )
-            .from_(left_table)
+            .from_(_table_expr(left_table))
             .group_by(exp.Literal.number(1))
         )
         r_cte = (
@@ -1108,7 +1112,7 @@ def profile_joins_for_query(
                 exp.alias_(right_expr_node, "join_key"),
                 exp.alias_(exp.Count(this=exp.Star()), "cnt"),
             )
-            .from_(right_table)
+            .from_(_table_expr(right_table))
             .group_by(exp.Literal.number(1))
         )
 

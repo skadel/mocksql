@@ -379,7 +379,7 @@ def create_test_tables(
 
             root_columns = [col for col in filtered_columns if "." not in col["name"]]
             columns_def = ", ".join(
-                f"{col['name']} {_get_ddl_type(col['name'], filtered_columns)}"
+                f'`{col["name"]}` {_get_ddl_type(col["name"], filtered_columns)}'
                 for col in root_columns
             )
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"

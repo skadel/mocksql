@@ -149,7 +149,7 @@ def build_insert_statement(
 
     logger.debug("colonnes finales pour INSERT: %s", columns)
 
-    column_list = ", ".join(columns)
+    column_list = ", ".join(f'"{col}"' for col in columns)
     values_str_list = []
 
     for record in records:

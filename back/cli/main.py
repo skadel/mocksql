@@ -6,6 +6,8 @@ from pathlib import Path
 import typer
 import yaml
 
+import utils.logger  # noqa: F401 — registers DIAG level (15) before basicConfig
+
 app = typer.Typer(
     name="mocksql",
     help="MockSQL — TDD engine for Analytics Engineering.",
@@ -16,7 +18,11 @@ app = typer.Typer(
 @app.callback()
 def _callback() -> None:
     """MockSQL — TDD engine for Analytics Engineering."""
-    log_level = os.getenv("LOG_LEVEL", "WARNING").upper()
+    raw = os.getenv("LOG_LEVEL", "WARNING").upper()
+    try:
+        log_level: int | str = int(raw)
+    except ValueError:
+        log_level = raw
     logging.basicConfig(level=log_level, format="%(name)s %(levelname)s %(message)s")
 
 
@@ -180,6 +186,30 @@ def init(
         f"  DUCKDB_PATH={duckdb_path}\n"
         "\nNext step: mocksql generate <your_model.sql>"
     )
+
+
+@app.command()
+def profile(
+    model: Path = typer.Argument(..., help="Path to the .sql model file."),
+    config: Path = typer.Option(
+        Path("mocksql.yml"),
+        "--config",
+        "-c",
+        help="Path to mocksql.yml config.",
+    ),
+    output_dir: Path = typer.Option(
+        Path(".mocksql/profiles"),
+        "--output",
+        "-o",
+        help="Directory where profile JSON files will be written.",
+    ),
+) -> None:
+    """Run BigQuery profiling on a SQL model and save the profile JSON."""
+    import asyncio
+
+    from cli.profile import run_profile
+
+    asyncio.run(run_profile(model, config, output_dir))
 
 
 @app.command()

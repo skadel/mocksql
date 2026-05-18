@@ -5,12 +5,16 @@ All tests are pure-Python, no DB, no LLM.
 They cover the five reference examples from the spec plus additional edge cases.
 """
 
+import pytest
+
 from build_query.constraint_simplifier import (
     ColumnRef,
     FilterConstraint,
     SimplificationResult,
     _UnionFind,
     _LineageResolver,
+    check_correlated_aggregate_cardinality,
+    check_having_cardinality,
     extract_constraints,
 )
 
@@ -324,6 +328,38 @@ class TestExtractConstraints:
         assert "alpha" in values
         assert "beta" in values
 
+    def test_scalar_subquery_in_projection_constraints(self):
+        """Filters inside a scalar correlated subquery (SELECT projection) must be captured."""
+        sql = """
+        WITH ws AS (
+            SELECT weather.stn AS station_id
+            FROM `myproject.ds.stations` AS station
+            JOIN `myproject.ds.gsod` AS weather ON station.usaf = weather.stn
+            WHERE station.state = 'WA'
+        ),
+        prcp AS (
+            SELECT
+                ws.station_id,
+                (
+                    SELECT COUNT(*)
+                    FROM `myproject.ds.gsod` AS w
+                    WHERE ws.station_id = w.stn
+                    AND prcp > 0
+                    AND prcp != 99.99
+                ) AS rainy_days
+            FROM ws
+        )
+        SELECT * FROM prcp WHERE prcp.rainy_days > 150
+        """
+        filters, _, _, _ = extract_constraints(sql)
+        prcp_filters = [f for f in filters if f.column.column == "prcp"]
+        assert any(f.op == "gt" and f.value == 0 for f in prcp_filters), (
+            "Expected prcp > 0 from scalar subquery projection"
+        )
+        assert any(f.op == "neq" and f.value == 99.99 for f in prcp_filters), (
+            "Expected prcp != 99.99 from scalar subquery projection"
+        )
+
 
 # ─── FilterConstraint.needs_llm ───────────────────────────────────────────────
 
@@ -348,3 +384,126 @@ class TestNeedsLlm:
     def test_between_no_llm(self):
         f = FilterConstraint(column=col("a", "x"), op="between", value=(1, 10))
         assert f.needs_llm() is False
+
+
+# ─── check_having_cardinality ─────────────────────────────────────────────────
+
+
+class TestCheckHavingCardinality:
+    def _sql(self, having_clause: str) -> str:
+        return f"""
+        WITH cte AS (
+            SELECT station_id, COUNT(*) AS rainy_days
+            FROM weather
+            GROUP BY station_id
+        )
+        SELECT station_id FROM cte
+        HAVING {having_clause}
+        """
+
+    def test_count_gt_above_threshold_raises(self):
+        sql = "SELECT stn, COUNT(*) AS cnt FROM weather GROUP BY stn HAVING COUNT(*) > 150"
+        with pytest.raises(ValueError, match="150"):
+            check_having_cardinality(sql)
+
+    def test_alias_gt_above_threshold_raises(self):
+        """Alias of COUNT in HAVING — bq045 pattern."""
+        with pytest.raises(ValueError, match="rainy_days > 150"):
+            check_having_cardinality(self._sql("rainy_days > 150"))
+
+    def test_alias_gte_above_threshold_raises(self):
+        with pytest.raises(ValueError, match="rainy_days >= 151"):
+            check_having_cardinality(self._sql("rainy_days >= 151"))
+
+    def test_exactly_at_threshold_does_not_raise(self):
+        """HAVING x > 20 needs 21 rows — user said this passes."""
+        check_having_cardinality(self._sql("rainy_days > 20"))
+
+    def test_below_threshold_does_not_raise(self):
+        check_having_cardinality(self._sql("rainy_days > 5"))
+
+    def test_gte_at_threshold_does_not_raise(self):
+        """HAVING x >= 20 needs exactly 20 rows — within limit."""
+        check_having_cardinality(self._sql("rainy_days >= 20"))
+
+    def test_lt_does_not_raise(self):
+        """LT/LTE impose no minimum row count."""
+        check_having_cardinality(self._sql("rainy_days < 1000"))
+
+    def test_literal_on_left_raises(self):
+        """150 < rainy_days is equivalent to rainy_days > 150."""
+        with pytest.raises(ValueError):
+            check_having_cardinality(self._sql("150 < rainy_days"))
+
+    def test_error_message_contains_condition(self):
+        """The error message must include the HAVING condition."""
+        with pytest.raises(ValueError, match=r"HAVING"):
+            check_having_cardinality(self._sql("rainy_days > 150"))
+
+    def test_invalid_sql_does_not_raise(self):
+        """Unparseable SQL should be silently ignored."""
+        check_having_cardinality("THIS IS NOT SQL !!!!")
+
+    def test_custom_threshold(self):
+        check_having_cardinality(self._sql("rainy_days > 5"), threshold=5)
+        with pytest.raises(ValueError):
+            check_having_cardinality(self._sql("rainy_days > 6"), threshold=5)
+
+
+# ─── check_correlated_aggregate_cardinality ───────────────────────────────────
+
+
+class TestCheckCorrelatedAggregateCardinality:
+    _SQL = """
+    WITH prcp2023 AS (
+        SELECT
+            ws.name,
+            (SELECT COUNT(*) FROM `proj.ds.gsod2023` AS w WHERE ws.station_id = w.stn AND w.prcp > 0) AS rainy_days
+        FROM WashingtonStations AS ws
+    )
+    SELECT prcp2023.name
+    FROM prcp2023
+    WHERE prcp2023.rainy_days > {threshold}
+    """
+
+    def _sql(self, threshold: int) -> str:
+        return self._SQL.format(threshold=threshold)
+
+    def test_high_threshold_raises(self):
+        with pytest.raises(ValueError):
+            check_correlated_aggregate_cardinality(self._sql(150))
+
+    def test_low_threshold_does_not_raise(self):
+        check_correlated_aggregate_cardinality(self._sql(5))
+
+    def test_exact_threshold_does_not_raise(self):
+        check_correlated_aggregate_cardinality(self._sql(20), threshold=20)
+
+    def test_one_above_threshold_raises(self):
+        with pytest.raises(ValueError):
+            check_correlated_aggregate_cardinality(self._sql(21), threshold=20)
+
+    def test_gte_at_threshold_does_not_raise(self):
+        check_correlated_aggregate_cardinality(
+            self._SQL.replace("> {threshold}", ">= 20").format(threshold=20),
+            threshold=20,
+        )
+
+    def test_error_message_contains_col_and_cte(self):
+        with pytest.raises(ValueError, match=r"rainy_days"):
+            check_correlated_aggregate_cardinality(self._sql(150))
+
+    def test_no_cte_does_not_raise(self):
+        check_correlated_aggregate_cardinality(
+            "SELECT * FROM t WHERE t.n > 150"
+        )
+
+    def test_cte_without_subquery_aggregate_does_not_raise(self):
+        sql = """
+        WITH cte AS (SELECT t.n FROM t)
+        SELECT * FROM cte WHERE cte.n > 150
+        """
+        check_correlated_aggregate_cardinality(sql)
+
+    def test_invalid_sql_does_not_raise(self):
+        check_correlated_aggregate_cardinality("THIS IS NOT SQL !!!!")
