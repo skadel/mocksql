@@ -379,7 +379,7 @@ def create_test_tables(
 
             root_columns = [col for col in filtered_columns if "." not in col["name"]]
             columns_def = ", ".join(
-                f'`{col["name"]}` {_get_ddl_type(col["name"], filtered_columns)}'
+                f"`{col['name']}` {_get_ddl_type(col['name'], filtered_columns)}"
                 for col in root_columns
             )
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"
@@ -783,7 +783,11 @@ async def run_query_on_test_dataset(
             return result, current_sql
         except duckdb.BinderException as e:
             patched = _fix_bare_unnest_col_refs(current_sql, str(e))
-            if patched is None and "Referenced table" in str(e) and "not found" in str(e):
+            if (
+                patched is None
+                and "Referenced table" in str(e)
+                and "not found" in str(e)
+            ):
                 try:
                     tree = sqlglot.parse_one(current_sql, dialect="duckdb")
                     fixed = _fix_unnest_scope_leak(tree).sql(dialect="duckdb")
@@ -867,8 +871,10 @@ def _fix_unnest_scope_leak(tree: exp.Expression) -> exp.Expression:
         for alias, source in scope.sources.items():
             unnest = (
                 source.expression
-                if hasattr(source, "expression") and isinstance(source.expression, exp.Unnest)
-                else source if isinstance(source, exp.Unnest)
+                if hasattr(source, "expression")
+                and isinstance(source.expression, exp.Unnest)
+                else source
+                if isinstance(source, exp.Unnest)
                 else None
             )
             if unnest is None:

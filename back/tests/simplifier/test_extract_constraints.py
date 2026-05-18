@@ -494,9 +494,7 @@ class TestCheckCorrelatedAggregateCardinality:
             check_correlated_aggregate_cardinality(self._sql(150))
 
     def test_no_cte_does_not_raise(self):
-        check_correlated_aggregate_cardinality(
-            "SELECT * FROM t WHERE t.n > 150"
-        )
+        check_correlated_aggregate_cardinality("SELECT * FROM t WHERE t.n > 150")
 
     def test_cte_without_subquery_aggregate_does_not_raise(self):
         sql = """

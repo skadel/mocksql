@@ -316,7 +316,5 @@ class TestReservedWordColumns:
         con.execute(stmts[0])
 
         table_name = reserved_tables[0]["table_name"]
-        row = con.execute(
-            f'SELECT "begin", "end" FROM {table_name}'
-        ).fetchone()
+        row = con.execute(f'SELECT "begin", "end" FROM {table_name}').fetchone()
         assert row == ("19490101", "20231231")

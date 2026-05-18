@@ -138,7 +138,8 @@ def build_initial_state(
         "schemas": schemas,
         "used_columns": build_used_columns(schemas),
         "used_columns_changed": True,
-        "gen_retries": 2,
+        "gen_retries": 1,
+        "debug_retries": 2,
         "status": None,
         "input": "",
         "user_tables": "",
@@ -376,13 +377,23 @@ async def run_generate(
 
         to_fetch = [r for r in missing if validate_bq_ref(r)]
         if to_fetch:
-            schema_rows, failed = await fetch_tables_schema(to_fetch, billing_project)
+            schema_rows, failed, partitions = await fetch_tables_schema(
+                to_fetch, billing_project
+            )
             if failed:
                 typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
             if schema_rows:
                 new_tables = generate_tables_and_columns_from_project_schema(
                     {"data": schema_rows}
                 )
+                if partitions:
+                    for tbl in new_tables:
+                        full_name = tbl.get("table_name", "")
+                        info = partitions.get(full_name) or partitions.get(
+                            full_name.split(".")[-1]
+                        )
+                        if info:
+                            tbl["partition"] = info
                 updated = merge_into_cache(cached, new_tables)
                 save_schema_cache(cache_path, updated)
                 typer.echo(f"[OK] Schema cache updated ({len(new_tables)} table(s)).")

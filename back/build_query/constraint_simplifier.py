@@ -1172,9 +1172,9 @@ def _check_having_threshold_pred(
     # Normalise to  expr <effective_op> literal  (flip when literal is on the left)
     _flip = {exp.GT: exp.LT, exp.GTE: exp.LTE, exp.LT: exp.GT, exp.LTE: exp.GTE}
     if _is_literal(right) and not _is_literal(left):
-        expr_node, lit_node, effective_op = left, right, op_type
+        _, lit_node, effective_op = left, right, op_type
     elif _is_literal(left) and not _is_literal(right):
-        expr_node, lit_node, effective_op = right, left, _flip[op_type]
+        _, lit_node, effective_op = right, left, _flip[op_type]
     else:
         return
 

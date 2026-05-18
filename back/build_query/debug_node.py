@@ -61,12 +61,14 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
         id=str(uuid.uuid4()),
         additional_kwargs={
             "type": msg_type,
-            "parent": state.get("user_message_id"),
+            "parent": state.get("parent_message_id"),
             "request_id": state.get("request_id"),
             "test_index": test_index,
         },
     )
+    debug_retries = max(0, (state.get("debug_retries") or 0) - 1)
     return {
         "messages": [debug_msg],
         "history": [debug_msg],
+        "debug_retries": debug_retries,
     }

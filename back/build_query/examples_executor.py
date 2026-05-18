@@ -112,7 +112,7 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     global_status = _determine_global_status(all_tests_results)
     content_msg = json.dumps(all_tests_results, indent=2)
     gen_retries = (
-        state.get("gen_retries") if state.get("gen_retries") is not None else 2
+        state.get("gen_retries") if state.get("gen_retries") is not None else 1
     )
 
     sql = state.get("query", "").strip()
@@ -485,7 +485,6 @@ async def _run_cte_trace(
     return trace
 
 
-
 async def _run_single_test_case(
     state: QueryState,
     test_case: Dict[str, Any],
@@ -523,9 +522,14 @@ async def _run_single_test_case(
 
         logger.debug("Creating temp tables for suffix=%s", suffix)
 
-        logger.diag("[executor] tables dans les données: %s", list(test_case.get("data", {}).keys()))
+        logger.diag(
+            "[executor] tables dans les données: %s",
+            list(test_case.get("data", {}).keys()),
+        )
         for tname, rows in test_case.get("data", {}).items():
-            logger.diag("  %s: %s ligne(s)", tname, len(rows) if isinstance(rows, list) else "?")
+            logger.diag(
+                "  %s: %s ligne(s)", tname, len(rows) if isinstance(rows, list) else "?"
+            )
 
         # Création des tables de test dans DuckDB + insertion
         duckdb_tables_schema = create_test_tables(
@@ -744,7 +748,9 @@ Réponds UNIQUEMENT avec un tableau JSON (aucun texte autour) :
         if json_match:
             parsed = json.loads(json_match.group())
             assertions = [a for a in parsed if isinstance(a, dict) and a.get("sql")]
-            logger.diag("[generate_assertions] %s assertion(s) parsée(s)", len(assertions))
+            logger.diag(
+                "[generate_assertions] %s assertion(s) parsée(s)", len(assertions)
+            )
             return assertions
     except Exception as e:
         logger.diag("[generate_assertions] ERREUR: %s", e)
@@ -842,7 +848,10 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
 
     llm = make_llm()
     try:
-        logger.diag("[regen_assertion] assertion à corriger: %r", original.get("description", ""))
+        logger.diag(
+            "[regen_assertion] assertion à corriger: %r",
+            original.get("description", ""),
+        )
         logger.diag("[regen_assertion] erreur: %s", error)
         result = await llm.ainvoke(prompt)
         content = normalize_llm_content(result.content)
@@ -872,13 +881,21 @@ async def _evaluate_assertions_with_retry(
     """
     logger.diag("[assertion_retry] évaluation de %s assertion(s)", len(assertions))
     results = _evaluate_assertions(assertions, view_name, con)
-    logger.diag("[assertion_retry] résultats initiaux: %s", [{"passed": r.get("passed"), "error": bool(r.get("error"))} for r in results])
+    logger.diag(
+        "[assertion_retry] résultats initiaux: %s",
+        [{"passed": r.get("passed"), "error": bool(r.get("error"))} for r in results],
+    )
 
     for attempt in range(REGEN_ASSERTION_LIMIT):
         errored_indices = [i for i, r in enumerate(results) if r.get("error")]
         if not errored_indices:
             break
-        logger.diag("[assertion_retry] tentative %s/%s — %s assertion(s) en erreur", attempt+1, REGEN_ASSERTION_LIMIT, len(errored_indices))
+        logger.diag(
+            "[assertion_retry] tentative %s/%s — %s assertion(s) en erreur",
+            attempt + 1,
+            REGEN_ASSERTION_LIMIT,
+            len(errored_indices),
+        )
         for i in errored_indices:
             new_assertion = await _regenerate_assertion(
                 original=results[i],
@@ -917,14 +934,20 @@ async def _fix_logically_failing_assertions(
     failing_indices = [
         i for i, r in enumerate(results) if not r.get("passed") and not r.get("error")
     ]
-    logger.diag("[assertion_fixer] %s assertion(s) logiquement échouée(s) sur %s", len(failing_indices), len(assertion_results))
+    logger.diag(
+        "[assertion_fixer] %s assertion(s) logiquement échouée(s) sur %s",
+        len(failing_indices),
+        len(assertion_results),
+    )
     if not failing_indices:
         return results
 
     for i in failing_indices:
         a = results[i]
         failing_rows = a.get("failing_rows", [])
-        logger.diag("[assertion_fixer] correction assertion %s: %r", i, a.get("description", ""))
+        logger.diag(
+            "[assertion_fixer] correction assertion %s: %r", i, a.get("description", "")
+        )
 
         prompt = f"""Tu es un expert en tests SQL DuckDB dbt-style.
 

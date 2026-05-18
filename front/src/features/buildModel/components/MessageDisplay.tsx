@@ -24,7 +24,7 @@ import { fetchPage } from '../../../api/query';
 import { fetchUniqueColumns } from '../../../api/table';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { StyledButton } from '../../../style/StyledComponents';
-import { AnyRenderable, Message, MessageGroup, SqlHistoryEntry } from '../../../utils/types';
+import { AnyRenderable, Message, MessageGroup, MsgType, SqlHistoryEntry } from '../../../utils/types';
 import { setSelectedChildIndex } from '../buildModelSlice';
 import MessageBody from './MessageBody';
 import MessageGroupComponent from './MessageGroupComponent';
@@ -341,6 +341,14 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
                   onCreateClick={handleCreateClick}
                   onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
                   onRequestProfile={onRequestProfile}
+                  debugMessages={
+                    ((msg as any).children || [])
+                      .map((id: string) => queryComponentGraph[id])
+                      .filter((m: any) => m && (
+                        m.contentType === MsgType.DEBUG_RUN_CTE ||
+                        m.contentType === MsgType.DEBUG_COUNT_STEPS
+                      )) as Message[]
+                  }
                 />
               )}
             </CardContent>

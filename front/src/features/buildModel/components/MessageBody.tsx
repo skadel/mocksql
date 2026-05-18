@@ -6,7 +6,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import DisplayTable from './DisplayTable';
 import { StyledButton } from '../../../style/StyledComponents';
-import type { DebugCountStep, Message } from '../../../utils/types';
+import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, Message } from '../../../utils/types';
 
 type MessageBodyProps = {
   msg: Message;
@@ -26,6 +26,82 @@ type MessageBodyProps = {
   onCreateClick?: (id: string) => void;
   onSuggestionClick?: (text: string) => void;
   onRequestProfile?: () => void;
+  debugMessages?: Message[];
+};
+
+const DebugRunCteContent: React.FC<{ d: DebugRunCteResult }> = ({ d }) => {
+  if (d.error) return <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>;
+  const cols = d.rows.length > 0 ? Object.keys(d.rows[0]) : [];
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
+        {d.cte_name}{d.column ? ` · ${d.column}` : ''} — {d.row_count} ligne{d.row_count !== 1 ? 's' : ''}
+      </Typography>
+      {d.lineage && (
+        <Typography variant="caption" sx={{ display: 'block', color: '#888', mb: 0.75, fontStyle: 'italic' }}>
+          Lineage : {d.lineage}
+        </Typography>
+      )}
+      {cols.length > 0 ? (
+        <Box sx={{ overflowX: 'auto', border: '1px solid #e0e0e0', borderRadius: '6px' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow sx={{ bgcolor: '#f5f5f5' }}>
+                {cols.map((c) => (
+                  <TableCell key={c} sx={{ fontSize: 11, fontWeight: 700, color: '#555', py: 0.5, px: 1 }}>{c}</TableCell>
+                ))}
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {d.rows.map((row, i) => (
+                <TableRow key={i} sx={{ '&:last-child td': { border: 0 } }}>
+                  {cols.map((c) => (
+                    <TableCell key={c} sx={{ fontSize: 11, color: '#333', py: 0.5, px: 1 }}>
+                      {row[c] === null || row[c] === undefined ? <em style={{ color: '#aaa' }}>null</em> : String(row[c])}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </Box>
+      ) : (
+        <Typography variant="caption" sx={{ color: '#999' }}>Aucune ligne retournée.</Typography>
+      )}
+    </Box>
+  );
+};
+
+const DebugCountStepsContent: React.FC<{ d: DebugCountStepsResult }> = ({ d }) => {
+  if (d.error) return <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>;
+  const maxCount = Math.max(...d.steps.map((s) => s.count), 1);
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
+        {d.cte_name} — analyse étape par étape
+      </Typography>
+      <Stack gap={0.5}>
+        {d.steps.map((step: DebugCountStep, i: number) => {
+          const isZero = step.count === 0;
+          const pct = maxCount > 0 ? Math.round((step.count / maxCount) * 100) : 0;
+          const barColor = isZero ? '#ef5350' : i === 0 ? '#1ca8a4' : '#42a5f5';
+          return (
+            <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+              <Typography sx={{ fontSize: 11, color: '#555', width: 260, flexShrink: 0, lineHeight: 1.3 }}>
+                {step.label}
+              </Typography>
+              <Box sx={{ flex: 1, height: 14, bgcolor: '#f0f0f0', borderRadius: 1, overflow: 'hidden' }}>
+                <Box sx={{ width: `${pct}%`, height: '100%', bgcolor: barColor, borderRadius: 1, transition: 'width 0.3s' }} />
+              </Box>
+              <Typography sx={{ fontSize: 11, fontWeight: 700, color: isZero ? '#ef5350' : '#333', width: 32, textAlign: 'right', flexShrink: 0 }}>
+                {step.count}
+              </Typography>
+            </Box>
+          );
+        })}
+      </Stack>
+    </Box>
+  );
 };
 
 const MessageBody: React.FC<MessageBodyProps> = ({
@@ -40,9 +116,11 @@ const MessageBody: React.FC<MessageBodyProps> = ({
   onCreateClick,
   onSuggestionClick,
   onRequestProfile,
+  debugMessages,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [debugOpen, setDebugOpen] = useState(false);
 
   const handleDownloadSQL = (sql: string) => {
     const blob = new Blob([sql], { type: 'text/plain' });
@@ -376,88 +454,36 @@ const MessageBody: React.FC<MessageBodyProps> = ({
           </Box>
       )}
 
-      {/* Debug — run_cte: show rows */}
-      {msg.contents.debugRunCte && (() => {
-        const d = msg.contents.debugRunCte!;
-        if (d.error) {
-          return <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>;
-        }
-        const cols = d.rows.length > 0 ? Object.keys(d.rows[0]) : [];
-        return (
-          <Box sx={{ mt: 1 }}>
-            <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
-              {d.cte_name}{d.column ? ` · ${d.column}` : ''} — {d.row_count} ligne{d.row_count !== 1 ? 's' : ''}
-            </Typography>
-            {d.lineage && (
-              <Typography variant="caption" sx={{ display: 'block', color: '#888', mb: 0.75, fontStyle: 'italic' }}>
-                Lineage : {d.lineage}
-              </Typography>
-            )}
-            {cols.length > 0 ? (
-              <Box sx={{ overflowX: 'auto', border: '1px solid #e0e0e0', borderRadius: '6px' }}>
-                <Table size="small">
-                  <TableHead>
-                    <TableRow sx={{ bgcolor: '#f5f5f5' }}>
-                      {cols.map((c) => (
-                        <TableCell key={c} sx={{ fontSize: 11, fontWeight: 700, color: '#555', py: 0.5, px: 1 }}>{c}</TableCell>
-                      ))}
-                    </TableRow>
-                  </TableHead>
-                  <TableBody>
-                    {d.rows.map((row, i) => (
-                      <TableRow key={i} sx={{ '&:last-child td': { border: 0 } }}>
-                        {cols.map((c) => (
-                          <TableCell key={c} sx={{ fontSize: 11, color: '#333', py: 0.5, px: 1 }}>
-                            {row[c] === null || row[c] === undefined ? <em style={{ color: '#aaa' }}>null</em> : String(row[c])}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </Box>
-            ) : (
-              <Typography variant="caption" sx={{ color: '#999' }}>Aucune ligne retournée.</Typography>
-            )}
-          </Box>
-        );
-      })()}
+      {/* Debug — standalone fallback (edge case: message rendered directly) */}
+      {msg.contents.debugRunCte && <DebugRunCteContent d={msg.contents.debugRunCte} />}
+      {msg.contents.debugCountSteps && <DebugCountStepsContent d={msg.contents.debugCountSteps} />}
 
-      {/* Debug — count_cte_steps: step-by-step count waterfall */}
-      {msg.contents.debugCountSteps && (() => {
-        const d = msg.contents.debugCountSteps!;
-        if (d.error) {
-          return <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>;
-        }
-        const maxCount = Math.max(...d.steps.map((s) => s.count), 1);
-        return (
-          <Box sx={{ mt: 1 }}>
-            <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
-              {d.cte_name} — analyse étape par étape
-            </Typography>
-            <Stack gap={0.5}>
-              {d.steps.map((step: DebugCountStep, i: number) => {
-                const isZero = step.count === 0;
-                const pct = maxCount > 0 ? Math.round((step.count / maxCount) * 100) : 0;
-                const barColor = isZero ? '#ef5350' : i === 0 ? '#1ca8a4' : '#42a5f5';
-                return (
-                  <Box key={i} sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography sx={{ fontSize: 11, color: '#555', width: 260, flexShrink: 0, lineHeight: 1.3 }}>
-                      {step.label}
-                    </Typography>
-                    <Box sx={{ flex: 1, height: 14, bgcolor: '#f0f0f0', borderRadius: 1, overflow: 'hidden' }}>
-                      <Box sx={{ width: `${pct}%`, height: '100%', bgcolor: barColor, borderRadius: 1, transition: 'width 0.3s' }} />
-                    </Box>
-                    <Typography sx={{ fontSize: 11, fontWeight: 700, color: isZero ? '#ef5350' : '#333', width: 32, textAlign: 'right', flexShrink: 0 }}>
-                      {step.count}
-                    </Typography>
-                  </Box>
-                );
-              })}
-            </Stack>
+      {/* Debug — résultats collapsés (rattachés au message parent) */}
+      {debugMessages && debugMessages.length > 0 && (
+        <Box sx={{ mt: 0.75 }}>
+          <Box
+            onClick={() => setDebugOpen(o => !o)}
+            sx={{
+              display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
+              color: '#888', fontSize: 12,
+              '&:hover': { color: '#555' },
+            }}
+          >
+            <ExpandMoreIcon sx={{ fontSize: 14, transform: debugOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+            Réflexion
           </Box>
-        );
-      })()}
+          <Collapse in={debugOpen}>
+            <Box sx={{ mt: 0.5 }}>
+              {debugMessages.map(dm => (
+                <Box key={dm.id}>
+                  {dm.contents.debugRunCte && <DebugRunCteContent d={dm.contents.debugRunCte} />}
+                  {dm.contents.debugCountSteps && <DebugCountStepsContent d={dm.contents.debugCountSteps} />}
+                </Box>
+              ))}
+            </Box>
+          </Collapse>
+        </Box>
+      )}
 
       {/* Erreur */}
       {msg.contents.error && (

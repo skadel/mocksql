@@ -444,7 +444,10 @@ async def generate_examples_(
     if sim_result is not None:
         logger.debug(
             "[generator] sim_result.source_columns: %s",
-            [(str(r), [str(c) for c in cs]) for r, cs in sim_result.source_columns.items()],
+            [
+                (str(r), [str(c) for c in cs])
+                for r, cs in sim_result.source_columns.items()
+            ],
         )
 
     filtered_schema = filter_columns(schema, used_columns)
@@ -455,11 +458,19 @@ async def generate_examples_(
     base_tables = {entry["table"].lower() for entry in used_columns}
     faker_cols: dict[str, set[str]] = {}
     _has_unnest = "unnest" in optimized_sql.lower()
-    logger.debug("[generator] _has_unnest=%s  sim_result=%s", _has_unnest, sim_result is not None)
-    if sim_result is not None and not _has_unnest and _all_refs_resolved(sim_result, base_tables):
+    logger.debug(
+        "[generator] _has_unnest=%s  sim_result=%s", _has_unnest, sim_result is not None
+    )
+    if (
+        sim_result is not None
+        and not _has_unnest
+        and _all_refs_resolved(sim_result, base_tables)
+    ):
         faker_cols = _compute_faker_columns(sim_result, used_columns, base_tables)
 
-    logger.debug("[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()})
+    logger.debug(
+        "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
+    )
 
     # Build LLM schema with Faker-eligible columns removed to shrink the prompt
     llm_filtered_schema = filtered_schema
@@ -504,15 +515,25 @@ async def generate_examples_(
     if prompt is None:
         return None, None
 
-    logger.diag("\n%s", "="*60)
-    logger.diag("[generator] constraints_hint:\n%s", constraints or "(vide — sous-requêtes corrélées non capturées ?)")
-    logger.diag("[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()})
+    logger.diag("\n%s", "=" * 60)
+    logger.diag(
+        "[generator] constraints_hint:\n%s",
+        constraints or "(vide — sous-requêtes corrélées non capturées ?)",
+    )
+    logger.diag(
+        "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
+    )
     try:
         formatted_msgs = prompt.format_messages()
-        logger.diag("[generator] PROMPT LLM (dernier message):\n%s", formatted_msgs[-1].content[:3000])
+        logger.diag(
+            "[generator] PROMPT LLM (dernier message):\n%s",
+            formatted_msgs[-1].content[:3000],
+        )
     except Exception:
-        logger.diag("[generator] PROMPT LLM (template):\n%s", str(prompt.messages[-1])[:3000])
-    logger.diag("%s\n", "="*60)
+        logger.diag(
+            "[generator] PROMPT LLM (template):\n%s", str(prompt.messages[-1])[:3000]
+        )
+    logger.diag("%s\n", "=" * 60)
 
     llm = make_llm()
     generated_data = await (prompt | llm | parser).ainvoke({})
@@ -521,7 +542,11 @@ async def generate_examples_(
 
     logger.diag("[generator] données générées par le LLM:")
     for table_name, rows in filled_data.items():
-        logger.diag("  %s: %s ligne(s)", table_name, len(rows) if isinstance(rows, list) else "?")
+        logger.diag(
+            "  %s: %s ligne(s)",
+            table_name,
+            len(rows) if isinstance(rows, list) else "?",
+        )
 
     # Merge Faker-generated values into LLM output
     if faker_cols:
@@ -699,7 +724,9 @@ def _compute_faker_columns(
     # subquery that it can't propagate), don't Faker-fill anything — the LLM sees the
     # full SQL and will respect the WHERE clause on its own.
     if not constrained:
-        logger.debug("[faker] source_columns empty — skipping Faker fill, delegating to LLM")
+        logger.debug(
+            "[faker] source_columns empty — skipping Faker fill, delegating to LLM"
+        )
         return {}
 
     faker_cols: dict[str, set[str]] = {}

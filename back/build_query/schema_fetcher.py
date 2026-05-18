@@ -76,17 +76,36 @@ _API_TIMEOUT = 60.0
 _CLI_TIMEOUT = 60
 
 
-async def _fetch_table_via_api(client: Any, ref: str, billing_project: str) -> list:
+def _extract_partition_info(bq_table: Any) -> dict | None:
+    """Extract partition metadata from a BigQuery Table object."""
+    if bq_table.time_partitioning:
+        return {
+            "type": "time",
+            "granularity": bq_table.time_partitioning.type_,  # DAY, HOUR, MONTH, YEAR
+            "field": bq_table.time_partitioning.field,  # None = ingestion time (_PARTITIONDATE)
+        }
+    if bq_table.range_partitioning:
+        return {
+            "type": "range",
+            "field": bq_table.range_partitioning.field,
+        }
+    return None
+
+
+async def _fetch_table_via_api(
+    client: Any, ref: str, billing_project: str
+) -> tuple[list, dict | None]:
     proj, dataset, table = parse_ref(ref, billing_project)
     bq_table = await asyncio.wait_for(
         asyncio.to_thread(client.get_table, f"{proj}.{dataset}.{table}"),
         timeout=_API_TIMEOUT,
     )
     fields = _schema_fields_to_dicts(bq_table.schema)
-    return [
+    rows = [
         {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
         for row in _flatten_bq_schema(fields)
     ]
+    return rows, _extract_partition_info(bq_table)
 
 
 _AUTH_KEYWORDS = (
@@ -153,38 +172,38 @@ async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
 
 async def _fetch_single_table(
     sem: asyncio.Semaphore, client: Any, ref: str, billing_project: str
-) -> tuple[str, list, str | None]:
+) -> tuple[str, list, dict | None, str | None]:
     async with sem:
         try:
-            rows = await _fetch_table_via_api(client, ref, billing_project)
-            return ref, rows, None
+            rows, partition = await _fetch_table_via_api(client, ref, billing_project)
+            return ref, rows, partition, None
         except Exception as api_exc:
             if _is_auth_error(api_exc):
                 return (
                     ref,
                     [],
-                    (
-                        "Reauthentication required. Run: gcloud auth application-default login"
-                    ),
+                    None,
+                    "Reauthentication required. Run: gcloud auth application-default login",
                 )
             print(f"[import] API failed for {ref} ({api_exc}), trying CLI fallback")
             try:
                 rows = await _fetch_table_via_cli(ref, billing_project)
-                return ref, rows, None
+                return ref, rows, None, None
             except Exception as cli_exc:
-                return ref, [], str(cli_exc)
+                return ref, [], None, str(cli_exc)
 
 
 async def fetch_tables_schema(
     refs: list[str],
     billing_project: str,
     concurrency: int = 3,
-) -> tuple[list[dict], list[dict]]:
+) -> tuple[list[dict], list[dict], dict[str, dict]]:
     """Fetch BigQuery schema for a list of table refs.
 
-    Returns (schema_rows, failed) where:
+    Returns (schema_rows, failed, partitions) where:
       - schema_rows: flat list of INFORMATION_SCHEMA-style dicts
       - failed: list of {"table": ref, "error": msg}
+      - partitions: {ref: {"type": "time"|"range", "granularity": str, "field": str|None}}
     """
     from google.cloud import bigquery as _bq
 
@@ -195,13 +214,16 @@ async def fetch_tables_schema(
 
     schema_rows: list[dict] = []
     failed: list[dict] = []
-    for ref, rows, error in results:
+    partitions: dict[str, dict] = {}
+    for ref, rows, partition, error in results:
         if error:
             failed.append({"table": ref, "error": error})
         else:
             schema_rows.extend(rows)
+            if partition:
+                partitions[ref] = partition
 
-    return schema_rows, failed
+    return schema_rows, failed, partitions
 
 
 async def fetch_tables_schema_snowflake(

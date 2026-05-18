@@ -29,7 +29,9 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
 
     cfg = load_config(config)
     dialect = cfg.get("dialect", "bigquery")
-    cache_path = str(config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json"))
+    cache_path = str(
+        config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
+    )
     preprocessor_fn = cfg.get("preprocessor_fn")
 
     billing_project = (
@@ -66,11 +68,23 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
             typer.echo(f"[WARN] Unqualified table refs: {unqualified}")
         to_fetch = [r for r in missing if validate_bq_ref(r)]
         if to_fetch:
-            schema_rows, failed = await fetch_tables_schema(to_fetch, billing_project)
+            schema_rows, failed, partitions = await fetch_tables_schema(
+                to_fetch, billing_project
+            )
             if failed:
                 typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
             if schema_rows:
-                new_tables = generate_tables_and_columns_from_project_schema({"data": schema_rows})
+                new_tables = generate_tables_and_columns_from_project_schema(
+                    {"data": schema_rows}
+                )
+                if partitions:
+                    for tbl in new_tables:
+                        full_name = tbl.get("table_name", "")
+                        info = partitions.get(full_name) or partitions.get(
+                            full_name.split(".")[-1]
+                        )
+                        if info:
+                            tbl["partition"] = info
                 updated = merge_into_cache(cached, new_tables)
                 save_schema_cache(cache_path, updated)
                 typer.echo(f"[OK] Schema cache updated ({len(new_tables)} table(s)).")
@@ -87,18 +101,25 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
     def executor(bq_sql: str) -> list[dict]:
         logger.diag("[profile] BQ query (%d chars):\n%s", len(bq_sql), bq_sql)
         rows = [dict(row) for row in client.query(bq_sql).result()]
-        logger.diag("[profile] → %d row(s): %s", len(rows), json.dumps(rows, default=str))
+        logger.diag(
+            "[profile] → %d row(s): %s", len(rows), json.dumps(rows, default=str)
+        )
         return rows
 
     schema_for_profiler = _to_profiler_schema(schemas)
-    logger.diag("[profile] schema_for_profiler:\n%s", json.dumps(schema_for_profiler, indent=2, default=str))
+    logger.diag(
+        "[profile] schema_for_profiler:\n%s",
+        json.dumps(schema_for_profiler, indent=2, default=str),
+    )
 
     typer.echo("Running profile_schema...")
     result = profile_schema(schema_for_profiler, executor, dialect=dialect)
     typer.echo(f"[OK] profile_schema -> {len(result.get('tables', {}))} table(s)")
 
     typer.echo("Running profile_joins...")
-    result["joins"] = profile_joins_for_query(schema_for_profiler, sql, executor, dialect=dialect)
+    result["joins"] = profile_joins_for_query(
+        schema_for_profiler, sql, executor, dialect=dialect
+    )
     typer.echo(f"[OK] profile_joins -> {len(result['joins'])} join(s)")
 
     output_dir.mkdir(parents=True, exist_ok=True)

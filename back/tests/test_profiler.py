@@ -22,6 +22,7 @@ from build_query.profiler import (
     _extract_subquery_aliases,
     _resolve_alias_to_table,
     describe_join,
+    _build_partition_where,
 )
 
 
@@ -2017,6 +2018,169 @@ class TestBuildProfileQueryInlineSubquery(unittest.TestCase):
             q, dialect="bigquery", error_level=sqlglot.ErrorLevel.RAISE
         )
         self.assertGreater(len(parsed), 0)
+
+
+# ─── Partitioned tables ───────────────────────────────────────────────────────
+
+_PARTITIONED_SCHEMA = {
+    "tables": [
+        {
+            "name": "project.dataset.events",
+            "columns": [
+                {"name": "event_date", "type": "DATE"},
+                {"name": "user_id", "type": "STRING"},
+                {"name": "revenue", "type": "FLOAT64"},
+            ],
+            "partition": {"type": "time", "field": "event_date"},
+        }
+    ]
+}
+
+_INGESTION_TIME_SCHEMA = {
+    "tables": [
+        {
+            "name": "project.dataset.logs",
+            "columns": [
+                {"name": "message", "type": "STRING"},
+                {"name": "level", "type": "STRING"},
+            ],
+            "partition": {"type": "time", "field": None},
+        }
+    ]
+}
+
+_RANGE_PARTITIONED_SCHEMA = {
+    "tables": [
+        {
+            "name": "project.dataset.sales",
+            "columns": [
+                {"name": "region_id", "type": "INTEGER"},
+                {"name": "amount", "type": "FLOAT64"},
+            ],
+            "partition": {"type": "range", "field": "region_id"},
+        }
+    ]
+}
+
+
+class TestBuildPartitionWhere(unittest.TestCase):
+    """Unit tests for _build_partition_where."""
+
+    def test_time_field_based_returns_in_clause(self):
+        result = _build_partition_where(
+            "project.dataset.events",
+            {"type": "time", "field": "event_date"},
+            "bigquery",
+            3,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("event_date", result)
+        self.assertIn("LIMIT 3", result)
+        self.assertIn("ORDER BY", result)
+        self.assertIn("DESC", result)
+
+    def test_ingestion_time_uses_partitiondate(self):
+        result = _build_partition_where(
+            "project.dataset.logs",
+            {"type": "time", "field": None},
+            "bigquery",
+            5,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("_PARTITIONDATE", result)
+        self.assertIn("LIMIT 5", result)
+
+    def test_range_partitioning_returns_none(self):
+        result = _build_partition_where(
+            "project.dataset.sales",
+            {"type": "range", "field": "region_id"},
+            "bigquery",
+            3,
+        )
+        self.assertIsNone(result)
+
+    def test_empty_partition_returns_none(self):
+        self.assertIsNone(_build_partition_where("t", {}, "bigquery", 3))
+
+    def test_limit_respected(self):
+        result = _build_partition_where(
+            "project.dataset.events",
+            {"type": "time", "field": "event_date"},
+            "bigquery",
+            7,
+        )
+        self.assertIn("LIMIT 7", result)
+
+
+class TestBuildProfileQueryPartitioned(unittest.TestCase):
+    """Integration tests: build_profile_query with partitioned tables."""
+
+    _USED = [
+        {"table": "project.dataset.events", "used_columns": ["user_id", "revenue"]}
+    ]
+
+    def _query(self, options=None):
+        return build_profile_query(
+            _PARTITIONED_SCHEMA,
+            self._USED,
+            dialect="bigquery",
+            options=options,
+        )
+
+    def test_partition_where_injected_in_column_branches(self):
+        q = self._query(options={"partition_limit": 3})
+        col_branches = [b for b in q.split("UNION ALL") if "'column'" in b]
+        self.assertGreater(len(col_branches), 0)
+        for branch in col_branches:
+            self.assertIn("event_date", branch)
+            self.assertIn("LIMIT 3", branch)
+
+    def test_no_partition_when_limit_none(self):
+        # partition_limit=None → the partition field (event_date) must not appear
+        # as a WHERE filter in column branches (LIMIT still appears in top_values)
+        q = self._query(options={"partition_limit": None})
+        col_branches = [b for b in q.split("UNION ALL") if "'column'" in b]
+        self.assertGreater(len(col_branches), 0)
+        for branch in col_branches:
+            self.assertNotIn("event_date", branch)
+
+    def test_partition_limit_default_is_3(self):
+        """Default partition_limit=3 applies without explicit options."""
+        q = self._query()
+        self.assertIn("LIMIT 3", q)
+
+    def test_generated_sql_parseable(self):
+        q = self._query(options={"partition_limit": 3})
+        parsed = sqlglot.parse(
+            q, dialect="bigquery", error_level=sqlglot.ErrorLevel.RAISE
+        )
+        self.assertGreater(len(parsed), 0)
+
+    def test_ingestion_time_partition(self):
+        used = [{"table": "project.dataset.logs", "used_columns": ["message"]}]
+        q = build_profile_query(
+            _INGESTION_TIME_SCHEMA,
+            used,
+            dialect="bigquery",
+            options={"partition_limit": 2},
+        )
+        self.assertIn("_PARTITIONDATE", q)
+        self.assertIn("LIMIT 2", q)
+
+    def test_range_partition_no_filter(self):
+        # Range partitioning is skipped → partition field (region_id) must not appear
+        # as a WHERE filter in column branches for 'amount'
+        used = [{"table": "project.dataset.sales", "used_columns": ["amount"]}]
+        q = build_profile_query(
+            _RANGE_PARTITIONED_SCHEMA,
+            used,
+            dialect="bigquery",
+            options={"partition_limit": 3},
+        )
+        col_branches = [b for b in q.split("UNION ALL") if "'column'" in b]
+        self.assertGreater(len(col_branches), 0)
+        for branch in col_branches:
+            self.assertNotIn("region_id", branch)
 
 
 if __name__ == "__main__":

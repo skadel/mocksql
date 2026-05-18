@@ -350,6 +350,7 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
 
     if body.dialect == "snowflake":
         schema_data, failed = await fetch_tables_schema_snowflake(body.tables_to_import)
+        partitions: dict = {}
         source_label = "Snowflake"
     else:
         unqualified = [t for t in body.tables_to_import if not validate_bq_ref(t)]
@@ -366,7 +367,7 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
                 },
             )
         billing_project = BQ_SCHEMA_BILLING_PROJECT
-        schema_data, failed = await fetch_tables_schema(
+        schema_data, failed, partitions = await fetch_tables_schema(
             body.tables_to_import, billing_project
         )
         source_label = "BigQuery"
@@ -388,6 +389,15 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
 
     new_schema = generate_tables_and_columns_from_project_schema({"data": schema_data})
 
+    # Enrich each table dict with partition info when available (keyed by short or full ref).
+    if partitions:
+        for tbl in new_schema:
+            full_name = tbl.get("table_name", "")
+            short_name = full_name.split(".")[-1] if full_name else ""
+            info = partitions.get(full_name) or partitions.get(short_name)
+            if info:
+                tbl["partition"] = info
+
     from models.schemas import save_schemas
 
     save_schemas(new_schema)
@@ -395,6 +405,63 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
     return {
         "imported": len(new_schema),
         "tables": [t["table_name"] for t in new_schema],
+    }
+
+
+class RefreshSchemasRequest(BaseModel):
+    tables: list[str] = []  # empty = refresh all stored BQ tables
+
+
+@router.post("/refresh-schemas")
+async def refresh_schemas_route(body: RefreshSchemasRequest):
+    """Re-import schemas from BigQuery to pick up partition info on existing tables."""
+    from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
+    from utils.schema_utils import generate_tables_and_columns_from_project_schema
+    from models.schemas import get_schemas, save_schemas
+
+    if body.tables:
+        refs = [t for t in body.tables if validate_bq_ref(t)]
+    else:
+        existing = await get_schemas()
+        refs = [
+            t["table_name"]
+            for t in existing
+            if validate_bq_ref(t.get("table_name", ""))
+            and len(t["table_name"].split(".")) == 3
+        ]
+
+    if not refs:
+        return {"refreshed": 0, "tables": []}
+
+    billing_project = BQ_SCHEMA_BILLING_PROJECT
+    schema_data, failed, partitions = await fetch_tables_schema(refs, billing_project)
+
+    if failed:
+        print(f"[refresh-schemas] Échec partiel : {failed}")
+
+    if not schema_data:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Aucune donnée retournée depuis BigQuery : {failed}",
+        )
+
+    new_schema = generate_tables_and_columns_from_project_schema({"data": schema_data})
+
+    if partitions:
+        for tbl in new_schema:
+            full_name = tbl.get("table_name", "")
+            short_name = full_name.split(".")[-1] if full_name else ""
+            info = partitions.get(full_name) or partitions.get(short_name)
+            if info:
+                tbl["partition"] = info
+
+    save_schemas(new_schema)
+
+    partitioned = [t["table_name"] for t in new_schema if t.get("partition")]
+    return {
+        "refreshed": len(new_schema),
+        "tables": [t["table_name"] for t in new_schema],
+        "partitioned": partitioned,
     }
 
 

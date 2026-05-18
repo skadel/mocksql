@@ -18,6 +18,7 @@ class QueryState(TypedDict):
     history: Annotated[list[AnyMessage], add_messages]
     status: Union[str, None]
     gen_retries: int
+    debug_retries: int
     changed_message_id: str
     parent_message_id: str
     session: str

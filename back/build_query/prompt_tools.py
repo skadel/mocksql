@@ -380,7 +380,9 @@ def generate_data_prompt(
         else ""
     )
 
-    _ntile_match = re.search(r"\bNTILE\s*\(\s*(\d+)\s*\)", sql, re.IGNORECASE) if sql else None
+    _ntile_match = (
+        re.search(r"\bNTILE\s*\(\s*(\d+)\s*\)", sql, re.IGNORECASE) if sql else None
+    )
     ntile_block = (
         f"\n⚠️ **NTILE({_ntile_match.group(1)}) détecté** : génère au minimum **{_ntile_match.group(1)} lignes** "
         f"dans la table principale pour que la fonction de quantile produise des buckets distincts.\n"

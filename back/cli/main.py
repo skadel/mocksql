@@ -339,6 +339,106 @@ def _print_test_results(model_results: list) -> None:
         typer.echo(f"  {failed} test(s) FAILED — exit code 1")
 
 
+@app.command("refresh-schemas")
+def refresh_schemas(
+    config: Path = typer.Option(
+        Path("mocksql.yml"),
+        "--config",
+        "-c",
+        help="Path to mocksql.yml config.",
+    ),
+    tables: list[str] = typer.Option(
+        [],
+        "--table",
+        "-t",
+        help="Re-import only these tables (project.dataset.table). Default: all cached BQ tables.",
+    ),
+) -> None:
+    """Re-import schemas from BigQuery to pick up partition info on existing tables."""
+
+    async def _run() -> None:
+        from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
+        from cli.generate import (
+            load_config,
+            load_schema_cache,
+            merge_into_cache,
+            save_schema_cache,
+        )
+        from utils.schema_utils import generate_tables_and_columns_from_project_schema
+
+        cfg = load_config(config)
+        cache_path = str(
+            config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
+        )
+        billing_project = (
+            os.getenv("BQ_TEST_PROJECT")
+            or os.getenv("VERTEX_PROJECT")
+            or cfg.get("billing_project")
+        )
+        if not billing_project:
+            typer.echo(
+                "[ERROR] BQ_TEST_PROJECT not set. Set it in your environment or add "
+                "billing_project to mocksql.yml.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        cached = load_schema_cache(cache_path)
+
+        if tables:
+            refs = [t for t in tables if validate_bq_ref(t)]
+            invalid = [t for t in tables if not validate_bq_ref(t)]
+            if invalid:
+                typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+        else:
+            refs = [
+                t["table_name"]
+                for t in cached
+                if isinstance(t, dict)
+                and validate_bq_ref(t.get("table_name", ""))
+                and len(t["table_name"].split(".")) == 3
+            ]
+
+        if not refs:
+            typer.echo(
+                "No BigQuery tables found in cache. Run `mocksql generate` first."
+            )
+            raise typer.Exit()
+
+        typer.echo(f"Re-importing {len(refs)} table(s) from BigQuery...")
+        schema_rows, failed, partitions = await fetch_tables_schema(
+            refs, billing_project
+        )
+
+        if failed:
+            typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
+        if not schema_rows:
+            typer.echo("[ERROR] No data returned from BigQuery.", err=True)
+            raise typer.Exit(1)
+
+        new_tables = generate_tables_and_columns_from_project_schema(
+            {"data": schema_rows}
+        )
+        partitioned = []
+        for tbl in new_tables:
+            full_name = tbl.get("table_name", "")
+            info = partitions.get(full_name) or partitions.get(full_name.split(".")[-1])
+            if info:
+                tbl["partition"] = info
+                partitioned.append(full_name)
+
+        updated = merge_into_cache(cached, new_tables)
+        save_schema_cache(cache_path, updated)
+
+        typer.echo(f"[OK] {len(new_tables)} table(s) refreshed.")
+        if partitioned:
+            typer.echo(f"[OK] Partition info stored for: {partitioned}")
+        else:
+            typer.echo("[INFO] No partitioned tables detected.")
+
+    asyncio.run(_run())
+
+
 @app.command()
 def ui(
     port: int = typer.Option(8080, "--port", "-p", help="Port for the MockSQL server."),

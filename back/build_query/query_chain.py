@@ -33,7 +33,11 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
 
         statements = sqlglot.parse(sql, read=dialect)
         final_ast = next(
-            (s for s in statements if isinstance(s, (sqlglot.exp.Query, sqlglot.exp.With))),
+            (
+                s
+                for s in statements
+                if isinstance(s, (sqlglot.exp.Query, sqlglot.exp.With))
+            ),
             None,
         )
         if final_ast is None:
@@ -42,12 +46,14 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
         with_clause = final_ast.ctes
         if with_clause:
             for cte in with_clause:
-                ctes.append({
-                    "name": cte.alias_or_name,
-                    "code": cte.this.sql(dialect=dialect, pretty=True),
-                    "dependencies": [],
-                    "sources": [],
-                })
+                ctes.append(
+                    {
+                        "name": cte.alias_or_name,
+                        "code": cte.this.sql(dialect=dialect, pretty=True),
+                        "dependencies": [],
+                        "sources": [],
+                    }
+                )
         final_ast.ctes.clear()
         final_code = final_ast.sql(dialect=dialect, pretty=True)
 
@@ -60,19 +66,23 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
                 and node.alias not in existing_names
             ):
                 existing_names.add(node.alias)
-                ctes.append({
-                    "name": node.alias,
-                    "code": node.this.sql(dialect=dialect, pretty=True),
-                    "dependencies": [],
-                    "sources": [],
-                })
+                ctes.append(
+                    {
+                        "name": node.alias,
+                        "code": node.this.sql(dialect=dialect, pretty=True),
+                        "dependencies": [],
+                        "sources": [],
+                    }
+                )
 
-        ctes.append({
-            "name": "final_query",
-            "code": final_code,
-            "dependencies": [],
-            "sources": [],
-        })
+        ctes.append(
+            {
+                "name": "final_query",
+                "code": final_code,
+                "dependencies": [],
+                "sources": [],
+            }
+        )
         return json.dumps(ctes)
     except Exception as exc:
         print(f"[pre_routing] _lightweight_query_decomposed failed: {exc}")
@@ -279,7 +289,12 @@ def build_query_graph():
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
     builder.add_conditional_edges("conversational_agent", route_agent_output)
-    builder.add_edge("debug_node", "conversational_agent")
+    builder.add_conditional_edges(
+        "debug_node",
+        lambda s: (
+            "conversational_agent" if (s.get("debug_retries") or 0) > 0 else "generator"
+        ),
+    )
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")

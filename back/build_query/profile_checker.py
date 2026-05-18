@@ -207,7 +207,8 @@ def enrich_joins_with_cte_context(
 
 def _to_profiler_schema(schemas: list) -> dict:
     """Convert state["schemas"] (list of table dicts with "table_name") to
-    the {"tables": [{"name": ..., "columns": [...]}]} format expected by profiler.
+    the {"tables": [{"name": ..., "columns": [...], "partition": ...}]} format
+    expected by profiler.
 
     Always uses the fully-qualified table name so the generated SQL FROM clause
     is correct (e.g. project.dataset.country_summary, not just country_summary).
@@ -215,12 +216,10 @@ def _to_profiler_schema(schemas: list) -> dict:
     tables = []
     for t in schemas:
         full_name = t.get("table_name") or t.get("name", "")
-        tables.append(
-            {
-                "name": full_name,
-                "columns": t.get("columns", []),
-            }
-        )
+        entry: dict = {"name": full_name, "columns": t.get("columns", [])}
+        if t.get("partition"):
+            entry["partition"] = t["partition"]
+        tables.append(entry)
     return {"tables": tables}
 
 
@@ -419,11 +418,13 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
     dialect = state.get("dialect", "bigquery")
     sql_query = state.get("query") or None
     missing_resolved = _resolve_full_table_names(missing, schemas)
+    partition_limit: int | None = state.get("profile_partition_limit", 3)
     profile_sql = build_profile_query(
         schema=_to_profiler_schema(schemas),
         used_columns=missing_resolved,
         dialect=dialect,
         sql_query=sql_query,
+        options={"partition_limit": partition_limit},
     )
     expected_joins = _extract_expected_join_pairs(sql_query or "", dialect)
 

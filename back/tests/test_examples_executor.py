@@ -336,7 +336,7 @@ class TestDetermineGlobalStatus:
 
     def test_single_error_status(self):
         results = [{"status": "error"}]
-        assert _determine_global_status(results) == "complete"
+        assert _determine_global_status(results) == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -444,7 +444,7 @@ class TestParseUnitTestsFromState:
             "project": "proj",
             "query": "",
             "status": "",
-            "gen_retries": 2,
+            "gen_retries": 1,
             "request_id": None,
             "optimized_sql": "",
             "query_decomposed": "[]",

@@ -66,9 +66,13 @@ async def evaluate_tests(state: QueryState):
             check_correlated_aggregate_cardinality,
             check_having_cardinality,
         )
+
         dialect = state.get("dialect", "bigquery")
         cardinality_error: str | None = None
-        for _check in (check_having_cardinality, check_correlated_aggregate_cardinality):
+        for _check in (
+            check_having_cardinality,
+            check_correlated_aggregate_cardinality,
+        ):
             try:
                 _check(sql, dialect)
             except ValueError as exc:
@@ -121,7 +125,10 @@ Tu reçois une requête SQL et les détails d'un test unitaire qui vient d'être
 
 Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Couvre la jointure sur clé manquante. Données et résultat valides."}}"""
 
-    logger.diag("[evaluator] test_detail:\n%s", json.dumps(test_detail, ensure_ascii=False, indent=2))
+    logger.diag(
+        "[evaluator] test_detail:\n%s",
+        json.dumps(test_detail, ensure_ascii=False, indent=2),
+    )
     logger.diag("[evaluator] prompt:\n%s", prompt)
 
     llm = make_llm()
@@ -129,7 +136,12 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
 
     try:
         result: _EvaluationOutput = await structured_llm.ainvoke(prompt)
-        logger.diag("[evaluator] verdict=%s reason_type=%s — %s", result.verdict, result.reason_type, result.explanation)
+        logger.diag(
+            "[evaluator] verdict=%s reason_type=%s — %s",
+            result.verdict,
+            result.reason_type,
+            result.explanation,
+        )
     except Exception as exc:
         if is_vertex_permission_error(exc):
             return {}
@@ -139,7 +151,7 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
 
     eval_test_index = current_test.get("test_index")
     gen_retries = (
-        state.get("gen_retries") if state.get("gen_retries") is not None else 2
+        state.get("gen_retries") if state.get("gen_retries") is not None else 1
     )
 
     evaluation_feedback = (

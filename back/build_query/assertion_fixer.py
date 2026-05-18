@@ -57,7 +57,8 @@ async def fix_assertions(state: QueryState):
         return {}
 
     current_test = find_current_test(
-        existing_tests, eval_test_idx if eval_test_idx is not None else state.get("test_index")
+        existing_tests,
+        eval_test_idx if eval_test_idx is not None else state.get("test_index"),
     )
     if not current_test:
         return {}

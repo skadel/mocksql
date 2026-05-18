@@ -1,6 +1,8 @@
 import { createSelector } from '@reduxjs/toolkit';
 import { RootState } from '../app/store';
-import { Message, MessageGroup } from '../utils/types';
+import { Message, MessageGroup, MsgType } from '../utils/types';
+
+const DEBUG_TYPES = new Set<string>([MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS]);
 
 const isMessage = (item: any): item is Message => !!item && item.id !== undefined;
 
@@ -136,6 +138,9 @@ export const getRenderMessages = createSelector(
       if (processedIds.has(msg.id)) return;
       processedIds.add(msg.id);
 
+      // Debug messages are embedded inside their parent as a collapsed section, not standalone.
+      if (DEBUG_TYPES.has(getContentType(msg) ?? '')) return;
+
       const last = out[out.length - 1];
 
       if (last && isMessage(last)) {
@@ -156,7 +161,10 @@ export const getRenderMessages = createSelector(
         out.push(msg);
       }
 
-      const children = getChildren(msg.id);
+      // Filter out debug children for branching — they are rendered inside the parent.
+      const children = getChildren(msg.id).filter(
+        c => !DEBUG_TYPES.has(getContentType(c) ?? '')
+      );
       if (children.length > 1) {
         const branches: (Message | MessageGroup)[][] = [];
         for (const child of children) {

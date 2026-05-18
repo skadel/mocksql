@@ -12,10 +12,18 @@ Public API:
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable, Optional
 
 import sqlglot
 from sqlglot import expressions as exp
+
+try:
+    import utils.logger  # noqa: F401 — registers DIAG level (15)
+except ImportError:
+    pass
+
+logger = logging.getLogger(__name__)
 
 
 # ─── Schema normalisation ────────────────────────────────────────────────────
@@ -130,7 +138,8 @@ _ORDERABLE_TYPES = frozenset(
 def _is_unprofilable(col_type: str) -> bool:
     """Return True if *col_type* cannot be used with MIN/MAX/DISTINCT/GROUP BY.
 
-    Applies to ARRAY, STRUCT, and RECORD types (BigQuery nested/repeated fields).
+    Applies to ARRAY, STRUCT, RECORD (BigQuery nested/repeated fields) and
+    GEOGRAPHY / GEOMETRY types which do not support aggregate functions.
 
     Examples:
         >>> _is_unprofilable("RECORD")
@@ -143,15 +152,23 @@ def _is_unprofilable(col_type: str) -> bool:
         True
         >>> _is_unprofilable("STRUCT<x STRING>")
         True
+        >>> _is_unprofilable("GEOGRAPHY")
+        True
+        >>> _is_unprofilable("GEOMETRY")
+        True
         >>> _is_unprofilable("STRING")
         False
         >>> _is_unprofilable("INTEGER")
         False
     """
     upper = col_type.upper().strip()
-    return upper in ("RECORD", "STRUCT", "ARRAY") or upper.startswith(
-        ("ARRAY<", "STRUCT<")
-    )
+    return upper in (
+        "RECORD",
+        "STRUCT",
+        "ARRAY",
+        "GEOGRAPHY",
+        "GEOMETRY",
+    ) or upper.startswith(("ARRAY<", "STRUCT<"))
 
 
 def _is_orderable(col_type: str) -> bool:
@@ -336,7 +353,11 @@ def _quote(name: str) -> str:
 
 
 def build_column_profile_queries(
-    table_name: str, col: dict, options: dict, dialect: str = "bigquery"
+    table_name: str,
+    col: dict,
+    options: dict,
+    dialect: str = "bigquery",
+    partition_where: str | None = None,
 ) -> dict[str, str]:
     """Return a dict of named SQL strings for profiling one column.
 
@@ -345,11 +366,14 @@ def build_column_profile_queries(
     temporal).
 
     Args:
-        table_name: Fully-qualified or bare table name as it appears in SQL.
-        col:        Column descriptor dict with at least ``"name"`` and
-                    optionally ``"type"``.
-        options:    Knobs dict; recognises ``"top_k_values"`` (default 20).
-        dialect:    SQL dialect for identifier quoting (default ``"bigquery"``).
+        table_name:      Fully-qualified or bare table name as it appears in SQL.
+        col:             Column descriptor dict with at least ``"name"`` and
+                         optionally ``"type"``.
+        options:         Knobs dict; recognises ``"top_k_values"`` (default 20).
+        dialect:         SQL dialect for identifier quoting (default ``"bigquery"``).
+        partition_where: Optional SQL WHERE fragment (e.g. from
+                         :func:`_build_partition_where`) applied to every query
+                         to restrict the scan to recent partitions.
 
     Returns:
         Dict mapping query name → SQL string.
@@ -388,24 +412,34 @@ def build_column_profile_queries(
     def _not_null() -> exp.Expression:
         return exp.Not(this=_is_null())
 
-    basic = (
-        exp.select(
-            exp.alias_(exp.Count(this=exp.Star()), "total_count"),
-            exp.alias_(
-                exp.Anonymous(this="COUNTIF", expressions=[_is_null()]), "null_count"
-            ),
-            exp.alias_(
-                exp.Count(this=exp.Distinct(expressions=[_cref()])), "distinct_count"
-            ),
-        )
-        .from_(_table_expr(table_name))
-        .sql(dialect=dialect)
-    )
+    pw_expr: exp.Expression | None = None
+    if partition_where:
+        try:
+            pw_expr = sqlglot.parse_one(partition_where, dialect=dialect)
+        except Exception:
+            pw_expr = None
 
-    dup_inner = (
+    def _apply_pw(q: exp.Select) -> exp.Select:
+        return q.where(pw_expr.copy()) if pw_expr is not None else q
+
+    basic_q = exp.select(
+        exp.alias_(exp.Count(this=exp.Star()), "total_count"),
+        exp.alias_(
+            exp.Anonymous(this="COUNTIF", expressions=[_is_null()]), "null_count"
+        ),
+        exp.alias_(
+            exp.Count(this=exp.Distinct(expressions=[_cref()])), "distinct_count"
+        ),
+    ).from_(_table_expr(table_name))
+    basic = _apply_pw(basic_q).sql(dialect=dialect)
+
+    dup_base = (
         exp.select(_cref(), exp.alias_(exp.Count(this=exp.Star()), "cnt"))
         .from_(_table_expr(table_name))
         .where(_not_null())
+    )
+    dup_inner = (
+        _apply_pw(dup_base)
         .group_by(exp.Literal.number(1))
         .having(
             exp.GT(this=exp.Count(this=exp.Star()), expression=exp.Literal.number(1))
@@ -417,12 +451,12 @@ def build_column_profile_queries(
         .sql(dialect=dialect)
     )
 
+    top_q = exp.select(
+        exp.alias_(_cref(), "val"),
+        exp.alias_(exp.Count(this=exp.Star()), "cnt"),
+    ).from_(_table_expr(table_name))
     top_values = (
-        exp.select(
-            exp.alias_(_cref(), "val"),
-            exp.alias_(exp.Count(this=exp.Star()), "cnt"),
-        )
-        .from_(_table_expr(table_name))
+        _apply_pw(top_q)
         .group_by(exp.Literal.number(1))
         .order_by(exp.Ordered(this=exp.column("cnt"), desc=True))
         .limit(top_k)
@@ -436,15 +470,15 @@ def build_column_profile_queries(
     }
 
     if _is_orderable(col.get("type", "")):
-        queries["minmax"] = (
+        mm_q = (
             exp.select(
                 exp.alias_(exp.Min(this=_cref()), "min_value"),
                 exp.alias_(exp.Max(this=_cref()), "max_value"),
             )
             .from_(_table_expr(table_name))
             .where(_not_null())
-            .sql(dialect=dialect)
         )
+        queries["minmax"] = _apply_pw(mm_q).sql(dialect=dialect)
 
     if _is_temporal(col.get("type", "")):
         reg_q = _build_regularity_query(
@@ -462,6 +496,7 @@ def build_column_profile(
     sql_executor: Callable[[str], list[dict]],
     options: dict,
     dialect: str = "bigquery",
+    partition_where: str | None = None,
 ) -> dict:
     """Execute profile queries for one column and return structured statistics.
 
@@ -528,9 +563,12 @@ def build_column_profile(
         >>> p["min_value"]
         1
     """
-    queries = build_column_profile_queries(table_name, col, options, dialect=dialect)
+    queries = build_column_profile_queries(
+        table_name, col, options, dialect=dialect, partition_where=partition_where
+    )
     col_type = col.get("type", "STRING")
     threshold = options.get("categorical_distinct_threshold", 20)
+    logger.diag("[profiler] basic query: %s", queries["basic"])
 
     # Basic stats
     basic_rows = sql_executor(queries["basic"])
@@ -820,6 +858,7 @@ def profile_schema(
         True
     """
     options = options or {}
+    partition_limit: int | None = options.get("partition_limit", 3)
     norm = normalize_schema(schema)
 
     result: dict = {"tables": {}, "joins": []}
@@ -827,16 +866,34 @@ def profile_schema(
     for table in norm["tables"]:
         table_name: str = table["name"]
         columns: list[dict] = table.get("columns", [])
+        logger.diag("[profiler] table=%s cols=%d", table_name, len(columns))
 
-        # Row count
-        try:
-            rc_rows = sql_executor(
-                exp.select(exp.alias_(exp.Count(this=exp.Star()), "row_count"))
-                .from_(_table_expr(table_name))
-                .sql(dialect=dialect)
+        # Compute partition WHERE once per table
+        pw: str | None = None
+        if partition_limit:
+            pw = _build_partition_where(
+                table_name, table.get("partition") or {}, dialect, partition_limit
             )
+            if pw:
+                logger.diag("[profiler] partition_where for %s: %s", table_name, pw)
+
+        # Row count (restricted to recent partitions when available)
+        rc_q = exp.select(exp.alias_(exp.Count(this=exp.Star()), "row_count")).from_(
+            _table_expr(table_name)
+        )
+        if pw:
+            try:
+                rc_q = rc_q.where(sqlglot.parse_one(pw, dialect=dialect))
+            except Exception:
+                pass
+        rc_sql = rc_q.sql(dialect=dialect)
+        logger.diag("[profiler] row_count query: %s", rc_sql)
+        try:
+            rc_rows = sql_executor(rc_sql)
             row_count = int((rc_rows[0].get("row_count") or 0)) if rc_rows else 0
-        except Exception:
+            logger.diag("[profiler] row_count=%d", row_count)
+        except Exception as rc_exc:
+            logger.warning("[profiler] row_count failed for %s: %s", table_name, rc_exc)
             row_count = 0
 
         # Column profiles
@@ -844,13 +901,28 @@ def profile_schema(
         for col in columns:
             col_type = col.get("type", "UNKNOWN")
             if _is_unprofilable(col_type) or "." in col["name"]:
-                col_profiles[col["name"]] = {"type": col_type, "skipped": "unprofilable type"}
+                col_profiles[col["name"]] = {
+                    "type": col_type,
+                    "skipped": "unprofilable type",
+                }
                 continue
+            logger.diag("[profiler] col=%s type=%s", col["name"], col_type)
             try:
                 col_profiles[col["name"]] = build_column_profile(
-                    table_name, col, sql_executor, options, dialect=dialect
+                    table_name,
+                    col,
+                    sql_executor,
+                    options,
+                    dialect=dialect,
+                    partition_where=pw,
                 )
             except Exception as exc:
+                logger.warning(
+                    "[profiler] col=%s table=%s failed: %s",
+                    col["name"],
+                    table_name,
+                    exc,
+                )
                 col_profiles[col["name"]] = {
                     "type": col_type,
                     "error": str(exc),
@@ -1276,6 +1348,24 @@ def _table_expr(table: str) -> exp.Table:
     return exp.Table(this=exp.Identifier(this=parts[0], quoted=True))
 
 
+def _build_partition_where(
+    table: str, partition: dict, dialect: str, limit: int
+) -> str | None:
+    """Return a SQL WHERE clause string that restricts to the last *limit* partitions.
+
+    Only time-partitioned tables are supported (range partitioning is skipped).
+    For ingestion-time partitioning (field=None) the pseudo-column _PARTITIONDATE
+    is used.  For column-based partitioning the named field is used.
+    """
+    if not partition or partition.get("type") != "time":
+        return None
+    field = partition.get("field")
+    col = field if field else "_PARTITIONDATE"
+    col_q = _col_id(col, dialect)
+    tbl_q = _table_expr(table).sql(dialect=dialect)
+    return f"{col_q} IN (SELECT DISTINCT {col_q} FROM {tbl_q} ORDER BY {col_q} DESC LIMIT {limit})"
+
+
 def _build_col_query(
     table: str,
     col: str,
@@ -1283,6 +1373,7 @@ def _build_col_query(
     dialect: str,
     top_k: int,
     idx: int,
+    partition_where: str | None = None,
 ) -> str:
     """Build one SELECT that computes all profile metrics for a single column.
 
@@ -1337,6 +1428,13 @@ def _build_col_query(
     str_dtype = exp.DataType.build(str_t)
     complex_col = _is_unprofilable(col_type)
 
+    pw_expr: exp.Expression | None = None
+    if partition_where:
+        try:
+            pw_expr = sqlglot.parse_one(partition_where, dialect=dialect)
+        except Exception:
+            pw_expr = None
+
     def _cref() -> exp.Column:
         return exp.Column(this=exp.Identifier(this=col, quoted=True))
 
@@ -1344,27 +1442,26 @@ def _build_col_query(
         return exp.Not(this=exp.Is(this=_cref(), expression=exp.Null()))
 
     if not complex_col:
-        dup_inner = (
-            exp.select(_cref())
-            .from_(_table_expr(table))
-            .where(_not_null())
-            .group_by(exp.Literal.number(1))
-            .having(
-                exp.GT(
-                    this=exp.Count(this=exp.Star()), expression=exp.Literal.number(1)
-                )
-            )
+        dup_base = exp.select(_cref()).from_(_table_expr(table)).where(_not_null())
+        if pw_expr is not None:
+            dup_base = dup_base.where(pw_expr.copy())
+        dup_inner = dup_base.group_by(exp.Literal.number(1)).having(
+            exp.GT(this=exp.Count(this=exp.Star()), expression=exp.Literal.number(1))
         )
         dup_expr: exp.Expression = exp.select(exp.Count(this=exp.Star())).from_(
             dup_inner.subquery(f"_dup_{idx}")
         )
 
         top_alias = f"_top_{idx}"
-        top_inner = (
+        top_base = (
             exp.select(_cref(), exp.alias_(exp.Count(this=exp.Star()), "_cnt"))
             .from_(_table_expr(table))
             .where(_not_null())
-            .group_by(exp.Literal.number(1))
+        )
+        if pw_expr is not None:
+            top_base = top_base.where(pw_expr.copy())
+        top_inner = (
+            top_base.group_by(exp.Literal.number(1))
             .order_by(exp.Ordered(this=exp.column("_cnt"), desc=True))
             .limit(top_k)
         )
@@ -1396,43 +1493,38 @@ def _build_col_query(
         except Exception:
             pass
 
-    return (
-        exp.select(
-            exp.alias_(exp.Literal.string("column"), "row_type"),
-            exp.alias_(exp.Literal.string(table), "table_name"),
-            exp.alias_(exp.Literal.string(col), "col_name"),
-            exp.alias_(exp.Count(this=exp.Star()), "total_count"),
-            exp.alias_(
-                exp.Sub(
-                    this=exp.Count(this=exp.Star()), expression=exp.Count(this=_cref())
-                ),
-                "null_count",
+    outer = exp.select(
+        exp.alias_(exp.Literal.string("column"), "row_type"),
+        exp.alias_(exp.Literal.string(table), "table_name"),
+        exp.alias_(exp.Literal.string(col), "col_name"),
+        exp.alias_(exp.Count(this=exp.Star()), "total_count"),
+        exp.alias_(
+            exp.Sub(
+                this=exp.Count(this=exp.Star()), expression=exp.Count(this=_cref())
             ),
-            exp.alias_(exp.Count(this=_cref()), "non_null_count"),
-            exp.alias_(distinct_expr, "distinct_count"),
-            exp.alias_(
-                dup_expr.subquery() if not complex_col else dup_expr, "dup_count"
-            ),
-            exp.alias_(min_expr, "min_val"),
-            exp.alias_(max_expr, "max_val"),
-            exp.alias_(
-                top_expr.subquery() if not complex_col else top_expr, "top_values"
-            ),
-            exp.alias_(exp.Null(), "left_table"),
-            exp.alias_(exp.Null(), "right_table"),
-            exp.alias_(exp.Null(), "left_expr"),
-            exp.alias_(exp.Null(), "right_expr"),
-            exp.alias_(exp.Null(), "join_type"),
-            exp.alias_(exp.Null(), "left_match_rate"),
-            exp.alias_(exp.Null(), "avg_right_per_left_key"),
-            exp.alias_(exp.Null(), "max_right_per_left_key"),
-            exp.alias_(exp.Null(), "left_key_sample"),
-            exp.alias_(exp.Null(), "right_where_sql"),
-            exp.alias_(reg_expr, "date_regularity"),
-        )
-        .from_(_table_expr(table))
-        .sql(dialect=dialect)
-    )
+            "null_count",
+        ),
+        exp.alias_(exp.Count(this=_cref()), "non_null_count"),
+        exp.alias_(distinct_expr, "distinct_count"),
+        exp.alias_(dup_expr.subquery() if not complex_col else dup_expr, "dup_count"),
+        exp.alias_(min_expr, "min_val"),
+        exp.alias_(max_expr, "max_val"),
+        exp.alias_(top_expr.subquery() if not complex_col else top_expr, "top_values"),
+        exp.alias_(exp.Null(), "left_table"),
+        exp.alias_(exp.Null(), "right_table"),
+        exp.alias_(exp.Null(), "left_expr"),
+        exp.alias_(exp.Null(), "right_expr"),
+        exp.alias_(exp.Null(), "join_type"),
+        exp.alias_(exp.Null(), "left_match_rate"),
+        exp.alias_(exp.Null(), "avg_right_per_left_key"),
+        exp.alias_(exp.Null(), "max_right_per_left_key"),
+        exp.alias_(exp.Null(), "left_key_sample"),
+        exp.alias_(exp.Null(), "right_where_sql"),
+        exp.alias_(reg_expr, "date_regularity"),
+    ).from_(_table_expr(table))
+    if pw_expr is not None:
+        outer = outer.where(pw_expr.copy())
+    return outer.sql(dialect=dialect)
 
 
 def _resolve_cte_source(
@@ -2049,6 +2141,7 @@ def build_profile_query(
     """
     options = options or {}
     top_k = options.get("top_k_values", 10)
+    partition_limit: int | None = options.get("partition_limit", 3)
     norm = normalize_schema(schema)
 
     type_map: dict[str, dict[str, str]] = {
@@ -2059,6 +2152,14 @@ def build_profile_query(
         for tbl in norm["tables_by_name"]
     }
 
+    # Pre-build partition WHERE clauses per table (None when no partition info or limit disabled).
+    partition_where_map: dict[str, str | None] = {}
+    if partition_limit:
+        for tbl_name, tbl_dict in norm["tables_by_name"].items():
+            partition_where_map[tbl_name] = _build_partition_where(
+                tbl_name, tbl_dict.get("partition") or {}, dialect, partition_limit
+            )
+
     parts: list[str] = []
     idx = 0
 
@@ -2068,9 +2169,14 @@ def build_profile_query(
         if table not in norm["tables_by_name"]:
             continue
 
+        pw = partition_where_map.get(table) if partition_limit else None
         for col in col_list:
             col_type = type_map.get(table, {}).get(col, "STRING")
-            parts.append(_build_col_query(table, col, col_type, dialect, top_k, idx))
+            parts.append(
+                _build_col_query(
+                    table, col, col_type, dialect, top_k, idx, partition_where=pw
+                )
+            )
             idx += 1
 
     if not parts:
