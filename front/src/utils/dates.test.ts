@@ -1,3 +1,4 @@
+import { vi } from 'vitest';
 import { relativeDate } from './dates';
 
 const t = (key: string, opts?: { count?: number }): string => {
@@ -12,11 +13,11 @@ const t = (key: string, opts?: { count?: number }): string => {
 
 describe('relativeDate', () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    vi.useFakeTimers();
   });
 
   afterEach(() => {
-    jest.useRealTimers();
+    vi.useRealTimers();
   });
 
   it('returns empty string for undefined input', () => {
@@ -29,49 +30,49 @@ describe('relativeDate', () => {
 
   it('returns just_now for a timestamp less than 1 minute ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const thirtySecondsAgo = new Date(now.getTime() - 30 * 1000).toISOString();
     expect(relativeDate(thirtySecondsAgo, t)).toBe('just now');
   });
 
   it('returns minutes_ago for a timestamp 5 minutes ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const fiveMinutesAgo = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
     expect(relativeDate(fiveMinutesAgo, t)).toBe('5 minutes ago');
   });
 
   it('returns minutes_ago for exactly 59 minutes ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const ago = new Date(now.getTime() - 59 * 60 * 1000).toISOString();
     expect(relativeDate(ago, t)).toBe('59 minutes ago');
   });
 
   it('returns hours_ago for a timestamp 3 hours ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const threeHoursAgo = new Date(now.getTime() - 3 * 60 * 60 * 1000).toISOString();
     expect(relativeDate(threeHoursAgo, t)).toBe('3 hours ago');
   });
 
   it('returns hours_ago for exactly 23 hours ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const ago = new Date(now.getTime() - 23 * 60 * 60 * 1000).toISOString();
     expect(relativeDate(ago, t)).toBe('23 hours ago');
   });
 
   it('returns days_ago for a timestamp 2 days ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const twoDaysAgo = new Date(now.getTime() - 2 * 24 * 60 * 60 * 1000).toISOString();
     expect(relativeDate(twoDaysAgo, t)).toBe('2 days ago');
   });
 
   it('returns days_ago for exactly 1 day ago', () => {
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const ago = new Date(now.getTime() - 24 * 60 * 60 * 1000).toISOString();
     expect(relativeDate(ago, t)).toBe('1 days ago');
   });
@@ -83,7 +84,7 @@ describe('relativeDate', () => {
       return '';
     };
     const now = new Date('2026-04-27T12:00:00.000Z');
-    jest.setSystemTime(now);
+    vi.setSystemTime(now);
     const ago = new Date(now.getTime() - 45 * 60 * 1000).toISOString();
     relativeDate(ago, capturingT);
     expect(calls[0][0]).toBe('relative_date.minutes_ago');
