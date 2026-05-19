@@ -2020,6 +2020,122 @@ class TestBuildProfileQueryInlineSubquery(unittest.TestCase):
         self.assertGreater(len(parsed), 0)
 
 
+# ─── Inline subquery inside CTE body ─────────────────────────────────────────
+
+_CTE_WITH_INLINE_SUBQUERY_SQL = """
+WITH StateCases AS (
+    SELECT b.state_name, b.date, b.confirmed_cases - a.confirmed_cases AS daily_new_cases
+    FROM (
+        SELECT state_name, state_fips_code, confirmed_cases,
+               DATE_ADD(date, INTERVAL 1 DAY) AS date_shift
+        FROM `bigquery-public-data.covid19_nyt.us_states`
+        WHERE date >= '2020-02-29' AND date <= '2020-05-30'
+    ) a
+    JOIN `bigquery-public-data.covid19_nyt.us_states` b
+        ON a.state_fips_code = b.state_fips_code AND a.date_shift = b.date
+),
+CountyCases AS (
+    SELECT b.county, b.date, b.confirmed_cases - a.confirmed_cases AS daily_new_cases
+    FROM (
+        SELECT county, county_fips_code, confirmed_cases,
+               DATE_ADD(date, INTERVAL 1 DAY) AS date_shift
+        FROM `bigquery-public-data.covid19_nyt.us_counties`
+        WHERE date >= '2020-02-29' AND date <= '2020-05-30'
+    ) a
+    JOIN `bigquery-public-data.covid19_nyt.us_counties` b
+        ON a.county_fips_code = b.county_fips_code AND a.date_shift = b.date
+)
+SELECT county FROM CountyCases
+"""
+
+_CTE_INLINE_SCHEMA = {
+    "tables": [
+        {
+            "name": "bigquery-public-data.covid19_nyt.us_states",
+            "columns": [
+                {"name": "state_name", "type": "STRING"},
+                {"name": "state_fips_code", "type": "STRING"},
+                {"name": "confirmed_cases", "type": "INTEGER"},
+                {"name": "date", "type": "DATE"},
+            ],
+        },
+        {
+            "name": "bigquery-public-data.covid19_nyt.us_counties",
+            "columns": [
+                {"name": "county", "type": "STRING"},
+                {"name": "county_fips_code", "type": "STRING"},
+                {"name": "confirmed_cases", "type": "INTEGER"},
+                {"name": "date", "type": "DATE"},
+                {"name": "state_name", "type": "STRING"},
+            ],
+        },
+    ]
+}
+
+_CTE_INLINE_USED = [
+    {
+        "table": "bigquery-public-data.covid19_nyt.us_states",
+        "used_columns": ["state_name", "state_fips_code", "confirmed_cases", "date"],
+    },
+    {
+        "table": "bigquery-public-data.covid19_nyt.us_counties",
+        "used_columns": ["county", "county_fips_code", "confirmed_cases", "date"],
+    },
+]
+
+
+class TestBuildProfileQueryCteInlineSubquery(unittest.TestCase):
+    """Subquery aliases local to a CTE body (FROM (...) a) are hoisted to CTEs.
+
+    Without the fix, build_profile_query would generate FROM `a` which BigQuery
+    rejects because single-word identifiers must be dataset-qualified.
+    """
+
+    def _q(self):
+        return build_profile_query(
+            _CTE_INLINE_SCHEMA,
+            _CTE_INLINE_USED,
+            dialect="bigquery",
+            sql_query=_CTE_WITH_INLINE_SUBQUERY_SQL,
+        )
+
+    def test_generated_sql_parseable(self):
+        q = self._q()
+        parsed = sqlglot.parse(
+            q, dialect="bigquery", error_level=sqlglot.ErrorLevel.RAISE
+        )
+        self.assertGreater(len(parsed), 0)
+
+    def test_no_bare_alias_as_table(self):
+        """FROM `a` must not appear — `a` must be resolved to a CTE or real table."""
+        q = self._q()
+        self.assertNotIn("FROM `a`", q)
+        self.assertNotIn("FROM `a_2`", q)
+
+    def test_join_branches_present(self):
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        self.assertGreaterEqual(len(join_parts), 1)
+
+    def test_real_table_names_in_join_metadata(self):
+        """Stored table names must reference the real source tables, not the local alias."""
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        combined = " ".join(join_parts)
+        self.assertIn("us_states", combined)
+        self.assertIn("us_counties", combined)
+        self.assertNotIn("'a' AS left_table", combined)
+        self.assertNotIn("'a' AS right_table", combined)
+
+    def test_same_alias_in_two_ctes_disambiguated(self):
+        """Both CTEs use 'a' as local alias — both joins must be profiled independently."""
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        combined = " ".join(join_parts)
+        self.assertIn("us_states", combined)
+        self.assertIn("us_counties", combined)
+
+
 # ─── Partitioned tables ───────────────────────────────────────────────────────
 
 _PARTITIONED_SCHEMA = {

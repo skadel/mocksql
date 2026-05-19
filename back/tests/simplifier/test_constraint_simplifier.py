@@ -10,6 +10,7 @@ from build_query.constraint_simplifier import (
     SimplificationResult,
     simplify,
 )
+from build_query.examples_generator import _branch_to_dict
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -358,3 +359,90 @@ class TestSimplifyExample6:
     def test_indicators_data_2_value_is_not_null(self):
         assert is_source(self.r, "indicators_data_2", "value")
         assert "is_not_null" in filter_ops(self.r, "indicators_data_2", "value")
+
+
+# ─── Regression: inline subquery — sqlglot 30.x uses "from_" key ─────────────
+
+
+class TestInlineSubquerySimple:
+    """Minimal inline subquery — verifies FROM clause is read via 'from_' key."""
+
+    SQL = """
+    SELECT a.val
+    FROM (SELECT val FROM myproject.myds.mytable WHERE val > 42) a
+    """
+
+    def setup_method(self):
+        self.r = simplify(self.SQL)
+
+    def test_filter_from_inner_where_captured(self):
+        assert is_source(self.r, "mytable", "val")
+        assert "gt" in filter_ops(self.r, "mytable", "val")
+
+
+class TestInlineSubqueryFromJoinFiltersAndJoins:
+    """
+    Regression — two gaps fixed together (sqlglot 30.x 'from_' key):
+
+    Gap 1: WHERE filters inside the FROM subquery were not captured at all.
+    Gap 2: JOIN was rendered with subquery aliases (o/i) instead of real table names
+           (objects/images) in _branch_to_dict.
+
+    SQL from the bug report: MET museum objects × images, BigQuery dialect.
+    """
+
+    SQL = """
+    SELECT o.artist_display_name, o.title, o.object_end_date, o.medium, i.original_image_url
+    FROM (
+      SELECT object_id, title, artist_display_name, object_end_date, medium
+      FROM `bigquery-public-data.the_met.objects`
+      WHERE
+        department = 'Photographs'
+        AND object_name LIKE '%Photograph%'
+        AND artist_display_name != 'Unknown'
+        AND object_end_date <= 1839
+    ) o
+    INNER JOIN (
+      SELECT original_image_url, object_id
+      FROM `bigquery-public-data.the_met.images`
+    ) i ON o.object_id = i.object_id
+    ORDER BY o.object_end_date
+    """
+
+    def setup_method(self):
+        self.r = simplify(self.SQL, dialect="bigquery")
+
+    # ── Gap 1: all four WHERE predicates from the FROM subquery must be captured
+
+    def test_department_eq_filter(self):
+        assert is_source(self.r, "objects", "department")
+        assert filter_ops(self.r, "objects", "department") == ["eq"]
+
+    def test_object_name_like_filter(self):
+        assert is_source(self.r, "objects", "object_name")
+        assert "like" in filter_ops(self.r, "objects", "object_name")
+
+    def test_artist_display_name_neq_filter(self):
+        assert is_source(self.r, "objects", "artist_display_name")
+        assert "neq" in filter_ops(self.r, "objects", "artist_display_name")
+
+    def test_object_end_date_lte_filter(self):
+        assert is_source(self.r, "objects", "object_end_date")
+        assert "lte" in filter_ops(self.r, "objects", "object_end_date")
+
+    # ── Gap 2: join must render with real table names, not subquery aliases
+
+    def test_join_uses_real_table_names(self):
+        d = _branch_to_dict(self.r)
+        assert d.get("joins"), "No joins found in result"
+        join_str = d["joins"][0]
+        assert "objects" in join_str and "images" in join_str, (
+            f"Expected real table names in join, got: {join_str!r}"
+        )
+
+    def test_join_does_not_use_subquery_aliases(self):
+        d = _branch_to_dict(self.r)
+        join_str = d["joins"][0]
+        assert "o.object_id" not in join_str and "i.object_id" not in join_str, (
+            f"Join must not use inline-subquery aliases, got: {join_str!r}"
+        )
