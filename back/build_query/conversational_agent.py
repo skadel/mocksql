@@ -1,7 +1,7 @@
 import json
 import uuid
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
 from build_query.examples_generator import retrieve_existing_tests
@@ -11,12 +11,58 @@ from utils.msg_types import MsgType
 from utils.saver import get_history_from_state, get_message_type
 
 
+def _format_debug_message(msg: BaseMessage) -> BaseMessage:
+    """Return a copy of a DEBUG message with human-readable content instead of raw JSON."""
+    msg_type = get_message_type(msg)
+    if msg_type not in (MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS):
+        return msg
+    try:
+        data = json.loads(msg.content)
+    except Exception:
+        return msg
+
+    cte = data.get("cte_name", "?")
+    if data.get("error"):
+        formatted = f"[debug] {cte} → erreur : {data['error']}"
+    elif msg_type == MsgType.DEBUG_COUNT_STEPS:
+        steps = data.get("steps", [])
+        lines = [f"[count_cte_steps] CTE \"{cte}\" :"]
+        for step in steps:
+            marker = " ⚠️" if step["count"] == 0 else ""
+            lines.append(f"  {step['label']} → {step['count']} ligne(s){marker}")
+        formatted = "\n".join(lines)
+    else:  # DEBUG_RUN_CTE
+        rows = data.get("rows", [])
+        row_count = data.get("row_count", 0)
+        col_filter = data.get("column")
+        header = f"[run_cte] CTE \"{cte}\""
+        if col_filter:
+            header += f" (colonne : {col_filter})"
+        header += f" — {row_count} ligne(s)"
+        if not rows:
+            formatted = header + " : vide"
+        else:
+            headers = list(rows[0].keys())
+            sep = " | "
+            col_line = sep.join(headers)
+            row_lines = [sep.join(str(r.get(h, "")) for h in headers) for r in rows[:15]]
+            formatted = "\n".join([header, col_line, "-" * len(col_line)] + row_lines)
+            if row_count > 15:
+                formatted += f"\n  … {row_count - 15} lignes supplémentaires"
+
+    return AIMessage(
+        content=formatted,
+        id=msg.id,
+        additional_kwargs=msg.additional_kwargs,
+    )
+
+
 async def conversational_agent(state: QueryState):
     """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
     existing_tests = await retrieve_existing_tests(state["session"], state)
     tests_summary = (
         "\n".join(
-            f"Test {t.get('test_index')}: {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
+            f"[{t.get('test_uid', '?')}] {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
             for t in existing_tests
         )
         or "Aucun test pour l'instant."
@@ -40,7 +86,11 @@ async def conversational_agent(state: QueryState):
 
             # Find the failing test case to expose its data to the agent
             failing_test = next(
-                (t for t in existing_tests if str(t.get("test_index")) == str(eval_test_idx)),
+                (
+                    t
+                    for t in existing_tests
+                    if str(t.get("test_index")) == str(eval_test_idx)
+                ),
                 None,
             )
             test_data_block = ""
@@ -51,47 +101,75 @@ async def conversational_agent(state: QueryState):
 
                 if input_data:
                     try:
-                        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)
+                        input_summary = json.dumps(
+                            input_data, ensure_ascii=False, indent=2
+                        )
                     except Exception:
                         input_summary = str(input_data)
                     test_data_block += f"\n\nDonnées d'entrée du test {eval_test_idx} :\n```json\n{input_summary}\n```"
 
                 if results_json and results_json != "[]":
                     try:
-                        parsed_results = json.loads(results_json) if isinstance(results_json, str) else results_json
-                        results_summary = json.dumps(parsed_results[:10], ensure_ascii=False, indent=2)
+                        parsed_results = (
+                            json.loads(results_json)
+                            if isinstance(results_json, str)
+                            else results_json
+                        )
+                        results_summary = json.dumps(
+                            parsed_results[:10], ensure_ascii=False, indent=2
+                        )
                     except Exception:
                         results_summary = str(results_json)[:500]
-                    test_data_block += f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
+                    test_data_block += (
+                        f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
+                    )
                 else:
-                    test_data_block += f"\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
+                    test_data_block += "\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
 
                 if assertion_results:
-                    failing_assertions = [a for a in assertion_results if a.get("status") != "pass"]
+                    failing_assertions = [
+                        a for a in assertion_results if a.get("status") != "pass"
+                    ]
                     if failing_assertions:
                         try:
-                            assertions_summary = json.dumps(failing_assertions, ensure_ascii=False, indent=2)
+                            assertions_summary = json.dumps(
+                                failing_assertions, ensure_ascii=False, indent=2
+                            )
                         except Exception:
                             assertions_summary = str(failing_assertions)[:500]
                         test_data_block += f"\n\nAssertions en échec :\n```json\n{assertions_summary}\n```"
 
+            failing_uid = (failing_test or {}).get("test_uid", str(eval_test_idx))
+            test_name = (failing_test or {}).get("unit_test_description", "")
+            test_name_line = f"\nScénario : {test_name}" if test_name else ""
             eval_context = f"""
 
-⚠️ CONTEXTE AUTOMATIQUE — Le test {eval_test_idx} a été jugé **Insuffisant à cause des données d'entrée**.
-Verdict de l'évaluateur : {eval_verdict_text}
-Tentatives de correction restantes : {retries_left}{test_data_block}
+⚠️ CONTEXTE AUTOMATIQUE — Correction du test [{failing_uid}]{test_name_line}
 
-Ta mission : analyser pourquoi les données d'entrée posent problème, puis les corriger.
-Tu as à ta disposition :
-- `count_cte_steps` pour diagnostiquer où les données bloquent dans les CTEs
-- `run_cte` pour inspecter le contenu d'une CTE intermédiaire
-- `generate_test` pour regénérer le test avec des données corrigées et une instruction précise
+**Ce qui a été généré (données d'entrée injectées dans DuckDB) :**{test_data_block}
 
-Choisis librement l'outil le plus adapté à ce que tu observes dans les données du test."""
+**Ce que l'évaluateur a conclu :**
+{eval_verdict_text}
+
+Tentatives de correction restantes : {retries_left}
+
+**Outils disponibles :**
+- `count_cte_steps` — diagnostiquer où les données bloquent dans les CTEs
+- `run_cte` — inspecter le contenu d'une CTE intermédiaire
+- `update_test_data` — corriger les données d'entrée avec une instruction précise
+
+⚠️ Règle impérative : une fois le diagnostic posé, appelle `update_test_data` directement sans demander de confirmation."""
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]
     cte_names_str = ", ".join(f'"{n}"' for n in cte_names) if cte_names else "aucune"
+
+    debug_retries = state.get("debug_retries") or 0
+    debug_budget_note = f"\nRounds de debug restants : {debug_retries}." + (
+        " Tu ne peux plus appeler run_cte ni count_cte_steps — prends une décision (demander une précision à l'utilisateur ou regénérer le test)."
+        if debug_retries == 0
+        else ""
+    )
 
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
@@ -106,17 +184,46 @@ Tests existants :
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
-Réponds en français, de manière concise et naturelle.{eval_context}"""
+Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval_context}"""
+
+    # Build uid→test lookup (test_uid is assigned by retrieve_existing_tests above)
+    uid_to_test: dict = {t["test_uid"]: t for t in existing_tests if t.get("test_uid")}
+
+    # Tools that reference a specific test by test_uid and need uid validation
+    _UID_TOOLS = {
+        "delete_test",
+        "update_test_description",
+        "update_test_data",
+        "run_cte",
+        "count_cte_steps",
+    }
 
     @tool
-    def generate_test(scenario: str) -> str:
+    def generate_test_data(scenario: str) -> str:
         """Génère un nouveau test pour le scénario décrit en langage naturel."""
         return scenario
 
     @tool
-    def delete_test(test_index: int) -> str:
-        """Supprime le test à l'index donné (valeur du champ test_index du test)."""
-        return str(test_index)
+    def delete_test(test_uid: str) -> str:
+        """Supprime le test identifié par test_uid (ex: 'a3f9c2').
+        Utilise l'identifiant court visible dans la liste des tests existants."""
+        return test_uid
+
+    @tool
+    def update_test_data(test_uid: str, instruction: str) -> str:
+        """Corrige les données d'entrée d'un test existant identifié par test_uid.
+        instruction : décrit la correction à apporter aux données (ex: 'les montants doivent être positifs').
+        Utilise cet outil quand les données d'entrée sont incorrectes ou insuffisantes."""
+        return f"{test_uid}:{instruction}"
+
+    @tool
+    def update_test_description(
+        test_uid: str, new_name: str = "", new_description: str = ""
+    ) -> str:
+        """Met à jour le nom et/ou la description d'un test existant identifié par test_uid.
+        new_name : nouveau titre du test (laisser vide pour ne pas modifier).
+        new_description : nouvelle description (laisser vide pour ne pas modifier)."""
+        return f"{test_uid}:{new_name}:{new_description}"
 
     @tool
     def generate_suggestions(instructions: str = "") -> str:
@@ -127,22 +234,30 @@ Réponds en français, de manière concise et naturelle.{eval_context}"""
         return instructions
 
     @tool
-    def run_cte(test_index: int, cte_name: str, column: str = "") -> str:
+    def run_cte(test_uid: str, cte_name: str, column: str = "") -> str:
         """Exécute la requête SQL jusqu'à la CTE nommée avec les données du test et retourne les lignes.
         Utilise cet outil pour voir ce que contient une CTE intermédiaire ou finale.
-        column est optionnel : si fourni, ne sélectionne que cette colonne (ex : 'revenue')."""
-        return f"{test_index}:{cte_name}:{column}"
+        column est optionnel : si fourni, ne sélectionne que cette colonne (ex : 'revenue').
+        Tu peux appeler plusieurs outils de debug (run_cte, count_cte_steps) en même temps."""
+        return f"{test_uid}:{cte_name}:{column}"
 
     @tool
-    def count_cte_steps(test_index: int, cte_name: str) -> str:
+    def count_cte_steps(test_uid: str, cte_name: str) -> str:
         """Analyse pas à pas le nombre de lignes survivant à chaque JOIN et chaque condition WHERE
         d'une CTE, via une seule requête DuckDB avec des CASE WHEN cumulatifs.
-        Utilise cet outil pour diagnostiquer pourquoi une CTE retourne 0 ligne."""
-        return f"{test_index}:{cte_name}"
+        Utilise cet outil pour diagnostiquer pourquoi une CTE retourne 0 ligne.
+        Tu peux appeler plusieurs outils de debug (run_cte, count_cte_steps) en même temps."""
+        return f"{test_uid}:{cte_name}"
 
-    llm = make_llm().bind_tools(
-        [generate_test, delete_test, generate_suggestions, run_cte, count_cte_steps]
-    )
+    base_tools = [
+        generate_test_data,
+        delete_test,
+        update_test_data,
+        update_test_description,
+        generate_suggestions,
+    ]
+    debug_tools = [run_cte, count_cte_steps] if debug_retries > 0 else []
+    llm = make_llm().bind_tools(base_tools + debug_tools)
     history = get_history_from_state(
         state,
         msg_type=[
@@ -155,36 +270,127 @@ Réponds en français, de manière concise et naturelle.{eval_context}"""
         ],
     )
     user_input = state.get("input", "")
-    messages = [SystemMessage(content=system_content)] + history
+    formatted_history = [_format_debug_message(m) for m in history]
+    messages_for_llm = [SystemMessage(content=system_content)] + formatted_history
     if user_input:
-        messages = messages + [HumanMessage(content=user_input)]
+        messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
     elif evaluation_feedback == "bad_data":
         # Déclenchement automatique : aucune saisie utilisateur, l'agent vient de l'évaluateur
-        trigger = (
-            f"Le test {eval_test_idx} a été jugé Insuffisant à cause des données d'entrée. "
-            "Analyse le problème et prends les mesures nécessaires pour le corriger."
+        failing_uid_trigger = next(
+            (
+                t.get("test_uid", str(eval_test_idx))
+                for t in existing_tests
+                if str(t.get("test_index")) == str(eval_test_idx)
+            ),
+            str(eval_test_idx),
         )
-        messages = messages + [HumanMessage(content=trigger)]
+        has_debug_results = any(
+            get_message_type(m) in (MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS)
+            for m in history
+        )
+        if has_debug_results:
+            trigger = (
+                f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
+                f"Appelle maintenant `update_test_data` sur le test [{failing_uid_trigger}] "
+                f"pour corriger les données d'entrée en te basant sur ce diagnostic."
+            )
+        else:
+            trigger = (
+                f"Le test [{failing_uid_trigger}] a été jugé Insuffisant à cause des données d'entrée. "
+                f"Si la cause est évidente, appelle directement `update_test_data`. "
+                f"Sinon, diagnostique d'abord avec `count_cte_steps` sur les CTEs suspectes."
+            )
+        messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
 
-    result = await llm.ainvoke(messages)
-    tool_calls = getattr(result, "tool_calls", [])
+    _DEBUG_TOOLS = {"run_cte", "count_cte_steps"}
 
-    agent_tool_call = None
+    agent_tool_call: str | None = None
     agent_tool_args: dict = {}
     new_input = state.get("input", "")
+    result = None
+    _UID_RETRY_MAX = 2
+    uid_retries = 0
 
-    if tool_calls:
-        tc = tool_calls[0]
-        agent_tool_call = tc["name"]
-        agent_tool_args = tc["args"]
-        if agent_tool_call == "generate_test":
-            new_input = agent_tool_args.get("scenario", new_input)
-        elif agent_tool_call == "run_cte":
-            # test_index, cte_name, column passed to debug_node via agent_tool_args
-            pass
-        elif agent_tool_call == "count_cte_steps":
-            # test_index, cte_name passed to debug_node via agent_tool_args
-            pass
+    while True:
+        result = await llm.ainvoke(messages_for_llm)
+        tool_calls = getattr(result, "tool_calls", [])
+
+        if not tool_calls:
+            break
+
+        # Separate debug calls (can be batched) from action calls (take only first)
+        pending_debug_calls = []
+        first_action_tc = None
+
+        for tc in tool_calls:
+            if tc["name"] in _DEBUG_TOOLS:
+                args = dict(tc["args"])
+                uid = args.get("test_uid", "")
+                if uid and uid in uid_to_test:
+                    args["test_index"] = uid_to_test[uid]["test_index"]
+                elif uid:
+                    continue  # silently skip invalid uid in batch mode
+                pending_debug_calls.append({"tool": tc["name"], "args": args})
+            elif first_action_tc is None and tc["name"] not in _DEBUG_TOOLS:
+                first_action_tc = tc
+
+        # If there are debug calls, batch them and skip action processing this round
+        if pending_debug_calls:
+            agent_tool_call = "debug_batch"
+            agent_tool_args = {"calls": pending_debug_calls}
+            break
+
+        if first_action_tc is None:
+            break
+
+        tc_name: str = first_action_tc["name"]
+        tc_args: dict = dict(first_action_tc["args"])
+
+        # Validate test_uid for tools that target a specific test
+        if tc_name in _UID_TOOLS:
+            uid = tc_args.get("test_uid", "")
+            if uid and uid not in uid_to_test:
+                if uid_retries < _UID_RETRY_MAX:
+                    uid_retries += 1
+                    available = (
+                        ", ".join(
+                            f"{t['test_uid']} ({t.get('test_name', '?')})"
+                            for t in existing_tests
+                            if t.get("test_uid")
+                        )
+                        or "aucun"
+                    )
+                    error_feedback = (
+                        f"L'identifiant de test '{uid}' n'existe pas. "
+                        f"IDs disponibles : {available}"
+                    )
+                    messages_for_llm = messages_for_llm + [
+                        result,
+                        HumanMessage(content=error_feedback),
+                    ]
+                    continue
+                # Exhausted retries → treat as no-op
+                break
+
+        # Resolve test_uid → test_index so downstream nodes need no change
+        if tc_name in _UID_TOOLS:
+            uid = tc_args.get("test_uid", "")
+            if uid and uid in uid_to_test:
+                tc_args["test_index"] = uid_to_test[uid]["test_index"]
+
+        agent_tool_call = tc_name
+        agent_tool_args = tc_args
+        if tc_name == "generate_test_data":
+            new_input = tc_args.get("scenario", new_input)
+        elif tc_name == "update_test_data":
+            new_input = tc_args.get("instruction", new_input)
+        break
+
+    # When triggered automatically after executor (bad_data), parent is the last message
+    if evaluation_feedback == "bad_data" and state.get("messages"):
+        parent = state["messages"][-1].id
+    else:
+        parent = state.get("user_message_id")
 
     update: dict = {
         "agent_tool_call": agent_tool_call,
@@ -192,18 +398,27 @@ Réponds en français, de manière concise et naturelle.{eval_context}"""
         "input": new_input,
     }
 
-    if agent_tool_call == "generate_test":
-        scenario = agent_tool_args.get("scenario", new_input)
+    msgs_to_add = []
+    last_msg_id = parent
+
+    if agent_tool_call in ("generate_test_data", "update_test_data"):
+        scenario = (
+            agent_tool_args.get("scenario")
+            or agent_tool_args.get("instruction")
+            or new_input
+        )
         scenario_msg = AIMessage(
             content=scenario,
             id=str(uuid.uuid4()),
             additional_kwargs={
                 "type": MsgType.GENERATE_TEST_SCENARIO,
-                "parent": state.get("user_message_id"),
+                "parent": last_msg_id,
                 "request_id": state.get("request_id"),
             },
         )
-        update["messages"] = update.get("messages", []) + [scenario_msg]
+        msgs_to_add.append(scenario_msg)
+        last_msg_id = scenario_msg.id
+        update["agent_message_id"] = scenario_msg.id
 
     # Gemini with bind_tools may return content as a list of parts instead of a plain string
     raw_content = result.content
@@ -215,16 +430,19 @@ Réponds en français, de manière concise et naturelle.{eval_context}"""
         )
 
     if raw_content:
-        update["messages"] = [
+        msgs_to_add.append(
             AIMessage(
                 content=raw_content,
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "type": MsgType.OTHER,
-                    "parent": state.get("user_message_id"),
+                    "parent": last_msg_id,
                     "request_id": state.get("request_id"),
                 },
             )
-        ]
+        )
+
+    if msgs_to_add:
+        update["messages"] = msgs_to_add
 
     return update

@@ -57,6 +57,9 @@ class QueryState(TypedDict):
         str
     ]  # tool called by conversational_agent: "generate_test" | "delete_test" | None
     agent_tool_args: Optional[Dict]  # args of the tool call
+    agent_message_id: Optional[
+        str
+    ]  # ID of the GENERATE_TEST_SCENARIO msg emitted by conversational_agent
     model_context: Optional[
         str
     ]  # concatenated mocksql.md files (global → file-specific)

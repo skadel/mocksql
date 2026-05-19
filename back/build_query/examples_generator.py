@@ -132,7 +132,11 @@ def _format_filter_constraints(constraints: list) -> list[str]:
 
 def _col_str_join(col) -> str:
     """Return 'real_table.column', preferring real_table over subquery alias."""
-    t = col.real_table if (col.real_table and col.real_table != col.table) else col.table
+    t = (
+        col.real_table
+        if (col.real_table and col.real_table != col.table)
+        else col.table
+    )
     return f"{t}.{col.column}"
 
 
@@ -280,6 +284,83 @@ def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
     return result_map
 
 
+def _build_eval_context(state, existing_tests: list) -> str:
+    """Build a context block for the generator when called after a bad_data evaluation."""
+    if state.get("evaluation_feedback") != "bad_data":
+        return ""
+
+    eval_msgs = [
+        m
+        for m in state.get("messages", [])
+        if get_message_type(m) == MsgType.EVALUATION
+    ]
+    if not eval_msgs:
+        return ""
+
+    latest_eval = eval_msgs[-1]
+    eval_test_idx = latest_eval.additional_kwargs.get("test_index")
+    verdict_text = latest_eval.content
+
+    failing_test = next(
+        (t for t in existing_tests if str(t.get("test_index")) == str(eval_test_idx)),
+        None,
+    )
+
+    lines = [
+        "\n⚠️ **Contexte de correction** — Ce test a été jugé Insuffisant (données incorrectes).",
+        f"\n**Verdict de l'évaluateur :**\n{verdict_text}\n",
+    ]
+
+    if failing_test:
+        input_data = failing_test.get("data", {})
+        results_json = failing_test.get("results_json", "[]")
+        assertion_results = failing_test.get("assertion_results", [])
+
+        if input_data:
+            try:
+                input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)
+            except Exception:
+                input_summary = str(input_data)
+            lines.append(
+                f"**Données d'entrée actuelles (à corriger) :**\n```json\n{input_summary}\n```\n"
+            )
+
+        if results_json and results_json != "[]":
+            try:
+                parsed = (
+                    json.loads(results_json)
+                    if isinstance(results_json, str)
+                    else results_json
+                )
+                results_summary = json.dumps(parsed[:10], ensure_ascii=False, indent=2)
+            except Exception:
+                results_summary = str(results_json)[:500]
+            lines.append(
+                f"**Sortie DuckDB obtenue :**\n```json\n{results_summary}\n```\n"
+            )
+        else:
+            lines.append("**Sortie DuckDB obtenue :** vide (0 lignes)\n")
+
+        failing_assertions = [
+            a for a in (assertion_results or []) if a.get("status") != "pass"
+        ]
+        if failing_assertions:
+            try:
+                assertions_summary = json.dumps(
+                    failing_assertions, ensure_ascii=False, indent=2
+                )
+            except Exception:
+                assertions_summary = str(failing_assertions)[:500]
+            lines.append(
+                f"**Assertions en échec :**\n```json\n{assertions_summary}\n```\n"
+            )
+
+    lines.append(
+        "**Ta mission :** génère de nouvelles données d'entrée qui corrigent exactement le problème identifié ci-dessus.\n"
+    )
+    return "\n".join(lines)
+
+
 def _get_failing_cte_from_results(history) -> tuple:
     """Scans history for the last RESULTS message that has a failing CTE."""
     for msg in reversed(history):
@@ -303,6 +384,7 @@ async def retrieve_existing_tests(session_id: str, state) -> list:
     Priority:
     1. In-pipeline RESULTS messages (during retry, before saver has persisted)
     2. Filesystem (test_repository)
+    Assigns a short stable test_uid to any test case that lacks one (lazy migration).
     """
     # 1. In-pipeline RESULTS (executor ran this cycle but saver hasn't run yet)
     results_msgs = [
@@ -312,17 +394,31 @@ async def retrieve_existing_tests(session_id: str, state) -> list:
         try:
             data = json.loads(results_msgs[-1].content)
             if isinstance(data, list) and data:
+                _ensure_test_uids(data)
                 return data
         except Exception:
             pass
 
     # 2. Filesystem storage
-    from storage.test_repository import get_test
+    from storage.test_repository import get_test, update_test
 
     test = get_test(session_id)
     if test and isinstance(test.get("test_cases"), list):
-        return test["test_cases"]
+        cases = test["test_cases"]
+        if _ensure_test_uids(cases):
+            update_test(session_id, {"test_cases": cases})
+        return cases
     return []
+
+
+def _ensure_test_uids(cases: list) -> bool:
+    """Assign test_uid to any case that lacks one. Returns True if any uid was assigned."""
+    changed = False
+    for tc in cases:
+        if not tc.get("test_uid"):
+            tc["test_uid"] = uuid.uuid4().hex[:4]
+            changed = True
+    return changed
 
 
 async def generate_examples(state: QueryState):
@@ -339,13 +435,14 @@ async def generate_examples(state: QueryState):
 
     used_columns = [json.loads(c) for c in state.get("used_columns") or []]
 
-    if state.get("input", "").strip():
+    if state.get("agent_message_id"):
+        parent = state["agent_message_id"]
+    elif state.get("input", "").strip():
         parent = state["user_message_id"]
+    elif state.get("status") == "empty_results" and state.get("messages"):
+        parent = state["messages"][-1].id
     else:
-        if state.get("status") == "empty_results" and state.get("messages"):
-            parent = state["messages"][-1].id
-        else:
-            parent = state.get("parent_message_id") or state.get("user_message_id")
+        parent = state.get("parent_message_id") or state.get("user_message_id")
 
     try:
         generated_test, generated_test_index = await generate_examples_(
@@ -516,6 +613,8 @@ async def generate_examples_(
         PydanticOutputParser(pydantic_object=output_type)
     )
 
+    eval_context = _build_eval_context(state, existing_tests)
+
     prompt = await create_appropriate_prompt(
         state,
         existing_tests,
@@ -524,6 +623,7 @@ async def generate_examples_(
         parser.get_format_instructions(),
         constraints_hint=constraints,
         excluded_columns=excluded_col_names,
+        eval_context=eval_context,
     )
     if prompt is None:
         return None, None
@@ -563,7 +663,9 @@ async def generate_examples_(
 
     # Merge Faker-generated values into LLM output
     if faker_cols:
-        faker_data = generate_faker_rows(schema, faker_cols, filled_data, profile=state.get("profile"))
+        faker_data = generate_faker_rows(
+            schema, faker_cols, filled_data, profile=state.get("profile")
+        )
         for uc_key, faker_rows in faker_data.items():
             llm_rows = filled_data.get(uc_key) or []
             if llm_rows:
@@ -586,17 +688,29 @@ async def generate_examples_(
     target_key = _resolve_target_key(state, existing_tests)
     if target_key is not None:
         test_index = target_key
+        # Preserve the existing test_uid so the frontend keeps the same reference
+        existing_tc = next(
+            (t for t in existing_tests if str(t.get("test_index")) == str(target_key)),
+            None,
+        )
+        test_uid = (existing_tc or {}).get("test_uid") or uuid.uuid4().hex[:4]
     else:
         test_index = str(len(existing_tests) + 1)
+        test_uid = uuid.uuid4().hex[:4]
 
-    return {**generated, "test_index": test_index}, test_index
+    return {**generated, "test_index": test_index, "test_uid": test_uid}, test_index
 
 
 def get_generation_output_type(data_model, existing_tests):
     reasoning_desc = (
-        "Réflexion pas à pas sur comment modifier les données de tests."
+        "Avant de générer le JSON final, simulez mentalement la traversée des données à travers chaque CTE et filtre "
+        "du SQL : listez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
+        "indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent. "
+        "Précisez ensuite la modification apportée par rapport aux données existantes."
         if existing_tests
-        else "Réflexion pas à pas sur comment construire les données de tests."
+        else "Avant de générer le JSON final, simulez mentalement la traversée des données à travers chaque CTE et filtre "
+        "du SQL : listez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
+        "indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent."
     )
 
     return create_model(
@@ -643,6 +757,7 @@ async def create_appropriate_prompt(
     format_instructions,
     constraints_hint: str = "",
     excluded_columns: list[str] | None = None,
+    eval_context: str = "",
 ):
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
@@ -659,6 +774,7 @@ async def create_appropriate_prompt(
             sql=stripped_sql,
             profile=profile,
             model_context=model_context,
+            eval_context=eval_context,
         )
     elif state.get("input", "").strip():
         if state.get("test_index") is not None:
@@ -674,6 +790,7 @@ async def create_appropriate_prompt(
                 sql=sql,
                 existing_test=existing_test,
                 model_context=model_context,
+                eval_context=eval_context,
             )
         return generate_data_prompt(
             history,
@@ -685,6 +802,7 @@ async def create_appropriate_prompt(
             user_instruction=state["input"],
             profile=profile,
             model_context=model_context,
+            eval_context=eval_context,
         )
     elif state.get("status") == "empty_results":
         return generate_data_prompt(

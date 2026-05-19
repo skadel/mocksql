@@ -3,11 +3,11 @@ import uuid
 
 from langchain_core.messages import AIMessage
 
-from build_query.assertion_fixer import fix_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
 from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
+from build_query.update_test_node import update_test_node
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
 from build_query.suggestions_node import generate_suggestions
@@ -222,9 +222,9 @@ def build_query_graph():
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
     builder.add_node("conversational_agent", conversational_agent)
-    builder.add_node("assertion_fixer", fix_assertions)
     builder.add_node("debug_node", debug_test_node)
     builder.add_node("delete_test_node", delete_test_node)
+    builder.add_node("update_test_node", update_test_node)
     builder.add_node("generator", generate_examples)
     builder.add_node("assertion_modifier", modify_assertions)
     builder.add_node("executor", run_on_examples)
@@ -251,13 +251,15 @@ def build_query_graph():
 
     def route_agent_output(state: QueryState):
         tool_call = state.get("agent_tool_call")
-        if tool_call == "generate_test":
+        if tool_call in ("generate_test_data", "update_test_data"):
             return "generator"
         if tool_call == "delete_test":
             return "delete_test_node"
+        if tool_call == "update_test_description":
+            return "update_test_node"
         if tool_call == "generate_suggestions":
             return "suggestions_generator"
-        if tool_call in ("run_cte", "count_cte_steps"):
+        if tool_call in ("run_cte", "count_cte_steps", "debug_batch"):
             return "debug_node"
         return "history_saver"
 
@@ -273,34 +275,29 @@ def build_query_graph():
         # SQL structurally requires too many rows — no retry can fix this
         if state.get("evaluation_feedback") == "too_many_rows":
             return "history_saver"
-        if (
-            state.get("evaluation_feedback") == "bad_data"
-            and state.get("gen_retries", 0) > 0
-        ):
-            return "conversational_agent"
-        if (
-            state.get("evaluation_feedback") == "bad_assertions"
-            and state.get("gen_retries", 0) > 0
-        ):
-            return "assertion_fixer"
+        if state.get("evaluation_feedback") == "bad_data":
+            # gen_retries >= 0: agent has budget (0 = first call, -1 = already used its shot)
+            if state.get("gen_retries", 0) >= 0:
+                return "conversational_agent"
+            return "suggestions_generator"
+        if state.get("evaluation_feedback") == "bad_assertions":
+            if state.get("gen_retries", 0) >= 0:
+                return "executor"
         return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
     builder.add_conditional_edges("conversational_agent", route_agent_output)
-    builder.add_conditional_edges(
-        "debug_node",
-        lambda s: (
-            "conversational_agent" if (s.get("debug_retries") or 0) > 0 else "generator"
-        ),
-    )
+    # After debug, always let the agent decide: ask user or regenerate.
+    # Debug tools are removed from the agent's toolset when debug_retries == 0 (safety).
+    builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
+    builder.add_edge("update_test_node", "history_saver")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
-    builder.add_edge("assertion_fixer", "executor")
     builder.add_edge("suggestions_generator", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)
