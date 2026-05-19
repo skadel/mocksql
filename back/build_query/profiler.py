@@ -1086,7 +1086,9 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
                 _lf_node = _local_from.this
                 if isinstance(_lf_node, exp.Table):
                     _lf_key = _lf_node.alias or _lf_node.name
-                    local_primary = local_alias_map.get(_lf_key, _full_table_name(_lf_node))
+                    local_primary = local_alias_map.get(
+                        _lf_key, _full_table_name(_lf_node)
+                    )
 
         def resolve(name: str, _m: dict = local_alias_map) -> str:
             return _m.get(name, name)
@@ -1112,7 +1114,9 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
             continue
 
         # Walk AND-separated conditions
-        def collect_eq(node: exp.Expression, _rt: str = right_table, _lp: str = local_primary):
+        def collect_eq(
+            node: exp.Expression, _rt: str = right_table, _lp: str = local_primary
+        ):
             if isinstance(node, exp.And):
                 collect_eq(node.left, _rt, _lp)
                 collect_eq(node.right, _rt, _lp)
@@ -1520,7 +1524,11 @@ def _build_col_query(
         )
         top_expr: exp.Expression = exp.select(
             exp.Anonymous(
-                this="STRING_AGG", expressions=[exp.Cast(this=_cref(), to=str_dtype)]
+                this="STRING_AGG",
+                expressions=[
+                    exp.Cast(this=_cref(), to=str_dtype),
+                    exp.Literal.string("|||"),
+                ],
             )
         ).from_(top_inner.subquery(top_alias))
 
@@ -2650,11 +2658,15 @@ def _build_one_derived_expr_branch(
     )
 
     if dialect == "postgres":
-        top_values_scalar = f"(SELECT STRING_AGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
+        top_values_scalar = (
+            f"(SELECT STRING_AGG(_v, '|||') FROM ({inner}) AS _tv_{idx})"
+        )
     elif dialect == "snowflake":
-        top_values_scalar = f"(SELECT LISTAGG(_v, ',') FROM ({inner}) AS _tv_{idx})"
+        top_values_scalar = f"(SELECT LISTAGG(_v, '|||') FROM ({inner}) AS _tv_{idx})"
     else:
-        top_values_scalar = f"(SELECT STRING_AGG(_v) FROM ({inner}) AS _tv_{idx})"
+        top_values_scalar = (
+            f"(SELECT STRING_AGG(_v, '|||') FROM ({inner}) AS _tv_{idx})"
+        )
 
     src_str = ",".join(sorted(source_tables))
     expr_lit = exp.Literal.string(expr_sql).sql(dialect=dialect)
@@ -3014,11 +3026,12 @@ def parse_profile_query_result(
             min_value = row.get("min_val")
             max_value = row.get("max_val")
 
-            # top_values is a comma-separated STRING_AGG result
             top_raw = row.get("top_values") or ""
-            top_values = (
-                [v.strip() for v in top_raw.split(",") if v.strip()] if top_raw else []
-            )
+            if top_raw:
+                sep = "|||" if "|||" in top_raw else ","
+                top_values = [v.strip() for v in top_raw.split(sep) if v.strip()]
+            else:
+                top_values = []
 
             # ── derived fields ───────────────────────────────────────────────
             nullable_ratio = round(null_cnt / total, 4) if total > 0 else 0.0
@@ -3061,7 +3074,8 @@ def parse_profile_query_result(
         top_raw = row.get("top_values") or ""
         if not (src_str and expr_sql_stored):
             continue
-        top_vals = [v.strip() for v in top_raw.split(",") if v.strip()]
+        sep = "|||" if "|||" in top_raw else ","
+        top_vals = [v.strip() for v in top_raw.split(sep) if v.strip()]
 
         # Parse source column lineage from left_key_sample ("col@table,col@table,...")
         src_cols_raw = row.get("left_key_sample") or ""

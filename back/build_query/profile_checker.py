@@ -84,9 +84,12 @@ def _normalize_profile(raw) -> Optional[dict]:
                 continue
             if tbl not in tables:
                 tables[tbl] = {"columns": {}}
-            tables[tbl]["columns"][col] = {
-                k: v for k, v in row.items() if k not in _COL_SKIP
-            }
+            col_data = {k: v for k, v in row.items() if k not in _COL_SKIP}
+            tv = col_data.get("top_values")
+            if isinstance(tv, str) and tv:
+                sep = "|||"
+                col_data["top_values"] = [v.strip() for v in tv.split(sep) if v.strip()]
+            tables[tbl]["columns"][col] = col_data
         elif row_type == "join":
             joins.append({k: v for k, v in row.items() if k not in _JOIN_COL_NOISE})
         elif row_type == "derived_expr":
@@ -95,7 +98,8 @@ def _normalize_profile(raw) -> Optional[dict]:
             top_raw = row.get("top_values") or ""
             if not (src_str and expr_sql):
                 continue
-            top_vals = [v.strip() for v in top_raw.split(",") if v.strip()]
+            sep = "|||"
+            top_vals = [v.strip() for v in top_raw.split(sep) if v.strip()]
             for tbl in src_str.split(","):
                 tbl = tbl.strip()
                 if not tbl:

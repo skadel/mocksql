@@ -56,17 +56,38 @@ def _value_from_profile(stats: dict, bq_type: str):
     if top_values:
         return random.choice(top_values)
 
-    min_v = stats.get("min_value") if stats.get("min_value") is not None else stats.get("min_val")
-    max_v = stats.get("max_value") if stats.get("max_value") is not None else stats.get("max_val")
+    min_v = (
+        stats.get("min_value")
+        if stats.get("min_value") is not None
+        else stats.get("min_val")
+    )
+    max_v = (
+        stats.get("max_value")
+        if stats.get("max_value") is not None
+        else stats.get("max_val")
+    )
     if min_v is None or max_v is None:
         return None
 
     upper = bq_type.upper().strip()
     try:
-        if any(t in upper for t in ("INT64", "INTEGER", "SMALLINT", "BIGINT", "TINYINT", "BYTEINT", "INT")):
+        if any(
+            t in upper
+            for t in (
+                "INT64",
+                "INTEGER",
+                "SMALLINT",
+                "BIGINT",
+                "TINYINT",
+                "BYTEINT",
+                "INT",
+            )
+        ):
             lo, hi = int(float(min_v)), int(float(max_v))
             return random.randint(lo, hi) if lo <= hi else lo
-        if any(t in upper for t in ("FLOAT64", "FLOAT", "NUMERIC", "BIGNUMERIC", "DECIMAL")):
+        if any(
+            t in upper for t in ("FLOAT64", "FLOAT", "NUMERIC", "BIGNUMERIC", "DECIMAL")
+        ):
             lo, hi = float(min_v), float(max_v)
             return round(random.uniform(lo, hi), 2) if lo <= hi else lo
     except (ValueError, TypeError):
