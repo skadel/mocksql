@@ -1,7 +1,6 @@
 import datetime
 import difflib
 import json
-import re
 from typing import Literal, Optional, List
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
@@ -231,7 +230,7 @@ def _format_profile_block(
                     pct = round(nullable_ratio * 100, 1)
                     parts.append(f"null={pct}%")
                 top_values = stats.get("top_values", [])
-                if top_values and is_categorical:
+                if top_values:
                     top_str = ", ".join(str(v) for v in top_values[:10])
                     parts.append(f"valeurs=[{top_str}]")
                 if parts:
@@ -316,9 +315,34 @@ def _format_profile_block(
     if join_lines:
         result += "\nJointures profilées (cardinalités réelles) :\n"
         result += "\n".join(join_lines)
-    print("formatted_profil")
-    print(result)
     return result
+
+
+def _build_volume_hints_block(sql: str, dialect: str = "bigquery") -> str:
+    """Build a warning block listing structural volume requirements (OFFSET, NTILE, RANK filters)."""
+    if not sql:
+        return ""
+    try:
+        from build_query.constraint_simplifier import extract_volume_hints
+
+        hints = extract_volume_hints(sql, dialect)
+    except Exception:
+        return ""
+    if not hints:
+        return ""
+    lines = [
+        "\n⚠️ **Contraintes volumétriques** — ces clauses nécessitent un minimum de lignes "
+        "pour que la requête retourne un résultat non vide :"
+    ]
+    for h in hints:
+        scope_word = "cette " + (
+            "CTE" if h.context.startswith("CTE") else "sous-requête"
+        )
+        lines.append(
+            f"- `{h.clause_sql}` dans la {h.context} : génère **au moins {h.min_rows} ligne(s)** "
+            f"dans les tables sources de {scope_word}."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def generate_data_prompt(
@@ -331,6 +355,7 @@ def generate_data_prompt(
     user_instruction: str = "",
     profile: Optional[dict] = None,
     model_context: str = "",
+    eval_context: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
@@ -360,6 +385,8 @@ def generate_data_prompt(
         else ""
     )
 
+    eval_context_block = f"\n{eval_context}\n" if eval_context else ""
+
     profile_block_str = _format_profile_block(profile, used_columns)
     profile_block = (
         f"\n{profile_block_str}\n"
@@ -379,15 +406,7 @@ def generate_data_prompt(
         else ""
     )
 
-    _ntile_match = (
-        re.search(r"\bNTILE\s*\(\s*(\d+)\s*\)", sql, re.IGNORECASE) if sql else None
-    )
-    ntile_block = (
-        f"\n⚠️ **NTILE({_ntile_match.group(1)}) détecté** : génère au minimum **{_ntile_match.group(1)} lignes** "
-        f"dans la table principale pour que la fonction de quantile produise des buckets distincts.\n"
-        if _ntile_match
-        else ""
-    )
+    volume_hints_block = _build_volume_hints_block(sql, dialect)
 
     if user_instruction:
         consignes_1_2 = """\
@@ -407,7 +426,7 @@ Vous êtes un data QA, testeur de requêtes SQL et expert en génération de don
 Analysez la requête SQL et le schéma des données sources fournis,
 puis générez un unique test unitaire en format JSON.
 
-{context_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{ntile_block}
+{context_block}{eval_context_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}
 
 **Consignes principales :**
 """
@@ -530,6 +549,7 @@ def update_data_prompt(
     sql: str = "",
     existing_test: Optional[dict] = None,
     model_context: str = "",
+    eval_context: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
@@ -555,10 +575,15 @@ def update_data_prompt(
     )
     system_message_content = (
         "Vous êtes un data QA, testeur de requêtes SQL et expert en génération et modification de données de test JSON.\n"
-        "Votre objectif est de mettre à jour les données sources JSON selon les instructions données,\n"
-        "sans ajouter d'explications ou de justifications superflues.\n"
-        "Ne modifiez que les parties explicitement concernées par les instructions, sans réécrire les tests inchangés.\n"
-        "En cas d'ajout d'un nouveau test, utilisez un index qui n'existe pas encore.\n"
+        "Votre objectif est de produire un test complet et correct selon les instructions données.\n\n"
+        "**Règle de non-destruction des données d'environnement :**\n"
+        "L'instruction utilisateur précise *ce qu'il faut ajouter ou modifier*, mais elle ne définit pas le jeu de données complet. "
+        "Vous devez générer l'intégralité des lignes nécessaires dans chaque table — y compris les lignes d'environnement "
+        "(lignes 'leurres') qui n'ont pas de rôle métier direct mais sont indispensables pour que les clauses structurelles "
+        "du SQL (OFFSET, RANK, ROW_NUMBER, LIMIT, JOIN) retournent un résultat non vide. "
+        "Ne livrez jamais uniquement les lignes explicitement demandées : vérifiez que le volume total permet à la requête "
+        "de traverser toutes ses CTEs et filtres jusqu'au SELECT final.\n\n"
+        "**Format :** répondez uniquement avec le JSON demandé, sans explication ni justification.\n"
         + context_block
     )
     system_msg = SystemMessage(content=system_message_content)
@@ -584,9 +609,12 @@ def update_data_prompt(
 
         existing_test_block = f"\nTest à modifier :\n```json\n{_format_unit_tests_for_generator([existing_test])}\n```\n"
 
+    eval_context_block = f"\n{eval_context}\n" if eval_context else ""
+    volume_hints_block = _build_volume_hints_block(sql, dialect)
+
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{existing_test_block}
+{sql_block}{volume_hints_block}{existing_test_block}{eval_context_block}
 <Instruction>
 {user_input}
 </Instruction>

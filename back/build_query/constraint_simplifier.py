@@ -995,7 +995,9 @@ def _walk_select(
 
     # Resolve __unknown__ table refs for columns with no table qualifier when there
     # is exactly one real base table in scope (e.g. inside an inline subquery).
-    real_tables_in_scope = {v for v in alias_map.values() if v and not v.startswith("__")}
+    real_tables_in_scope = {
+        v for v in alias_map.values() if v and not v.startswith("__")
+    }
     if len(real_tables_in_scope) == 1:
         default_table = next(iter(real_tables_in_scope))
         for idx in range(filters_before, len(filters)):
@@ -1011,7 +1013,11 @@ def _walk_select(
         logger.diag(
             "[walk_select] __unknown__ resolved to '%s' for %d filter(s)",
             default_table,
-            sum(1 for i in range(filters_before, len(filters)) if filters[i].column.table == default_table),
+            sum(
+                1
+                for i in range(filters_before, len(filters))
+                if filters[i].column.table == default_table
+            ),
         )
 
     # ON clauses of every JOIN
@@ -1127,7 +1133,9 @@ def _walk_tree(
             col_inequalities,
         )
     elif isinstance(node, exp.Subquery):
-        logger.diag("[walk_tree] Subquery alias=%s → diving into its inner SELECT", node.alias)
+        logger.diag(
+            "[walk_tree] Subquery alias=%s → diving into its inner SELECT", node.alias
+        )
         _walk_tree(
             node.this,
             alias_map,
@@ -1138,7 +1146,9 @@ def _walk_tree(
             col_inequalities,
         )
     else:
-        logger.diag("[walk_tree] node type %s not handled — skipped", type(node).__name__)
+        logger.diag(
+            "[walk_tree] node type %s not handled — skipped", type(node).__name__
+        )
 
 
 # ─── Main extractor ───────────────────────────────────────────────────────────
@@ -1810,3 +1820,164 @@ def detect_select_derived_expressions(
             if clause is not None:
                 _scan_clause(clause)
     return results[:10]
+
+
+# ─── Structural volume hints (OFFSET, NTILE, RANK/ROW_NUMBER filters) ──────────
+
+
+@dataclass
+class VolumeHint:
+    """A structural SQL clause that imposes a minimum row count at a specific scope."""
+
+    hint_type: str  # "offset" | "ntile" | "rank_filter"
+    context: (
+        str  # human label: "CTE `paginated`" | "sous-requête `sub`" | "SELECT final"
+    )
+    min_rows: int  # minimum rows needed in the sources of that scope
+    clause_sql: str  # display string, e.g. "OFFSET 3" or "RANK() <= 5 (via `rn`)"
+
+
+def _volume_context_label(node: exp.Expression) -> str:
+    """Walk up from *node* to find the nearest enclosing CTE or named subquery."""
+    p = node.parent
+    while p:
+        if isinstance(p, exp.CTE):
+            return f"CTE `{p.alias}`"
+        if isinstance(p, exp.Subquery):
+            alias = p.alias
+            return f"sous-requête `{alias}`" if alias else "sous-requête anonyme"
+        p = p.parent
+    return "SELECT final"
+
+
+def _flatten_and_volume(node: exp.Expression) -> list[exp.Expression]:
+    if isinstance(node, exp.And):
+        return _flatten_and_volume(node.args["this"]) + _flatten_and_volume(
+            node.args["expression"]
+        )
+    return [node]
+
+
+def extract_volume_hints(sql: str, dialect: str = "bigquery") -> list[VolumeHint]:
+    """Return structural volume requirements inferred from the SQL AST.
+
+    Detects three patterns, each with its enclosing CTE or subquery name:
+
+    * **OFFSET N** — the scope must produce at least N+1 rows so that at least
+      one row survives the skip.
+    * **NTILE(N)** — the scope needs at least N rows to fill every bucket.
+    * **RANK / ROW_NUMBER alias filtered by <= N** — the CTE that defines the
+      window alias must contain at least N rows (per partition if PARTITION BY
+      is present).
+    """
+    if not sql:
+        return []
+    try:
+        tree = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return []
+
+    hints: list[VolumeHint] = []
+
+    # ── OFFSET N ──────────────────────────────────────────────────────────────
+    for node in tree.walk():
+        if isinstance(node, exp.Offset):
+            val = node.args.get("expression")
+            if not isinstance(val, exp.Literal):
+                continue
+            try:
+                n = int(val.this)
+            except (ValueError, TypeError):
+                continue
+            ctx = _volume_context_label(node)
+            hints.append(
+                VolumeHint(
+                    hint_type="offset",
+                    context=ctx,
+                    min_rows=n + 1,
+                    clause_sql=f"OFFSET {n}",
+                )
+            )
+
+    # ── NTILE(N) ──────────────────────────────────────────────────────────────
+    for node in tree.walk():
+        if isinstance(node, exp.Window) and isinstance(node.this, exp.Ntile):
+            arg = node.this.args.get("this")
+            if not isinstance(arg, exp.Literal):
+                continue
+            try:
+                n = int(arg.this)
+            except (ValueError, TypeError):
+                continue
+            ctx = _volume_context_label(node)
+            hints.append(
+                VolumeHint(
+                    hint_type="ntile",
+                    context=ctx,
+                    min_rows=n,
+                    clause_sql=f"NTILE({n})",
+                )
+            )
+
+    # ── RANK / ROW_NUMBER alias filtered by <= N ──────────────────────────────
+    # Step 1: collect all window aliases (rn, rnk, …) defined in CTEs/subqueries.
+    window_aliases: dict[str, tuple[str, str]] = {}  # lower_alias -> (ctx, fn_name)
+    for node in tree.walk():
+        if not isinstance(node, exp.Window):
+            continue
+        if not isinstance(node.this, (exp.RowNumber, exp.Rank, exp.DenseRank)):
+            continue
+        alias_node = node.parent
+        if not isinstance(alias_node, exp.Alias):
+            continue
+        alias_name = alias_node.alias.lower()
+        ctx = _volume_context_label(node)
+        fn_name = type(node.this).__name__.upper()
+        window_aliases[alias_name] = (ctx, fn_name)
+
+    # Step 2: find WHERE / QUALIFY that applies <= N or = 1 to a known alias.
+    seen_alias_filters: set[str] = set()
+    for node in tree.walk():
+        if not isinstance(node, (exp.Where, exp.Qualify)):
+            continue
+        for pred in _flatten_and_volume(node.this):
+            if not isinstance(pred, (exp.LTE, exp.LT, exp.EQ)):
+                continue
+            left = pred.args.get("this")
+            right = pred.args.get("expression")
+            if not (isinstance(right, exp.Literal) and isinstance(left, exp.Column)):
+                continue
+            col_name = left.name.lower()
+            if col_name not in window_aliases:
+                continue
+            try:
+                n = int(right.this)
+            except (ValueError, TypeError):
+                continue
+            if isinstance(pred, exp.LTE):
+                min_rows = n
+            elif isinstance(pred, exp.LT):
+                min_rows = max(1, n - 1)
+            else:  # EQ
+                min_rows = n
+            if min_rows < 1 or col_name in seen_alias_filters:
+                continue
+            seen_alias_filters.add(col_name)
+            ctx, fn_name = window_aliases[col_name]
+            op = (
+                "<="
+                if isinstance(pred, exp.LTE)
+                else ("<" if isinstance(pred, exp.LT) else "=")
+            )
+            hints.append(
+                VolumeHint(
+                    hint_type="rank_filter",
+                    context=ctx,
+                    min_rows=min_rows,
+                    clause_sql=f"{fn_name}() {op} {n} (via alias `{col_name}`)",
+                )
+            )
+
+    return hints
