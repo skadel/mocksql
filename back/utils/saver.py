@@ -37,6 +37,14 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
         ),
         None,
     )
+    # IDs of results messages referenced as parent by an evaluation — must be kept
+    # so that reload never produces an evaluation with an orphaned parent.
+    eval_parent_ids = {
+        m.additional_kwargs.get("parent")
+        for m in all_msgs
+        if get_message_type(m) == MsgType.EVALUATION
+        and m.additional_kwargs.get("parent")
+    }
 
     for i, msg in enumerate(all_msgs):
         if not msg.content:
@@ -44,7 +52,8 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
         if get_message_type(msg) == MsgType.EXAMPLES:
             continue
         if get_message_type(msg) == MsgType.RESULTS and i != last_results_idx:
-            continue
+            if msg.id not in eval_parent_ids:
+                continue
         logger.debug(
             "Saving message | type=%s id=%s content_preview=%.200s",
             get_message_type(msg),
