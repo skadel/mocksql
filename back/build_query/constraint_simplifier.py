@@ -61,6 +61,8 @@ import sqlglot
 from sqlglot import expressions as exp
 from sqlglot.optimizer.simplify import simplify as sg_simplify
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
+
 logger = logging.getLogger(__name__)
 
 
@@ -334,7 +336,7 @@ def _build_column_sql(
         if isinstance(node, exp.Column) and node.table
     }
 
-    from_clause = source.args.get("from")
+    from_clause = source.args.get("from_")
     joins = source.args.get("joins") or []
 
     # Keep only joins whose table/alias is referenced by col_expr
@@ -502,7 +504,7 @@ class _LineageResolver:
 
 def _collect_aliases(select: exp.Select, alias_map: dict[str, str]) -> None:
     """Populate alias_map with {alias_lower → real_table_lower} from FROM/JOINs."""
-    from_clause = select.args.get("from")
+    from_clause = select.args.get("from_")
     joins = select.args.get("joins") or []
 
     sources = []
@@ -520,7 +522,22 @@ def _collect_aliases(select: exp.Select, alias_map: dict[str, str]) -> None:
         elif isinstance(src, exp.Subquery):
             alias = src.alias.lower() if src.alias else ""
             if alias:
-                alias_map[alias] = alias
+                # Resolve alias to the underlying base table when the inner SELECT
+                # is a simple single-table scan (no sub-JOINs, no nested subqueries).
+                real = alias
+                inner = src.this
+                if isinstance(inner, exp.Select):
+                    inner_from = inner.args.get("from_")
+                    inner_joins = inner.args.get("joins") or []
+                    if (
+                        inner_from
+                        and not inner_joins
+                        and isinstance(inner_from.this, exp.Table)
+                    ):
+                        real = inner_from.this.name.lower()
+                alias_map[alias] = real
+                if real != alias:
+                    alias_map[real] = real
 
 
 # ─── Condition flattening ─────────────────────────────────────────────────────
@@ -941,13 +958,60 @@ def _walk_select(
     """Extract constraints from a single SELECT node."""
     _collect_aliases(select, alias_map)
 
+    # Log FROM / JOIN sources to diagnose missing filters
+    logger.diag("[walk_select] select.args keys = %s", list(select.args.keys()))
+    from_clause = select.args.get("from_")
+    logger.diag(
+        "[walk_select] from_clause type=%s value=%r",
+        type(from_clause).__name__,
+        from_clause,
+    )
+    join_sources = [j.this for j in (select.args.get("joins") or [])]
+    all_sources = ([from_clause.this] if from_clause else []) + join_sources
+    for src in all_sources:
+        logger.diag(
+            "[walk_select] source type=%s alias=%s",
+            type(src).__name__,
+            getattr(src, "alias", "—"),
+        )
+
     # WHERE — collect IS NULL columns first for anti-join detection below
     where = select.args.get("where")
     where_is_null_cols: set[ColumnRef] = set()
     if where:
+        filters_before = len(filters)
         where_is_null_cols = _collect_is_null_cols(where.this, alias_map, resolver)
         _extract_from_condition(
             where.this, alias_map, resolver, filters, equalities, functional
+        )
+        logger.diag(
+            "[walk_select] WHERE extracted %d new filter(s): %s",
+            len(filters) - filters_before,
+            [str(f.column) + " " + f.op for f in filters[filters_before:]],
+        )
+    else:
+        logger.diag("[walk_select] no WHERE clause on this SELECT")
+        filters_before = len(filters)
+
+    # Resolve __unknown__ table refs for columns with no table qualifier when there
+    # is exactly one real base table in scope (e.g. inside an inline subquery).
+    real_tables_in_scope = {v for v in alias_map.values() if v and not v.startswith("__")}
+    if len(real_tables_in_scope) == 1:
+        default_table = next(iter(real_tables_in_scope))
+        for idx in range(filters_before, len(filters)):
+            f = filters[idx]
+            if f.column.table == "__unknown__":
+                new_col = ColumnRef(default_table, f.column.column)
+                filters[idx] = FilterConstraint(
+                    column=new_col,
+                    op=f.op,
+                    value=f.value,
+                    source_columns=[new_col],
+                )
+        logger.diag(
+            "[walk_select] __unknown__ resolved to '%s' for %d filter(s)",
+            default_table,
+            sum(1 for i in range(filters_before, len(filters)) if filters[i].column.table == default_table),
         )
 
     # ON clauses of every JOIN
@@ -1001,6 +1065,26 @@ def _walk_select(
                 col_inequalities,
             )
 
+    # Recurse into subqueries used as table sources in FROM / JOIN clauses so that
+    # their WHERE filters (e.g. FROM (SELECT … WHERE dept = 'X') t) are captured.
+    # Use a fresh alias scope — inline table subqueries are self-contained and
+    # must not inherit the outer scope, so that __unknown__ resolution sees only
+    # the single base table from the inner FROM.
+    for src in all_sources:
+        if isinstance(src, exp.Subquery):
+            logger.diag(
+                "[walk_select] recursing into FROM/JOIN subquery alias=%s", src.alias
+            )
+            _walk_tree(
+                src,
+                {},
+                resolver,
+                filters,
+                equalities,
+                functional,
+                col_inequalities,
+            )
+
 
 def _walk_tree(
     node: exp.Expression,
@@ -1012,6 +1096,7 @@ def _walk_tree(
     col_inequalities: list[tuple[ColumnRef, ColumnRef]],
 ) -> None:
     """Recursively walk SELECT / UNION trees."""
+    logger.diag("[walk_tree] node type: %s", type(node).__name__)
     if isinstance(node, exp.Select):
         _walk_select(
             node,
@@ -1042,6 +1127,7 @@ def _walk_tree(
             col_inequalities,
         )
     elif isinstance(node, exp.Subquery):
+        logger.diag("[walk_tree] Subquery alias=%s → diving into its inner SELECT", node.alias)
         _walk_tree(
             node.this,
             alias_map,
@@ -1051,6 +1137,8 @@ def _walk_tree(
             functional,
             col_inequalities,
         )
+    else:
+        logger.diag("[walk_tree] node type %s not handled — skipped", type(node).__name__)
 
 
 # ─── Main extractor ───────────────────────────────────────────────────────────

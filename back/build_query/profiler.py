@@ -1009,21 +1009,52 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
         parts.append(tbl.name)
         return ".".join(parts)
 
-    # Build alias → full-qualified-table map
-    alias_map: dict[str, str] = {}
-    for tbl in tree.find_all(exp.Table):
-        full = _full_table_name(tbl)
-        if tbl.alias:
-            alias_map[tbl.alias] = full
-        alias_map[tbl.name] = full  # short name → full name
-
-    def resolve(name: str) -> str:
-        return alias_map.get(name, name)
-
     def source_cols(expr: exp.Expression) -> list[str]:
         return [c.name for c in expr.find_all(exp.Column)]
 
-    # Identify the primary FROM table
+    def _direct_alias_map(select: exp.Select) -> dict[str, str]:
+        """Return alias→full_table_name for the direct FROM and JOIN tables only.
+
+        Unlike find_all(exp.Table), this never descends into scalar subqueries,
+        LATERAL views, or other nested scopes — so an alias reused in a WHERE
+        scalar subquery (e.g. ``WHERE x = (SELECT y FROM t AS b WHERE …)``)
+        cannot overwrite the outer JOIN alias ``b``.
+        """
+        m: dict[str, str] = {}
+
+        def _register(node: exp.Expression) -> None:
+            if isinstance(node, exp.Table):
+                full = _full_table_name(node)
+                if node.alias:
+                    m[node.alias] = full
+                m[node.name] = full
+            elif isinstance(node, exp.Alias) and isinstance(node.this, exp.Table):
+                full = _full_table_name(node.this)
+                m[node.alias] = full
+                m[node.this.name] = full
+            elif isinstance(node, (exp.Subquery, exp.Alias)):
+                # Inline subquery that survived eliminate_subqueries — keep alias as-is
+                # so build_profile_query can decide whether to profile it.
+                alias = node.alias
+                if alias:
+                    m[alias] = alias
+
+        from_clause = select.args.get("from") or select.args.get("from_")
+        if from_clause:
+            _register(from_clause.this)
+        for join in select.args.get("joins") or []:
+            _register(join.this)
+        return m
+
+    # Global alias map (all tables in the tree) — used only for primary_table fallback.
+    _global_alias_map: dict[str, str] = {}
+    for _t in tree.find_all(exp.Table):
+        _full = _full_table_name(_t)
+        if _t.alias:
+            _global_alias_map[_t.alias] = _full
+        _global_alias_map[_t.name] = _full
+
+    # Identify the primary FROM table of the outermost SELECT.
     from_node = tree.find(exp.From)
     primary_table: str = ""
     if from_node:
@@ -1037,6 +1068,28 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
         on_expr = join_node.args.get("on")
         if not on_expr:
             continue
+
+        # Walk up to the containing SELECT and build a scope-local alias map
+        # from its direct FROM/JOIN only — no nested-subquery traversal.
+        _scope: exp.Expression | None = join_node.parent
+        while _scope is not None and not isinstance(_scope, exp.Select):
+            _scope = _scope.parent
+        local_alias_map = (
+            _direct_alias_map(_scope) if _scope is not None else _global_alias_map
+        )
+
+        # Local primary FROM table (fallback when l_expr has no table qualifier).
+        local_primary: str = primary_table
+        if _scope is not None:
+            _local_from = _scope.args.get("from") or _scope.args.get("from_")
+            if _local_from:
+                _lf_node = _local_from.this
+                if isinstance(_lf_node, exp.Table):
+                    _lf_key = _lf_node.alias or _lf_node.name
+                    local_primary = local_alias_map.get(_lf_key, _full_table_name(_lf_node))
+
+        def resolve(name: str, _m: dict = local_alias_map) -> str:
+            return _m.get(name, name)
 
         # Right-side table
         jt = join_node.this
@@ -1059,10 +1112,10 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
             continue
 
         # Walk AND-separated conditions
-        def collect_eq(node: exp.Expression):
+        def collect_eq(node: exp.Expression, _rt: str = right_table, _lp: str = local_primary):
             if isinstance(node, exp.And):
-                collect_eq(node.left)
-                collect_eq(node.right)
+                collect_eq(node.left, _rt, _lp)
+                collect_eq(node.right, _rt, _lp)
             elif isinstance(node, exp.EQ):
                 left = node.left
                 right = node.right
@@ -1073,7 +1126,7 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
 
                 # Determine which side belongs to which table.
                 # right_table is the JOIN node's table; the other side is the FROM/left table.
-                if right_tbl == right_table or (not left_tbl and not right_tbl):
+                if right_tbl == _rt or (not left_tbl and not right_tbl):
                     l_expr, r_expr = left, right
                 else:
                     l_expr, r_expr = right, left
@@ -1089,8 +1142,8 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
 
                 specs.append(
                     {
-                        "left_table": l_resolved or primary_table,
-                        "right_table": right_table,
+                        "left_table": l_resolved or _lp,
+                        "right_table": _rt,
                         "left_expr_sql": l_expr.sql(),
                         "right_expr_sql": r_expr.sql(),
                         "left_keys": source_cols(l_expr),
@@ -2188,6 +2241,23 @@ def build_profile_query(
     ctes: list[tuple[str, str]] = []
     cte_map: dict[str, str] = {}
     if sql_query:
+        # Hoist inline FROM-clause subqueries (e.g. FROM (...) a inside a CTE body)
+        # into top-level CTEs before any further processing.  This makes local aliases
+        # like `a` globally referenceable as CTE names, fixing queries that would
+        # otherwise generate FROM `a` (invalid in BigQuery — requires dataset qualification).
+        # Duplicate aliases get unique suffixes (a → a_2) automatically.
+        try:
+            from sqlglot.optimizer.eliminate_subqueries import (
+                eliminate_subqueries as _elim_subq,
+            )
+
+            _parsed = sqlglot.parse_one(
+                sql_query, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+            )
+            sql_query = _elim_subq(_parsed).sql(dialect=dialect)
+        except Exception:
+            pass
+
         # Extract CTE definitions so SQL-based join branches can reference CTE names.
         ctes = _extract_ctes(sql_query, dialect=dialect)
         cte_map = dict(ctes)

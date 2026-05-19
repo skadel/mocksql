@@ -171,7 +171,7 @@ def _build_count_steps_query(
     Returns (full_sql, labels) where labels[i] describes the i-th SELECT column.
     """
     tree = sqlglot.parse_one(cte_code, read=dialect)
-    from_expr: Optional[exp.From] = tree.args.get("from")
+    from_expr: Optional[exp.From] = tree.args.get("from") or tree.args.get("from_")
     joins: List[exp.Join] = tree.args.get("joins") or []
     where: Optional[exp.Where] = tree.args.get("where")
 

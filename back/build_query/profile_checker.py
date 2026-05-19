@@ -416,7 +416,7 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
         except Exception:
             schemas = []
     dialect = state.get("dialect", "bigquery")
-    sql_query = state.get("query") or None
+    sql_query = state.get("optimized_sql") or state.get("query") or None
     missing_resolved = _resolve_full_table_names(missing, schemas)
     partition_limit: int | None = state.get("profile_partition_limit", 3)
     profile_sql = build_profile_query(
