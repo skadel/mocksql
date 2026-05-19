@@ -37,11 +37,49 @@ async def conversational_agent(state: QueryState):
             eval_test_idx = latest_eval.additional_kwargs.get("test_index")
             eval_verdict_text = latest_eval.content
             retries_left = state.get("gen_retries", 0)
+
+            # Find the failing test case to expose its data to the agent
+            failing_test = next(
+                (t for t in existing_tests if str(t.get("test_index")) == str(eval_test_idx)),
+                None,
+            )
+            test_data_block = ""
+            if failing_test:
+                input_data = failing_test.get("data", {})
+                results_json = failing_test.get("results_json", "[]")
+                assertion_results = failing_test.get("assertion_results", [])
+
+                if input_data:
+                    try:
+                        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)
+                    except Exception:
+                        input_summary = str(input_data)
+                    test_data_block += f"\n\nDonnées d'entrée du test {eval_test_idx} :\n```json\n{input_summary}\n```"
+
+                if results_json and results_json != "[]":
+                    try:
+                        parsed_results = json.loads(results_json) if isinstance(results_json, str) else results_json
+                        results_summary = json.dumps(parsed_results[:10], ensure_ascii=False, indent=2)
+                    except Exception:
+                        results_summary = str(results_json)[:500]
+                    test_data_block += f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
+                else:
+                    test_data_block += f"\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
+
+                if assertion_results:
+                    failing_assertions = [a for a in assertion_results if a.get("status") != "pass"]
+                    if failing_assertions:
+                        try:
+                            assertions_summary = json.dumps(failing_assertions, ensure_ascii=False, indent=2)
+                        except Exception:
+                            assertions_summary = str(failing_assertions)[:500]
+                        test_data_block += f"\n\nAssertions en échec :\n```json\n{assertions_summary}\n```"
+
             eval_context = f"""
 
 ⚠️ CONTEXTE AUTOMATIQUE — Le test {eval_test_idx} a été jugé **Insuffisant à cause des données d'entrée**.
 Verdict de l'évaluateur : {eval_verdict_text}
-Tentatives de correction restantes : {retries_left}
+Tentatives de correction restantes : {retries_left}{test_data_block}
 
 Ta mission : analyser pourquoi les données d'entrée posent problème, puis les corriger.
 Tu as à ta disposition :

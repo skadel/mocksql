@@ -336,7 +336,6 @@ def generate_data_prompt(
     Construit un prompt pour générer un test unitaire,
     en incluant un historique de messages (system/human/ai, etc.).
     """
-
     if constraints_hint:
         if user_instruction:
             constraints_block = (
