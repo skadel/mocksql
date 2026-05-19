@@ -1,7 +1,7 @@
 """
 Tests for build_query/examples_executor.py — pure and DuckDB-testable functions.
 
-Functions with LLM calls (_generate_assertions_from_result, _regenerate_assertion)
+Functions with LLM calls (_generate_assertions_and_evaluate, _regenerate_assertion)
 and those requiring the full LangGraph state / external DB are excluded.
 """
 

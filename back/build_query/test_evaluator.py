@@ -1,36 +1,25 @@
 import json
 import logging
 import uuid
-from typing import Literal, Optional
 
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
-from utils.llm_errors import is_vertex_permission_error
-from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
-from utils.test_utils import build_test_detail, find_current_test
+from utils.test_utils import find_current_test
 
 logger = logging.getLogger(__name__)
 
 
-class _EvaluationOutput(BaseModel):
-    verdict: Literal["Excellent", "Bon", "Insuffisant"]
-    reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
-    explanation: str
-
-
 async def evaluate_tests(state: QueryState):
     """
-    Évalue la qualité de la suite de tests unitaires après exécution et produit
-    un verdict + commentaire via le LLM.
+    Lit le verdict pré-calculé par l'executor (embedded dans le résultat du test),
+    émet le message EVALUATION et gère le routing (bad_data / bad_assertions / too_many_rows).
 
-    Quand le verdict est Insuffisant, classifie la cause :
-    - bad_data       : données d'entrée incorrectes → déclenche une relance via l'agent conversationnel
-    - bad_assertions : assertions/résultats attendus mal définis
+    Le verdict et les assertions sont produits en un seul appel LLM dans _generate_assertions_and_evaluate
+    (examples_executor.py). Ce nœud ne fait plus d'appel LLM.
     """
     if state.get("error"):
         return {}
@@ -51,17 +40,12 @@ async def evaluate_tests(state: QueryState):
         all_tests = [all_tests]
 
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
-
     current_test = find_current_test(all_tests, state.get("test_index"))
     if current_test is None:
         return {}
 
-    test_detail = build_test_detail(current_test)
-
-    # Fast path: if the test produced 0 rows, check whether the SQL itself requires
-    # more rows than MockSQL can generate (e.g. COUNT(*) threshold in a CTE WHERE).
-    # This avoids wasting an LLM call and avoids the bad_data retry loop.
-    if test_detail.get("status") == "empty_results":
+    # Fast path: empty_results due to structural SQL constraint (no LLM needed).
+    if current_test.get("status") == "empty_results":
         from build_query.constraint_simplifier import (
             check_correlated_aggregate_cardinality,
             check_having_cardinality,
@@ -81,11 +65,10 @@ async def evaluate_tests(state: QueryState):
 
         if cardinality_error:
             logger.diag("[evaluator] too_many_rows détecté: %s", cardinality_error)
-            content = f"**Insuffisant** — {cardinality_error}"
             return {
                 "messages": [
                     AIMessage(
-                        content=content,
+                        content=f"**Insuffisant** — {cardinality_error}",
                         id=str(uuid.uuid4()),
                         additional_kwargs={
                             "type": MsgType.EVALUATION,
@@ -99,55 +82,44 @@ async def evaluate_tests(state: QueryState):
                 "status": "complete",
             }
 
-    prompt = f"""Tu es un expert en qualité de tests SQL unitaires.
+        # No structural constraint → données incorrectes, déclenche le retry conversational_agent
+        gen_retries = state.get("gen_retries") if state.get("gen_retries") is not None else 1
+        failing_cte = current_test.get("failing_cte", "")
+        if failing_cte:
+            explanation = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
+        else:
+            explanation = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
+        logger.diag("[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d", gen_retries)
+        state_update: dict = {
+            "messages": [
+                AIMessage(
+                    content=f"**Insuffisant** — {explanation}",
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.EVALUATION,
+                        "parent": last_results.id,
+                        "request_id": state.get("request_id"),
+                        "test_index": current_test.get("test_index"),
+                    },
+                )
+            ],
+            "evaluation_feedback": "bad_data",
+            "status": "empty_results",
+        }
+        if gen_retries > 0:
+            state_update["gen_retries"] = gen_retries - 1
+        return state_update
 
-Tu reçois une requête SQL et les détails d'un test unitaire qui vient d'être généré et exécuté.
+    verdict = current_test.get("verdict")
+    reason_type = current_test.get("reason_type")
+    explanation = current_test.get("evaluation_explanation", "")
 
-**Requête SQL :**
-```sql
-{sql}
-```
-
-**Test évalué :**
-{json.dumps(test_detail, ensure_ascii=False, indent=2)}
-
-**Mission :**
-Évalue la qualité du test et retourne un objet JSON structuré avec :
-- `verdict` : "Excellent", "Bon", ou "Insuffisant"
-- `reason_type` (uniquement si Insuffisant) :
-  - "bad_data" : les données d'entrée sont incorrectes (mauvais types, contraintes non respectées,
-    valeurs incohérentes, jointures impossibles, résultat inattendu dû aux données générées)
-  - "bad_assertions" : les assertions ou résultats attendus sont trop permissifs, incorrects ou
-    mal définis — les données elles-mêmes sont valides
-- `explanation` : une phrase ultra-concise (max 20 mots) en français expliquant le verdict
-
-**Cas particulier — résultat vide intentionnel** : si la description du test indique explicitement que le résultat attendu est vide (ex : "plage vide", "aucune ligne", "filtre qui exclut tout", "0 ligne attendue"), alors le résultat vide est correct. Dans ce cas, évalue si les données d'entrée sont bien construites pour produire ce vide (Bon/Excellent), ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data).
-
-Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Couvre la jointure sur clé manquante. Données et résultat valides."}}"""
+    if not verdict:
+        return {}
 
     logger.diag(
-        "[evaluator] test_detail:\n%s",
-        json.dumps(test_detail, ensure_ascii=False, indent=2),
+        "[evaluator] verdict=%s reason_type=%s — %s", verdict, reason_type, explanation
     )
-    logger.diag("[evaluator] prompt:\n%s", prompt)
-
-    llm = make_llm()
-    structured_llm = llm.with_structured_output(_EvaluationOutput)
-
-    try:
-        result: _EvaluationOutput = await structured_llm.ainvoke(prompt)
-        logger.diag(
-            "[evaluator] verdict=%s reason_type=%s — %s",
-            result.verdict,
-            result.reason_type,
-            result.explanation,
-        )
-    except Exception as exc:
-        if is_vertex_permission_error(exc):
-            return {}
-        raise
-
-    content = f"**{result.verdict}** — {result.explanation}"
 
     eval_test_index = current_test.get("test_index")
     gen_retries = (
@@ -155,25 +127,21 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
     )
 
     evaluation_feedback = (
-        result.reason_type
-        if result.verdict == "Insuffisant" and result.reason_type
-        else None
+        reason_type if verdict == "Insuffisant" and reason_type else None
     )
-    triggers_agent_retry = (
-        evaluation_feedback == "bad_data"
-        and gen_retries > 0
-        and not state.get("assertion_only")
+    triggers_agent_retry = evaluation_feedback == "bad_data" and not state.get(
+        "assertion_only"
     )
     triggers_assertion_fix = (
         evaluation_feedback == "bad_assertions"
-        and gen_retries > 0
         and not state.get("assertion_only")
+        and current_test.get("assertion_fix") is not None
     )
 
     state_update: dict = {
         "messages": [
             AIMessage(
-                content=content,
+                content=f"**{verdict}** — {explanation}",
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "type": MsgType.EVALUATION,
@@ -184,9 +152,40 @@ Exemple de sortie : {{"verdict": "Bon", "reason_type": null, "explanation": "Cou
             )
         ],
         "evaluation_feedback": evaluation_feedback,
-        "status": "empty_results" if triggers_agent_retry else "complete",
+        "status": "empty_results"
+        if (triggers_agent_retry and gen_retries > 0)
+        else "complete",
     }
+
     if triggers_agent_retry or triggers_assertion_fix:
         state_update["gen_retries"] = gen_retries - 1
+
+    if triggers_assertion_fix:
+        fix = current_test["assertion_fix"]
+        updated_test = {
+            **current_test,
+            "test_name": fix["test_name"],
+            "unit_test_description": fix["unit_test_description"],
+            "unit_test_build_reasoning": fix["unit_test_build_reasoning"],
+            "tags": fix["tags"],
+            "suggestions": fix["suggestions"],
+        }
+        parent = state.get("user_message_id") or state.get("parent_message_id")
+        state_update["examples"] = [
+            AIMessage(
+                content=json.dumps(updated_test),
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.EXAMPLES,
+                    "parent": parent,
+                    "request_id": state.get("request_id"),
+                    "generated_test_index": updated_test.get("test_index"),
+                    "assertion_only": True,
+                },
+            )
+        ]
+        logger.diag(
+            "[evaluator] assertion_fix inline: test_name=%r", fix["test_name"]
+        )
 
     return state_update

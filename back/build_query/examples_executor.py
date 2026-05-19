@@ -2,11 +2,12 @@ import json
 import logging
 import re
 import uuid
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 
 import sqlglot
 from langchain_core.messages import AIMessage
 from pandas import DataFrame
+from pydantic import BaseModel
 from sqlglot import exp
 
 from utils.llm_errors import normalize_llm_content
@@ -28,6 +29,28 @@ from utils.saver import examples_state_retriever
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 
 logger = logging.getLogger(__name__)
+
+
+class _Assertion(BaseModel):
+    description: str
+    sql: str
+
+
+class _AssertionFix(BaseModel):
+    test_name: str
+    unit_test_description: str
+    unit_test_build_reasoning: str
+    tags: List[str]
+    suggestions: List[str]
+
+
+class _AssertionsAndEvaluation(BaseModel):
+    reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
+    assertions: List[_Assertion]
+    verdict: Literal["Excellent", "Bon", "Insuffisant"]
+    reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
+    explanation: str
+    assertion_fix: Optional[_AssertionFix] = None
 
 
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
@@ -125,7 +148,7 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     )
     results_kwargs = {
         "type": MsgType.RESULTS,
-        "parent": state["messages"][-1].id if len(state["messages"]) > 0 else None,
+        "parent": state.get("parent_message_id") or (state["messages"][-1].id if state.get("messages") else None),
         "request_id": state.get("request_id"),
         **({"sql": sql} if sql else {}),
         **({"optimized_sql": optimized_sql} if optimized_sql else {}),
@@ -589,15 +612,16 @@ async def _run_single_test_case(
                 assertion_results = await _evaluate_assertions_with_retry(
                     existing_assertions, **retry_kwargs
                 )
+                eval_result = None
             else:
-                assertions = await _generate_assertions_from_result(
+                eval_result = await _generate_assertions_and_evaluate(
                     duckdb_sql=final_duckdb_sql,
                     test_data=test_data,
                     result_df=final_res_df,
                     test_description=test_case.get("unit_test_description", ""),
                 )
                 assertion_results = await _evaluate_assertions_with_retry(
-                    assertions, **retry_kwargs
+                    [a.model_dump() for a in eval_result.assertions], **retry_kwargs
                 )
                 assertion_results = await _fix_logically_failing_assertions(
                     assertion_results, **retry_kwargs
@@ -605,12 +629,19 @@ async def _run_single_test_case(
         finally:
             con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
 
-        return {
+        result = {
             **base,
             "status": "complete",
             "results_json": await format_result(final_res_df),
             "assertion_results": assertion_results,
         }
+        if eval_result is not None:
+            result["verdict"] = eval_result.verdict
+            result["reason_type"] = eval_result.reason_type
+            result["evaluation_explanation"] = eval_result.explanation
+            if eval_result.assertion_fix is not None:
+                result["assertion_fix"] = eval_result.assertion_fix.model_dump()
+        return result
 
     except Exception as e:
         return {
@@ -689,26 +720,27 @@ async def _handle_test_result(
 REGEN_ASSERTION_LIMIT = 3
 
 
-async def _generate_assertions_from_result(
+async def _generate_assertions_and_evaluate(
     duckdb_sql: str,
     test_data: list,
     result_df,
     test_description: str,
-) -> List[Dict[str, Any]]:
+) -> _AssertionsAndEvaluation:
     """
-    Asks the LLM to generate 2-3 dbt-style assertions using the real DuckDB result schema.
-    Called after query execution so column names and types are exact.
-    Returns a list of {"description": ..., "sql": ...} dicts (empty list on failure).
+    Single LLM call that generates 2-3 dbt-style assertions AND evaluates test quality.
+    Returns an _AssertionsAndEvaluation with assertions, verdict, explanation, and optional fix.
+    Falls back to an empty assertions + Bon verdict on failure.
     """
     schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
     schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
     sample = result_df.head(5).to_dict(orient="records")
     row_count = len(result_df)
 
-    prompt = f"""Tu es un expert en tests SQL avec Duckdb dbt-style.
+    prompt = f"""Tu es un expert en tests SQL dbt-style avec DuckDB.
+
 Description du test : {test_description}
 
-Données de tests input :
+Données d'entrée :
 {test_data}
 
 Requête SQL testée :
@@ -716,7 +748,7 @@ Requête SQL testée :
 {duckdb_sql}
 ```
 
-Résultat après execution du test sur DuckDB — {row_count} ligne(s).
+Résultat après exécution sur DuckDB — {row_count} ligne(s).
 
 Schéma exact de `__result__` :
 {schema_str}
@@ -724,37 +756,61 @@ Schéma exact de `__result__` :
 Exemples de lignes :
 {json.dumps(sample, ensure_ascii=False, default=str)}
 
-Génère 2 à 3 assertions SQL dbt-style sur `__result__`. Chaque assertion = SELECT DuckDB retournant **0 ligne si OK, des lignes si KO**.
+Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
+- Quelle est l'intention de ce test ? Quel comportement SQL veut-il vérifier ?
+- Les données d'entrée sont-elles cohérentes avec cette intention (types, cardinalité, cas limites) ?
+- Le résultat DuckDB est-il conforme à ce qu'on attendrait ?
+- Quelles assertions seraient pertinentes pour consolider ce verdict ?
 
-⚠️ Règles DuckDB strictes :
-- Utilise UNIQUEMENT les colonnes listées dans le schéma ci-dessus (noms exacts, sensibles à la casse)
-- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
-  `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
+Puis produis :
 
-Réponds UNIQUEMENT avec un tableau JSON (aucun texte autour) :
-[
-  {{"description": "...", "sql": "SELECT ..."}},
-  ...
-]"""
+1. 2 à 3 assertions SQL dbt-style sur `__result__`.
+   - Convention : 0 ligne si OK, des lignes si KO.
+   - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse).
+   - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
+     `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
+
+2. Le verdict de qualité :
+   - `verdict` : "Excellent", "Bon", ou "Insuffisant"
+   - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
+     mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
+     (les assertions générées ne permettent pas de valider ce scénario)
+   - `explanation` : une phrase ultra-concise (max 20 mots) en français
+   - `assertion_fix` (uniquement si `reason_type == "bad_assertions"`) : objet décrivant
+     la correction à apporter au test pour permettre une meilleure génération d'assertions :
+     - `test_name` : nom court corrigé (3–6 mots)
+     - `unit_test_description` : description précise et correcte, sans ambiguïté
+     - `unit_test_build_reasoning` : explication de la correction
+     - `tags` : liste parmi Logique métier, Null checks, Cas limites, Intégration,
+       Valeurs dupliquées, Performance
+     - `suggestions` : 2–3 vérifications correctives précises ("Vérifie que …")
+     Si `reason_type != "bad_assertions"`, `assertion_fix` doit être `null`.
+
+Cas particulier — résultat vide intentionnel : si la description mentionne explicitement
+"plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
+Évalue si les données d'entrée sont bien construites pour produire ce vide (Bon/Excellent),
+ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data)."""
 
     llm = make_llm()
+    structured_llm = llm.with_structured_output(_AssertionsAndEvaluation)
     try:
-        logger.diag("[generate_assertions] prompt (extrait):\n%s", prompt[:1500])
-        result = await llm.ainvoke(prompt)
-        content = normalize_llm_content(result.content)
-        logger.diag("[generate_assertions] réponse brute:\n%s", content[:1000])
-        # Greedy match captures the outermost [...] even when the LLM adds surrounding text
-        json_match = re.search(r"\[[\s\S]*\]", content)
-        if json_match:
-            parsed = json.loads(json_match.group())
-            assertions = [a for a in parsed if isinstance(a, dict) and a.get("sql")]
-            logger.diag(
-                "[generate_assertions] %s assertion(s) parsée(s)", len(assertions)
-            )
-            return assertions
+        logger.diag("[assertions_eval] prompt (extrait):\n%s", prompt[:1500])
+        result: _AssertionsAndEvaluation = await structured_llm.ainvoke(prompt)
+        logger.diag("[assertions_eval] reasoning:\n%s", result.reasoning)
+        logger.diag(
+            "[assertions_eval] verdict=%s reason_type=%s assertions=%s",
+            result.verdict,
+            result.reason_type,
+            len(result.assertions),
+        )
+        return result
     except Exception as e:
-        logger.diag("[generate_assertions] ERREUR: %s", e)
-    return []
+        logger.diag("[assertions_eval] ERREUR: %s", e)
+        return _AssertionsAndEvaluation(
+            assertions=[],
+            verdict="Bon",
+            explanation="Évaluation indisponible.",
+        )
 
 
 def _evaluate_assertions(
