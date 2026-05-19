@@ -112,6 +112,17 @@ export function formatMessage(message: any): Message {
       break;
     }
 
+    case 'update_test': {
+      const parsed = JSON.parse(message.content);
+      (newMessage.contents as any).testIndex = parsed.test_index;
+      (newMessage.contents as any).newName = parsed.new_name;
+      (newMessage.contents as any).newDescription = parsed.new_description;
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
+      }
+      break;
+    }
+
     case 'suggestions': {
       try {
         newMessage.contents.suggestions = JSON.parse(message.content);

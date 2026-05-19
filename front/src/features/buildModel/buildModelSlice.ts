@@ -209,6 +209,21 @@ export const buildModelSlice = createSlice({
           (t: any) => String(t.test_index) !== String(testIndex)
         );
       }
+
+      // Update name/description of a test renamed by the conversational agent
+      if (msg.contentType === 'update_test') {
+        const testIndex = (msg.contents as any).testIndex ?? msg.testIndex;
+        const newName = (msg.contents as any).newName;
+        const newDescription = (msg.contents as any).newDescription;
+        state.testResults = (state.testResults || []).map((t: any) => {
+          if (String(t.test_index) !== String(testIndex)) return t;
+          return {
+            ...t,
+            ...(newName ? { test_name: newName } : {}),
+            ...(newDescription ? { unit_test_description: newDescription } : {}),
+          };
+        });
+      }
     },
     removeMessage(state, action: PayloadAction<string>) {
       const tempMessageId = action.payload;

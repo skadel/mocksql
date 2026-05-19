@@ -29,6 +29,17 @@ type MessageBodyProps = {
   debugMessages?: Message[];
 };
 
+const markdownBodySx = {
+  fontSize: 13,
+  lineHeight: 1.5,
+  color: '#333',
+  '& p': { margin: '0 0 6px 0' },
+  '& p:last-child': { marginBottom: 0 },
+  '& strong': { fontWeight: 700 },
+  '& ul, & ol': { paddingLeft: '1.5em', marginTop: '4px', marginBottom: '4px' },
+  '& li': { marginBottom: '2px' },
+};
+
 const DebugRunCteContent: React.FC<{ d: DebugRunCteResult }> = ({ d }) => {
   if (d.error) return <Alert severity="error" sx={{ mt: 1 }}>{d.error}</Alert>;
   const cols = d.rows.length > 0 ? Object.keys(d.rows[0]) : [];
@@ -213,16 +224,13 @@ const MessageBody: React.FC<MessageBodyProps> = ({
       {msg.contentType === 'evaluation' && msg.contents.text && (
         <Box
           sx={{
+            ...markdownBodySx,
             mt: 1,
             p: 1.5,
             bgcolor: '#f8fffe',
             borderRadius: '8px',
             border: '1px solid #c8e6e4',
             borderLeft: '3px solid #1ca8a4',
-            fontSize: 13,
-            color: '#333',
-            '& p': { margin: '0 0 6px 0' },
-            '& p:last-child': { marginBottom: 0 },
             '& strong': { color: '#1ca8a4' },
           }}
         >
@@ -273,6 +281,26 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       )}
 
+      {/* Confirmation de mise à jour de la description d'un test */}
+      {msg.contentType === 'update_test' && (
+        <Box
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            mt: 1,
+            px: 1.5,
+            py: 0.75,
+            bgcolor: '#f0fafa',
+            borderRadius: '10px',
+            border: '1px solid #d0eeec',
+          }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 700, color: '#1ca8a4' }}>
+            ✅ Description du test n°{((msg.contents as any).testIndex ?? 0) + 1} mise à jour
+          </Typography>
+        </Box>
+      )}
+
       {/* Texte */}
       {msg.contents.text && msg.contentType !== 'evaluation' && msg.contentType !== 'generate_test_scenario' && (
         msg.type === 'user' ? (
@@ -283,9 +311,9 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             {msg.contents.text}
           </Typography>
         ) : (
-          <div style={{ marginTop: '4px', overflowX: 'auto' }}>
+          <Box sx={{ mt: 0.5, overflowX: 'auto', ...markdownBodySx }}>
             <ReactMarkdown>{msg.contents.text}</ReactMarkdown>
-          </div>
+          </Box>
         )
       )}
 

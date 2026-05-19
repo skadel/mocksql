@@ -109,7 +109,7 @@ export const chatQuery = createAsyncThunk(
             parent_message_id: parentMessageId || '',
             changed_message_id: ChangedMessageId || '',
             request_id,
-            gen_retries: 1,
+            gen_retries: 2,
             debug_retries: 2,
             used_columns: [],
             used_columns_changed: false,
