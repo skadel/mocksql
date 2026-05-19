@@ -130,10 +130,16 @@ def _format_filter_constraints(constraints: list) -> list[str]:
     return filters
 
 
+def _col_str_join(col) -> str:
+    """Return 'real_table.column', preferring real_table over subquery alias."""
+    t = col.real_table if (col.real_table and col.real_table != col.table) else col.table
+    return f"{t}.{col.column}"
+
+
 def _branch_to_dict(result) -> dict:
     """Convert a SimplificationResult to a plain dict (joins/filters/anti_joins)."""
     joins = [
-        " = ".join(sorted(str(c) for c in group))
+        " = ".join(sorted(_col_str_join(c) for c in group))
         for group in result.equivalence_classes
     ]
     anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
@@ -152,7 +158,7 @@ def _branch_to_dict(result) -> dict:
 def _or_path_to_dict(or_path_filters: list, result) -> dict:
     """Build a path dict for one OR branch, keeping join/anti-join context from result."""
     joins = [
-        " = ".join(sorted(str(c) for c in group))
+        " = ".join(sorted(_col_str_join(c) for c in group))
         for group in result.equivalence_classes
     ]
     anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
@@ -455,15 +461,22 @@ async def generate_examples_(
     # Compute Faker-eligible columns only when constraint extraction fully succeeded
     # and all ColumnRefs resolved to known base tables (no silent lineage failure).
     # UNNEST queries are skipped: array-of-struct constraints are not reliably captured.
+    # Faker is also disabled on retry (empty_results) — inconsistent data may have been
+    # caused by Faker-filled values conflicting with LLM-generated values.
     base_tables = {entry["table"].lower() for entry in used_columns}
     faker_cols: dict[str, set[str]] = {}
     _has_unnest = "unnest" in optimized_sql.lower()
+    _is_retry = state.get("status") == "empty_results"
     logger.debug(
-        "[generator] _has_unnest=%s  sim_result=%s", _has_unnest, sim_result is not None
+        "[generator] _has_unnest=%s  _is_retry=%s  sim_result=%s",
+        _has_unnest,
+        _is_retry,
+        sim_result is not None,
     )
     if (
         sim_result is not None
         and not _has_unnest
+        and not _is_retry
         and _all_refs_resolved(sim_result, base_tables)
     ):
         faker_cols = _compute_faker_columns(sim_result, used_columns, base_tables)
@@ -550,7 +563,7 @@ async def generate_examples_(
 
     # Merge Faker-generated values into LLM output
     if faker_cols:
-        faker_data = generate_faker_rows(schema, faker_cols, filled_data)
+        faker_data = generate_faker_rows(schema, faker_cols, filled_data, profile=state.get("profile"))
         for uc_key, faker_rows in faker_data.items():
             llm_rows = filled_data.get(uc_key) or []
             if llm_rows:
