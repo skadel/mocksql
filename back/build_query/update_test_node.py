@@ -49,7 +49,9 @@ async def update_test_node(state: QueryState):
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "type": MsgType.UPDATE_TEST,
-                    "parent": state["messages"][-1].id if state.get("messages") else state.get("parent_message_id"),
+                    "parent": state["messages"][-1].id
+                    if state.get("messages")
+                    else state.get("parent_message_id"),
                     "request_id": state.get("request_id"),
                     "test_index": test_index,
                 },

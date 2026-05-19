@@ -26,7 +26,7 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
         formatted = f"[debug] {cte} → erreur : {data['error']}"
     elif msg_type == MsgType.DEBUG_COUNT_STEPS:
         steps = data.get("steps", [])
-        lines = [f"[count_cte_steps] CTE \"{cte}\" :"]
+        lines = [f'[count_cte_steps] CTE "{cte}" :']
         for step in steps:
             marker = " ⚠️" if step["count"] == 0 else ""
             lines.append(f"  {step['label']} → {step['count']} ligne(s){marker}")
@@ -35,7 +35,7 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
         rows = data.get("rows", [])
         row_count = data.get("row_count", 0)
         col_filter = data.get("column")
-        header = f"[run_cte] CTE \"{cte}\""
+        header = f'[run_cte] CTE "{cte}"'
         if col_filter:
             header += f" (colonne : {col_filter})"
         header += f" — {row_count} ligne(s)"
@@ -45,7 +45,9 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
             headers = list(rows[0].keys())
             sep = " | "
             col_line = sep.join(headers)
-            row_lines = [sep.join(str(r.get(h, "")) for h in headers) for r in rows[:15]]
+            row_lines = [
+                sep.join(str(r.get(h, "")) for h in headers) for r in rows[:15]
+            ]
             formatted = "\n".join([header, col_line, "-" * len(col_line)] + row_lines)
             if row_count > 15:
                 formatted += f"\n  … {row_count - 15} lignes supplémentaires"

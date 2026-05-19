@@ -83,13 +83,18 @@ async def evaluate_tests(state: QueryState):
             }
 
         # No structural constraint → données incorrectes, déclenche le retry conversational_agent
-        gen_retries = state.get("gen_retries") if state.get("gen_retries") is not None else 1
+        gen_retries = (
+            state.get("gen_retries") if state.get("gen_retries") is not None else 1
+        )
         failing_cte = current_test.get("failing_cte", "")
         if failing_cte:
             explanation = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
         else:
             explanation = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
-        logger.diag("[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d", gen_retries)
+        logger.diag(
+            "[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d",
+            gen_retries,
+        )
         state_update: dict = {
             "messages": [
                 AIMessage(
@@ -184,8 +189,6 @@ async def evaluate_tests(state: QueryState):
                 },
             )
         ]
-        logger.diag(
-            "[evaluator] assertion_fix inline: test_name=%r", fix["test_name"]
-        )
+        logger.diag("[evaluator] assertion_fix inline: test_name=%r", fix["test_name"])
 
     return state_update
