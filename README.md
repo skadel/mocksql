@@ -55,6 +55,12 @@ docs/       # Documentation
 ## Contribuer
 
 ```bash
+make check-all   # back (style + tests) + front (vitest) — validation complète
+```
+
+Backend seul :
+
+```bash
 cd back
 make style    # lint + format check + code mort (vulture)
 make format   # auto-format et auto-fix

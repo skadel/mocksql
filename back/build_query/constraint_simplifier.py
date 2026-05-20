@@ -4,50 +4,46 @@ constraint_simplifier.py — SQL constraint extraction and simplification.
 Public API
 ----------
     simplify(sql, dialect="bigquery", schema=None) -> SimplificationResult
-    extract_constraints(sql, dialect, schema)       -> (filters, equalities, functional, col_inequalities)
+    extract_constraints(sql, dialect, schema)       -> list[ConstraintGroup]
+
+extract_constraints() algorithm
+--------------------------------
+Walks the SQL AST and returns one ConstraintGroup per independent satisfying path:
+
+  • AND predicates   → accumulated into the current group (no new groups)
+  • OR predicates    → DNF expansion → one group per AND-path (cartesian product)
+  • UNION ALL        → groups from each branch are concatenated (not multiplied)
+  • CTE / subquery   → cross-multiplied with the outer SELECT's groups when used
+                       in a positive JOIN/FROM context; skipped for anti-joins
+                       (LEFT JOIN … WHERE b IS NULL patterns).
+
+The expansion is capped at _MAX_CONSTRAINT_GROUPS (32) to prevent exponential blowup.
 
 simplify() algorithm
 --------------------
-Given a SQL query the function:
-  1. Resolves CTE column lineage back to base tables (sqlglot lineage engine).
-  2. Extracts three kinds of constraints via extract_constraints():
-       • FilterConstraint      – column <op> literal  (WHERE / ON predicates)
-       • EqualityConstraint    – col = col            (join keys, simple equalities)
-       • FunctionalConstraint  – col = f(col)         (TRIM, UPPER, …)
-  3. Builds Union-Find equivalence classes from column equalities.
-  4. Produces a minimal generation set:
-       • source_columns        – must be generated (one rep per equivalence class + filtered cols)
-       • derived_columns       – can be computed from a source
-       • equivalence_classes   – groups of columns sharing the same value
-  5. For UNION / UNION ALL queries, recursively calls simplify() per branch and stores
-     independent SimplificationResults in union_branches — so the LLM sees disjoint paths
-     instead of a flat merged set of constraints.
-  6. Computes OR paths via DNF (Disjunctive Normal Form) for WHERE clauses that contain
-     OR nodes — including the outermost SELECT WHERE and CTE body WHEREs:
-       • or_paths              – one list[FilterConstraint] per satisfying OR branch
-       • or_paths_truncated    – True when expansion exceeded _MAX_OR_PATHS_EMIT (32)
-     The DNF expansion is capped at _MAX_OR_PATHS_COMPUTE (128) internally to prevent
-     exponential blowup (e.g. 7 independent OR clauses × 2 alternatives = 128 paths).
+  1. Calls extract_constraints() → list[ConstraintGroup].
+  2. For each group, applies Union-Find to build source_columns / derived_columns /
+     equivalence_classes.
+  3. When more than one group exists, populates result.constraint_groups with one
+     SimplificationResult per group, and also builds a merged flat result for compat.
 
-Known gaps (extract_constraints)
----------------------------------
-  • OR predicates are dropped by _flatten_and — captured by or_paths in simplify() instead.
-  • OR in JOIN ON clauses is dropped entirely.
-  • HAVING predicates are not captured (they apply to groups, not individual rows).
+Known gaps
+----------
+  • OR in JOIN ON clauses is not expanded (unknown which side satisfies first).
+  • HAVING predicates are not captured (apply to groups, not rows).
   • Inner WHERE of IN (subquery) is not walked.
   • CASE WHEN branch conditions are not extracted.
 
 SimplificationResult fields
 ----------------------------
-  source_columns        dict[ColumnRef, list[FilterConstraint]]
-  derived_columns       dict[ColumnRef, (source_ColumnRef, "FUNC(source)")]
-  equivalence_classes   list[frozenset[ColumnRef]]
-  filters               list[FilterConstraint]        (raw, for downstream use)
-  functional            list[FunctionalConstraint]    (raw)
-  col_inequalities      list[(ColumnRef, ColumnRef)]  (anti-join pairs)
-  union_branches        list[SimplificationResult]    (one per UNION branch; empty if no UNION)
-  or_paths              list[list[FilterConstraint]]  (one per OR branch; empty if no OR)
-  or_paths_truncated    bool
+  source_columns          dict[ColumnRef, list[FilterConstraint]]
+  derived_columns         dict[ColumnRef, (source_ColumnRef, "FUNC(source)")]
+  equivalence_classes     list[frozenset[ColumnRef]]
+  filters                 list[FilterConstraint]        (raw, for downstream use)
+  functional              list[FunctionalConstraint]    (raw)
+  col_inequalities        list[(ColumnRef, ColumnRef)]  (anti-join pairs)
+  constraint_groups       list[SimplificationResult]    (one per satisfying path; empty = single flat path)
+  constraint_groups_truncated  bool
 """
 
 from __future__ import annotations
@@ -122,6 +118,21 @@ class FunctionalConstraint:
 
 
 @dataclass
+class ConstraintGroup:
+    """One independent satisfying path through the SQL.
+
+    Each ConstraintGroup represents a complete set of constraints that, when satisfied
+    simultaneously, produces at least one output row.  Multiple groups arise from
+    UNION ALL branches, OR conditions (via DNF), and CTE cross-products.
+    """
+
+    filters: list[FilterConstraint] = field(default_factory=list)
+    equalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
+    functional: list[FunctionalConstraint] = field(default_factory=list)
+    col_inequalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
+
+
+@dataclass
 class SimplificationResult:
     """Output of simplify()."""
 
@@ -148,21 +159,10 @@ class SimplificationResult:
     # Comes from LEFT/RIGHT/FULL JOIN … ON a = b WHERE b IS NULL patterns.
     col_inequalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
 
-    # Per-branch SimplificationResults for UNION / UNION ALL queries.
-    # Each entry is the independent result for one branch; empty for non-UNION queries.
-    # Lets the LLM understand that each branch is a separate satisfying path (one test row
-    # per branch) rather than a flat mix of constraints that must all hold simultaneously.
-    union_branches: list["SimplificationResult"] = field(default_factory=list)
-
-    # OR paths from DNF of the outermost WHERE clause.
-    # Non-empty only when the WHERE has at least one OR node.
-    # Each inner list is a complete, independent set of FilterConstraints
-    # (after AND×OR cartesian expansion) that alone satisfies the condition.
-    # Example: WHERE a.y=10 AND (a.x=1 OR a.x=2) → [[y=10,x=1], [y=10,x=2]]
-    or_paths: list[list["FilterConstraint"]] = field(default_factory=list)
-    or_paths_truncated: bool = (
-        False  # True when > _MAX_OR_PATHS_EMIT paths were truncated
-    )
+    # One SimplificationResult per independent satisfying path (UNION branch, OR path,
+    # CTE cross-product).  Empty when the query has only a single path.
+    constraint_groups: list["SimplificationResult"] = field(default_factory=list)
+    constraint_groups_truncated: bool = False
 
 
 # ─── Union-Find ───────────────────────────────────────────────────────────────
@@ -551,7 +551,9 @@ def _flatten_and(cond: exp.Expression) -> list[exp.Expression]:
 
 
 _MAX_OR_PATHS_COMPUTE = 128  # hard cap inside _to_dnf — prevents exponential blowup
-_MAX_OR_PATHS_EMIT = 32  # max paths emitted in or_paths (sent to LLM)
+_MAX_CONSTRAINT_GROUPS = (
+    32  # max groups emitted by extract_constraints / cross-multiply
+)
 
 
 def _to_dnf(
@@ -581,40 +583,6 @@ def _to_dnf(
             _to_dnf(cond.args["this"], _max) + _to_dnf(cond.args["expression"], _max)
         )[:_max]
     return [[cond]]
-
-
-def _extract_or_paths(
-    cond: exp.Expression,
-    alias_map: dict[str, str],
-    resolver: "_LineageResolver",
-) -> tuple[list[list[FilterConstraint]], bool]:
-    """Extract OR paths from a WHERE condition using DNF.
-
-    Returns (paths, truncated) where:
-      - paths  : one FilterConstraint list per OR path (empty when no OR node).
-      - truncated : True when computed paths exceeded _MAX_OR_PATHS_EMIT and were cut.
-    _to_dnf internally caps at _MAX_OR_PATHS_COMPUTE to prevent exponential blowup.
-    """
-    paths = _to_dnf(cond)
-    if len(paths) <= 1:
-        return [], False
-
-    truncated = len(paths) > _MAX_OR_PATHS_EMIT
-    if truncated:
-        logger.warning(
-            "OR path expansion truncated: %d paths → %d emitted",
-            len(paths),
-            _MAX_OR_PATHS_EMIT,
-        )
-    paths_to_process = paths[:_MAX_OR_PATHS_EMIT]
-
-    result: list[list[FilterConstraint]] = []
-    for path_preds in paths_to_process:
-        path_filters: list[FilterConstraint] = []
-        for pred in path_preds:
-            _dispatch_pred(pred, alias_map, resolver, path_filters, [], [])
-        result.append(path_filters)
-    return result, truncated
 
 
 def _collect_safe_cast_constraints(
@@ -943,212 +911,216 @@ def _dispatch_pred(
         return
 
 
-# ─── Walk entire AST for JOINs + WHEREs ───────────────────────────────────────
+# ─── Grouped AST walk ─────────────────────────────────────────────────────────
 
 
-def _walk_select(
+def _cross_multiply_groups(
+    left: list[ConstraintGroup],
+    right: list[ConstraintGroup],
+) -> list[ConstraintGroup]:
+    """Cartesian product of two ConstraintGroup lists, capped at _MAX_CONSTRAINT_GROUPS."""
+    result: list[ConstraintGroup] = []
+    for lg in left:
+        for rg in right:
+            if len(result) >= _MAX_CONSTRAINT_GROUPS:
+                return result
+            result.append(
+                ConstraintGroup(
+                    filters=lg.filters + rg.filters,
+                    equalities=lg.equalities + rg.equalities,
+                    functional=lg.functional + rg.functional,
+                    col_inequalities=lg.col_inequalities + rg.col_inequalities,
+                )
+            )
+    return result
+
+
+def _walk_select_grouped(
     select: exp.Select,
     alias_map: dict[str, str],
     resolver: _LineageResolver,
-    filters: list[FilterConstraint],
-    equalities: list[tuple[ColumnRef, ColumnRef]],
-    functional: list[FunctionalConstraint],
-    col_inequalities: list[tuple[ColumnRef, ColumnRef]],
-) -> None:
-    """Extract constraints from a single SELECT node."""
+    cte_groups_map: dict[str, list[ConstraintGroup]],
+) -> list[ConstraintGroup]:
+    """Return one ConstraintGroup per satisfying path through a single SELECT."""
     _collect_aliases(select, alias_map)
 
-    # Log FROM / JOIN sources to diagnose missing filters
-    logger.diag("[walk_select] select.args keys = %s", list(select.args.keys()))
     from_clause = select.args.get("from_")
-    logger.diag(
-        "[walk_select] from_clause type=%s value=%r",
-        type(from_clause).__name__,
-        from_clause,
-    )
-    join_sources = [j.this for j in (select.args.get("joins") or [])]
-    all_sources = ([from_clause.this] if from_clause else []) + join_sources
-    for src in all_sources:
-        logger.diag(
-            "[walk_select] source type=%s alias=%s",
-            type(src).__name__,
-            getattr(src, "alias", "—"),
-        )
+    joins = select.args.get("joins") or []
+    all_sources = ([from_clause.this] if from_clause else []) + [j.this for j in joins]
 
-    # WHERE — collect IS NULL columns first for anti-join detection below
+    # ── Anti-join detection ────────────────────────────────────────────────────
     where = select.args.get("where")
     where_is_null_cols: set[ColumnRef] = set()
     if where:
-        filters_before = len(filters)
         where_is_null_cols = _collect_is_null_cols(where.this, alias_map, resolver)
-        _extract_from_condition(
-            where.this, alias_map, resolver, filters, equalities, functional
-        )
-        logger.diag(
-            "[walk_select] WHERE extracted %d new filter(s): %s",
-            len(filters) - filters_before,
-            [str(f.column) + " " + f.op for f in filters[filters_before:]],
-        )
-    else:
-        logger.diag("[walk_select] no WHERE clause on this SELECT")
-        filters_before = len(filters)
 
-    # Resolve __unknown__ table refs for columns with no table qualifier when there
-    # is exactly one real base table in scope (e.g. inside an inline subquery).
-    real_tables_in_scope = {
-        v for v in alias_map.values() if v and not v.startswith("__")
-    }
-    if len(real_tables_in_scope) == 1:
-        default_table = next(iter(real_tables_in_scope))
-        for idx in range(filters_before, len(filters)):
-            f = filters[idx]
-            if f.column.table == "__unknown__":
-                new_col = ColumnRef(default_table, f.column.column)
-                filters[idx] = FilterConstraint(
-                    column=new_col,
-                    op=f.op,
-                    value=f.value,
-                    source_columns=[new_col],
-                )
-        logger.diag(
-            "[walk_select] __unknown__ resolved to '%s' for %d filter(s)",
-            default_table,
-            sum(
-                1
-                for i in range(filters_before, len(filters))
-                if filters[i].column.table == default_table
-            ),
-        )
+    # Collect aliases on the nullable side of outer joins
+    outer_join_aliases: set[str] = set()
+    for join in joins:
+        if (join.args.get("side") or "").upper() in {"LEFT", "RIGHT", "FULL"}:
+            src = join.this
+            alias = ""
+            if isinstance(src, exp.Table):
+                alias = (src.alias or src.name).lower()
+            elif isinstance(src, exp.Subquery):
+                alias = (src.alias or "").lower()
+            if alias:
+                outer_join_aliases.add(alias)
 
-    # ON clauses of every JOIN
-    for join in select.args.get("joins") or []:
+    anti_join_sources: set[str] = set()
+    if where and outer_join_aliases:
+        for pred in _flatten_and(where.this):
+            if isinstance(pred, exp.Is):
+                right_node = pred.args.get("expression") or pred.args.get("to")
+                if _is_column(pred.this) and isinstance(right_node, exp.Null):
+                    tbl = (pred.this.table or "").lower()
+                    if tbl in outer_join_aliases:
+                        anti_join_sources.add(tbl)
+
+    # ── Shared constraints (JOIN ON) ───────────────────────────────────────────
+    shared_filters: list[FilterConstraint] = []
+    shared_equalities: list[tuple[ColumnRef, ColumnRef]] = []
+    shared_functional: list[FunctionalConstraint] = []
+    shared_col_inequalities: list[tuple[ColumnRef, ColumnRef]] = []
+
+    for join in joins:
         on = join.args.get("on")
         if not on:
             continue
-
         join_side = (join.args.get("side") or "").upper()
         is_outer_join = join_side in {"LEFT", "RIGHT", "FULL"}
-
         if is_outer_join and where_is_null_cols:
-            # Anti-join pattern: a LEFT/RIGHT/FULL JOIN whose nullable side has an
-            # IS NULL filter in WHERE means "rows with no match in the other table".
-            # The ON equality is NOT a true value equality — skip those pairs.
-            # Filters from ON (e.g. ON … AND b.status = 'active') are kept.
             tmp_eq: list[tuple[ColumnRef, ColumnRef]] = []
             tmp_func: list[FunctionalConstraint] = []
-            _extract_from_condition(on, alias_map, resolver, filters, tmp_eq, tmp_func)
+            _extract_from_condition(
+                on, alias_map, resolver, shared_filters, tmp_eq, tmp_func
+            )
             for a, b in tmp_eq:
                 if a not in where_is_null_cols and b not in where_is_null_cols:
-                    equalities.append((a, b))
+                    shared_equalities.append((a, b))
                 else:
-                    col_inequalities.append((a, b))
+                    shared_col_inequalities.append((a, b))
             for fc in tmp_func:
                 if (
                     fc.derived not in where_is_null_cols
                     and fc.source not in where_is_null_cols
                 ):
-                    functional.append(fc)
+                    shared_functional.append(fc)
         else:
             _extract_from_condition(
-                on, alias_map, resolver, filters, equalities, functional
+                on,
+                alias_map,
+                resolver,
+                shared_filters,
+                shared_equalities,
+                shared_functional,
             )
 
-    # Scan SELECT projections, WHERE, and JOIN-ON for SAFE_CAST occurrences
-    _collect_safe_cast_constraints(select, alias_map, resolver, filters)
+    _collect_safe_cast_constraints(select, alias_map, resolver, shared_filters)
 
-    # Scalar subqueries in projections carry real constraints on the outer tables
-    # (e.g. correlated COUNT(*) with WHERE prcp > 0).  Walk them recursively so
-    # their WHERE predicates are captured alongside the rest of the query's filters.
+    # ── WHERE → DNF → per-path groups ─────────────────────────────────────────
+    dnf_paths = _to_dnf(where.this) if where else [[]]
+    real_tables = {v for v in alias_map.values() if v and not v.startswith("__")}
+    default_table = next(iter(real_tables)) if len(real_tables) == 1 else None
+
+    where_groups: list[ConstraintGroup] = []
+    for path_preds in dnf_paths[:_MAX_CONSTRAINT_GROUPS]:
+        path_filters: list[FilterConstraint] = []
+        path_equalities: list[tuple[ColumnRef, ColumnRef]] = []
+        path_functional: list[FunctionalConstraint] = []
+        for pred in path_preds:
+            _dispatch_pred(
+                pred,
+                alias_map,
+                resolver,
+                path_filters,
+                path_equalities,
+                path_functional,
+            )
+        if default_table:
+            path_filters = [
+                FilterConstraint(
+                    column=ColumnRef(default_table, f.column.column),
+                    op=f.op,
+                    value=f.value,
+                    source_columns=[ColumnRef(default_table, f.column.column)],
+                )
+                if f.column.table == "__unknown__"
+                else f
+                for f in path_filters
+            ]
+        where_groups.append(
+            ConstraintGroup(
+                filters=shared_filters + path_filters,
+                equalities=shared_equalities + path_equalities,
+                functional=shared_functional + path_functional,
+                col_inequalities=list(shared_col_inequalities),
+            )
+        )
+
+    result_groups: list[ConstraintGroup] = where_groups or [
+        ConstraintGroup(
+            filters=list(shared_filters),
+            equalities=list(shared_equalities),
+            functional=list(shared_functional),
+            col_inequalities=list(shared_col_inequalities),
+        )
+    ]
+
+    # ── Cross-multiply with CTE / inline-subquery sources ─────────────────────
+    for src in all_sources:
+        if isinstance(src, exp.Table):
+            tbl_name = (src.alias or src.name).lower()
+            if tbl_name in cte_groups_map and tbl_name not in anti_join_sources:
+                cte_gs = cte_groups_map[tbl_name]
+                # Skip cross-multiply when the CTE is entirely unconstrained (1 empty group)
+                if len(cte_gs) > 1 or any(
+                    g.filters or g.equalities or g.functional for g in cte_gs
+                ):
+                    result_groups = _cross_multiply_groups(result_groups, cte_gs)
+        elif isinstance(src, exp.Subquery):
+            sub_alias = (src.alias or "").lower()
+            if sub_alias not in anti_join_sources:
+                sub_gs = _walk_tree_grouped(src.this, {}, resolver, cte_groups_map)
+                if len(sub_gs) > 1 or any(
+                    g.filters or g.equalities or g.functional for g in sub_gs
+                ):
+                    result_groups = _cross_multiply_groups(result_groups, sub_gs)
+
+    # ── Scalar subqueries in SELECT projections (correlated) ──────────────────
     for projection in select.expressions:
         for subq in projection.find_all(exp.Subquery):
-            _walk_tree(
-                subq.this,
-                dict(alias_map),
-                resolver,
-                filters,
-                equalities,
-                functional,
-                col_inequalities,
+            sub_gs = _walk_tree_grouped(
+                subq.this, dict(alias_map), resolver, cte_groups_map
             )
+            for sub_g in sub_gs:
+                if not (sub_g.filters or sub_g.equalities or sub_g.functional):
+                    continue
+                for g in result_groups:
+                    g.filters = g.filters + sub_g.filters
+                    g.equalities = g.equalities + sub_g.equalities
+                    g.functional = g.functional + sub_g.functional
+                    g.col_inequalities = g.col_inequalities + sub_g.col_inequalities
 
-    # Recurse into subqueries used as table sources in FROM / JOIN clauses so that
-    # their WHERE filters (e.g. FROM (SELECT … WHERE dept = 'X') t) are captured.
-    # Use a fresh alias scope — inline table subqueries are self-contained and
-    # must not inherit the outer scope, so that __unknown__ resolution sees only
-    # the single base table from the inner FROM.
-    for src in all_sources:
-        if isinstance(src, exp.Subquery):
-            logger.diag(
-                "[walk_select] recursing into FROM/JOIN subquery alias=%s", src.alias
-            )
-            _walk_tree(
-                src,
-                {},
-                resolver,
-                filters,
-                equalities,
-                functional,
-                col_inequalities,
-            )
+    return result_groups
 
 
-def _walk_tree(
+def _walk_tree_grouped(
     node: exp.Expression,
     alias_map: dict[str, str],
     resolver: _LineageResolver,
-    filters: list[FilterConstraint],
-    equalities: list[tuple[ColumnRef, ColumnRef]],
-    functional: list[FunctionalConstraint],
-    col_inequalities: list[tuple[ColumnRef, ColumnRef]],
-) -> None:
-    """Recursively walk SELECT / UNION trees."""
-    logger.diag("[walk_tree] node type: %s", type(node).__name__)
+    cte_groups_map: dict[str, list[ConstraintGroup]],
+) -> list[ConstraintGroup]:
+    """Recursively walk a SELECT / UNION / Subquery tree, returning grouped constraints."""
     if isinstance(node, exp.Select):
-        _walk_select(
-            node,
-            dict(alias_map),
-            resolver,
-            filters,
-            equalities,
-            functional,
-            col_inequalities,
-        )
-    elif isinstance(node, exp.Union):
-        _walk_tree(
-            node.left,
-            alias_map,
-            resolver,
-            filters,
-            equalities,
-            functional,
-            col_inequalities,
-        )
-        _walk_tree(
-            node.right,
-            alias_map,
-            resolver,
-            filters,
-            equalities,
-            functional,
-            col_inequalities,
-        )
-    elif isinstance(node, exp.Subquery):
-        logger.diag(
-            "[walk_tree] Subquery alias=%s → diving into its inner SELECT", node.alias
-        )
-        _walk_tree(
-            node.this,
-            alias_map,
-            resolver,
-            filters,
-            equalities,
-            functional,
-            col_inequalities,
-        )
-    else:
-        logger.diag(
-            "[walk_tree] node type %s not handled — skipped", type(node).__name__
-        )
+        return _walk_select_grouped(node, dict(alias_map), resolver, cte_groups_map)
+    if isinstance(node, exp.Union):
+        left = _walk_tree_grouped(node.left, alias_map, resolver, cte_groups_map)
+        right = _walk_tree_grouped(node.right, alias_map, resolver, cte_groups_map)
+        return (left + right)[:_MAX_CONSTRAINT_GROUPS]
+    if isinstance(node, exp.Subquery):
+        return _walk_tree_grouped(node.this, alias_map, resolver, cte_groups_map)
+    return [ConstraintGroup()]
 
 
 # ─── Main extractor ───────────────────────────────────────────────────────────
@@ -1158,20 +1130,17 @@ def extract_constraints(
     sql: str,
     dialect: str = "bigquery",
     schema: list[dict] | None = None,
-) -> tuple[
-    list[FilterConstraint],
-    list[tuple[ColumnRef, ColumnRef]],
-    list[FunctionalConstraint],
-    list[tuple[ColumnRef, ColumnRef]],
-]:
-    """
-    Parse *sql* and return (filters, equalities, functional, col_inequalities).
+) -> list[ConstraintGroup]:
+    """Parse *sql* and return one ConstraintGroup per independent satisfying path.
 
-    - filters          : FilterConstraint list
-    - equalities       : list of (ColumnRef, ColumnRef) pairs that must be equal
-    - functional       : FunctionalConstraint list
-    - col_inequalities : anti-join pairs — (a, b) means "rows where a has no match on b"
-                         (LEFT/RIGHT/FULL JOIN … ON a = b WHERE b IS NULL patterns)
+    Each group is a complete set of constraints (filters, join equalities, functional
+    dependencies, anti-join pairs) that, when satisfied simultaneously, produces at
+    least one output row.
+
+    Multiple groups arise from:
+      • UNION ALL branches  (independent, concatenated)
+      • OR in WHERE         (DNF expansion, cartesian product within a SELECT)
+      • CTE / subquery OR   (cross-multiplied with the outer SELECT's groups)
 
     Args:
         schema: project schema from get_schemas(), used by sqlglot lineage for
@@ -1181,49 +1150,26 @@ def extract_constraints(
     statement = sqlglot.parse_one(sql, dialect=dialect)
     sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
     resolver = _LineageResolver(statement, sqlglot_schema, dialect)
-    alias_map: dict[str, str] = {}
 
-    filters: list[FilterConstraint] = []
-    equalities: list[tuple[ColumnRef, ColumnRef]] = []
-    functional: list[FunctionalConstraint] = []
-    col_inequalities: list[tuple[ColumnRef, ColumnRef]] = []
-
-    # Walk each CTE body first (constraints inside CTEs are real constraints)
+    # Process CTEs in definition order so later CTEs can reference earlier ones
+    cte_groups_map: dict[str, list[ConstraintGroup]] = {}
     with_clause = statement.args.get("with_") if hasattr(statement, "args") else None
     if with_clause:
         for cte in with_clause.expressions or []:
+            cte_name = (cte.alias or "").lower()
             inner = cte.this
-            if inner is not None:
-                _walk_tree(
-                    inner,
-                    {},
-                    resolver,
-                    filters,
-                    equalities,
-                    functional,
-                    col_inequalities,
+            if inner is not None and cte_name:
+                cte_groups_map[cte_name] = _walk_tree_grouped(
+                    inner, {}, resolver, cte_groups_map
                 )
 
-    # Walk the main query body (outer SELECT / UNION)
-    _walk_tree(
-        statement,
-        alias_map,
-        resolver,
-        filters,
-        equalities,
-        functional,
-        col_inequalities,
-    )
-
+    groups = _walk_tree_grouped(statement, {}, resolver, cte_groups_map)
     logger.debug(
-        "extract_constraints: %.1fms — filters=%d equalities=%d functional=%d inequalities=%d",
+        "extract_constraints: %.1fms — groups=%d",
         (time.monotonic() - _t0) * 1000,
-        len(filters),
-        len(equalities),
-        len(functional),
-        len(col_inequalities),
+        len(groups),
     )
-    return filters, equalities, functional, col_inequalities
+    return groups
 
 
 # ─── HAVING cardinality guard ─────────────────────────────────────────────────
@@ -1439,84 +1385,54 @@ def check_correlated_aggregate_cardinality(
             _check_aggregate_col_threshold(pred, agg_cols, threshold, dialect)
 
 
-# ─── UNION branch splitter ────────────────────────────────────────────────────
-
-
-def _collect_union_branches(
-    node: exp.Expression,
-    with_clause: exp.Expression | None,
-    dialect: str,
-) -> list[str]:
-    """Return one SQL string per leaf SELECT branch of a UNION tree.
-
-    Each branch is wrapped with the original WITH clause so CTE lineage
-    resolution still works when simplify() processes it independently.
-    Returns an empty list if *node* is not a UNION.
-    """
-    if isinstance(node, exp.Union):
-        left_branches = _collect_union_branches(node.left, with_clause, dialect)
-        right_branches = _collect_union_branches(node.right, with_clause, dialect)
-        return left_branches + right_branches
-
-    if not isinstance(node, exp.Select):
-        return []
-
-    branch = node.copy()
-    if with_clause is not None:
-        branch.set("with_", with_clause.copy())
-    return [branch.sql(dialect=dialect)]
-
-
 # ─── Simplifier ───────────────────────────────────────────────────────────────
 
 
-def simplify(
-    sql: str, dialect: str = "bigquery", schema: list[dict] | None = None
-) -> SimplificationResult:
-    """
-    Analyse *sql* and return a SimplificationResult:
+def _process_constraint_group(group: ConstraintGroup) -> SimplificationResult:
+    """Apply Union-Find to a ConstraintGroup → SimplificationResult (no sub-groups)."""
+    seen_f: set[tuple] = set()
+    filters: list[FilterConstraint] = []
+    for f in group.filters:
+        key = (f.column, f.op, repr(f.value))
+        if key not in seen_f:
+            seen_f.add(key)
+            filters.append(f)
 
-        result.source_columns     – {ColumnRef: [FilterConstraint, ...]}
-        result.derived_columns    – {ColumnRef: (source_ColumnRef, "FUNC(source)")}
-        result.equivalence_classes – [frozenset({ColumnRef, ...}), ...]
+    seen_eq: set[frozenset] = set()
+    equalities: list[tuple[ColumnRef, ColumnRef]] = []
+    for a, b in group.equalities:
+        key: frozenset = frozenset({a, b})
+        if key not in seen_eq:
+            seen_eq.add(key)
+            equalities.append((a, b))
 
-    Algorithm
-    ---------
-    1. Extract filters, equalities, functional dependencies.
-    2. Build a Union-Find over all columns mentioned in equalities.
-    3. For each functional dependency derived = func(source):
-       - source is a source column (will be generated).
-       - derived is NOT unioned with source; it is tracked as derived.
-    4. For each equivalence class:
-       - Pick a representative: prefer a column with a filter constraint.
-       - Mark all others as derived from the representative (propagation).
-    5. Functional-derived columns are marked as derived (not generated).
-    """
-    _t0 = time.monotonic()
-    filters, equalities, functional, col_inequalities = extract_constraints(
-        sql, dialect, schema
-    )
+    seen_fc: set[tuple] = set()
+    functional: list[FunctionalConstraint] = []
+    for fc in group.functional:
+        key = (fc.derived, fc.source, fc.func)
+        if key not in seen_fc:
+            seen_fc.add(key)
+            functional.append(fc)
+
+    seen_ci: set[frozenset] = set()
+    col_inequalities: list[tuple[ColumnRef, ColumnRef]] = []
+    for a, b in group.col_inequalities:
+        key = frozenset({a, b})
+        if key not in seen_ci:
+            seen_ci.add(key)
+            col_inequalities.append((a, b))
 
     uf = _UnionFind()
-
-    # Register all columns from equalities
     for a, b in equalities:
         uf.union(a, b)
-
-    # Register columns that only appear in filters (not in any equality)
     for f in filters:
         uf.add(f.column)
-
-    # Register functional columns (do NOT union — they are derived, not equivalent)
-    func_sources: set[ColumnRef] = set()
     func_derived: set[ColumnRef] = set()
     for fc in functional:
         uf.add(fc.source)
         uf.add(fc.derived)
-        func_sources.add(fc.source)
         func_derived.add(fc.derived)
 
-    # Build filter index: col → [FilterConstraint]
     filter_index: dict[ColumnRef, list[FilterConstraint]] = {}
     for f in filters:
         filter_index.setdefault(f.column, []).append(f)
@@ -1524,98 +1440,83 @@ def simplify(
     result = SimplificationResult(
         filters=filters, functional=functional, col_inequalities=col_inequalities
     )
-
-    # Collect equivalence classes (non-singleton groups)
     result.equivalence_classes = uf.groups()
 
-    # For each equivalence class, pick a representative and mark others as derived
-    processed: set[ColumnRef] = set()
-
-    for group in uf.all_groups():
-        # Choose representative: prefer column with a filter; otherwise pick smallest
-        candidates_with_filter = [c for c in group if c in filter_index]
-        rep = min(candidates_with_filter) if candidates_with_filter else min(group)
-
-        for col in group:
-            if col == rep:
+    for grp in uf.all_groups():
+        candidates = [c for c in grp if c in filter_index]
+        rep = min(candidates) if candidates else min(grp)
+        for col_ref in grp:
+            if col_ref == rep:
                 continue
-            # Mark as derived from rep (simple propagation, no function)
-            if col not in func_derived:
-                result.derived_columns[col] = (rep, str(rep))
-            processed.add(col)
-
-        # The representative becomes a source (if not already a functional derived)
+            if col_ref not in func_derived:
+                result.derived_columns[col_ref] = (rep, str(rep))
         if rep not in func_derived:
             result.source_columns[rep] = filter_index.get(rep, [])
-            processed.add(rep)
 
-    # Handle functional constraints
     for fc in functional:
         src = uf.find(fc.source)
-        # Ensure source has an entry in source_columns
         if src not in result.source_columns and src not in result.derived_columns:
             result.source_columns[src] = filter_index.get(src, [])
-        # Mark derived as derived with the function expression
-        expr_str = f"{fc.func}({fc.source})"
-        result.derived_columns[fc.derived] = (fc.source, expr_str)
+        result.derived_columns[fc.derived] = (fc.source, f"{fc.func}({fc.source})")
 
-    # Build per-branch results for UNION queries so the LLM sees independent paths.
-    statement = sqlglot.parse_one(sql, dialect=dialect)
-    with_clause = statement.args.get("with_") if hasattr(statement, "args") else None
-    branch_sqls = _collect_union_branches(statement, with_clause, dialect)
-    if len(branch_sqls) > 1:
-        for branch_sql in branch_sqls:
-            try:
-                result.union_branches.append(simplify(branch_sql, dialect, schema))
-            except Exception as exc:
-                logger.debug("union branch simplify failed: %s", exc)
+    return result
 
-    # OR paths — outermost WHERE + CTE bodies (non-UNION queries only).
-    if not isinstance(statement, exp.Union):
-        sqlglot_schema_or = _schemas_to_sqlglot(schema) if schema else None
-        _or_resolver = _LineageResolver(statement, sqlglot_schema_or, dialect)
 
-        # Outermost SELECT WHERE
-        if isinstance(statement, exp.Select):
-            _or_alias_map: dict[str, str] = {}
-            _collect_aliases(statement, _or_alias_map)
-            where = statement.args.get("where")
-            if where is not None:
-                or_paths, truncated = _extract_or_paths(
-                    where.this, _or_alias_map, _or_resolver
-                )
-                if or_paths:
-                    result.or_paths = or_paths
-                    result.or_paths_truncated = truncated
+def simplify(
+    sql: str, dialect: str = "bigquery", schema: list[dict] | None = None
+) -> SimplificationResult:
+    """Analyse *sql* and return a SimplificationResult.
 
-        # CTE body WHEREs (OR paths are added even when outermost WHERE has no OR).
-        # Note: CTE-level OR paths are not AND-merged with the outer WHERE constraints;
-        # those remain in source_columns as flat filters for the LLM to combine.
-        if with_clause:
-            for cte in with_clause.expressions or []:
-                inner = cte.this
-                if isinstance(inner, exp.Select):
-                    cte_where = inner.args.get("where")
-                    if cte_where is not None:
-                        cte_alias_map: dict[str, str] = {}
-                        _collect_aliases(inner, cte_alias_map)
-                        cte_paths, cte_truncated = _extract_or_paths(
-                            cte_where.this, cte_alias_map, _or_resolver
-                        )
-                        if cte_paths:
-                            result.or_paths.extend(cte_paths)
-                            if cte_truncated:
-                                result.or_paths_truncated = True
+    Calls extract_constraints() to get one ConstraintGroup per satisfying path,
+    then applies Union-Find per group to build source_columns / derived_columns /
+    equivalence_classes.
+
+    When more than one group is found, result.constraint_groups is populated with
+    one processed SimplificationResult per group, and the flat fields (filters,
+    source_columns, …) reflect the union of all groups.
+    """
+    _t0 = time.monotonic()
+    groups = extract_constraints(sql, dialect, schema)
+
+    if not groups:
+        return SimplificationResult()
+
+    if len(groups) == 1:
+        result = _process_constraint_group(groups[0])
+    else:
+        # Multiple paths: build per-group results + merged flat view
+        all_filters = [f for g in groups for f in g.filters]
+        all_equalities = [e for g in groups for e in g.equalities]
+        all_functional = [fc for g in groups for fc in g.functional]
+        all_col_inequalities = [ci for g in groups for ci in g.col_inequalities]
+        flat = _process_constraint_group(
+            ConstraintGroup(
+                filters=all_filters,
+                equalities=all_equalities,
+                functional=all_functional,
+                col_inequalities=all_col_inequalities,
+            )
+        )
+        result = SimplificationResult(
+            source_columns=flat.source_columns,
+            derived_columns=flat.derived_columns,
+            equivalence_classes=flat.equivalence_classes,
+            filters=flat.filters,
+            functional=flat.functional,
+            col_inequalities=flat.col_inequalities,
+            constraint_groups_truncated=len(groups) >= _MAX_CONSTRAINT_GROUPS,
+        )
+        for g in groups:
+            result.constraint_groups.append(_process_constraint_group(g))
 
     logger.debug(
-        "simplify: %.1fms total — source_cols=%d derived=%d equiv_classes=%d branches=%d or_paths=%d truncated=%s",
+        "simplify: %.1fms — source_cols=%d derived=%d equiv=%d groups=%d truncated=%s",
         (time.monotonic() - _t0) * 1000,
         len(result.source_columns),
         len(result.derived_columns),
         len(result.equivalence_classes),
-        len(result.union_branches),
-        len(result.or_paths),
-        result.or_paths_truncated,
+        len(result.constraint_groups),
+        result.constraint_groups_truncated,
     )
     return result
 

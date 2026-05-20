@@ -180,44 +180,21 @@ def _or_path_to_dict(or_path_filters: list, result) -> dict:
 def _simplification_to_hint(result) -> str:
     """Convert a SimplificationResult to a JSON constraints hint string.
 
-    Priority:
-      1. UNION branches  → {"paths": [branch0, branch1, ...]}
-         Each branch with OR inside is further expanded into sub-paths.
-      2. OR paths only   → {"paths": [or_path0, or_path1, ...]}
-         Each path includes join/anti-join context so the LLM sees complete rows.
-      3. Flat query      → {"joins": ..., "filters": ..., "anti_joins": ...}
+    When result.constraint_groups is non-empty (multiple satisfying paths from
+    UNION ALL branches, OR conditions, or CTE cross-products), emits:
+        {"paths": [group0, group1, ...]}
+    Otherwise emits the flat single-path form:
+        {"joins": ..., "filters": ..., "anti_joins": ...}
     """
     if result is None:
         return ""
 
-    if result.union_branches:
-        paths = []
-        truncated = False
-        for branch in result.union_branches:
-            if branch.or_paths:
-                for or_path in branch.or_paths:
-                    d = _or_path_to_dict(or_path, branch)
-                    if d:
-                        paths.append(d)
-                if branch.or_paths_truncated:
-                    truncated = True
-            else:
-                d = _branch_to_dict(branch)
-                if d:
-                    paths.append(d)
+    if result.constraint_groups:
+        paths = [_branch_to_dict(g) for g in result.constraint_groups]
         paths = [p for p in paths if p]
         if paths:
             hint: dict = {"paths": paths}
-            if truncated:
-                hint["paths_truncated"] = True
-            return json.dumps(hint, ensure_ascii=False, indent=2)
-
-    if result.or_paths:
-        paths = [_or_path_to_dict(p, result) for p in result.or_paths]
-        paths = [p for p in paths if p]
-        if paths:
-            hint = {"paths": paths}
-            if result.or_paths_truncated:
+            if result.constraint_groups_truncated:
                 hint["paths_truncated"] = True
             return json.dumps(hint, ensure_ascii=False, indent=2)
 

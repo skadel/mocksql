@@ -28,6 +28,17 @@ def col(table: str, column: str) -> ColumnRef:
     return ColumnRef(table.lower(), column.lower())
 
 
+def _flat(groups):
+    """Merge all ConstraintGroups into a single 4-tuple (for tests that don't care about path structure)."""
+    filters, equalities, functional, col_inequalities = [], [], [], []
+    for g in groups:
+        filters.extend(g.filters)
+        equalities.extend(g.equalities)
+        functional.extend(g.functional)
+        col_inequalities.extend(g.col_inequalities)
+    return filters, equalities, functional, col_inequalities
+
+
 def source_cols_of(filters: list, table: str, column: str) -> list[ColumnRef]:
     """Return source_columns of the first filter whose column matches table.column."""
     c = col(table, column)
@@ -81,7 +92,7 @@ class TestAntiJoin:
         LEFT JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE b.id IS NULL
         """
-        filters, equalities, _, col_ineq = extract_constraints(sql)
+        filters, equalities, _, col_ineq = _flat(extract_constraints(sql))
         pairs = [frozenset({a, b}) for a, b in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) not in pairs
         ineq_pairs = [frozenset({a, b}) for a, b in col_ineq]
@@ -95,7 +106,7 @@ class TestAntiJoin:
         LEFT JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE b.id IS NULL
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(f.column == col("b", "id") and f.op == "is_null" for f in filters)
 
     def test_left_join_no_null_filter_keeps_equality(self):
@@ -106,7 +117,7 @@ class TestAntiJoin:
         LEFT JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE a.status = 'active'
         """
-        _, equalities, _, _ = extract_constraints(sql)
+        _, equalities, _, _ = _flat(extract_constraints(sql))
         pairs = [frozenset({a, b}) for a, b in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) in pairs
 
@@ -118,7 +129,7 @@ class TestAntiJoin:
         RIGHT JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE a.id IS NULL
         """
-        _, equalities, _, col_ineq = extract_constraints(sql)
+        _, equalities, _, col_ineq = _flat(extract_constraints(sql))
         pairs = [frozenset({a, b}) for a, b in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) not in pairs
         ineq_pairs = [frozenset({a, b}) for a, b in col_ineq]
@@ -132,7 +143,7 @@ class TestAntiJoin:
         FULL JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE a.id IS NULL
         """
-        _, equalities, _, col_ineq = extract_constraints(sql)
+        _, equalities, _, col_ineq = _flat(extract_constraints(sql))
         pairs = [frozenset({a, b}) for a, b in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) not in pairs
         ineq_pairs = [frozenset({a, b}) for a, b in col_ineq]
@@ -146,7 +157,7 @@ class TestAntiJoin:
         LEFT JOIN myproject.analytics.b AS b ON a.id = b.id AND b.status = 'active'
         WHERE b.id IS NULL
         """
-        filters, equalities, _, col_ineq = extract_constraints(sql)
+        filters, equalities, _, col_ineq = _flat(extract_constraints(sql))
         # The equality must be gone, but the pair must be in col_inequalities
         pairs = [frozenset({x, y}) for x, y in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) not in pairs
@@ -186,7 +197,7 @@ class TestAntiJoin:
         JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE b.other IS NULL
         """
-        _, equalities, _, _ = extract_constraints(sql)
+        _, equalities, _, _ = _flat(extract_constraints(sql))
         pairs = [frozenset({x, y}) for x, y in equalities]
         assert frozenset({col("a", "id"), col("b", "id")}) in pairs
 
@@ -202,7 +213,7 @@ class TestSafeCastConstraints:
         SELECT SAFE_CAST(a.col AS INT64)
         FROM myproject.analytics.a AS a
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
             f.column == col("a", "col") and f.op == "safe_cast_not_null"
             for f in filters
@@ -213,7 +224,7 @@ class TestSafeCastConstraints:
         SELECT SAFE_CAST(a.col AS INT64)
         FROM myproject.analytics.a AS a
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next((f for f in filters if f.op == "safe_cast_not_null"), None)
         assert f is not None
         assert "INT64" in f.value.upper()
@@ -224,7 +235,7 @@ class TestSafeCastConstraints:
         FROM myproject.analytics.a AS a
         WHERE SAFE_CAST(a.dt AS DATE) >= '2024-01-01'
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
             f.column == col("a", "dt") and f.op == "safe_cast_not_null" for f in filters
         )
@@ -235,7 +246,7 @@ class TestSafeCastConstraints:
         FROM myproject.analytics.a AS a
         JOIN myproject.analytics.b AS b ON SAFE_CAST(a.col AS INT64) = b.id
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
             f.column == col("a", "col") and f.op == "safe_cast_not_null"
             for f in filters
@@ -246,7 +257,7 @@ class TestSafeCastConstraints:
         SELECT SAFE_CAST(a.x AS INT64), SAFE_CAST(a.y AS DATE)
         FROM myproject.analytics.a AS a
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         safe_cast = [f for f in filters if f.op == "safe_cast_not_null"]
         cols = {f.column.column for f in safe_cast}
         assert "x" in cols
@@ -258,7 +269,7 @@ class TestSafeCastConstraints:
         SELECT SAFE_CAST(a.col AS INT64), SAFE_CAST(a.col AS INT64)
         FROM myproject.analytics.a AS a
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         safe_cast = [
             f
             for f in filters
@@ -290,7 +301,7 @@ class TestSafeCastConstraints:
         FROM myproject.analytics.a AS a
         WHERE SAFE_CAST(a.col AS INT64) > 0
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         safe_cast = [
             f
             for f in filters
@@ -412,25 +423,25 @@ class TestFilterConstraintSourceColumns:
     def test_direct_column_eq(self):
         """Simple base-table equality: source_columns == [column]."""
         sql = "SELECT * FROM myproject.analytics.a AS a WHERE a.y = 10"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.column == col("a", "y"))
         assert f.source_columns == [col("a", "y")]
 
     def test_direct_column_like(self):
         sql = "SELECT * FROM myproject.analytics.b AS b WHERE b.b1 LIKE '%abc%'"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "like")
         assert f.source_columns == [col("b", "b1")]
 
     def test_direct_column_is_null(self):
         sql = "SELECT * FROM myproject.analytics.a AS a WHERE a.deleted_at IS NULL"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "is_null")
         assert f.source_columns == [col("a", "deleted_at")]
 
     def test_direct_column_is_not_null(self):
         sql = "SELECT * FROM myproject.analytics.a AS a WHERE a.name IS NOT NULL"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "is_not_null")
         assert f.source_columns == [col("a", "name")]
 
@@ -439,7 +450,7 @@ class TestFilterConstraintSourceColumns:
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.dt BETWEEN '2020-01-01' AND '2025-01-01'
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "between")
         assert f.source_columns == [col("a", "dt")]
 
@@ -448,7 +459,7 @@ class TestFilterConstraintSourceColumns:
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.status IN ('active', 'pending')
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "in")
         assert f.source_columns == [col("a", "status")]
 
@@ -456,20 +467,20 @@ class TestFilterConstraintSourceColumns:
         sql = (
             "SELECT * FROM myproject.analytics.a AS a WHERE a.status NOT IN ('deleted')"
         )
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "not_in")
         assert f.source_columns == [col("a", "status")]
 
     def test_direct_column_not_like(self):
         sql = "SELECT * FROM myproject.analytics.a AS a WHERE a.name NOT LIKE '%test%'"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "not_like")
         assert f.source_columns == [col("a", "name")]
 
     def test_literal_on_left_flipped(self):
         """10 = a.y — operator is flipped but source_columns still tracks a.y."""
         sql = "SELECT * FROM myproject.analytics.a AS a WHERE 10 = a.y"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.column == col("a", "y"))
         assert f.source_columns == [col("a", "y")]
 
@@ -481,7 +492,7 @@ class TestFilterConstraintSourceColumns:
         )
         SELECT * FROM cte1
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.column == col("b", "z"))
         assert col("b", "z") in f.source_columns
 
@@ -495,7 +506,7 @@ class TestFilterConstraintSourceColumns:
         )
         SELECT * FROM cte1 WHERE cte1.cte_mix = 'AADZ'
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         # The filter column may resolve to one of the base cols; find by source_columns
         f = next(
             (
@@ -514,7 +525,7 @@ class TestFilterConstraintSourceColumns:
     def test_safe_cast_source_columns(self):
         """SAFE_CAST constraint carries source_columns."""
         sql = "SELECT SAFE_CAST(a.col AS INT64) FROM myproject.analytics.a AS a"
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         f = next(f for f in filters if f.op == "safe_cast_not_null")
         assert f.source_columns == [col("a", "col")]
 
@@ -543,7 +554,7 @@ class TestFilterConstraintSourceColumns:
         )
         SELECT x, b1 FROM cte3
         """
-        filters, _, _, _ = extract_constraints(sql)
+        filters, _, _, _ = _flat(extract_constraints(sql))
         like_filter = next((f for f in filters if f.op == "like"), None)
         assert like_filter is not None, "Expected a LIKE filter on cte2.a1"
         assert col("a", "a1") in like_filter.source_columns
