@@ -434,9 +434,9 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
 
     profile_billing_tb: Optional[float] = None
     if dialect == "bigquery" and profile_sql:
-        from models.env_variables import BQ_SCHEMA_BILLING_PROJECT
+        from models.env_variables import BQ_TEST_PROJECT
 
-        billing_project = BQ_SCHEMA_BILLING_PROJECT
+        billing_project = BQ_TEST_PROJECT
         if billing_project:
             profile_billing_tb = await _estimate_profile_bytes(
                 profile_sql, billing_project

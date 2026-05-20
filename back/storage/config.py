@@ -24,9 +24,9 @@ def get_mocksql_dir() -> Path:
     return (Path(os.getcwd()) / ".mocksql").resolve()
 
 
-def get_bq_test_dataset() -> str:
+def get_duckdb_path() -> str:
     cfg = load_config()
-    return cfg.get("test_dataset") or os.getenv("BQ_TEST_DATASET", "test_dataset")
+    return cfg.get("duckdb_path") or os.getenv("DUCKDB_PATH", "data/mocksql.duckdb")
 
 
 def get_langchain_api_key() -> str | None:

@@ -80,13 +80,11 @@ pip install dist/mocksql-*.whl
 Variables d'environnement requises pour le CLI standalone :
 
 ```dotenv
-PROJECT_ID=<votre-projet-gcp>
-GOOGLE_CLOUD_PROJECT=<votre-projet-gcp>
+VERTEX_PROJECT=<votre-projet-gcp>
 GOOGLE_CLOUD_LOCATION=us-central1
-DUCKDB_PATH=data/mocksql.duckdb
 ```
 
-`GOOGLE_CLOUD_LOCATION` est obligatoire pour les appels Vertex AI.
+`GOOGLE_CLOUD_LOCATION` est obligatoire pour les appels Vertex AI. Le chemin DuckDB se configure via `duckdb_path` dans `mocksql.yml` (défaut : `data/mocksql.duckdb`).
 
 ### `mocksql init`
 
@@ -104,6 +102,7 @@ Exemple de `mocksql.yml` généré :
 version: "2"
 dialect: bigquery          # bigquery | postgres
 models_path: ./models
+duckdb_path: data/mocksql.duckdb   # chemin de la base DuckDB locale
 llm:
   provider: vertexai       # vertexai | openai
   model: gemini-2.0-flash  # override du modèle par défaut (optionnel)
@@ -200,17 +199,14 @@ uvicorn server:app --port 8080 --reload
 Variables essentielles dans `back/.env` :
 
 ```dotenv
-PROJECT_ID=<votre-projet-gcp>
-GOOGLE_CLOUD_PROJECT=<votre-projet-gcp>
+VERTEX_PROJECT=<votre-projet-gcp>
 GOOGLE_CLOUD_LOCATION=us-central1
-BQ_SCHEMA_BILLING_PROJECT=<votre-projet-gcp>
-BQ_REGION=US
+BQ_TEST_PROJECT=<votre-projet-gcp>    # optionnel — défaut : VERTEX_PROJECT
 DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
-DUCKDB_PATH=data/mocksql.duckdb
-SECRET_KEY=<clé-secrète>
-API_SECRET_KEY=<clé-api>
 FRONT_URL=http://127.0.0.1:3000
 ```
+
+Le chemin DuckDB se configure dans `mocksql.yml` (`duckdb_path`).
 
 ### Développement frontend (hot-reload)
 

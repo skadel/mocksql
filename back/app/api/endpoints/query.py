@@ -11,8 +11,8 @@ from pydantic import BaseModel
 from common_vars import get_tables_mapping
 from models.env_variables import (
     AUTO_SCHEMA_IMPORT,
-    BQ_SCHEMA_BILLING_PROJECT,
     AUTO_PROFILING,
+    BQ_TEST_PROJECT,
 )
 from storage.test_repository import (
     get_test,
@@ -85,7 +85,7 @@ def _qualify_two_part_refs(
 async def validate_query_route(body: ValidateQueryRequest):
     from build_query.validator import validate_query as _validate_query
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT
+    billing_project = BQ_TEST_PROJECT
 
     # Cache check: if the session already has a validated result for the same SQL,
     # return it immediately without recompiling.
@@ -296,7 +296,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         enrich_joins_with_cte_context,
     )
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT
+    billing_project = BQ_TEST_PROJECT
 
     try:
         client = _bq.Client(project=billing_project)
@@ -366,7 +366,7 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
                     ),
                 },
             )
-        billing_project = BQ_SCHEMA_BILLING_PROJECT
+        billing_project = BQ_TEST_PROJECT
         schema_data, failed, partitions = await fetch_tables_schema(
             body.tables_to_import, billing_project
         )
@@ -433,7 +433,7 @@ async def refresh_schemas_route(body: RefreshSchemasRequest):
     if not refs:
         return {"refreshed": 0, "tables": []}
 
-    billing_project = BQ_SCHEMA_BILLING_PROJECT
+    billing_project = BQ_TEST_PROJECT
     schema_data, failed, partitions = await fetch_tables_schema(refs, billing_project)
 
     if failed:

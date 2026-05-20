@@ -4,10 +4,9 @@ import sys
 from dotenv import load_dotenv
 
 from storage.config import (
-    get_bq_test_dataset,
+    get_duckdb_path,
     get_langchain_api_key,
     get_langchain_tracing,
-    get_llm_model,
 )
 
 load_dotenv()
@@ -58,19 +57,7 @@ def validate_required_env() -> None:
 # Variables optionnelles
 # ---------------------------------------------------------------------------
 DB_MODE = "duckdb"
-DUCKDB_PATH = os.getenv("DUCKDB_PATH", "data/mocksql.duckdb")
-BIGQUERY_LOCATION = os.getenv("BIGQUERY_LOCATION")
-EMBEDDING = os.getenv("EMBEDDING_MODEL", "text-multilingual-embedding-002")
-DEFAULT_MODEL_NAME = get_llm_model()
-ROUTING_MODEL = os.getenv("ROUTING_MODEL", DEFAULT_MODEL_NAME)
-SOLVER_MODEL = os.getenv("SOLVER_MODEL", DEFAULT_MODEL_NAME)
-ANALYSIS_MODEL = os.getenv("ANALYSIS_MODEL", DEFAULT_MODEL_NAME)
-GENERATOR_MODEL = os.getenv("SOLVER_MODEL", DEFAULT_MODEL_NAME)
-EXPLAIN_MODEL = os.getenv("EXPLAIN_MODEL", DEFAULT_MODEL_NAME)
-OTHER_MODEL = os.getenv("SOLVER_MODEL", DEFAULT_MODEL_NAME)
-SQLMESH_META_DB = os.getenv("SQLMESH_META_DB")
-BQ_TEST_DATASET = get_bq_test_dataset()
-BQ_SCHEMA_BILLING_PROJECT = os.getenv("BQ_SCHEMA_BILLING_PROJECT") or BQ_TEST_PROJECT
+DUCKDB_PATH = get_duckdb_path()
 SCHEMA_CACHE_PATH = os.getenv("SCHEMA_CACHE_PATH", ".mocksql/schema_cache.json")
 AUTO_SCHEMA_IMPORT = True
 AUTO_PROFILING = True

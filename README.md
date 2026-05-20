@@ -27,7 +27,7 @@ MockSQL se décline en deux modes :
 
 ```bash
 pip install dist/mocksql-*.whl
-export PROJECT_ID=<votre-projet-gcp>
+export VERTEX_PROJECT=<votre-projet-gcp>
 
 mocksql init
 mocksql generate models/my_model.sql

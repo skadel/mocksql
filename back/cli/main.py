@@ -468,10 +468,6 @@ def ui(
     if config_path.exists():
         with open(config_path) as f:
             cfg = yaml.safe_load(f) or {}
-        if duckdb_path_from_cfg := cfg.get("duckdb_path"):
-            os.environ.setdefault("DUCKDB_PATH", duckdb_path_from_cfg)
-        if test_dataset_from_cfg := cfg.get("test_dataset"):
-            os.environ.setdefault("BQ_TEST_DATASET", test_dataset_from_cfg)
         if langchain_api_key_from_cfg := cfg.get("langchain_api_key"):
             os.environ.setdefault("LANGCHAIN_API_KEY", langchain_api_key_from_cfg)
         tracing = cfg.get("langchain_tracing", bool(cfg.get("langchain_api_key")))
