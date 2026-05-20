@@ -130,6 +130,10 @@ class ConstraintGroup:
     equalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
     functional: list[FunctionalConstraint] = field(default_factory=list)
     col_inequalities: list[tuple[ColumnRef, ColumnRef]] = field(default_factory=list)
+    # Columns referenced in WHERE / JOIN ON / QUALIFY that couldn't be tied to an
+    # extractable constraint (e.g. inside arithmetic or multi-arg functions).
+    # Ensures the generator still produces values for them even without a specific op.
+    bare_columns: list[ColumnRef] = field(default_factory=list)
 
 
 @dataclass
@@ -571,39 +575,9 @@ def _flatten_and(cond: exp.Expression) -> list[exp.Expression]:
     return [cond]
 
 
-_MAX_OR_PATHS_COMPUTE = 128  # hard cap inside _to_dnf — prevents exponential blowup
 _MAX_CONSTRAINT_GROUPS = (
-    32  # max groups emitted by extract_constraints / cross-multiply
+    32  # max groups emitted by extract_constraints (UNION ALL branches)
 )
-
-
-def _to_dnf(
-    cond: exp.Expression, _max: int = _MAX_OR_PATHS_COMPUTE
-) -> list[list[exp.Expression]]:
-    """Convert a condition to Disjunctive Normal Form (DNF).
-
-    Returns a list of AND-paths (alternatives), where each path is a list of
-    atomic predicates that must all hold simultaneously.
-
-      AND(A, B)          → [[A, B]]
-      OR(A, B)           → [[A], [B]]
-      AND(OR(A,B), C)    → [[A, C], [B, C]]
-      OR(AND(A,B), C)    → [[A, B], [C]]
-
-    The _max parameter caps the result at each recursion level to prevent
-    exponential blowup (e.g. 7 OR clauses × 2 alternatives = 128 > _max).
-    """
-    if isinstance(cond, exp.Paren):
-        return _to_dnf(cond.this, _max)
-    if isinstance(cond, exp.And):
-        left_paths = _to_dnf(cond.args["this"], _max)
-        right_paths = _to_dnf(cond.args["expression"], _max)
-        return [lp + rp for lp in left_paths for rp in right_paths][:_max]
-    if isinstance(cond, exp.Or):
-        return (
-            _to_dnf(cond.args["this"], _max) + _to_dnf(cond.args["expression"], _max)
-        )[:_max]
-    return [[cond]]
 
 
 def _collect_safe_cast_constraints(
@@ -655,6 +629,46 @@ def _collect_safe_cast_constraints(
                     source_columns=src_cols,
                 )
             )
+
+
+def _collect_cols_shallow(
+    node: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: _LineageResolver,
+    default_table: str | None,
+) -> list[ColumnRef]:
+    """Return all ColumnRefs reachable from *node* without descending into subqueries.
+
+    Used to collect bare column references from WHERE / JOIN ON / QUALIFY so that
+    columns embedded in complex expressions (arithmetic, multi-arg functions, …)
+    are still added to source_columns even when no extractable constraint was found.
+    """
+    seen: set[ColumnRef] = set()
+    result: list[ColumnRef] = []
+
+    def _walk(n: exp.Expression) -> None:
+        if isinstance(n, (exp.Subquery, exp.With)):
+            return
+        if isinstance(n, exp.Column) and n.name:
+            raw = _col_ref(n, alias_map)
+            if raw:
+                if raw.table == "__unknown__" and default_table:
+                    raw = ColumnRef(default_table, raw.column, real_table=default_table)
+                ref = resolver.resolve(raw)
+                if ref not in seen:
+                    seen.add(ref)
+                    result.append(ref)
+            return
+        for child in n.args.values():
+            if isinstance(child, exp.Expression):
+                _walk(child)
+            elif isinstance(child, list):
+                for item in child:
+                    if isinstance(item, exp.Expression):
+                        _walk(item)
+
+    _walk(node)
+    return result
 
 
 def _collect_is_null_cols(
@@ -749,20 +763,38 @@ def _dispatch_pred(
                         column=ref, op="is_not_null", source_columns=src_cols
                     )
                 )
-        elif isinstance(inner, exp.Like) and _is_column(inner.this):
-            raw = _col_ref(inner.this, alias_map)
+        elif isinstance(inner, exp.Like):
             pat_node = inner.args.get("expression") or inner.args.get("pattern")
-            if raw and pat_node:
-                src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
-                filters.append(
-                    FilterConstraint(
-                        column=ref,
-                        op="not_like",
-                        value=_literal_value(pat_node) or _sql_of(pat_node),
-                        source_columns=src_cols,
+            col_node = inner.this
+            if _is_column(col_node):
+                raw = _col_ref(col_node, alias_map)
+                if raw and pat_node:
+                    src_cols = resolver.resolve_all(raw)
+                    ref = resolver.resolve(raw)
+                    filters.append(
+                        FilterConstraint(
+                            column=ref,
+                            op="not_like",
+                            value=_literal_value(pat_node) or _sql_of(pat_node),
+                            source_columns=src_cols,
+                        )
                     )
-                )
+            elif _func_name(col_node) is not None and pat_node:
+                # NOT func(col) LIKE 'pattern'
+                inner_col = _find_column_in(col_node)
+                if inner_col:
+                    raw = _col_ref(inner_col, alias_map)
+                    if raw:
+                        src_cols = resolver.resolve_all(raw)
+                        ref = resolver.resolve(raw)
+                        filters.append(
+                            FilterConstraint(
+                                column=ref,
+                                op="not_like",
+                                value=_literal_value(pat_node) or _sql_of(pat_node),
+                                source_columns=src_cols,
+                            )
+                        )
         elif isinstance(inner, exp.In) and _is_column(inner.this):
             raw = _col_ref(inner.this, alias_map)
             if raw:
@@ -793,6 +825,22 @@ def _dispatch_pred(
                         source_columns=src_cols,
                     )
                 )
+        elif _func_name(col_node) is not None and pat_node:
+            # func(col) LIKE 'pattern' — e.g. UPPER(lib_carte) LIKE 'M%'
+            inner_col = _find_column_in(col_node)
+            if inner_col:
+                raw = _col_ref(inner_col, alias_map)
+                if raw:
+                    src_cols = resolver.resolve_all(raw)
+                    ref = resolver.resolve(raw)
+                    filters.append(
+                        FilterConstraint(
+                            column=ref,
+                            op="like",
+                            value=_literal_value(pat_node) or _sql_of(pat_node),
+                            source_columns=src_cols,
+                        )
+                    )
         return
 
     # ── IN / NOT IN ───────────────────────────────────────────────────────────
@@ -971,28 +1019,272 @@ def _dispatch_pred(
         return
 
 
-# ─── Grouped AST walk ─────────────────────────────────────────────────────────
+# ─── Recursive condition walker (replaces DNF) ───────────────────────────────
 
 
-def _cross_multiply_groups(
-    left: list[ConstraintGroup],
-    right: list[ConstraintGroup],
-) -> list[ConstraintGroup]:
-    """Cartesian product of two ConstraintGroup lists, capped at _MAX_CONSTRAINT_GROUPS."""
-    result: list[ConstraintGroup] = []
-    for lg in left:
-        for rg in right:
-            if len(result) >= _MAX_CONSTRAINT_GROUPS:
-                return result
-            result.append(
-                ConstraintGroup(
-                    filters=lg.filters + rg.filters,
-                    equalities=lg.equalities + rg.equalities,
-                    functional=lg.functional + rg.functional,
-                    col_inequalities=lg.col_inequalities + rg.col_inequalities,
-                )
+def _extract_from_condition_recursive(
+    cond: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: "_LineageResolver",
+    filters: list[FilterConstraint],
+    equalities: list[tuple[ColumnRef, ColumnRef]],
+    functional: list[FunctionalConstraint],
+) -> None:
+    """Walk *cond* recursively, collecting constraints from ALL branches (AND + OR).
+
+    OR branches are not expanded — all constraints from any branch are accumulated
+    into the same lists.  This is conservative for Faker pre-fill: every column
+    mentioned in any OR branch is marked as constrained.
+    """
+    if isinstance(cond, (exp.And, exp.Or, exp.Paren)):
+        left = cond.args.get("this")
+        right = cond.args.get("expression")
+        if left is not None:
+            _extract_from_condition_recursive(
+                left, alias_map, resolver, filters, equalities, functional
             )
-    return result
+        if right is not None:
+            _extract_from_condition_recursive(
+                right, alias_map, resolver, filters, equalities, functional
+            )
+    else:
+        _dispatch_pred(cond, alias_map, resolver, filters, equalities, functional)
+
+
+# ─── AND/OR-preserving serializer (for build_conditions_hint) ─────────────────
+
+
+def _collect_window_aliases(statement: exp.Expression) -> set[str]:
+    """Return all column alias names defined by window functions in *statement*.
+
+    Aliases like ``rn`` in ``ROW_NUMBER() OVER (...) AS rn`` are collected so
+    predicates such as ``rn <= 3`` can be recognised as volume constraints and
+    excluded from the conditions hint.
+    """
+    aliases: set[str] = set()
+    for node in statement.walk():
+        if isinstance(node, exp.Window) and isinstance(
+            node.this, (exp.RowNumber, exp.Rank, exp.DenseRank, exp.Ntile)
+        ):
+            parent = node.parent
+            if isinstance(parent, exp.Alias) and parent.alias:
+                aliases.add(parent.alias.lower())
+    return aliases
+
+
+def _is_volume_pred(node: exp.Expression, window_aliases: set[str]) -> bool:
+    """Return True if *node* filters on a window-function alias (volume constraint).
+
+    Matches patterns like ``alias <= N``, ``alias < N``, ``alias = N``,
+    ``alias > N``, ``alias >= N`` where *alias* is a known window alias.
+    """
+    if not isinstance(node, (exp.LTE, exp.LT, exp.EQ, exp.GT, exp.GTE)):
+        return False
+    left = node.args.get("this")
+    right = node.args.get("expression")
+    col_node = None
+    if isinstance(left, exp.Column) and _is_literal(
+        right or exp.Literal(this="", is_string=False)
+    ):
+        col_node = left
+    elif isinstance(right, exp.Column) and _is_literal(
+        left or exp.Literal(this="", is_string=False)
+    ):
+        col_node = right
+    return col_node is not None and col_node.name.lower() in window_aliases
+
+
+def _resolve_pred_node(
+    node: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: "_LineageResolver",
+    dialect: str,
+) -> str:
+    """Render *node* with every Column reference replaced by ``base_table.col``.
+
+    Uses sqlglot's ``transform()`` so nested functions (UPPER, CAST, …) are
+    handled correctly.  Falls back to the original SQL on any error.
+    """
+
+    def _transform_fn(n: exp.Expression) -> exp.Expression:
+        if isinstance(n, exp.Column) and n.table:
+            raw = _col_ref(n, alias_map)
+            if raw is None:
+                return n
+            resolved = resolver.resolve(raw)
+            tbl = (
+                resolved.real_table
+                if (resolved.real_table and resolved.real_table != resolved.table)
+                else resolved.table
+            )
+            if tbl and tbl != "__unknown__":
+                return exp.column(resolved.column, table=tbl)
+        return n
+
+    try:
+        return node.transform(_transform_fn).sql(dialect=dialect)
+    except Exception:
+        return node.sql(dialect=dialect)
+
+
+def _serialize_cond(
+    node: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: "_LineageResolver",
+    window_aliases: set[str],
+    dialect: str,
+) -> str | None:
+    """Recursively serialise *node* preserving AND/OR structure.
+
+    Returns ``None`` for volume constraints (window alias filters) so they are
+    silently dropped by callers.
+
+    * ``exp.And``   → ``"left AND right"`` (None parts filtered)
+    * ``exp.Or``    → ``"left OR right"``  (no extra parens — caller wraps if needed)
+    * ``exp.Paren`` → ``"(inner)"``
+    * volume pred   → ``None``
+    * leaf pred     → ``_resolve_pred_node()``
+    """
+    if isinstance(node, exp.Paren):
+        inner = _serialize_cond(node.this, alias_map, resolver, window_aliases, dialect)
+        return f"({inner})" if inner else None
+
+    if isinstance(node, exp.And):
+        left = _serialize_cond(
+            node.args["this"], alias_map, resolver, window_aliases, dialect
+        )
+        right = _serialize_cond(
+            node.args["expression"], alias_map, resolver, window_aliases, dialect
+        )
+        parts = [p for p in (left, right) if p]
+        return " AND ".join(parts) if parts else None
+
+    if isinstance(node, exp.Or):
+        left = _serialize_cond(
+            node.args["this"], alias_map, resolver, window_aliases, dialect
+        )
+        right = _serialize_cond(
+            node.args["expression"], alias_map, resolver, window_aliases, dialect
+        )
+        parts = [p for p in (left, right) if p]
+        if not parts:
+            return None
+        return " OR ".join(parts)
+
+    if _is_volume_pred(node, window_aliases):
+        return None
+
+    return _resolve_pred_node(node, alias_map, resolver, dialect)
+
+
+def _collect_format_constraints_strings(
+    statement: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: "_LineageResolver",
+    dialect: str,
+) -> list[str]:
+    """Return human-readable format-constraint strings for SAFE_CAST, CAST, PARSE_DATE, etc.
+
+    Each entry has the form ``"base_table.col : SAFE_CAST AS FLOAT64"`` or
+    ``"base_table.col : PARSE_DATE('%Y%m')"`` so the LLM knows which columns
+    require a specific format.  Results are deduplicated.
+    """
+    seen: set[str] = set()
+    results: list[str] = []
+
+    def _resolved_tbl_col(col_node: exp.Column) -> tuple[str, str] | None:
+        raw = _col_ref(col_node, alias_map)
+        if raw is None:
+            return None
+        resolved = resolver.resolve(raw)
+        tbl = (
+            resolved.real_table
+            if (resolved.real_table and resolved.real_table != resolved.table)
+            else resolved.table
+        )
+        if not tbl or tbl == "__unknown__":
+            return None
+        return tbl, resolved.column
+
+    def _add(entry: str) -> None:
+        if entry not in seen:
+            seen.add(entry)
+            results.append(entry)
+
+    # TryCast → SAFE_CAST AS T  /  Cast → CAST AS T
+    for node in statement.find_all((exp.TryCast, exp.Cast)):
+        inner_col = _find_column_in(node.this)
+        if inner_col is None:
+            continue
+        tc = _resolved_tbl_col(inner_col)
+        if tc is None:
+            continue
+        tbl, col_name = tc
+        to_type = node.args.get("to")
+        type_str = to_type.sql(dialect=dialect).upper() if to_type else ""
+        fn = "SAFE_CAST" if isinstance(node, exp.TryCast) else "CAST"
+        _add(f"{tbl}.{col_name} : {fn} AS {type_str}")
+
+    # Named date-format function types (sqlglot maps dialect-specific names to these)
+    # exp.StrToDate    → PARSE_DATE('%Y%m', col)
+    # exp.TimeToStr    → FORMAT_DATE('%Y-%m', col)
+    # exp.StrToTime    → PARSE_TIMESTAMP('%Y', col)
+    # exp.ParseDatetime → PARSE_DATETIME('%Y-%m-%d', col)
+    _NAMED_DATE_FNS: tuple[tuple[type, str], ...] = (
+        (exp.StrToDate, "PARSE_DATE"),
+        (exp.TimeToStr, "FORMAT_DATE"),
+        (exp.StrToTime, "PARSE_TIMESTAMP"),
+        (getattr(exp, "ParseDatetime", type(None)), "PARSE_DATETIME"),
+    )
+    for fn_type, fn_name in _NAMED_DATE_FNS:
+        if fn_type is type(None):
+            continue
+        for node in statement.find_all(fn_type):
+            fmt_node = node.args.get("format")
+            fmt_str = _literal_value(fmt_node) if fmt_node else None
+            inner_col = _find_column_in(node.this)
+            if inner_col is None:
+                continue
+            tc = _resolved_tbl_col(inner_col)
+            if tc is None:
+                continue
+            tbl, col_name = tc
+            fmt_repr = (
+                repr(fmt_str)
+                if fmt_str is not None
+                else (fmt_node.sql(dialect=dialect) if fmt_node else "?")
+            )
+            _add(f"{tbl}.{col_name} : {fn_name}({fmt_repr})")
+
+    # Fallback: Anonymous function nodes (non-BigQuery dialects or unknown functions)
+    _DATE_FNS: frozenset[str] = frozenset(
+        {"PARSE_DATE", "FORMAT_DATE", "PARSE_TIMESTAMP", "PARSE_DATETIME"}
+    )
+    for node in statement.find_all(exp.Anonymous):
+        fname = (node.name or "").upper()
+        if fname not in _DATE_FNS:
+            continue
+        args = node.args.get("expressions") or []
+        if len(args) < 2:
+            continue
+        fmt_arg, col_arg = args[0], args[1]
+        fmt_str = _literal_value(fmt_arg)
+        inner_col = _find_column_in(col_arg)
+        if inner_col is None:
+            continue
+        tc = _resolved_tbl_col(inner_col)
+        if tc is None:
+            continue
+        tbl, col_name = tc
+        fmt_repr = (
+            repr(fmt_str) if fmt_str is not None else fmt_arg.sql(dialect=dialect)
+        )
+        _add(f"{tbl}.{col_name} : {fname}({fmt_repr})")
+
+    return results
+
+
+# ─── Grouped AST walk ─────────────────────────────────────────────────────────
 
 
 def _walk_select_grouped(
@@ -1078,27 +1370,24 @@ def _walk_select_grouped(
 
     _collect_safe_cast_constraints(select, alias_map, resolver, shared_filters)
 
-    # ── WHERE → DNF → per-path groups ─────────────────────────────────────────
-    dnf_paths = _to_dnf(where.this) if where else [[]]
+    # ── WHERE → flat recursive walk (AND/OR branches merged into one group) ────
     real_tables = {v for v in alias_map.values() if v and not v.startswith("__")}
     default_table = next(iter(real_tables)) if len(real_tables) == 1 else None
 
-    where_groups: list[ConstraintGroup] = []
-    for path_preds in dnf_paths[:_MAX_CONSTRAINT_GROUPS]:
-        path_filters: list[FilterConstraint] = []
-        path_equalities: list[tuple[ColumnRef, ColumnRef]] = []
-        path_functional: list[FunctionalConstraint] = []
-        for pred in path_preds:
-            _dispatch_pred(
-                pred,
-                alias_map,
-                resolver,
-                path_filters,
-                path_equalities,
-                path_functional,
-            )
+    where_filters: list[FilterConstraint] = []
+    where_equalities: list[tuple[ColumnRef, ColumnRef]] = []
+    where_functional: list[FunctionalConstraint] = []
+    if where:
+        _extract_from_condition_recursive(
+            where.this,
+            alias_map,
+            resolver,
+            where_filters,
+            where_equalities,
+            where_functional,
+        )
         if default_table:
-            path_filters = [
+            where_filters = [
                 FilterConstraint(
                     column=ColumnRef(default_table, f.column.column),
                     op=f.op,
@@ -1107,56 +1396,62 @@ def _walk_select_grouped(
                 )
                 if f.column.table == "__unknown__"
                 else f
-                for f in path_filters
+                for f in where_filters
             ]
-        where_groups.append(
-            ConstraintGroup(
-                filters=shared_filters + path_filters,
-                equalities=shared_equalities + path_equalities,
-                functional=shared_functional + path_functional,
-                col_inequalities=list(shared_col_inequalities),
-            )
-        )
 
-    result_groups: list[ConstraintGroup] = where_groups or [
+    result_groups: list[ConstraintGroup] = [
         ConstraintGroup(
-            filters=list(shared_filters),
-            equalities=list(shared_equalities),
-            functional=list(shared_functional),
+            filters=shared_filters + where_filters,
+            equalities=shared_equalities + where_equalities,
+            functional=shared_functional + where_functional,
             col_inequalities=list(shared_col_inequalities),
         )
     ]
 
-    # ── Cross-multiply with CTE / inline-subquery sources ─────────────────────
-    # Guard: cross-multiply each CTE at most once per SELECT, even if referenced
-    # multiple times under different aliases (e.g. self-join: FROM a AS p JOIN a AS q).
-    seen_cte_cross: set[str] = set()
+    # ── Merge CTE / inline-subquery constraints into the single group ──────────
+    # Guard: merge each CTE at most once per SELECT, even if referenced multiple
+    # times under different aliases (e.g. self-join: FROM a AS p JOIN a AS q).
+    seen_cte_merge: set[str] = set()
     for src in all_sources:
         if isinstance(src, exp.Table):
             tbl_name = (src.alias or src.name).lower()
-            # Resolve alias → real CTE name (e.g. "FROM filtered AS f" → "filtered")
             real_tbl = alias_map.get(tbl_name, tbl_name)
             cte_key = real_tbl if real_tbl in cte_groups_map else tbl_name
             if (
                 cte_key in cte_groups_map
                 and tbl_name not in anti_join_sources
-                and cte_key not in seen_cte_cross
+                and cte_key not in seen_cte_merge
             ):
-                seen_cte_cross.add(cte_key)
+                seen_cte_merge.add(cte_key)
                 cte_gs = cte_groups_map[cte_key]
-                # Skip cross-multiply when the CTE is entirely unconstrained (1 empty group)
-                if len(cte_gs) > 1 or any(
-                    g.filters or g.equalities or g.functional for g in cte_gs
-                ):
-                    result_groups = _cross_multiply_groups(result_groups, cte_gs)
+                if any(g.filters or g.equalities or g.functional for g in cte_gs):
+                    for cte_g in cte_gs:
+                        for g in result_groups:
+                            g.filters = g.filters + cte_g.filters
+                            g.equalities = g.equalities + cte_g.equalities
+                            g.functional = g.functional + cte_g.functional
+                            g.col_inequalities = (
+                                g.col_inequalities + cte_g.col_inequalities
+                            )
+                            g.bare_columns = list(
+                                {*g.bare_columns, *cte_g.bare_columns}
+                            )
         elif isinstance(src, exp.Subquery):
             sub_alias = (src.alias or "").lower()
             if sub_alias not in anti_join_sources:
                 sub_gs = _walk_tree_grouped(src.this, {}, resolver, cte_groups_map)
-                if len(sub_gs) > 1 or any(
-                    g.filters or g.equalities or g.functional for g in sub_gs
-                ):
-                    result_groups = _cross_multiply_groups(result_groups, sub_gs)
+                if any(g.filters or g.equalities or g.functional for g in sub_gs):
+                    for sub_g in sub_gs:
+                        for g in result_groups:
+                            g.filters = g.filters + sub_g.filters
+                            g.equalities = g.equalities + sub_g.equalities
+                            g.functional = g.functional + sub_g.functional
+                            g.col_inequalities = (
+                                g.col_inequalities + sub_g.col_inequalities
+                            )
+                            g.bare_columns = list(
+                                {*g.bare_columns, *sub_g.bare_columns}
+                            )
 
     # ── Scalar subqueries in SELECT projections (correlated) ──────────────────
     for projection in select.expressions:
@@ -1172,6 +1467,33 @@ def _walk_select_grouped(
                     g.equalities = g.equalities + sub_g.equalities
                     g.functional = g.functional + sub_g.functional
                     g.col_inequalities = g.col_inequalities + sub_g.col_inequalities
+
+    # ── Bare columns: WHERE + JOIN ON + QUALIFY (not HAVING — aggregated cols) ─
+    # Catches column refs in complex expressions (arithmetic, multi-arg functions)
+    # that _dispatch_pred couldn't map to a specific constraint.
+    bare_candidates: list[ColumnRef] = []
+    if where:
+        bare_candidates.extend(
+            _collect_cols_shallow(where.this, alias_map, resolver, default_table)
+        )
+    for join in joins:
+        on = join.args.get("on")
+        if on:
+            bare_candidates.extend(
+                _collect_cols_shallow(on, alias_map, resolver, default_table)
+            )
+    qualify = select.args.get("qualify")
+    if qualify:
+        qualify_node = qualify.this if isinstance(qualify, exp.Qualify) else qualify
+        bare_candidates.extend(
+            _collect_cols_shallow(qualify_node, alias_map, resolver, default_table)
+        )
+    if bare_candidates:
+        for g in result_groups:
+            captured = {f.column for f in g.filters} | set(g.bare_columns)
+            g.bare_columns = g.bare_columns + [
+                c for c in bare_candidates if c not in captured
+            ]
 
     return result_groups
 
@@ -1192,6 +1514,111 @@ def _walk_tree_grouped(
     if isinstance(node, exp.Subquery):
         return _walk_tree_grouped(node.this, alias_map, resolver, cte_groups_map)
     return [ConstraintGroup()]
+
+
+# ─── Conditions hint builder ─────────────────────────────────────────────────
+
+
+def build_conditions_hint(
+    sql: str,
+    dialect: str = "bigquery",
+    schema: list[dict] | None = None,
+) -> dict:
+    """Build a concise LLM hint dict from *sql*.
+
+    Returns::
+
+        {
+          "conditions":         "table.col = 'x' AND (t2.col = 'a' OR t2.col = 'b')",
+          "format_constraints": ["table.col : SAFE_CAST AS FLOAT64"]
+        }
+
+    * WHERE + JOIN ON + QUALIFY predicates are collected and ANDed.
+    * AND/OR structure is preserved — no DNF expansion.
+    * Volume constraints (ROW_NUMBER / RANK / NTILE alias filters) are excluded.
+    * CTE column aliases are resolved to their base table via lineage.
+    * ``format_constraints`` lists SAFE_CAST, CAST, PARSE_DATE, FORMAT_DATE entries.
+
+    Returns an empty dict on unparseable input.
+    """
+    if not sql:
+        return {}
+    try:
+        statement = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return {}
+
+    sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
+    resolver = _LineageResolver(statement, sqlglot_schema, dialect)
+
+    # Build a global alias map from all Table nodes + per-SELECT _collect_aliases.
+    # CTE names land in resolver._cte_names; base-table aliases land in alias_map.
+    alias_map: dict[str, str] = {}
+    for tbl in statement.find_all(exp.Table):
+        real = tbl.name.lower()
+        alias = tbl.alias.lower() if tbl.alias else real
+        if real:
+            alias_map[alias] = real
+            alias_map[real] = real
+    for sel in statement.find_all(exp.Select):
+        _collect_aliases(sel, alias_map)
+
+    window_aliases = _collect_window_aliases(statement)
+
+    cond_parts: list[str] = []
+    seen_cond: set[str] = set()
+
+    def _add_cond(s: str | None) -> None:
+        if s and s not in seen_cond:
+            seen_cond.add(s)
+            cond_parts.append(s)
+
+    for sel in statement.find_all(exp.Select):
+        # WHERE
+        where = sel.args.get("where")
+        if where:
+            _add_cond(
+                _serialize_cond(
+                    where.this, alias_map, resolver, window_aliases, dialect
+                )
+            )
+        # JOIN ON
+        for join in sel.args.get("joins") or []:
+            on = join.args.get("on")
+            if on:
+                _add_cond(
+                    _serialize_cond(on, alias_map, resolver, window_aliases, dialect)
+                )
+        # QUALIFY
+        qualify = sel.args.get("qualify")
+        if qualify:
+            qualify_node = qualify.this if isinstance(qualify, exp.Qualify) else qualify
+            _add_cond(
+                _serialize_cond(
+                    qualify_node, alias_map, resolver, window_aliases, dialect
+                )
+            )
+
+    # When joining multiple parts with AND, wrap parts that contain a top-level OR
+    # (without surrounding parens) to preserve AND/OR precedence.
+    def _safe_and_part(s: str) -> str:
+        if " OR " in s and not (s.startswith("(") and s.endswith(")")):
+            return f"({s})"
+        return s
+
+    conditions = " AND ".join(_safe_and_part(p) for p in cond_parts)
+    format_constraints = _collect_format_constraints_strings(
+        statement, alias_map, resolver, dialect
+    )
+
+    result: dict = {}
+    if conditions:
+        result["conditions"] = conditions
+    if format_constraints:
+        result["format_constraints"] = format_constraints
+    return result
 
 
 # ─── Main extractor ───────────────────────────────────────────────────────────
@@ -1530,6 +1957,12 @@ def _process_constraint_group(group: ConstraintGroup) -> SimplificationResult:
             result.source_columns[src] = filter_index.get(src, [])
         result.derived_columns[fc.derived] = (fc.source, f"{fc.func}({fc.source})")
 
+    for col_ref in group.bare_columns:
+        uf.add(col_ref)
+        rep = uf.find(col_ref)
+        if rep not in result.source_columns and rep not in result.derived_columns:
+            result.source_columns[rep] = filter_index.get(rep, [])
+
     return result
 
 
@@ -1560,12 +1993,14 @@ def simplify(
         all_equalities = [e for g in groups for e in g.equalities]
         all_functional = [fc for g in groups for fc in g.functional]
         all_col_inequalities = [ci for g in groups for ci in g.col_inequalities]
+        all_bare = list({c for g in groups for c in g.bare_columns})
         flat = _process_constraint_group(
             ConstraintGroup(
                 filters=all_filters,
                 equalities=all_equalities,
                 functional=all_functional,
                 col_inequalities=all_col_inequalities,
+                bare_columns=all_bare,
             )
         )
         result = SimplificationResult(

@@ -149,6 +149,9 @@ def _branch_to_dict(result) -> dict:
     anti_joins = [f"{col_a} NOT IN {col_b}" for col_a, col_b in result.col_inequalities]
     all_constraints = [c for cs in result.source_columns.values() for c in cs]
     filters = _format_filter_constraints(all_constraints)
+    # Bare columns: referenced in WHERE/JOIN ON/QUALIFY inside complex expressions
+    # (e.g. UPPER(col) * 2) — no extractable constraint, but must not be Faker-filled.
+    bare = [_col_str_join(col) for col, cs in result.source_columns.items() if not cs]
     d: dict = {}
     if joins:
         d["joins"] = joins
@@ -156,6 +159,8 @@ def _branch_to_dict(result) -> dict:
         d["anti_joins"] = anti_joins
     if filters:
         d["filters"] = filters
+    if bare:
+        d["referenced"] = bare
     return d
 
 
@@ -177,31 +182,27 @@ def _or_path_to_dict(or_path_filters: list, result) -> dict:
     return d
 
 
-def _simplification_to_hint(result) -> str:
-    """Convert a SimplificationResult to a JSON constraints hint string.
+def _simplification_to_hint(
+    result,
+    sql: str | None = None,
+    dialect: str = "bigquery",
+    schema: list[dict] | None = None,
+) -> str:
+    """Build the LLM constraints hint string.
 
-    When result.constraint_groups is non-empty (multiple satisfying paths from
-    UNION ALL branches, OR conditions, or CTE cross-products), emits:
-        {"paths": [group0, group1, ...]}
-    Otherwise emits the flat single-path form:
-        {"joins": ..., "filters": ..., "anti_joins": ...}
+    Uses ``build_conditions_hint`` from constraint_simplifier to produce a
+    single ``{"conditions": "...", "format_constraints": [...]}`` dict that
+    preserves AND/OR structure without DNF expansion.
+
+    Falls back to an empty string when SQL is unavailable or the hint is empty.
     """
-    if result is None:
-        return ""
+    if sql:
+        from build_query.constraint_simplifier import build_conditions_hint
 
-    if result.constraint_groups:
-        paths = [_branch_to_dict(g) for g in result.constraint_groups]
-        paths = [p for p in paths if p]
-        if paths:
-            hint: dict = {"paths": paths}
-            if result.constraint_groups_truncated:
-                hint["paths_truncated"] = True
+        hint = build_conditions_hint(sql, dialect=dialect, schema=schema)
+        if hint:
             return json.dumps(hint, ensure_ascii=False, indent=2)
-
-    structured = _branch_to_dict(result)
-    if not structured:
-        return ""
-    return json.dumps(structured, ensure_ascii=False, indent=2)
+    return ""
 
 
 def _strip_unconstrained_from_sql(
@@ -255,7 +256,7 @@ def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
         if cte["name"] == "final_query":
             continue
         sim = _run_simplify(cte["code"], dialect=dialect)
-        hint = _simplification_to_hint(sim)
+        hint = _simplification_to_hint(sim, sql=cte["code"], dialect=dialect)
         if hint:
             result_map[cte["name"]] = json.loads(hint)
     return result_map
@@ -518,7 +519,9 @@ async def generate_examples_(
 
     # Single simplify() call — result reused for hint + mandatory set + unconstrained
     sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
-    constraints = _simplification_to_hint(sim_result)
+    constraints = _simplification_to_hint(
+        sim_result, sql=optimized_sql, dialect=dialect, schema=schema
+    )
 
     logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
     if sim_result is not None:

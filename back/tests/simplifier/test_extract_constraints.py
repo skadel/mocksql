@@ -367,37 +367,37 @@ class TestExtractConstraintsSingleGroup:
 
 class TestExtractConstraintsOrGroups:
     def test_simple_or_two_groups(self):
+        """OR → 1 flat group with both values."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.x = 1 OR a.x = 2
         """
         groups = extract_constraints(sql)
-        assert len(groups) == 2
-        values = {f.value for g in groups for f in g.filters if f.column.column == "x"}
+        assert len(groups) == 1
+        values = {f.value for f in groups[0].filters if f.column.column == "x"}
         assert values == {1, 2}
 
     def test_and_or_combo_two_groups_both_carry_and_part(self):
-        """WHERE a.y = 10 AND (a.x = 1 OR a.x = 2) → 2 groups, both have y=10."""
+        """WHERE a.y = 10 AND (a.x = 1 OR a.x = 2) → 1 flat group with all constraints."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.y = 10 AND (a.x = 1 OR a.x = 2)
         """
         groups = extract_constraints(sql)
-        assert len(groups) == 2
-        for g in groups:
-            y_vals = [f.value for f in g.filters if f.column.column == "y"]
-            assert 10 in y_vals, "a.y = 10 must appear in every group"
-        x_vals = {f.value for g in groups for f in g.filters if f.column.column == "x"}
+        assert len(groups) == 1
+        y_vals = [f.value for f in groups[0].filters if f.column.column == "y"]
+        assert 10 in y_vals, "a.y = 10 must appear in the group"
+        x_vals = {f.value for f in groups[0].filters if f.column.column == "x"}
         assert x_vals == {1, 2}
 
     def test_cross_product_or(self):
-        """(a.x=1 OR a.x=2) AND (a.y=10 OR a.y=20) → 4 groups."""
+        """(a.x=1 OR a.x=2) AND (a.y=10 OR a.y=20) → 1 flat group."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE (a.x = 1 OR a.x = 2) AND (a.y = 10 OR a.y = 20)
         """
         groups = extract_constraints(sql)
-        assert len(groups) == 4
+        assert len(groups) == 1
 
     def test_or_in_join_on_no_groups(self):
         """OR in JOIN ON — not expanded, single group with shared ON equality."""
@@ -454,15 +454,15 @@ class TestExtractConstraintsUnionGroups:
         assert "beta" in g1_vals and "alpha" not in g1_vals
 
     def test_union_with_or_branch(self):
-        """UNION branch with OR → that branch expands to 2 groups."""
+        """UNION branch with OR → OR collapses into 1 group per UNION branch."""
         sql = """
         SELECT x FROM myproject.analytics.a AS a WHERE a.v = 1 OR a.v = 2
         UNION ALL
         SELECT x FROM myproject.analytics.b AS b WHERE b.v = 3
         """
         groups = extract_constraints(sql)
-        # 2 OR groups from branch1 + 1 from branch2
-        assert len(groups) == 3
+        # OR collapses within its branch: 1 group for branch1 + 1 for branch2
+        assert len(groups) == 2
 
 
 # ─── extract_constraints — CTE cross-product ──────────────────────────────────
@@ -470,7 +470,7 @@ class TestExtractConstraintsUnionGroups:
 
 class TestExtractConstraintsCteCrossProduct:
     def test_cte_or_cross_multiplied_with_outer_where(self):
-        """CTE with OR × outer WHERE → groups are the cross-product."""
+        """CTE with OR × outer WHERE → 1 flat group with all constraints merged."""
         sql = """
         WITH cte AS (
             SELECT a.x, a.status
@@ -480,21 +480,16 @@ class TestExtractConstraintsCteCrossProduct:
         SELECT * FROM cte WHERE cte.x > 0
         """
         groups = extract_constraints(sql)
-        # 2 CTE groups × 1 outer WHERE group = 2 groups
-        assert len(groups) == 2
-        statuses = {
-            f.value for g in groups for f in g.filters if f.column.column == "status"
-        }
+        assert len(groups) == 1
+        statuses = {f.value for f in groups[0].filters if f.column.column == "status"}
         assert statuses == {"active", "pending"}
-        # All groups must also carry the outer WHERE constraint
-        for g in groups:
-            x_filters = [f for f in g.filters if f.column.column == "x"]
-            assert any(f.op == "gt" and f.value == 0 for f in x_filters), (
-                "outer WHERE x > 0 must be in every group"
-            )
+        x_filters = [f for f in groups[0].filters if f.column.column == "x"]
+        assert any(f.op == "gt" and f.value == 0 for f in x_filters), (
+            "outer WHERE x > 0 must be in the group"
+        )
 
     def test_two_ctes_with_or_cross_product(self):
-        """Two CTEs each with OR → 2 × 2 = 4 groups."""
+        """Two CTEs each with OR → all constraints merged into 1 flat group."""
         sql = """
         WITH cte1 AS (
             SELECT a.x FROM myproject.analytics.a AS a WHERE a.p = 1 OR a.p = 2
@@ -505,9 +500,9 @@ class TestExtractConstraintsCteCrossProduct:
         SELECT * FROM cte1 JOIN cte2 ON cte1.x = cte2.x
         """
         groups = extract_constraints(sql)
-        assert len(groups) == 4
-        p_vals = {f.value for g in groups for f in g.filters if f.column.column == "p"}
-        q_vals = {f.value for g in groups for f in g.filters if f.column.column == "q"}
+        assert len(groups) == 1
+        p_vals = {f.value for f in groups[0].filters if f.column.column == "p"}
+        q_vals = {f.value for f in groups[0].filters if f.column.column == "q"}
         assert p_vals == {1, 2}
         assert q_vals == {3, 4}
 

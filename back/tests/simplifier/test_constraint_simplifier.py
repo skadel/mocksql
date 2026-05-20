@@ -8,6 +8,7 @@ They cover the five reference examples from the spec plus additional edge cases.
 from build_query.constraint_simplifier import (
     ColumnRef,
     SimplificationResult,
+    build_conditions_hint,
     simplify,
 )
 from build_query.examples_generator import _branch_to_dict
@@ -445,4 +446,193 @@ class TestInlineSubqueryFromJoinFiltersAndJoins:
         join_str = d["joins"][0]
         assert "o.object_id" not in join_str and "i.object_id" not in join_str, (
             f"Join must not use inline-subquery aliases, got: {join_str!r}"
+        )
+
+
+# ─── LIKE sur fonction (UPPER/LOWER) ──────────────────────────────────────────
+
+
+class TestFuncLikeConstraint:
+    """UPPER(col) LIKE 'pattern' doit capturer une contrainte like sur la colonne interne."""
+
+    SQL = """
+    SELECT sum(col)
+    FROM `pro.dat.tab`
+    WHERE partition_date = PARSE_DATE('%Y-%m-%d', '2024-01-01')
+    AND axe = 'axe1'
+    AND indicateur IN ('ind1', 'ind2')
+    AND (UPPER(lib_carte) LIKE 'M%' OR UPPER(lib_carte) LIKE '%M%')
+    AND (lib_service IS NULL OR lib_service = '')
+    AND code_groupe IN ('BP', 'CE')
+    GROUP BY 1, 2, 3, 4, 5, 6
+    """
+
+    def setup_method(self):
+        self.r = simplify(self.SQL, dialect="bigquery")
+
+    def test_lib_carte_is_captured(self):
+        """lib_carte doit apparaître dans source_columns malgré le UPPER()."""
+        assert is_source(self.r, "tab", "lib_carte"), (
+            "lib_carte absent de source_columns — UPPER(col) LIKE non capturé"
+        )
+
+    def test_lib_carte_has_like_op(self):
+        ops = filter_ops(self.r, "tab", "lib_carte")
+        assert "like" in ops, f"op 'like' attendu sur lib_carte, obtenu : {ops}"
+
+    def test_no_constraint_groups_produced(self):
+        """Sans DNF, les OR sont fusionnés dans un seul groupe — constraint_groups vide."""
+        assert len(self.r.constraint_groups) == 0
+
+    def test_other_filters_present(self):
+        assert is_source(self.r, "tab", "axe")
+        assert is_source(self.r, "tab", "indicateur")
+        assert is_source(self.r, "tab", "code_groupe")
+
+
+# ─── bare columns → hint "referenced" ────────────────────────────────────────
+
+
+class TestBareColumnsInHint:
+    """Colonnes dans WHERE mais non extractibles (expression multi-col) → 'referenced' dans le hint LLM."""
+
+    SQL = """
+    SELECT *
+    FROM `proj.ds.orders`
+    WHERE amount + fee > 100
+    AND status = 'active'
+    """
+
+    def setup_method(self):
+        self.r = simplify(self.SQL, dialect="bigquery")
+
+    def test_amount_and_fee_in_source_columns(self):
+        assert is_source(self.r, "orders", "amount")
+        assert is_source(self.r, "orders", "fee")
+
+    def test_amount_and_fee_have_no_filter_constraint(self):
+        assert filter_ops(self.r, "orders", "amount") == []
+        assert filter_ops(self.r, "orders", "fee") == []
+
+    def test_status_has_filter(self):
+        assert "eq" in filter_ops(self.r, "orders", "status")
+
+    def test_bare_columns_in_hint_referenced(self):
+        hint = _branch_to_dict(self.r)
+        assert "referenced" in hint, f"'referenced' absent du hint : {hint}"
+        refs = hint["referenced"]
+        assert any("amount" in c for c in refs), (
+            f"'amount' absent de referenced : {refs}"
+        )
+        assert any("fee" in c for c in refs), f"'fee' absent de referenced : {refs}"
+
+    def test_status_not_in_referenced(self):
+        hint = _branch_to_dict(self.r)
+        refs = hint.get("referenced", [])
+        assert not any("status" in c for c in refs), (
+            f"'status' ne devrait pas être dans referenced : {refs}"
+        )
+
+
+# ─── build_conditions_hint — structure AND/OR préservée ──────────────────────
+
+
+class TestBuildConditionsHintOrPreserved:
+    """Critères d'acceptance principaux du US Simplifier le hint de contraintes."""
+
+    SQL = """
+    WITH base AS (
+        SELECT t.user_id, t.raw_date, SAFE_CAST(t.amount AS FLOAT64) AS amount_f
+        FROM transactions t WHERE t.type = 'credit'
+    ),
+    ranked AS (
+        SELECT b.*, ROW_NUMBER() OVER (PARTITION BY b.user_id ORDER BY b.raw_date DESC) AS rn
+        FROM base b
+    )
+    SELECT r.user_id, r.amount_f
+    FROM ranked r
+    JOIN users u ON r.user_id = u.id
+    WHERE r.rn <= 3 AND (u.country = 'FR' OR u.country = 'BE')
+    """
+
+    def setup_method(self):
+        self.hint = build_conditions_hint(self.SQL)
+
+    def test_or_preserved_not_expanded(self):
+        """OR doit apparaître dans conditions — pas d'expansion DNF."""
+        cond = self.hint.get("conditions", "")
+        assert " OR " in cond, f"OR absent de conditions : {cond!r}"
+        assert " AND " in cond, f"AND absent de conditions : {cond!r}"
+
+    def test_volume_constraint_excluded(self):
+        """rn <= 3 est une contrainte de volume — doit être absente."""
+        cond = self.hint.get("conditions", "")
+        assert "rn" not in cond, (
+            f"rn <= 3 ne doit pas figurer dans conditions : {cond!r}"
+        )
+        assert "<= 3" not in cond, (
+            f"<= 3 ne doit pas figurer dans conditions : {cond!r}"
+        )
+
+    def test_cte_alias_resolved_to_base_table(self):
+        """Les alias CTE (t, r, u, b) doivent être résolus en noms de tables réels."""
+        cond = self.hint.get("conditions", "")
+        # Au moins une table de base doit apparaître (transactions ou users)
+        assert "transactions" in cond or "users" in cond, (
+            f"Aucune table de base résolue dans conditions : {cond!r}"
+        )
+
+    def test_join_and_where_merged(self):
+        """JOIN ON et WHERE doivent apparaître dans la même chaîne conditions."""
+        cond = self.hint.get("conditions", "")
+        # On s'attend à au moins 2 clauses ANDées (JOIN ON + WHERE résiduel)
+        assert cond.count(" AND ") >= 1, (
+            f"JOIN ON et WHERE doivent être ANDés dans conditions : {cond!r}"
+        )
+
+    def test_safe_cast_in_format_constraints(self):
+        """SAFE_CAST(t.amount AS FLOAT64) doit apparaître dans format_constraints."""
+        fc = self.hint.get("format_constraints", [])
+        assert any("SAFE_CAST" in s for s in fc), (
+            f"SAFE_CAST attendu dans format_constraints, obtenu : {fc}"
+        )
+
+    def test_no_duplicate_conditions(self):
+        """Aucune clause AND ne doit être répétée exactement."""
+        cond = self.hint.get("conditions", "")
+        # Sépare sur AND (hors des parenthèses) — approximation suffisante ici
+        parts = [p.strip() for p in cond.split(" AND ") if p.strip()]
+        assert len(parts) == len(set(parts)), (
+            f"Doublons détectés dans conditions : {parts}"
+        )
+
+
+# ─── build_conditions_hint — PARSE_DATE dans format_constraints ───────────────
+
+
+class TestBuildConditionsHintParseDate:
+    """PARSE_DATE dans SELECT → entrée dans format_constraints."""
+
+    SQL = """
+    SELECT PARSE_DATE('%Y%m', t.month_str) AS month_date, t.amount
+    FROM transactions t
+    WHERE t.status = 'active'
+    """
+
+    def setup_method(self):
+        self.hint = build_conditions_hint(self.SQL)
+
+    def test_parse_date_in_format_constraints(self):
+        fc = self.hint.get("format_constraints", [])
+        assert any("PARSE_DATE" in s for s in fc), (
+            f"PARSE_DATE attendu dans format_constraints, obtenu : {fc}"
+        )
+
+    def test_conditions_contains_where_predicate(self):
+        cond = self.hint.get("conditions", "")
+        assert "active" in cond, f"Prédicat WHERE absent de conditions : {cond!r}"
+
+    def test_conditions_key_present(self):
+        assert "conditions" in self.hint, (
+            f"Clé 'conditions' absente du hint : {self.hint}"
         )

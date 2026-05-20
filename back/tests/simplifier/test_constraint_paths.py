@@ -10,8 +10,6 @@ Sections:
   6. TestEdgeCases            — empty/malformed SQL, no-table, subquery, window
 """
 
-import json
-
 import pytest
 
 from build_query.constraint_simplifier import (
@@ -63,13 +61,15 @@ class TestConstraintGroups:
         assert r.constraint_groups == []
 
     def test_or_where_populates_groups(self):
-        """WHERE a.x = 1 OR a.x = 2 → 2 constraint_groups."""
+        """WHERE a.x = 1 OR a.x = 2 → flat single group, constraint_groups empty."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.x = 1 OR a.x = 2
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
+        assert r.constraint_groups == []
+        values = {f.value for f in r.filters if f.column.column == "x"}
+        assert values == {1, 2}
 
     def test_union_all_populates_groups(self):
         """UNION ALL → 2 constraint_groups."""
@@ -95,16 +95,17 @@ class TestConstraintGroups:
         assert "beta" in g1_vals and "alpha" not in g1_vals
 
     def test_groups_isolated_or(self):
-        """Each OR group carries the AND context + its own OR branch."""
+        """AND + OR → single flat group carrying all constraints."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.y = 10 AND (a.x = 1 OR a.x = 2)
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
-        for g in r.constraint_groups:
-            y_vals = [f.value for f in g.filters if f.column.column == "y"]
-            assert 10 in y_vals
+        assert r.constraint_groups == []
+        y_vals = [f.value for f in r.filters if f.column.column == "y"]
+        assert 10 in y_vals
+        x_vals = {f.value for f in r.filters if f.column.column == "x"}
+        assert x_vals == {1, 2}
 
     def test_three_branch_union_three_groups(self):
         sql = """
@@ -168,57 +169,52 @@ class TestConstraintGroups:
 
 class TestOrGroups:
     def test_simple_or_two_groups(self):
+        """OR → flat single group; both OR values appear in filters."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.x = 1 OR a.x = 2
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
-        values = {f.value for g in r.constraint_groups for f in g.filters}
+        assert r.constraint_groups == []
+        values = {f.value for f in r.filters if f.column.column == "x"}
         assert values == {1, 2}
 
     def test_and_or_combo_distribution(self):
-        """WHERE a.y = 10 AND (a.x = 1 OR a.x = 2) → 2 groups, both carry y=10."""
+        """WHERE a.y = 10 AND (a.x = 1 OR a.x = 2) → flat group with all constraints."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.y = 10 AND (a.x = 1 OR a.x = 2)
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
-        for g in r.constraint_groups:
-            y_vals = [f.value for f in g.filters if f.column.column == "y"]
-            assert 10 in y_vals
-        x_vals = {
-            f.value
-            for g in r.constraint_groups
-            for f in g.filters
-            if f.column.column == "x"
-        }
+        assert r.constraint_groups == []
+        y_vals = [f.value for f in r.filters if f.column.column == "y"]
+        assert 10 in y_vals
+        x_vals = {f.value for f in r.filters if f.column.column == "x"}
         assert x_vals == {1, 2}
 
     def test_three_way_or(self):
+        """Three OR branches → flat group with all three values."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE a.x = 1 OR a.x = 2 OR a.x = 3
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 3
-        values = {f.value for g in r.constraint_groups for f in g.filters}
+        assert r.constraint_groups == []
+        values = {f.value for f in r.filters if f.column.column == "x"}
         assert values == {1, 2, 3}
 
     def test_cross_product_or(self):
-        """WHERE (a.x=1 OR a.x=2) AND (a.y=10 OR a.y=20) → 4 groups."""
+        """Two sets of OR conditions → flat group with all values."""
         sql = """
         SELECT * FROM myproject.analytics.a AS a
         WHERE (a.x = 1 OR a.x = 2) AND (a.y = 10 OR a.y = 20)
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 4
-        for g in r.constraint_groups:
-            x_vals = [f.value for f in g.filters if f.column.column == "x"]
-            y_vals = [f.value for f in g.filters if f.column.column == "y"]
-            assert len(x_vals) == 1
-            assert len(y_vals) == 1
+        assert r.constraint_groups == []
+        x_vals = {f.value for f in r.filters if f.column.column == "x"}
+        y_vals = {f.value for f in r.filters if f.column.column == "y"}
+        assert x_vals == {1, 2}
+        assert y_vals == {10, 20}
 
     def test_or_in_join_on_no_expansion(self):
         """OR in JOIN ON — not expanded (known gap), single path."""
@@ -263,15 +259,15 @@ class TestUnionGroups:
         assert len(r.constraint_groups) == 2
 
     def test_union_branch_with_or_expands(self):
-        """UNION branch with OR → that branch gives 2 sub-groups."""
+        """UNION branch with OR → OR collapses into 1 group per UNION branch."""
         sql = """
         SELECT x FROM myproject.analytics.a AS a WHERE a.v = 1 OR a.v = 2
         UNION ALL
         SELECT x FROM myproject.analytics.b AS b WHERE b.v = 3
         """
         r = simplify(sql)
-        # 2 (OR branch) + 1 (plain branch) = 3 total groups
-        assert len(r.constraint_groups) == 3
+        # OR collapses to 1 flat group per branch → 2 total UNION groups
+        assert len(r.constraint_groups) == 2
 
     def test_cte_union_branches_preserve_lineage(self):
         sql = """
@@ -295,6 +291,7 @@ class TestUnionGroups:
 
 class TestCteGroups:
     def test_cte_or_cross_multiplied(self):
+        """CTE with OR merged into a flat single group."""
         sql = """
         WITH cte AS (
             SELECT a.x, a.status
@@ -304,12 +301,14 @@ class TestCteGroups:
         SELECT * FROM cte WHERE cte.x > 0
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
-        for g in r.constraint_groups:
-            x_filters = [f for f in g.filters if f.column.column == "x"]
-            assert any(f.op == "gt" and f.value == 0 for f in x_filters)
+        assert r.constraint_groups == []
+        status_vals = {f.value for f in r.filters if f.column.column == "status"}
+        assert status_vals == {"active", "pending"}
+        x_filters = [f for f in r.filters if f.column.column == "x"]
+        assert any(f.op == "gt" and f.value == 0 for f in x_filters)
 
     def test_two_ctes_four_groups(self):
+        """Two CTEs each with OR → all constraints merged into one flat group."""
         sql = """
         WITH cte1 AS (
             SELECT a.x FROM myproject.analytics.a AS a WHERE a.p = 1 OR a.p = 2
@@ -320,7 +319,10 @@ class TestCteGroups:
         SELECT * FROM cte1 JOIN cte2 ON cte1.x = cte2.x
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 4
+        assert r.constraint_groups == []
+        all_vals = {f.value for f in r.filters}
+        assert {1, 2}.issubset(all_vals)
+        assert {3, 4}.issubset(all_vals)
 
     def test_cte_without_or_no_extra_groups(self):
         sql = """
@@ -339,7 +341,7 @@ class TestCteGroups:
         assert 1 in vals
 
     def test_cte_no_or_outer_or_two_groups(self):
-        """CTE AND-only × outer WHERE OR → outer OR drives the 2 groups."""
+        """CTE AND-only × outer WHERE OR → flat group with all constraints."""
         sql = """
         WITH cte AS (
             SELECT a.x, a.z
@@ -349,7 +351,9 @@ class TestCteGroups:
         SELECT * FROM cte WHERE cte.z = 10 OR cte.z = 20
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
+        assert r.constraint_groups == []
+        z_vals = {f.value for f in r.filters if f.column.column == "z"}
+        assert z_vals == {10, 20}
 
     def test_anti_join_cte_not_cross_multiplied(self):
         """CTE used as anti-join source (LEFT JOIN … WHERE IS NULL) → no multiplication."""
@@ -367,7 +371,7 @@ class TestCteGroups:
         assert len(r.constraint_groups) == 0  # single flat path
 
     def test_cte_or_paths_surfaced(self):
-        """Original test: CTE OR appears in constraint_groups (not or_paths)."""
+        """CTE OR → flat result with both status values in filters."""
         sql = """
         WITH cte AS (
             SELECT a.x, a.status
@@ -377,12 +381,12 @@ class TestCteGroups:
         SELECT * FROM cte
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 2
-        values = {f.value for g in r.constraint_groups for f in g.filters}
+        assert r.constraint_groups == []
+        values = {f.value for f in r.filters if f.column.column == "status"}
         assert values == {"active", "pending"}
 
     def test_multiple_ctes_groups_accumulated(self):
-        """Two CTEs each with OR → groups combine (cross-product)."""
+        """Two CTEs each with OR → flat group accumulates all constraints."""
         sql = """
         WITH cte1 AS (
             SELECT a.x FROM myproject.analytics.a AS a WHERE a.p = 1 OR a.p = 2
@@ -393,8 +397,8 @@ class TestCteGroups:
         SELECT * FROM cte1 JOIN cte2 ON cte1.x = cte2.x
         """
         r = simplify(sql)
-        assert len(r.constraint_groups) == 4
-        all_vals = {f.value for g in r.constraint_groups for f in g.filters}
+        assert r.constraint_groups == []
+        all_vals = {f.value for f in r.filters}
         assert {1, 2}.issubset(all_vals)
         assert {3, 4}.issubset(all_vals)
 
@@ -403,46 +407,41 @@ class TestCteGroups:
 
 
 class TestGroupsLimit:
-    # 6 independent OR clauses × 2 alternatives = 2^6 = 64 paths > _MAX_CONSTRAINT_GROUPS
-    _SQL_64_PATHS = "SELECT * FROM myproject.analytics.a AS a WHERE " + " AND ".join(
-        f"(a.c{i} = {i * 10} OR a.c{i} = {i * 10 + 1})" for i in range(1, 7)
+    # 33 UNION ALL branches > _MAX_CONSTRAINT_GROUPS = 32
+    _SQL_MANY_UNION = " UNION ALL ".join(
+        f"SELECT {i} AS v FROM myproject.analytics.t{i} AS a WHERE a.x = {i}"
+        for i in range(1, 34)
     )
-    _SQL_4_PATHS = """
-    SELECT * FROM myproject.analytics.a AS a
-    WHERE (a.x = 1 OR a.x = 2) AND (a.y = 10 OR a.y = 20)
+    _SQL_4_UNION = """
+    SELECT x FROM myproject.analytics.a AS a WHERE a.v = 1
+    UNION ALL SELECT x FROM myproject.analytics.b AS b WHERE b.v = 2
+    UNION ALL SELECT x FROM myproject.analytics.c AS c WHERE c.v = 3
+    UNION ALL SELECT x FROM myproject.analytics.d AS d WHERE d.v = 4
     """
 
     def test_below_limit_no_truncation(self):
-        r = simplify(self._SQL_4_PATHS)
+        r = simplify(self._SQL_4_UNION)
         assert len(r.constraint_groups) == 4
         assert r.constraint_groups_truncated is False
 
     def test_above_limit_truncates(self):
-        r = simplify(self._SQL_64_PATHS)
+        r = simplify(self._SQL_MANY_UNION)
         assert len(r.constraint_groups) == _MAX_CONSTRAINT_GROUPS
         assert r.constraint_groups_truncated is True
 
     def test_truncated_groups_are_valid(self):
-        r = simplify(self._SQL_64_PATHS)
+        r = simplify(self._SQL_MANY_UNION)
         for g in r.constraint_groups:
             assert isinstance(g, SimplificationResult)
             assert g.source_columns or g.filters
 
-    def test_truncated_hint_has_flag(self):
-        from build_query.examples_generator import _simplification_to_hint
-
-        r = simplify(self._SQL_64_PATHS)
+    def test_truncated_flag_set(self):
+        r = simplify(self._SQL_MANY_UNION)
         assert r.constraint_groups_truncated is True
-        hint = json.loads(_simplification_to_hint(r))
-        assert hint.get("paths_truncated") is True
 
-    def test_non_truncated_hint_no_flag(self):
-        from build_query.examples_generator import _simplification_to_hint
-
-        r = simplify(self._SQL_4_PATHS)
+    def test_non_truncated_flag_not_set(self):
+        r = simplify(self._SQL_4_UNION)
         assert r.constraint_groups_truncated is False
-        hint = json.loads(_simplification_to_hint(r))
-        assert "paths_truncated" not in hint
 
 
 # ─── 6. Edge cases ────────────────────────────────────────────────────────────
