@@ -231,6 +231,12 @@ def _literal_value(node: exp.Expression) -> Any:
     # e.g. CAST('2025-01-01' AS DATE) — return the inner string
     if isinstance(node, (exp.Cast, exp.TryCast)):
         return _literal_value(node.this)
+    # Any expression with no column references is a constant (PARSE_DATE(...), CURRENT_DATE(), etc.)
+    # Exclude aggregate functions (COUNT(*), SUM(1), …) — they are not constants.
+    if not any(True for _ in node.find_all(exp.Column)) and not any(
+        True for _ in node.find_all(exp.AggFunc)
+    ):
+        return node.sql()
     return None
 
 
@@ -843,21 +849,23 @@ def _dispatch_pred(
     # col = func(col)  →  functional dependency
     if left_is_col and right_func and op_str == "eq":
         inner_col = _find_column_in(right)
-        ref_derived = _col_ref(left, alias_map)
-        if ref_derived and inner_col:
-            ref_source = _col_ref(inner_col, alias_map)
-            if ref_source:
-                ref_derived = resolver.resolve(ref_derived)
-                ref_source = resolver.resolve(ref_source)
-                if ref_derived != ref_source:
-                    functional.append(
-                        FunctionalConstraint(
-                            derived=ref_derived,
-                            source=ref_source,
-                            func=right_func,
+        if inner_col:
+            ref_derived = _col_ref(left, alias_map)
+            if ref_derived:
+                ref_source = _col_ref(inner_col, alias_map)
+                if ref_source:
+                    ref_derived = resolver.resolve(ref_derived)
+                    ref_source = resolver.resolve(ref_source)
+                    if ref_derived != ref_source:
+                        functional.append(
+                            FunctionalConstraint(
+                                derived=ref_derived,
+                                source=ref_source,
+                                func=right_func,
+                            )
                         )
-                    )
-        return
+            return
+        # no column inside function → constant expression, fall through to literal check
 
     # func(col) = col  →  same, flipped
     if right_is_col and left_func and op_str == "eq":
@@ -876,6 +884,43 @@ def _dispatch_pred(
                             func=left_func,
                         )
                     )
+        return
+
+    # func(col) <op> literal  →  constraint on the inner column
+    # e.g. LOWER(email) = 'john', EXTRACT(YEAR FROM dt) = 2024, FORMAT_DATE('%Y', dt) = '2024'
+    if left_func and right_is_lit and not left_is_col and not right_is_col:
+        inner_col = _find_column_in(left)
+        if inner_col:
+            raw = _col_ref(inner_col, alias_map)
+            if raw:
+                src_cols = resolver.resolve_all(raw)
+                ref = resolver.resolve(raw)
+                filters.append(
+                    FilterConstraint(
+                        column=ref,
+                        op=op_str,
+                        value=_literal_value(right),
+                        source_columns=src_cols,
+                    )
+                )
+        return
+
+    # literal <op> func(col)  →  flip the operator
+    if right_func and left_is_lit and not left_is_col and not right_is_col:
+        inner_col = _find_column_in(right)
+        if inner_col:
+            raw = _col_ref(inner_col, alias_map)
+            if raw:
+                src_cols = resolver.resolve_all(raw)
+                ref = resolver.resolve(raw)
+                filters.append(
+                    FilterConstraint(
+                        column=ref,
+                        op=_FLIP_OP.get(op_str, op_str),
+                        value=_literal_value(left),
+                        source_columns=src_cols,
+                    )
+                )
         return
 
     # col <op> literal
