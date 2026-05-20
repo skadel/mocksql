@@ -309,6 +309,10 @@ async def run_generate(
 ) -> None:
     import typer
 
+    from models.env_variables import validate_required_env
+
+    validate_required_env()
+
     from init.init_db import run_migrations
     from models.database import db_pool
 
@@ -347,11 +351,7 @@ async def run_generate(
         ref_names = [".".join(p for p in [r.catalog, r.db, r.name] if p) for r in refs]
         typer.echo(f"Found {len(refs)} source table(s): {ref_names}")
 
-    billing_project = (
-        os.getenv("BQ_TEST_PROJECT")
-        or os.getenv("VERTEX_PROJECT")
-        or cfg.get("billing_project")
-    )
+    billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
 
     # Step 3 — resolve schemas from cache + fetch missing
     cached = load_schema_cache(cache_path)
@@ -362,7 +362,7 @@ async def run_generate(
         if not billing_project:
             typer.echo(
                 "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
-                "Set it in your environment or add billing_project to mocksql.yml."
+                "Set it in your .env or shell environment."
             )
             raise typer.Exit(1)
 
@@ -406,7 +406,7 @@ async def run_generate(
         if not billing_project:
             typer.echo(
                 "[ERROR] --profile requires BQ_TEST_PROJECT. "
-                "Set it in your environment or add billing_project to mocksql.yml."
+                "Set it in your .env or shell environment."
             )
             raise typer.Exit(1)
         typer.echo("Profiling tables on BigQuery (this may take a moment)...")

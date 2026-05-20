@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
     import typer
 
+    from models.env_variables import validate_required_env
+
+    validate_required_env()
+
     from cli.generate import (
         load_config,
         load_schema_cache,
@@ -34,15 +38,10 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
     )
     preprocessor_fn = cfg.get("preprocessor_fn")
 
-    billing_project = (
-        os.getenv("BQ_TEST_PROJECT")
-        or os.getenv("VERTEX_PROJECT")
-        or cfg.get("billing_project")
-    )
+    billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
     if not billing_project:
         typer.echo(
-            "[ERROR] BQ_TEST_PROJECT not set. Set it in your environment or add "
-            "billing_project to mocksql.yml.",
+            "[ERROR] BQ_TEST_PROJECT not set. Define it in your .env or shell environment.",
             err=True,
         )
         raise typer.Exit(1)

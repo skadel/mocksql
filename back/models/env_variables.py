@@ -17,6 +17,7 @@ load_dotenv()
 # ---------------------------------------------------------------------------
 VERTEX_PROJECT = os.getenv("VERTEX_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
 if VERTEX_PROJECT:
+    os.environ.setdefault("VERTEX_PROJECT", VERTEX_PROJECT)
     os.environ.setdefault("GOOGLE_CLOUD_PROJECT", VERTEX_PROJECT)
 
 # ---------------------------------------------------------------------------
@@ -35,10 +36,7 @@ _REQUIRED: list[tuple[str, str]] = [
 
 def validate_required_env() -> None:
     missing = [
-        f"  • {name}  — {desc}"
-        for name, desc in _REQUIRED
-        if not os.getenv(name)
-        and not (name == "VERTEX_PROJECT" and os.getenv("GOOGLE_CLOUD_PROJECT"))
+        f"  • {name}  — {desc}" for name, desc in _REQUIRED if not os.getenv(name)
     ]
     if missing:
         print(
@@ -46,8 +44,8 @@ def validate_required_env() -> None:
             + "\n".join(missing)
             + "\n\nDéfinissez-les dans votre .env ou via l'environnement shell, puis relancez.\n"
             "Exemple minimal :\n"
-            "  VERTEX_PROJECT=my-gcp-project          # projet Vertex AI\n"
-            "  BQ_TEST_PROJECT=my-bq-project           # optionnel — défaut : VERTEX_PROJECT\n",
+            "  VERTEX_PROJECT=my-gcp-project    # ou GOOGLE_CLOUD_PROJECT si déjà configuré\n"
+            "  BQ_TEST_PROJECT=my-bq-project    # optionnel — défaut : VERTEX_PROJECT\n",
             file=sys.stderr,
         )
         sys.exit(1)

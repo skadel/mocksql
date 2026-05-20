@@ -358,6 +358,7 @@ def refresh_schemas(
     """Re-import schemas from BigQuery to pick up partition info on existing tables."""
 
     async def _run() -> None:
+        from models.env_variables import validate_required_env
         from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
         from cli.generate import (
             load_config,
@@ -367,19 +368,16 @@ def refresh_schemas(
         )
         from utils.schema_utils import generate_tables_and_columns_from_project_schema
 
+        validate_required_env()
+
         cfg = load_config(config)
         cache_path = str(
             config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
         )
-        billing_project = (
-            os.getenv("BQ_TEST_PROJECT")
-            or os.getenv("VERTEX_PROJECT")
-            or cfg.get("billing_project")
-        )
+        billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
         if not billing_project:
             typer.echo(
-                "[ERROR] BQ_TEST_PROJECT not set. Set it in your environment or add "
-                "billing_project to mocksql.yml.",
+                "[ERROR] BQ_TEST_PROJECT not set. Define it in your .env or shell environment.",
                 err=True,
             )
             raise typer.Exit(1)
