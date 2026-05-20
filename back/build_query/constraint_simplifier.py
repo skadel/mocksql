@@ -396,6 +396,17 @@ class _LineageResolver:
         )
         self._cte_names: set[str] = {cte.alias.lower() for cte in ctes if cte.alias}
 
+    def _effective_cte_name(self, col: ColumnRef) -> str | None:
+        """Return the CTE name this column resolves to, or None if it's a base table.
+
+        Handles FROM aliases: `FROM cte1 AS c` → col.table='c', col.real_table='cte1'.
+        """
+        if col.table in self._cte_names:
+            return col.table
+        if col.real_table and col.real_table in self._cte_names:
+            return col.real_table
+        return None
+
     def resolve(self, col: ColumnRef) -> ColumnRef:
         """Return a base-table ColumnRef with a SQL lineage string.
 
@@ -406,7 +417,9 @@ class _LineageResolver:
         if key in self._cache:
             return self._cache[key]
         resolved = (
-            self._resolve_via_lineage(col) if col.table in self._cte_names else col
+            self._resolve_via_lineage(col)
+            if self._effective_cte_name(col) is not None
+            else col
         )
         self._cache[key] = resolved
         return resolved
@@ -419,7 +432,7 @@ class _LineageResolver:
         returns [a.x1, b.d2] — all leaf base-table columns in the lineage tree.
         Non-CTE columns are returned as-is in a single-element list.
         """
-        if col.table not in self._cte_names:
+        if self._effective_cte_name(col) is None:
             return [col]
         key = (col.table, col.column)
         if key in self._all_cache:
@@ -434,9 +447,11 @@ class _LineageResolver:
         Ensures col.column always appears in the outermost SELECT so that
         sqlglot lineage can trace it through multi-level CTEs, even when the
         column is not projected by the original outer query.
+        Uses the real CTE name (not a FROM alias) so the WITH clause matches.
         """
+        cte_name = self._effective_cte_name(col) or col.table
         wrapper = sqlglot.parse_one(
-            f"SELECT {col.column} FROM {col.table}",
+            f"SELECT {col.column} FROM {cte_name}",
             dialect=self._dialect,
         )
         with_clause = self._statement.args.get("with_")
@@ -1113,11 +1128,22 @@ def _walk_select_grouped(
     ]
 
     # ── Cross-multiply with CTE / inline-subquery sources ─────────────────────
+    # Guard: cross-multiply each CTE at most once per SELECT, even if referenced
+    # multiple times under different aliases (e.g. self-join: FROM a AS p JOIN a AS q).
+    seen_cte_cross: set[str] = set()
     for src in all_sources:
         if isinstance(src, exp.Table):
             tbl_name = (src.alias or src.name).lower()
-            if tbl_name in cte_groups_map and tbl_name not in anti_join_sources:
-                cte_gs = cte_groups_map[tbl_name]
+            # Resolve alias → real CTE name (e.g. "FROM filtered AS f" → "filtered")
+            real_tbl = alias_map.get(tbl_name, tbl_name)
+            cte_key = real_tbl if real_tbl in cte_groups_map else tbl_name
+            if (
+                cte_key in cte_groups_map
+                and tbl_name not in anti_join_sources
+                and cte_key not in seen_cte_cross
+            ):
+                seen_cte_cross.add(cte_key)
+                cte_gs = cte_groups_map[cte_key]
                 # Skip cross-multiply when the CTE is entirely unconstrained (1 empty group)
                 if len(cte_gs) > 1 or any(
                     g.filters or g.equalities or g.functional for g in cte_gs
