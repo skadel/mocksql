@@ -62,10 +62,12 @@ gcloud iam service-accounts keys create ~/keys/mocksql-sa.json \
   --iam-account="${SA_EMAIL}"
 ```
 
-Puis dans `back/.env` :
+En local, dans le `.env` à la racine de votre projet (voir section suivante) :
 ```dotenv
 GOOGLE_APPLICATION_CREDENTIALS=/chemin/vers/mocksql-sa.json
 ```
+
+En CI/CD, injecter `GOOGLE_APPLICATION_CREDENTIALS` comme variable d'environnement secrète.
 
 > **Erreur fréquente** : `Forbidden: Access Denied: bigquery.jobs.create` → le rôle `bigquery.user` est manquant.
 
@@ -77,11 +79,57 @@ GOOGLE_APPLICATION_CREDENTIALS=/chemin/vers/mocksql-sa.json
 pip install dist/mocksql-*.whl
 ```
 
-Variables d'environnement requises pour le CLI standalone :
+### Variables d'environnement
+
+MockSQL lit la configuration GCP depuis les variables d'environnement. La priorité est :
+
+```
+variable système / CI  >  fichier .env local  >  erreur
+```
+
+`mocksql.yml` décrit la structure du projet (chemins, dialect) — pas les credentials ni les projets GCP, qui changent selon l'environnement.
+
+#### En développement local
+
+Créez un `.env` **gitignorée** à la racine de votre projet :
 
 ```dotenv
-VERTEX_PROJECT=<votre-projet-gcp>
+# .env — ne pas committer
+VERTEX_PROJECT=my-project-dev
 GOOGLE_CLOUD_LOCATION=us-central1
+
+# Optionnel — défaut : VERTEX_PROJECT
+BQ_TEST_PROJECT=my-project-dev
+
+# Optionnel : service account explicite (sinon : Application Default Credentials)
+# GOOGLE_APPLICATION_CREDENTIALS=/chemin/vers/service_account.json
+```
+
+MockSQL charge ce fichier automatiquement au démarrage (`load_dotenv()`). Ajoutez `.env` à votre `.gitignore` :
+
+```
+.env
+```
+
+#### En CI/CD (GitHub Actions, Cloud Build…)
+
+Injectez les variables directement — elles ont priorité sur le `.env` local :
+
+```yaml
+# GitHub Actions
+env:
+  VERTEX_PROJECT: my-project-preprod
+  GOOGLE_CLOUD_LOCATION: us-central1
+  BQ_TEST_PROJECT: my-project-preprod   # si différent de VERTEX_PROJECT
+```
+
+```yaml
+# Cloud Build
+substitutions:
+  _VERTEX_PROJECT: my-project-prod
+env:
+  - VERTEX_PROJECT=$_VERTEX_PROJECT
+  - GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
 `GOOGLE_CLOUD_LOCATION` est obligatoire pour les appels Vertex AI. Le chemin DuckDB se configure via `duckdb_path` dans `mocksql.yml` (défaut : `data/mocksql.duckdb`).
@@ -190,18 +238,17 @@ make build-ui    # CLI + UI (Node.js requis)
 
 ```bash
 cd back
-cp .env.example .env   # puis éditer les variables ci-dessous
+cp .env.example .env   # ajuster DEFAULT_MODEL_NAME, LOG_LEVEL si besoin
 python -m venv .venv && source .venv/bin/activate   # Windows : .\.venv\Scripts\activate
 pip install poetry && poetry install
 uvicorn server:app --port 8080 --reload
 ```
 
-Variables essentielles dans `back/.env` :
+Les variables GCP (`VERTEX_PROJECT`, `BQ_TEST_PROJECT`…) se mettent dans un `.env` à la racine du projet (voir section "Variables d'environnement" ci-dessus) — le serveur les charge via `load_dotenv()` au démarrage.
+
+Variables spécifiques à `back/.env` (infra dev) :
 
 ```dotenv
-VERTEX_PROJECT=<votre-projet-gcp>
-GOOGLE_CLOUD_LOCATION=us-central1
-BQ_TEST_PROJECT=<votre-projet-gcp>    # optionnel — défaut : VERTEX_PROJECT
 DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
 FRONT_URL=http://127.0.0.1:3000
 ```

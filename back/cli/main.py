@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 import yaml
+from dotenv import load_dotenv
 
 import utils.logger  # noqa: F401 — registers DIAG level (15) before basicConfig
 
@@ -18,6 +19,7 @@ app = typer.Typer(
 @app.callback()
 def _callback() -> None:
     """MockSQL — TDD engine for Analytics Engineering."""
+    load_dotenv()
     raw = os.getenv("LOG_LEVEL", "WARNING").upper()
     try:
         log_level: int | str = int(raw)
@@ -179,11 +181,10 @@ def init(
     typer.echo(f"[DB] Database ready at {duckdb_path}")
 
     typer.echo(
-        "\nRequired environment variables:\n"
-        "  VERTEX_PROJECT=<gcp-project-for-vertex-ai>\n"
-        "  BQ_TEST_PROJECT=<gcp-project-for-bigquery>  # defaults to VERTEX_PROJECT if not set\n"
+        "\nRequired environment variables (env var or .env file at project root):\n"
+        "  VERTEX_PROJECT=<gcp-project>          # Vertex AI / LLM\n"
         "  GOOGLE_CLOUD_LOCATION=us-central1\n"
-        f"  DUCKDB_PATH={duckdb_path}\n"
+        "  BQ_TEST_PROJECT=<gcp-project>         # optional, defaults to VERTEX_PROJECT\n"
         "\nNext step: mocksql generate <your_model.sql>"
     )
 
