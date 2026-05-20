@@ -13,12 +13,48 @@ Thank you for your interest in contributing!
 ```bash
 # Backend
 cd back
-poetry install
-cp .env.example .env   # fill in your values
+python -m venv .venv && source .venv/bin/activate   # Windows : .\.venv\Scripts\activate
+pip install poetry && poetry install
+cp .env.example .env   # ajuster DEFAULT_MODEL_NAME, LOG_LEVEL si besoin
 
 # Frontend
 cd front
 npm ci
+```
+
+Variables GCP à mettre dans un `.env` à la racine du projet (chargé automatiquement via `load_dotenv()`) :
+
+```dotenv
+VERTEX_PROJECT=my-project-dev
+GOOGLE_CLOUD_LOCATION=us-central1
+BQ_TEST_PROJECT=my-project-dev   # optionnel, défaut : VERTEX_PROJECT
+```
+
+Variables spécifiques au backend (`back/.env`) :
+
+```dotenv
+DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
+FRONT_URL=http://127.0.0.1:3000
+```
+
+## Lancer le projet en local
+
+```bash
+# Backend
+cd back
+uvicorn server:app --port 8080 --reload
+
+# Frontend (hot-reload, proxy vers le backend sur :8080)
+cd front
+npm start      # http://localhost:3000
+```
+
+## Builder les packages
+
+```bash
+cd back
+make build-cli   # wheel CLI uniquement
+make build-ui    # wheel CLI + UI (Node.js requis)
 ```
 
 ## Development workflow

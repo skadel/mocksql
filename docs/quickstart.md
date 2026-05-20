@@ -76,7 +76,7 @@ En CI/CD, injecter `GOOGLE_APPLICATION_CREDENTIALS` comme variable d'environneme
 ## 3. Installation CLI
 
 ```bash
-pip install dist/mocksql-*.whl
+pip install mocksql
 ```
 
 ### Variables d'environnement
@@ -219,46 +219,14 @@ MockSQL distribue deux wheels distincts :
 
 ```bash
 # CLI + UI
-pip install dist/mocksql-*.whl dist/mocksql_ui-*.whl
+pip install mocksql mocksql-ui
+```
 
+Assurez-vous que les variables d'environnement GCP sont définies (voir [section 3](#3-installation-cli)) puis :
+
+```bash
 mocksql ui                  # http://localhost:8080/static/
 mocksql ui --port 4000
 mocksql ui --no-browser
 ```
 
-### Builder les wheels
-
-```bash
-cd back
-make build-cli   # CLI uniquement
-make build-ui    # CLI + UI (Node.js requis)
-```
-
-### Développement backend depuis les sources
-
-```bash
-cd back
-cp .env.example .env   # ajuster DEFAULT_MODEL_NAME, LOG_LEVEL si besoin
-python -m venv .venv && source .venv/bin/activate   # Windows : .\.venv\Scripts\activate
-pip install poetry && poetry install
-uvicorn server:app --port 8080 --reload
-```
-
-Les variables GCP (`VERTEX_PROJECT`, `BQ_TEST_PROJECT`…) se mettent dans un `.env` à la racine du projet (voir section "Variables d'environnement" ci-dessus) — le serveur les charge via `load_dotenv()` au démarrage.
-
-Variables spécifiques à `back/.env` (infra dev) :
-
-```dotenv
-DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
-FRONT_URL=http://127.0.0.1:3000
-```
-
-Le chemin DuckDB se configure dans `mocksql.yml` (`duckdb_path`).
-
-### Développement frontend (hot-reload)
-
-```bash
-cd front
-npm ci
-npm start      # http://localhost:3000 (proxy vers le backend sur :8080)
-```

@@ -19,7 +19,7 @@ app = typer.Typer(
 @app.callback()
 def _callback() -> None:
     """MockSQL — TDD engine for Analytics Engineering."""
-    load_dotenv()
+    load_dotenv(dotenv_path=Path(".env"))
     raw = os.getenv("LOG_LEVEL", "WARNING").upper()
     try:
         log_level: int | str = int(raw)
