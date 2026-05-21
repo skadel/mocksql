@@ -3,6 +3,7 @@ import uuid
 
 from langchain_core.messages import AIMessage
 
+from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
 from build_query.debug_node import debug_test_node
@@ -228,6 +229,7 @@ def build_query_graph():
     builder.add_node("generator", generate_examples)
     builder.add_node("assertion_modifier", modify_assertions)
     builder.add_node("executor", run_on_examples)
+    builder.add_node("assertion_corrector", correct_assertions)
     builder.add_node("test_evaluator", evaluate_tests)
     builder.add_node("suggestions_generator", generate_suggestions)
     builder.add_node("history_saver", history_saver)
@@ -282,7 +284,7 @@ def build_query_graph():
             return "suggestions_generator"
         if state.get("evaluation_feedback") == "bad_assertions":
             if state.get("gen_retries", 0) >= 0:
-                return "executor"
+                return "assertion_corrector"
         return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")
@@ -298,6 +300,7 @@ def build_query_graph():
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("suggestions_generator", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

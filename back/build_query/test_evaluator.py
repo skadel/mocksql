@@ -137,12 +137,6 @@ async def evaluate_tests(state: QueryState):
     triggers_agent_retry = evaluation_feedback == "bad_data" and not state.get(
         "assertion_only"
     )
-    triggers_assertion_fix = (
-        evaluation_feedback == "bad_assertions"
-        and not state.get("assertion_only")
-        and current_test.get("assertion_fix") is not None
-    )
-
     state_update: dict = {
         "messages": [
             AIMessage(
@@ -162,33 +156,7 @@ async def evaluate_tests(state: QueryState):
         else "complete",
     }
 
-    if triggers_agent_retry or triggers_assertion_fix:
+    if triggers_agent_retry:
         state_update["gen_retries"] = gen_retries - 1
-
-    if triggers_assertion_fix:
-        fix = current_test["assertion_fix"]
-        updated_test = {
-            **current_test,
-            "test_name": fix["test_name"],
-            "unit_test_description": fix["unit_test_description"],
-            "unit_test_build_reasoning": fix["unit_test_build_reasoning"],
-            "tags": fix["tags"],
-            "suggestions": fix["suggestions"],
-        }
-        parent = state.get("user_message_id") or state.get("parent_message_id")
-        state_update["examples"] = [
-            AIMessage(
-                content=json.dumps(updated_test),
-                id=str(uuid.uuid4()),
-                additional_kwargs={
-                    "type": MsgType.EXAMPLES,
-                    "parent": parent,
-                    "request_id": state.get("request_id"),
-                    "generated_test_index": updated_test.get("test_index"),
-                    "assertion_only": True,
-                },
-            )
-        ]
-        logger.diag("[evaluator] assertion_fix inline: test_name=%r", fix["test_name"])
 
     return state_update

@@ -174,6 +174,7 @@ def _build_cli_graph():
     """CLI graph: generator → executor → test_evaluator, with bad_data and bad_assertions retry loops."""
     from langgraph.graph import END, START, StateGraph
 
+    from build_query.assertion_corrector import correct_assertions
     from build_query.conversational_agent import conversational_agent
     from build_query.examples_executor import run_on_examples
     from build_query.examples_generator import generate_examples
@@ -185,6 +186,7 @@ def _build_cli_graph():
     builder.add_node("executor", run_on_examples)
     builder.add_node("test_evaluator", evaluate_tests)
     builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("assertion_corrector", correct_assertions)
 
     def route_executor(state: QueryState):
         if state.get("error") or state.get("status") == "error":
@@ -199,17 +201,15 @@ def _build_cli_graph():
             and state.get("gen_retries", 0) > 0
         ):
             return "conversational_agent"
-        if (
-            state.get("evaluation_feedback") == "bad_assertions"
-            and state.get("gen_retries", 0) > 0
-        ):
-            return "executor"
+        if state.get("evaluation_feedback") == "bad_assertions":
+            return "assertion_corrector"
         return END
 
     builder.add_edge(START, "generator")
     builder.add_edge("generator", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("conversational_agent", "generator")
 
     return builder.compile()
