@@ -263,6 +263,8 @@ def build_query_graph():
             return "suggestions_generator"
         if tool_call in ("run_cte", "count_cte_steps", "debug_batch"):
             return "debug_node"
+        if tool_call == "request_reevaluation":
+            return "test_evaluator"
         return "history_saver"
 
     def route_executor(state: QueryState):

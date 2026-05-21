@@ -1,16 +1,96 @@
 import json
 import logging
 import uuid
+from typing import Literal
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from pydantic import BaseModel
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
+from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
 from utils.test_utils import find_current_test
 
 logger = logging.getLogger(__name__)
+
+
+class _ReevalResult(BaseModel):
+    verdict: Literal["Excellent", "Bon", "Insuffisant"]
+    explanation: str
+
+
+async def _reevaluate_empty_result(
+    state: QueryState, current_test: dict, last_results_msg: AIMessage
+) -> dict:
+    """LLM re-evaluation when the conversational agent suspects bad_data was a false positive."""
+    test_desc = current_test.get("unit_test_description", "")
+    input_data = current_test.get("data", {})
+    sql = (state.get("optimized_sql") or state.get("query", "")).strip()
+    reason = state.get("reevaluation_context", "")
+    eval_test_index = current_test.get("test_index")
+
+    try:
+        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)[:800]
+    except Exception:
+        input_summary = str(input_data)[:800]
+
+    prompt = f"""SQL testé (dialecte {state.get("dialect", "bigquery")}) :
+{sql}
+
+Scénario du test : {test_desc}
+
+Données d'entrée injectées dans DuckDB :
+{input_summary}
+
+Résultat DuckDB : 0 lignes retournées.
+
+Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
+{reason}
+
+Évalue la qualité de ce test. Le fait que la requête retourne 0 lignes est-il cohérent avec le scénario décrit et les données fournies ?
+- "Excellent" ou "Bon" si 0 lignes est bien le comportement attendu pour ce scénario.
+- "Insuffisant" si les données d'entrée ne permettent pas de valider le scénario malgré la justification."""
+
+    llm = make_llm().with_structured_output(_ReevalResult)
+    try:
+        result = await llm.ainvoke(
+            [
+                SystemMessage(content="Tu es un expert en tests SQL pour MockSQL."),
+                HumanMessage(content=prompt),
+            ]
+        )
+        verdict = result.verdict
+        explanation = result.explanation
+    except Exception as exc:
+        logger.warning("[evaluator] _reevaluate_empty_result failed: %s", exc)
+        verdict = "Insuffisant"
+        explanation = "Réévaluation impossible — erreur LLM."
+
+    logger.diag(
+        "[evaluator] réévaluation après request_reevaluation : verdict=%s — %s",
+        verdict,
+        explanation,
+    )
+    evaluation_feedback = "bad_data" if verdict == "Insuffisant" else None
+    return {
+        "messages": [
+            AIMessage(
+                content=f"**{verdict}** — {explanation}",
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.EVALUATION,
+                    "parent": last_results_msg.id,
+                    "request_id": state.get("request_id"),
+                    "test_index": eval_test_index,
+                },
+            )
+        ],
+        "evaluation_feedback": evaluation_feedback,
+        "status": "complete",
+        "reevaluation_context": None,
+    }
 
 
 async def evaluate_tests(state: QueryState):
@@ -43,6 +123,12 @@ async def evaluate_tests(state: QueryState):
     current_test = find_current_test(all_tests, state.get("test_index"))
     if current_test is None:
         return {}
+
+    # Re-evaluation requested by conversational_agent: skip automatic bad_data classification.
+    if current_test.get("status") == "empty_results" and state.get(
+        "reevaluation_context"
+    ):
+        return await _reevaluate_empty_result(state, current_test, last_results)
 
     # Fast path: empty_results due to structural SQL constraint (no LLM needed).
     if current_test.get("status") == "empty_results":

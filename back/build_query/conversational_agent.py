@@ -159,8 +159,9 @@ Tentatives de correction restantes : {retries_left}
 - `count_cte_steps` — diagnostiquer où les données bloquent dans les CTEs
 - `run_cte` — inspecter le contenu d'une CTE intermédiaire
 - `update_test_data` — corriger les données d'entrée avec une instruction précise
+- `request_reevaluation` — demander une réévaluation LLM si le diagnostic montre que les données sont correctes (ex : 0 ligne est le comportement attendu pour ce scénario)
 
-⚠️ Règle impérative : une fois le diagnostic posé, appelle `update_test_data` directement sans demander de confirmation."""
+⚠️ Règle impérative : une fois le diagnostic posé, appelle soit `update_test_data` si les données sont incorrectes, soit `request_reevaluation` si elles sont correctes et que l'évaluation initiale était erronée. Ne demande pas de confirmation."""
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]
@@ -198,6 +199,7 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         "update_test_data",
         "run_cte",
         "count_cte_steps",
+        "request_reevaluation",
     }
 
     @tool
@@ -251,12 +253,22 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         Tu peux appeler plusieurs outils de debug (run_cte, count_cte_steps) en même temps."""
         return f"{test_uid}:{cte_name}"
 
+    @tool
+    def request_reevaluation(test_uid: str, reason: str) -> str:
+        """Demande une réévaluation LLM du test quand le diagnostic montre que les données
+        d'entrée sont correctes et que l'évaluation initiale était erronée.
+        Utilise cet outil quand le comportement observé (ex : 0 ligne retournée) est
+        intentionnel et cohérent avec le scénario décrit (ex : cas plage vide, jointure sans résultat attendu).
+        reason : justification courte expliquant pourquoi le comportement est correct."""
+        return f"{test_uid}:{reason}"
+
     base_tools = [
         generate_test_data,
         delete_test,
         update_test_data,
         update_test_description,
         generate_suggestions,
+        request_reevaluation,
     ]
     debug_tools = [run_cte, count_cte_steps] if debug_retries > 0 else []
     llm = make_llm().bind_tools(base_tools + debug_tools)
@@ -293,13 +305,15 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         if has_debug_results:
             trigger = (
                 f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
-                f"Appelle maintenant `update_test_data` sur le test [{failing_uid_trigger}] "
-                f"pour corriger les données d'entrée en te basant sur ce diagnostic."
+                f"Analyse : si les données d'entrée sont incorrectes, appelle `update_test_data` sur [{failing_uid_trigger}]. "
+                f"Si au contraire le comportement observé (ex : 0 ligne) est le comportement attendu pour ce scénario, "
+                f"appelle `request_reevaluation` sur [{failing_uid_trigger}] avec la justification."
             )
         else:
             trigger = (
                 f"Le test [{failing_uid_trigger}] a été jugé Insuffisant à cause des données d'entrée. "
-                f"Si la cause est évidente, appelle directement `update_test_data`. "
+                f"Si la cause est évidente (données incorrectes), appelle directement `update_test_data`. "
+                f"Si le comportement observé est en réalité attendu pour ce scénario, appelle `request_reevaluation`. "
                 f"Sinon, diagnostique d'abord avec `count_cte_steps` sur les CTEs suspectes."
             )
         messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
@@ -399,6 +413,11 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         "agent_tool_args": agent_tool_args,
         "input": new_input,
     }
+    if agent_tool_call == "request_reevaluation":
+        update["gen_retries"] = -1
+        update["reevaluation_context"] = agent_tool_args.get("reason", "")
+        if "test_index" in agent_tool_args:
+            update["test_index"] = agent_tool_args["test_index"]
 
     msgs_to_add = []
     last_msg_id = parent
