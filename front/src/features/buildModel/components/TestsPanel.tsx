@@ -1462,6 +1462,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
+  const loadingTestIndex = useAppSelector((state) => state.buildModel.loadingTestIndex);
 
   const {
     editingIndex, setEditingIndex,
@@ -1710,7 +1711,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   isCollapsed={false}
                   areCommentsOpen={!!openComments[testKey]}
                   comments={testComments}
-                  isLoading={isLoading}
+                  isLoading={isLoading && (loadingTestIndex === undefined || test.test_index === loadingTestIndex)}
                   onStartEdit={() => setEditingIndex(idx)}
                   onSaveEdit={() => handleSaveEdit(idx)}
                   onEditDescription={(val) => setEditedDescriptions((prev) => ({ ...prev, [idx]: val }))}

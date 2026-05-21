@@ -408,14 +408,29 @@ export const buildModelSlice = createSlice({
 
         state.selectedDatabases = [];
       })
-      .addCase(chatQuery.pending, (state) => {
+      .addCase(chatQuery.pending, (state, action) => {
         state.loading = true;
         state.streamingReasoning = undefined;
+        const { testIndex, assertionOnly } = action.meta.arg;
+        state.loadingTestIndex = testIndex;
+        if (testIndex !== undefined && state.testResults?.length) {
+          state.testResults = state.testResults.map((t: any) => {
+            if (t.test_index !== testIndex) return t;
+            if (assertionOnly) {
+              // Assertion-only: garde les données, efface juste l'évaluation
+              return { ...t, evaluation: undefined };
+            } else {
+              // Régénération complète : pending immédiat sans attendre les SSE
+              return { ...t, status: 'pending', evaluation: undefined };
+            }
+          });
+        }
       })
       .addCase(chatQuery.fulfilled, (state) => {
         state.loading = false;
         state.loading_message = undefined;
         state.streamingReasoning = undefined;
+        state.loadingTestIndex = undefined;
       })
       .addCase(fetchUniqueColumns.pending, (state) => {
         state.loading = true;
@@ -455,6 +470,7 @@ export const buildModelSlice = createSlice({
       })
       .addCase(chatQuery.rejected, (state, action) => {
         handleRejectedCase(state, action, "Execution error");
+        state.loadingTestIndex = undefined;
       })
       .addCase(getMessages.rejected, (state, action) => {
         state.loading = false;

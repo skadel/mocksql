@@ -116,7 +116,11 @@ export async function streamThunk(
       } else {
         const sseError: string | undefined = error?.error;
         const networkHint = sseError || error?.message || '';
-        if (sseError?.includes('Reauthentication') || sseError?.includes('application-default')) {
+        if (sseError === 'recursion_limit') {
+          dispatch(setError(
+            "La génération a pris trop d'itérations (limite : 50 étapes). Essaie de simplifier la requête ou de relancer."
+          ));
+        } else if (sseError?.includes('Reauthentication') || sseError?.includes('application-default')) {
           dispatch(setError(
             "Session Google Cloud expirée. Relancez gcloud auth application-default login dans votre terminal, puis réessayez."
           ));

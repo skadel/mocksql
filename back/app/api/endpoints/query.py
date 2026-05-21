@@ -2,6 +2,8 @@ import asyncio
 import json
 from typing import Optional, List, Any
 
+from langgraph.errors import GraphRecursionError
+
 import dotenv
 import sqlglot
 from fastapi import APIRouter, Request, HTTPException
@@ -507,10 +509,22 @@ async def stream_events_route(body: StreamEventsRequest):
 
     async def event_generator():
         try:
-            async for event in graph.astream_events(graph_input, version="v2"):
+            async for event in graph.astream_events(
+                graph_input,
+                version="v2",
+                config={"recursion_limit": 50},
+            ):
                 yield f"data: {json.dumps(_make_serializable(event))}\n\n"
         except asyncio.CancelledError:
             return  # client disconnected — stop streaming silently
+        except GraphRecursionError:
+            _recursion_payload = json.dumps(
+                {
+                    "error": "recursion_limit",
+                    "message": "Trop d'itérations — le graph a dépassé la limite de 50 étapes.",
+                }
+            )
+            yield f"data: {_recursion_payload}\n\n"
         except Exception as exc:
             yield f"data: {json.dumps({'error': str(exc)})}\n\n"
 

@@ -2054,6 +2054,9 @@ _TRIVIAL_FUNC_TYPES: frozenset[type] = frozenset(
         # table-valued functions used in FROM clauses — not usable as scalar column
         # expressions; including these produces invalid SQL in profiling queries
         exp.Unnest,
+        # complex-typed constructors — MIN/CAST/DISTINCT fail on STRUCT and ARRAY
+        exp.Struct,
+        exp.Array,
     }
 )
 
