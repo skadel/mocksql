@@ -95,6 +95,9 @@ back/data/
 .claude/settings.json
 .claude/settings.local.json
 
+################################## Docs stratégiques (privé)
+docs/vision-produit.md
+
 ################################## Examples
 
 # État local généré par MockSQL (DuckDB, cache schéma, tests générés)
