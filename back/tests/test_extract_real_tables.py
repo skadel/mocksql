@@ -313,3 +313,33 @@ class TestExtractRealTableRefs:
         # Les noms de projets GCP contiennent souvent des tirets
         sql = "SELECT * FROM `my-super-project.my_dataset.my_table`"
         assert names(sql) == {"my-super-project.my_dataset.my_table"}
+
+    def test_cte_uppercase_name_lowercase_usage(self):
+        # CTE définie en majuscules, référencée en minuscules → ne doit pas être
+        # retournée comme table réelle
+        sql = """
+        WITH MY_CTE AS (SELECT * FROM project.dataset.orders)
+        SELECT * FROM my_cte
+        """
+        assert names(sql) == {"project.dataset.orders"}
+
+    def test_cte_mixedcase_name(self):
+        # CTE en camelCase, référencée en minuscules
+        sql = """
+        WITH OrderBase AS (SELECT * FROM project.dataset.orders)
+        SELECT * FROM orderbase
+        """
+        assert names(sql) == {"project.dataset.orders"}
+
+    def test_cte_uppercase_unpivot_chain(self):
+        # CTE uppercase + UNPIVOT (double workaround : PIVOT bug + casse)
+        sql = """
+        WITH
+        RAW_DATA AS (SELECT x, y FROM ds.t),
+        UNPIVOTED AS (
+            SELECT * FROM RAW_DATA
+            UNPIVOT(v FOR k IN (x, y))
+        )
+        SELECT * FROM unpivoted
+        """
+        assert names(sql) == {"ds.t"}
