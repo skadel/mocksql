@@ -55,7 +55,7 @@ class _AssertionFix(BaseModel):
 
 class _AssertionsAndEvaluation(BaseModel):
     reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
-    assertions: List[_Assertion]
+    assertions: List[_Assertion] = Field(min_length=1)
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
     reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
     explanation: str
@@ -737,7 +737,7 @@ async def _generate_assertions_and_evaluate(
     test_description: str,
 ) -> _AssertionsAndEvaluation:
     """
-    Single LLM call that generates 2-3 dbt-style assertions AND evaluates test quality.
+    Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
     Returns an _AssertionsAndEvaluation with assertions, verdict, explanation, and optional fix.
     Falls back to an empty assertions + Bon verdict on failure.
     """
@@ -774,7 +774,7 @@ Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
 
 Puis produis :
 
-1. 2 à 3 assertions SQL dbt-style sur `__result__`.
+1. Entre 1 et plusieurs assertions SQL dbt-style sur `__result__` — autant que nécessaire pour valider ce scénario (1 suffit si le test est simple, plusieurs si la requête couvre plusieurs calculs ou cas).
    - Convention : 0 ligne si OK, des lignes si KO.
    - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse).
    - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
