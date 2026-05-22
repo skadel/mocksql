@@ -156,6 +156,21 @@ def process_group_by(
         table_to_columns_map = {}
         alias_to_table_map = {}
 
+        if group_by.args.get("all"):
+            return None
+
+        for special_key in ("rollup", "cube", "grouping_sets"):
+            special_list = group_by.args.get(special_key)
+            if not special_list:
+                continue
+            for item in special_list:
+                if not isinstance(item, exp.Expression):
+                    continue
+                for col in item.find_all(exp.Column):
+                    col_name = extract_column_name(col)
+                    if col_name:
+                        grain_columns.add(col_name)
+
         for col in group_by.expressions:
             if isinstance(col, exp.Column):
                 col_name = extract_column_name(col)

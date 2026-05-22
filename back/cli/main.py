@@ -340,6 +340,73 @@ def _print_test_results(model_results: list) -> None:
         typer.echo(f"  {failed} test(s) FAILED — exit code 1")
 
 
+@app.command()
+def check(
+    model: list[str] = typer.Option(
+        [],
+        "--model",
+        "-m",
+        help="Only check these models (repeatable). Default: all.",
+    ),
+    config: Path = typer.Option(
+        Path("mocksql.yml"),
+        "--config",
+        "-c",
+        help="Path to mocksql.yml config.",
+    ),
+    strict: bool = typer.Option(
+        False,
+        "--strict",
+        help="Also fail when a model has no tests at all.",
+    ),
+    output_json: bool = typer.Option(
+        False, "--json", help="Output results as JSON (useful for CI pipelines)."
+    ),
+) -> None:
+    """Check that all SQL models have up-to-date test files. Exits 1 if any model is stale."""
+    import json as _json
+
+    from cli.checker import check_models
+
+    model_filters = list(model) or None
+    exit_code, results = check_models(config, model_filters, strict=strict)
+
+    if output_json:
+        typer.echo(_json.dumps(results, indent=2))
+    else:
+        _print_check_results(results)
+
+    raise typer.Exit(exit_code)
+
+
+def _print_check_results(results: list[dict]) -> None:
+    if not results:
+        typer.echo("No SQL models found. Check your models_path in mocksql.yml.")
+        return
+
+    icons = {"ok": "✓", "stale": "✗", "missing": "─"}
+    n_stale = sum(1 for r in results if r["status"] == "stale")
+    n_missing = sum(1 for r in results if r["status"] == "missing")
+
+    for r in results:
+        icon = icons.get(r["status"], "?")
+        detail = f"  {r['detail']}" if r["detail"] else ""
+        typer.echo(f"  {icon}  {r['model']:<40}{detail}")
+
+    typer.echo(f"\n  {'─' * 52}")
+    if n_stale == 0 and n_missing == 0:
+        typer.echo(f"  All {len(results)} model(s) up to date.")
+    else:
+        if n_stale:
+            typer.echo(
+                f"  {n_stale} model(s) stale — run `mocksql generate <model.sql>` — exit code 1"
+            )
+        if n_missing:
+            typer.echo(
+                f"  {n_missing} model(s) with no tests — run `mocksql generate <model.sql>`"
+            )
+
+
 @app.command("refresh-schemas")
 def refresh_schemas(
     config: Path = typer.Option(

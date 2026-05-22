@@ -76,6 +76,13 @@ def ensure_in_group_by(select: exp.Select, col_exprs: List[exp.Expression]):
             select.set("group", group)
         else:
             return
+    if (
+        group.args.get("all")
+        or group.args.get("rollup")
+        or group.args.get("cube")
+        or group.args.get("grouping_sets")
+    ):
+        return
     existing = [g.sql() for g in (group.expressions or [])]
     for c in col_exprs:
         if c.sql() not in existing:

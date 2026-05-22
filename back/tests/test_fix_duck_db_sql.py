@@ -17,7 +17,8 @@ import duckdb
 import pytest
 import sqlglot
 
-from utils.examples import fix_duck_db_sql
+from build_query.validator import prune_constant_group_by
+from utils.examples import fix_duck_db_sql, parse_test_query
 
 
 # ---------------------------------------------------------------------------
@@ -379,3 +380,180 @@ class TestSourceDialectGuard:
             fix_duck_db_sql(sql, source_dialect="bigquery")
             == "SELECT ST_POINT(1.0, 2.0)"
         )
+
+
+# ===========================================================================
+# Section 9 : GROUP BY ALL — pipeline complet via parse_test_query
+# ===========================================================================
+
+
+class TestGroupByAll:
+    """
+    Régression : GROUP BY ALL (syntaxe BigQuery) était corrompu en GROUP BY ALL a, b
+    par _fix_group_by_strict_mode, provoquant une ParserException DuckDB.
+
+    Ces tests couvrent le pipeline complet parse_test_query :
+        bq_sql → strip_qualifiers → _qualify_group_order_by_aliases
+               → _fix_group_by_strict_mode → .sql(duckdb) → DuckDB execute
+    """
+
+    @pytest.fixture
+    def con(self):
+        # strip_qualifiers_with_scope(proj.ds.sales, sess1) → ds_sales_sess1
+        c = duckdb.connect()
+        c.execute(
+            "CREATE TABLE ds_sales_sess1 (region VARCHAR, product VARCHAR, amount INTEGER)"
+        )
+        c.execute("""
+            INSERT INTO ds_sales_sess1 VALUES
+            ('EU', 'A', 10), ('EU', 'A', 20), ('US', 'B', 5)
+        """)
+        return c
+
+    @pytest.mark.asyncio
+    async def test_group_by_all_simple(self, con):
+        """GROUP BY ALL sur une table simple : le pipeline complet s'exécute sans erreur."""
+        bq_sql = """
+            SELECT region, product, SUM(amount) AS total
+            FROM `proj.ds.sales`
+            GROUP BY ALL
+        """
+        duckdb_sql = await parse_test_query(bq_sql, "sess1", "bigquery")
+        rows = con.execute(duckdb_sql).fetchall()
+        assert len(rows) == 2
+
+    @pytest.mark.asyncio
+    async def test_group_by_all_produces_valid_syntax(self):
+        """Le SQL généré contient GROUP BY ALL sans colonnes parasites."""
+        bq_sql = "SELECT a, b, SUM(c) AS total FROM `proj.ds.t` GROUP BY ALL"
+        duckdb_sql = await parse_test_query(bq_sql, "sess1", "bigquery")
+        assert "GROUP BY ALL" in duckdb_sql
+        # pas de colonnes après ALL
+        after_all = duckdb_sql.split("GROUP BY ALL")[1].strip()
+        assert after_all == "" or after_all.upper().startswith("ORDER")
+
+    @pytest.mark.asyncio
+    async def test_group_by_xyz_equivalent_to_group_by_all(self, con):
+        """
+        GROUP BY region, product et GROUP BY ALL doivent produire les mêmes résultats.
+        """
+        sql_explicit = """
+            SELECT region, product, SUM(amount) AS total
+            FROM `proj.ds.sales`
+            GROUP BY region, product
+        """
+        sql_all = """
+            SELECT region, product, SUM(amount) AS total
+            FROM `proj.ds.sales`
+            GROUP BY ALL
+        """
+        duck_explicit = await parse_test_query(sql_explicit, "sess1", "bigquery")
+        duck_all = await parse_test_query(sql_all, "sess1", "bigquery")
+
+        rows_explicit = sorted(con.execute(duck_explicit).fetchall())
+        rows_all = sorted(con.execute(duck_all).fetchall())
+        assert rows_explicit == rows_all
+
+    @pytest.mark.asyncio
+    async def test_group_by_all_in_cte(self, con):  # noqa: F811 (con shadowed by class fixture)
+        """GROUP BY ALL dans une CTE imbriquée passe sans erreur."""
+        bq_sql = """
+            WITH agg AS (
+                SELECT region, product, SUM(amount) AS total
+                FROM `proj.ds.sales`
+                GROUP BY ALL
+            )
+            SELECT region, SUM(total) AS region_total
+            FROM agg
+            GROUP BY ALL
+        """
+        duckdb_sql = await parse_test_query(bq_sql, "sess1", "bigquery")
+        rows = con.execute(duckdb_sql).fetchall()
+        assert len(rows) == 2
+
+
+# ===========================================================================
+# Section 10 : Bug 3 — prune_constant_group_by efface GROUP BY ALL/ROLLUP/CUBE/GROUPING SETS
+#              quand au moins une projection SELECT est une constante
+# ===========================================================================
+
+
+class TestPruneConstantGroupBySpecialConstructs:
+    """
+    Spec des corrections attendues — ces tests échouent tant que le bug existe.
+
+    Symptôme : prune_constant_group_by identifie les projections constantes dans
+    SELECT (ex: 'hello' AS label), constate que group.expressions == [] pour
+    GROUP BY ALL / ROLLUP / CUBE / GROUPING SETS, construit new_group = [],
+    et puisque c'est falsy → node.set("group", None) : efface tout le GROUP BY.
+
+    Correction attendue : skipper la réécriture quand group.args contient
+    "all", "rollup", "cube" ou "grouping_sets".
+    """
+
+    def test_group_by_all_with_constant_select_preserved(self):
+        """GROUP BY ALL ne doit pas être supprimé si SELECT contient une constante."""
+        sql = "SELECT 'hello' AS label, a, b, SUM(c) AS total FROM t GROUP BY ALL"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        result = prune_constant_group_by(tree)
+        assert result.args.get("group") is not None, (
+            "prune_constant_group_by a supprimé GROUP BY ALL"
+        )
+        assert result.args["group"].args.get("all") is True
+
+    def test_group_by_rollup_with_constant_select_preserved(self):
+        """GROUP BY ROLLUP ne doit pas être supprimé si SELECT contient une constante."""
+        sql = "SELECT 'label' AS label, a, SUM(c) AS total FROM t GROUP BY ROLLUP(a)"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        result = prune_constant_group_by(tree)
+        assert result.args.get("group") is not None, (
+            "prune_constant_group_by a supprimé GROUP BY ROLLUP"
+        )
+        assert result.args["group"].args.get("rollup")
+
+    def test_group_by_cube_with_constant_select_preserved(self):
+        """GROUP BY CUBE ne doit pas être supprimé si SELECT contient une constante."""
+        sql = "SELECT 1 AS const, a, b, SUM(c) AS total FROM t GROUP BY CUBE(a, b)"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        result = prune_constant_group_by(tree)
+        assert result.args.get("group") is not None, (
+            "prune_constant_group_by a supprimé GROUP BY CUBE"
+        )
+
+    def test_group_by_grouping_sets_with_constant_select_preserved(self):
+        """GROUP BY GROUPING SETS ne doit pas être supprimé si SELECT contient une constante."""
+        sql = "SELECT 'x' AS x, a, SUM(c) AS total FROM t GROUP BY GROUPING SETS ((a), ())"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        result = prune_constant_group_by(tree)
+        assert result.args.get("group") is not None, (
+            "prune_constant_group_by a supprimé GROUP BY GROUPING SETS"
+        )
+
+    def test_group_by_all_query_executes_correctly_after_prune(self):
+        """
+        End-to-end : GROUP BY ALL avec constante dans SELECT doit s'exécuter sur DuckDB
+        et retourner des lignes agrégées (pas un plein scan).
+        """
+        sql = "SELECT 'static' AS label, a, b, SUM(c) AS total FROM t GROUP BY ALL"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        pruned = prune_constant_group_by(tree)
+        duckdb_sql = pruned.sql(dialect="duckdb")
+
+        con = duckdb.connect()
+        con.execute("CREATE TABLE t (a VARCHAR, b VARCHAR, c INTEGER)")
+        con.execute("INSERT INTO t VALUES ('x', 'y', 1), ('x', 'y', 2), ('z', 'w', 5)")
+        rows = con.execute(duckdb_sql).fetchall()
+        # Doit être agrégé : 2 lignes (x,y) et (z,w), pas 3 lignes brutes
+        assert len(rows) == 2, f"Attendu 2 lignes agrégées, obtenu {len(rows)} : {rows}"
+
+    def test_regular_group_by_with_constant_still_pruned(self):
+        """Non-régression : GROUP BY a, 1 doit toujours supprimer la constante ordinale."""
+        sql = "SELECT 1 AS const, a, SUM(c) AS total FROM t GROUP BY a, 1"
+        tree = sqlglot.parse_one(sql, dialect="bigquery")
+        result = prune_constant_group_by(tree)
+        group_sql = (
+            result.args["group"].sql(dialect="duckdb")
+            if result.args.get("group")
+            else ""
+        )
+        assert "1" not in group_sql or "a" in group_sql

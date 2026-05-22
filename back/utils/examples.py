@@ -1002,6 +1002,13 @@ def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
         group = select.args.get("group")
         if not group:
             continue
+        if (
+            group.args.get("all")
+            or group.args.get("grouping_sets")
+            or group.args.get("rollup")
+            or group.args.get("cube")
+        ):
+            continue
 
         grouped_sqls = {g.sql(dialect="duckdb").lower() for g in group.expressions}
 
@@ -1059,6 +1066,17 @@ def _qualify_group_order_by_aliases(tree: exp.Expression) -> None:
                 else:
                     new_exprs.append(expr)
             group.set("expressions", new_exprs)
+
+            for special_key in ("rollup", "cube", "grouping_sets"):
+                special_list = group.args.get(special_key)
+                if not special_list:
+                    continue
+                for item in special_list:
+                    if not isinstance(item, exp.Expression):
+                        continue
+                    for col in list(item.find_all(exp.Column)):
+                        if not col.args.get("table") and col.name.lower() in alias_map:
+                            col.replace(alias_map[col.name.lower()].copy())
 
         order = select.args.get("order")
         if order:

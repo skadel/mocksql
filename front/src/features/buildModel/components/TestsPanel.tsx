@@ -46,6 +46,7 @@ import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { relativeDate } from '../../../utils/dates';
 import ExcelDownloader from '../../../shared/ExcelDownloader';
 import ExcelUploader from '../../../shared/ExcelUploader';
+import HtmlExporter from '../../../shared/HtmlExporter';
 import { setTestResults } from '../buildModelSlice';
 import DisplayTable from './DisplayTable';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
@@ -1613,6 +1614,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
             )}
           </Box>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, ml: 'auto' }}>
+            <HtmlExporter tests={testResults} sqlFileName={sqlProps?.sqlFileName} />
             {onOpenChat && (
               <Box
                 component="button"

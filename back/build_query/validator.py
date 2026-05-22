@@ -320,6 +320,14 @@ def prune_constant_group_by(expr: exp.Expression) -> exp.Expression:
 
         group = node.args.get("group")
         if group:
+            if (
+                group.args.get("all")
+                or group.args.get("rollup")
+                or group.args.get("cube")
+                or group.args.get("grouping_sets")
+            ):
+                continue
+
             # 1) Identifier les projections constantes
             const_positions = set()
             const_aliases = set()
