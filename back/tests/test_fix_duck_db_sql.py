@@ -18,7 +18,7 @@ import pytest
 import sqlglot
 
 from build_query.validator import prune_constant_group_by
-from utils.examples import fix_duck_db_sql, parse_test_query
+from utils.examples import fix_duck_db_sql, parse_test_query, _fix_group_by_strict_mode
 
 
 # ---------------------------------------------------------------------------
@@ -557,3 +557,80 @@ class TestPruneConstantGroupBySpecialConstructs:
             else ""
         )
         assert "1" not in group_sql or "a" in group_sql
+
+
+# ===========================================================================
+# Section 11 : Bug — _fix_group_by_strict_mode ajoute la colonne originale
+#              d'une expression CASE au GROUP BY → DuckDB "Cannot mix aggregates"
+# ===========================================================================
+
+
+class TestGroupByCaseOriginalColumnBug:
+    """
+    Comportement de _fix_group_by_strict_mode sur un CASE en GROUP BY.
+
+    Symptôme : _fix_group_by_strict_mode parcourt les exp.Column dans chaque
+    expression SELECT non-agrégée. Quand la SELECT est un CASE WHEN col = ...,
+    elle trouve `col` et l'ajoute au GROUP BY si elle n'y est pas littéralement.
+
+    Résultat si le GROUP BY contenait déjà le CASE :
+        GROUP BY CASE WHEN s = 'a' THEN 'A' ELSE 'B' END
+        → après fix : GROUP BY CASE WHEN s = 'a' THEN 'A' ELSE 'B' END, s
+
+    Constat (vérifié par les tests ci-dessous) :
+    - La colonne originale EST bien ajoutée au GROUP BY (redondance inutile).
+    - DuckDB n'en lève PAS "Cannot mix aggregates" — il accepte le GROUP BY redondant.
+    - La prémisse "DuckDB lèvera l'erreur" était incorrecte pour ce pattern.
+    """
+
+    def test_fix_group_by_adds_original_column_inside_case(self):
+        """
+        _fix_group_by_strict_mode ajoute s au GROUP BY quand CASE WHEN s = ...
+        est déjà dans GROUP BY mais que s seul n'y figure pas.
+        """
+        sql = (
+            "SELECT CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END AS cat,"
+            " COUNT(*) AS cnt"
+            " FROM events"
+            " GROUP BY CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END"
+        )
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        group_part = result_sql[result_sql.upper().rfind("GROUP BY") :]
+        assert re.search(r",\s*s\b", group_part, re.IGNORECASE), (
+            f"_fix_group_by_strict_mode n'a pas ajouté s au GROUP BY.\nSQL: {result_sql}"
+        )
+
+    def test_duckdb_accepts_case_plus_original_column_in_group_by(self, con):
+        """
+        DuckDB n'a PAS levé "Cannot mix aggregates" — il accepte le GROUP BY redondant
+        (CASE + colonne originale). La prémisse initiale était incorrecte.
+        """
+        sql = (
+            "SELECT CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END AS cat,"
+            " COUNT(*) AS cnt"
+            " FROM events"
+            " GROUP BY CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END, s"
+        )
+        con.execute(sql)
+
+    def test_pipeline_produces_valid_duckdb_sql(self, con):
+        """
+        Pipeline complet : même après que _fix_group_by_strict_mode a ajouté s
+        au GROUP BY, DuckDB exécute la requête sans erreur.
+        La redondance du GROUP BY est inoffensive pour DuckDB.
+        """
+        sql = (
+            "SELECT CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END AS cat,"
+            " COUNT(*) AS cnt"
+            " FROM events"
+            " GROUP BY CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END"
+        )
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        rows = con.execute(result_sql).fetchall()
+        assert len(rows) == 1

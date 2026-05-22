@@ -588,6 +588,24 @@ JOIN pays_iso p
         # Two equality conditions → two join specs
         self.assertGreaterEqual(len(result), 1)
 
+    def test_same_table_joined_twice_with_different_aliases(self):
+        # transactions joined twice to pays_iso under two different aliases.
+        # Each JOIN should produce a separate profile entry — not be merged.
+        sql = """
+SELECT *
+FROM transactions t
+JOIN pays_iso p1 ON t.cd_pays_bin = p1.code_pays_alpha
+JOIN pays_iso p2 ON t.cd_pays_bin = p2.refresh_month
+"""
+        result = profile_joins_for_query(TWO_TABLE_SCHEMA, sql, self._join_executor())
+        self.assertEqual(
+            len(result),
+            2,
+            "Both JOINs on pays_iso must produce distinct profile entries",
+        )
+        right_tables = [r["right_table"] for r in result]
+        self.assertEqual(right_tables.count("pays_iso"), 2)
+
 
 # ─── build_profile_query ─────────────────────────────────────────────────────
 

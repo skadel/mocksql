@@ -8,7 +8,6 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import HistoryIcon from '@mui/icons-material/History';
 import LinkIcon from '@mui/icons-material/Link';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import ReplayIcon from '@mui/icons-material/Replay';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
@@ -36,7 +35,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { DangerIconButton, MutedIconButton, OutlinedPrimaryButton, PrimaryButton, TealIconButton } from '../../../style/AppButtons';
+import { DangerIconButton, MutedIconButton, OutlinedPrimaryButton, TealIconButton } from '../../../style/AppButtons';
 import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -627,9 +626,8 @@ export interface SqlStripProps {
 
 type ReloadStatus = 'idle' | 'loading' | 'changed' | 'same';
 
-function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName, onReloadFile }: SqlStripProps) {
+function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName, onReloadFile }: SqlStripProps) {
   const [open, setOpen] = useState(true);
-  const [editedSql, setEditedSql] = useState(sql);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
   const [reloadStatus, setReloadStatus] = useState<ReloadStatus>('idle');
@@ -643,7 +641,6 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
     if (newSql === null) { setReloadStatus('idle'); return; }
     if (newSql.trim() !== sql.trim()) {
       setReloadStatus('changed');
-      setEditedSql(newSql);
       onUpdate?.(newSql);
       setTimeout(() => setReloadStatus('idle'), 3000);
     } else {
@@ -664,7 +661,6 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
   useEffect(() => {
     if (historyRestoreTrigger !== undefined && historyRestoreTrigger !== prevTrigger.current) {
       prevTrigger.current = historyRestoreTrigger;
-      setEditedSql(sql);
       setViewMode('raw');
       setOpen(true);
     }
@@ -678,22 +674,13 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
   const truncated = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
 
   const handleToggle = () => {
-    if (!open) { setEditedSql(sql); setViewMode('raw'); }
+    if (!open) setViewMode('raw');
     setOpen((v) => !v);
-  };
-
-  const handleUpdate = () => {
-    if (!editedSql.trim()) return;
-    onUpdate?.(editedSql);
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); handleUpdate(); }
   };
 
   const showToggle = !!optimizedSql && optimizedSql.trim() !== sql.trim();
   const isOptimizedView = viewMode === 'optimized';
-  const editorValue = isOptimizedView ? (optimizedSql ?? '') : editedSql;
+  const editorValue = isOptimizedView ? (optimizedSql ?? '') : sql;
   const hasHistory = sqlHistory && sqlHistory.length > 0;
 
   return (
@@ -813,26 +800,12 @@ function SqlStrip({ sql, onUpdate, disabled, loading, hasError, optimizedSql, sq
 
             <SqlEditor
               value={editorValue}
-              onChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
-              disabled={disabled || isOptimizedView}
+              onChange={() => {}}
+              disabled={true}
               maxHeight={240}
               fontSize={12.5}
               minHeight={80}
-              onKeyDown={handleKeyDown}
             />
-
-            {!isOptimizedView && (
-              <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, py: 1, borderTop: '1px solid #e8f5f4' }}>
-                <PrimaryButton
-                  size="small"
-                  startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon />}
-                  onClick={handleUpdate}
-                  disabled={disabled || !editedSql.trim()}
-                >
-                  {loading ? 'Validation…' : 'Mettre à jour'}
-                </PrimaryButton>
-              </Box>
-            )}
           </>
         )}
       </Box>

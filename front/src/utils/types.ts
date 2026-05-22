@@ -285,6 +285,7 @@ export interface ChatQueryParams {
   context?: 'sql_update';
   assertionOnly?: boolean;
   forceRoute?: string;
+  silent?: boolean;
 }
 
 

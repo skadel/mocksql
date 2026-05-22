@@ -619,6 +619,7 @@ const ChatComponent: React.FC = () => {
           t,
           parentMessageId: effectiveParentId,
           context: 'sql_update',
+          silent: true,
         })).unwrap?.();
       } catch {}
       setSqlDirty(false);
@@ -754,8 +755,23 @@ const ChatComponent: React.FC = () => {
   }, []);
 
   const handleRerunTest = useCallback((idx: number) => {
-    handleSendMessage(t('chat.regenerate_test'), idx);
-  }, [handleSendMessage, t]);
+    if (isSending) return;
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const lastMessageId = lastMessage ? lastMessage.id : '';
+    dispatch(chatQuery({
+      userInput: '',
+      sessionId: currentModelId || '',
+      project: '',
+      dialect: DIALECT,
+      query: sqlQuery,
+      ChangedMessageId: '',
+      t,
+      parentMessageId: lastMessageId,
+      testIndex: idx,
+      forceRoute: 'generator',
+      silent: true,
+    }));
+  }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t]);
 
 
   return (

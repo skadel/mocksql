@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Literal, Optional
 import sqlglot
 from langchain_core.messages import AIMessage
 from pandas import DataFrame
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlglot import exp
 
 from utils.llm_errors import normalize_llm_content
@@ -32,7 +32,16 @@ logger = logging.getLogger(__name__)
 
 
 class _Assertion(BaseModel):
-    description: str
+    description: str = Field(
+        description=(
+            "Phrase courte (max 15 mots) décrivant l'assertion en termes métier, "
+            "lisible par un responsable non-développeur. "
+            "✓ Bon : 'Le montant total est toujours positif.' "
+            "'Chaque commande appartient à un client actif.' "
+            "✗ À proscrire : 'price > 0 pour toutes les lignes de __result__', "
+            "'COALESCE(amount, 0) != NULL dans la CTE finale'."
+        )
+    )
     sql: str
 
 
@@ -776,7 +785,11 @@ Puis produis :
    - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
      mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
      (les assertions générées ne permettent pas de valider ce scénario)
-   - `explanation` : une phrase ultra-concise (max 20 mots) en français
+   - `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
+     sans noms de colonnes, de CTEs ni de mots-clés SQL.
+     ✓ 'Les données couvrent correctement le scénario nominal.'
+     ✓ 'Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite.'
+     ✗ 'La CTE orders_filtered retourne 0 lignes car user_id IS NULL.'
    - `assertion_fix` (uniquement si `reason_type == "bad_assertions"`) : objet décrivant
      la correction à apporter au test pour permettre une meilleure génération d'assertions :
      - `test_name` : nom court corrigé (3–6 mots)

@@ -2,6 +2,7 @@ import ChevronLeftIcon from '@mui/icons-material/ChevronLeft';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import SearchIcon from '@mui/icons-material/Search';
 import AddIcon from '@mui/icons-material/Add';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import { Box, Drawer, FormControl, IconButton, InputBase, InputLabel, MenuItem, Select, Tooltip, Typography } from '@mui/material';
 import { SelectChangeEvent } from '@mui/material/Select';
 import React, { useEffect, useState } from 'react';
@@ -139,6 +140,22 @@ const DrawerComponent: React.FC = () => {
           <Typography sx={{ fontSize: 14, fontWeight: 700, color: INK, flex: 1, letterSpacing: '-0.2px' }}>
             MockSQL
           </Typography>
+
+          <Tooltip title="Rafraîchir la liste" placement="right">
+            <IconButton
+              onClick={() => dispatch(fetchModels())}
+              size="small"
+              sx={{
+                color: MUTED,
+                width: 28, height: 28,
+                borderRadius: '7px',
+                border: `1px solid ${LINE}`,
+                '&:hover': { bgcolor: '#e4eaec', color: INK },
+              }}
+            >
+              <RefreshIcon sx={{ fontSize: 15 }} />
+            </IconButton>
+          </Tooltip>
 
           <Tooltip title="Nouveau test" placement="right">
             <IconButton

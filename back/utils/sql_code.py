@@ -106,7 +106,7 @@ def _extract_all_cte_names(parsed: sg.exp.Expression) -> set[str]:
     for with_stmt in parsed.find_all(sg.exp.With):
         for cte in with_stmt.expressions:
             if isinstance(cte, sg.exp.CTE) and cte.alias:
-                all_cte_names.add(cte.alias)
+                all_cte_names.add(cte.alias.lower())
 
     return all_cte_names
 
@@ -118,13 +118,13 @@ def _extract_scope_cte_names(scope) -> set[str]:
     active_cte_names = set()
 
     if isinstance(scope.ctes, dict):
-        active_cte_names.update(scope.ctes.keys())
+        active_cte_names.update(k.lower() for k in scope.ctes.keys())
     elif isinstance(scope.ctes, list):
         for item in scope.ctes:
             if isinstance(item, str):
-                active_cte_names.add(item)
+                active_cte_names.add(item.lower())
             elif hasattr(item, "alias"):
-                active_cte_names.add(item.alias)
+                active_cte_names.add(item.alias.lower())
 
     return active_cte_names
 
@@ -146,12 +146,13 @@ def _is_cte_reference(
       de filtrer une vraie table qui partage son nom avec une CTE (shadowing).
     """
     is_unqualified = not source.db and not source.catalog
+    source_name_lower = source.name.lower()
 
-    if is_unqualified and source.name in active_cte_names:
+    if is_unqualified and source_name_lower in active_cte_names:
         return True
 
     # Fallback PIVOT/UNPIVOT : scope.ctes est vide même quand des CTEs sont référencées
-    if scope_has_pivot and is_unqualified and source.name in all_cte_names:
+    if scope_has_pivot and is_unqualified and source_name_lower in all_cte_names:
         return True
 
     return False

@@ -253,6 +253,9 @@ def create_test(model_name: str) -> Dict[str, Any]:
     if p.exists():
         existing = _read_json(p)
         if existing:
+            current_sql = read_model_sql(model_name)
+            if current_sql is not None:
+                existing["sql"] = current_sql
             return existing
 
     test_id = str(uuid.uuid4())

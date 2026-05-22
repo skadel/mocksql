@@ -1,11 +1,16 @@
+import logging
+
 from langchain_core.messages import HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.prompt_tools import make_routing_prompt
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_history_from_state, common_history_retriever
+
+logger = logging.getLogger(__name__)
 
 _llm = make_llm()
 
@@ -20,10 +25,12 @@ async def routing(state: QueryState):
     """
     profile_result = state.get("profile_result")
     if profile_result:
+        logger.diag("[routing] → profile_checker (profile_result présent)")
         return {"route": "profile_checker"}
 
     user_tables = state.get("user_tables")
     if user_tables:
+        logger.diag("[routing] → executor (user_tables présent)")
         return {
             "route": "executor",
             "examples": [
@@ -41,6 +48,7 @@ async def routing(state: QueryState):
 
     # Assertion-only mode: user wants to modify assertion metadata without regenerating data
     if state.get("assertion_only"):
+        logger.diag("[routing] → assertion_modifier (assertion_only)")
         input_text = state.get("input", "").strip()
         messages = []
         if input_text:
@@ -62,6 +70,7 @@ async def routing(state: QueryState):
 
     # Demande manuelle de correction d'erreur : charger l'historique pour le fixer
     if input_text == "__fix_error__":
+        logger.diag("[routing] → fixer (__fix_error__ reçu)")
         error_history = await common_history_retriever(
             session_id=state["session"],
             last_message_id=state.get("parent_message_id") or None,
@@ -75,6 +84,7 @@ async def routing(state: QueryState):
         and state.get("has_existing_tests")
         and not state.get("rerun_all_tests")
     ):
+        logger.diag("[routing] → conversational_agent (tests existants + input texte)")
         messages.append(
             HumanMessage(
                 content=input_text,
@@ -147,6 +157,13 @@ async def _classify_intent(state: QueryState, input_text: str) -> str:
     chain = prompt | _llm | JsonOutputParser()
     try:
         result = await chain.ainvoke({"input": input_text})
-        return result.get("route", "generator")
-    except Exception:
+        detected = result.get("route", "generator")
+        logger.diag(
+            "[routing] _classify_intent → %s (input=%r)", detected, input_text[:80]
+        )
+        return detected
+    except Exception as exc:
+        logger.diag(
+            "[routing] _classify_intent exception → fallback generator: %s", exc
+        )
         return "generator"

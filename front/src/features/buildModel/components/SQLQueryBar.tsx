@@ -1,14 +1,12 @@
 import CodeIcon from '@mui/icons-material/Code';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import HistoryIcon from '@mui/icons-material/History';
-import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import {
   Accordion,
   AccordionDetails,
   AccordionSummary,
   Box,
   Button,
-  CircularProgress,
   Divider,
   List,
   ListItemButton,
@@ -17,7 +15,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { PrimaryButton, TealIconButton } from '../../../style/AppButtons';
+import { TealIconButton } from '../../../style/AppButtons';
 import React, { useEffect, useRef, useState } from 'react';
 import SqlEditor from '../../../shared/SqlEditor';
 import { SqlHistoryEntry } from '../../../utils/types';
@@ -26,7 +24,6 @@ interface SQLQueryBarProps {
   sqlQuery: string;
   onUpdate: (newSql: string) => void;
   disabled?: boolean;
-  loading?: boolean;
   hasError?: boolean;
   optimizedSql?: string;
   sqlHistory?: SqlHistoryEntry[];
@@ -38,7 +35,6 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   sqlQuery,
   onUpdate,
   disabled,
-  loading,
   hasError,
   optimizedSql,
   sqlHistory,
@@ -46,7 +42,6 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   historyRestoreTrigger,
 }) => {
   const [expanded, setExpanded] = useState(true);
-  const [editedSql, setEditedSql] = useState(sqlQuery);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
   const prevDisabled = useRef(disabled);
@@ -69,7 +64,6 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   useEffect(() => {
     if (historyRestoreTrigger !== undefined && historyRestoreTrigger !== prevTrigger.current) {
       prevTrigger.current = historyRestoreTrigger;
-      setEditedSql(sqlQuery);
       setViewMode('raw');
       setExpanded(true);
     }
@@ -80,24 +74,8 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   const preview = firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine;
 
   const handleToggle = () => {
-    if (!expanded) {
-      setEditedSql(sqlQuery); // reset to latest on open
-      setViewMode('raw');     // always open in raw/editable view
-    }
+    if (!expanded) setViewMode('raw');
     setExpanded((v) => !v);
-  };
-
-  const handleUpdate = () => {
-    if (!editedSql.trim()) return;
-    onUpdate(editedSql);
-    // Don't collapse immediately — wait for the request to complete (see useEffect above)
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
-      e.preventDefault();
-      handleUpdate();
-    }
   };
 
   const handleHistoryClick = (e: React.MouseEvent<HTMLElement>) => {
@@ -112,7 +90,7 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
 
   const showToggle = !!optimizedSql && optimizedSql.trim() !== sqlQuery.trim();
   const isOptimizedView = viewMode === 'optimized';
-  const editorValue = isOptimizedView ? (optimizedSql ?? '') : editedSql;
+  const editorValue = isOptimizedView ? (optimizedSql ?? '') : sqlQuery;
   const hasHistory = sqlHistory && sqlHistory.length > 0;
 
   return (
@@ -216,26 +194,12 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
 
           <SqlEditor
             value={editorValue}
-            onChange={(v) => { if (!isOptimizedView) setEditedSql(v); }}
-            disabled={disabled || isOptimizedView}
+            onChange={() => {}}
+            disabled={true}
             maxHeight={360}
             fontSize={13}
             minHeight={100}
-            onKeyDown={handleKeyDown}
           />
-
-          {!isOptimizedView && (
-            <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 2, py: 1, borderTop: '1px solid #e8f5f4' }}>
-              <PrimaryButton
-                size="small"
-                startIcon={loading ? <CircularProgress size={14} color="inherit" /> : <PlayArrowIcon />}
-                onClick={handleUpdate}
-                disabled={disabled || !editedSql.trim()}
-              >
-                {loading ? 'Validation…' : 'Mettre à jour'}
-              </PrimaryButton>
-            </Box>
-          )}
         </AccordionDetails>
       </Accordion>
 

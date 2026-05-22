@@ -1,14 +1,18 @@
 import json
+import logging
 import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import tool
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_history_from_state, get_message_type
+
+logger = logging.getLogger(__name__)
 
 
 def _format_debug_message(msg: BaseMessage) -> BaseMessage:
@@ -61,6 +65,12 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
 
 async def conversational_agent(state: QueryState):
     """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
+    logger.diag(
+        "[conv_agent] entrée — evaluation_feedback=%s gen_retries=%s input=%r",
+        state.get("evaluation_feedback"),
+        state.get("gen_retries"),
+        (state.get("input") or "")[:60],
+    )
     existing_tests = await retrieve_existing_tests(state["session"], state)
     tests_summary = (
         "\n".join(
@@ -332,6 +342,7 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         tool_calls = getattr(result, "tool_calls", [])
 
         if not tool_calls:
+            logger.diag("[conv_agent] LLM n'a appelé aucun outil → réponse texte libre")
             break
 
         # Separate debug calls (can be batched) from action calls (take only first)
@@ -368,6 +379,12 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
             if uid and uid not in uid_to_test:
                 if uid_retries < _UID_RETRY_MAX:
                     uid_retries += 1
+                    logger.diag(
+                        "[conv_agent] uid=%r inconnu — retry %d/%d",
+                        uid,
+                        uid_retries,
+                        _UID_RETRY_MAX,
+                    )
                     available = (
                         ", ".join(
                             f"{t['test_uid']} ({t.get('test_name', '?')})"
@@ -396,6 +413,7 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
 
         agent_tool_call = tc_name
         agent_tool_args = tc_args
+        logger.diag("[conv_agent] outil sélectionné: %s args=%s", tc_name, tc_args)
         if tc_name == "generate_test_data":
             new_input = tc_args.get("scenario", new_input)
         elif tc_name == "update_test_data":

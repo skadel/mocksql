@@ -699,8 +699,9 @@ def get_generation_output_type(data_model, existing_tests):
             str,
             Field(
                 description=(
-                    "Nom court du scénario (3-6 mots), commençant par un verbe ou un nom. "
-                    "Exemple : 'Commandes actives France', 'Ventes nulles juillet'."
+                    "Nom court du scénario (3-6 mots) destiné à un lecteur métier, sans jargon SQL ni noms techniques. "
+                    "✓ Bons exemples : 'Commandes actives France', 'Client sans historique', 'Ventes nulles juillet'. "
+                    "✗ À proscrire : 'CTE orders_filtered vide', 'JOIN sur user_id NULL', 'WHERE status active'."
                 )
             ),
         ),
@@ -708,9 +709,15 @@ def get_generation_output_type(data_model, existing_tests):
             str,
             Field(
                 description=(
-                    "Assertion courte et actionnable décrivant ce que ce test vérifie, "
-                    "commençant par un verbe : 'Vérifie que…', 'S'assure que…'. "
-                    "Exemple : 'Vérifie que price > 0 pour toutes les lignes France'."
+                    "Phrase courte (max 20 mots) destinée à un responsable métier non-développeur, "
+                    "décrivant le comportement fonctionnel vérifié par ce test. "
+                    "Commence obligatoirement par un verbe d'assertion : 'Vérifie que…', 'S'assure que…', 'Contrôle que…'. "
+                    "✓ Bons exemples : "
+                    "'Vérifie que le chiffre d'affaires est nul quand aucune commande n'est passée.' "
+                    "'S'assure qu'un client sans adresse n'apparaît pas dans les résultats.' "
+                    "✗ À proscrire absolument — noms de colonnes SQL, noms de CTEs, syntaxe SQL : "
+                    "'Vérifie que price > 0 dans la CTE orders_filtered.' "
+                    "'S'assure que le LEFT JOIN sur user_id retourne NULL.'"
                 )
             ),
         ),

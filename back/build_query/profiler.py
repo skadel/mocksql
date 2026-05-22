@@ -1096,6 +1096,7 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
         # Right-side table
         jt = join_node.this
         if isinstance(jt, exp.Alias):
+            right_alias = jt.alias
             if isinstance(jt.this, exp.Table):
                 right_table = resolve(jt.alias) or _full_table_name(jt.this)
             else:
@@ -1105,9 +1106,13 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
                 continue
         elif isinstance(jt, exp.Table):
             right_table = _full_table_name(jt)
+            # Use the alias (e.g. "i1") if present so two JOINs on the same physical
+            # table with different aliases are kept as separate grouping keys.
+            right_alias = jt.alias or jt.name
         elif isinstance(jt, exp.Subquery):
             # sqlglot represents JOIN (SELECT ...) AS alias as exp.Subquery with .alias set
             right_table = jt.alias or ""
+            right_alias = jt.alias or ""
             if not right_table:
                 continue
         else:
@@ -1115,11 +1120,14 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
 
         # Walk AND-separated conditions
         def collect_eq(
-            node: exp.Expression, _rt: str = right_table, _lp: str = local_primary
+            node: exp.Expression,
+            _rt: str = right_table,
+            _lp: str = local_primary,
+            _ra: str = right_alias,
         ):
             if isinstance(node, exp.And):
-                collect_eq(node.left, _rt, _lp)
-                collect_eq(node.right, _rt, _lp)
+                collect_eq(node.left, _rt, _lp, _ra)
+                collect_eq(node.right, _rt, _lp, _ra)
             elif isinstance(node, exp.EQ):
                 left = node.left
                 right = node.right
@@ -1148,6 +1156,7 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
                     {
                         "left_table": l_resolved or _lp,
                         "right_table": _rt,
+                        "right_alias": _ra,
                         "left_expr_sql": l_expr.sql(),
                         "right_expr_sql": r_expr.sql(),
                         "left_keys": source_cols(l_expr),
@@ -2291,9 +2300,10 @@ def build_profile_query(
         except Exception:
             cte_grain_map = {}
 
-        # Group specs by (left_table, right_table) so compound AND conditions
-        # (e.g. ON a.date = b.date AND a.merchant = b.merchant) are evaluated together
-        # against the grain before deciding cardinality.
+        # Group specs by (left_table, right_table, right_alias) so compound AND
+        # conditions (e.g. ON a.date = b.date AND a.merchant = b.merchant) are
+        # evaluated together, while two separate JOINs on the same physical table
+        # with different aliases (e.g. JOIN items i1 … JOIN items i2) stay distinct.
         # Filter out literal-equality specs (e.g. table.year = 2011) — those are
         # filters, not join key relationships: one side would have no column refs.
         from collections import defaultdict
@@ -2301,9 +2311,15 @@ def build_profile_query(
         _grouped: dict = defaultdict(list)
         for spec in _collect_join_specs(sql_query, dialect=dialect):
             if spec.get("left_keys") and spec.get("right_keys"):
-                _grouped[(spec["left_table"], spec["right_table"])].append(spec)
+                _grouped[
+                    (
+                        spec["left_table"],
+                        spec["right_table"],
+                        spec.get("right_alias", ""),
+                    )
+                ].append(spec)
 
-        for (left_table, right_table), pair_specs in _grouped.items():
+        for (left_table, right_table, _), pair_specs in _grouped.items():
             all_left_keys: set = set()
             all_right_keys: set = set()
             for s in pair_specs:
@@ -2612,7 +2628,8 @@ def _build_one_derived_expr_branch(
     tables_list = list(query_tables)
     primary = tables_list[0]
     primary_alias = table_to_alias.get(primary, primary.split(".")[-1])
-    from_clause = f"{primary} AS {primary_alias}"
+    primary_sql = _table_expr(primary).sql(dialect=dialect)
+    from_clause = f"{primary_sql} AS {primary_alias}"
     join_parts: list[str] = []
 
     if len(tables_list) > 1:
@@ -2634,8 +2651,9 @@ def _build_one_derived_expr_branch(
                     if not conds:
                         continue
                     tgt_alias = table_to_alias.get(tgt, tgt.split(".")[-1])
+                    tgt_sql = _table_expr(tgt).sql(dialect=dialect)
                     join_parts.append(
-                        f"JOIN {tgt} AS {tgt_alias} ON {' AND '.join(conds)}"
+                        f"JOIN {tgt_sql} AS {tgt_alias} ON {' AND '.join(conds)}"
                     )
                     connected.add(tgt)
                     remaining.discard(tgt)

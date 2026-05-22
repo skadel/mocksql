@@ -1,8 +1,9 @@
 import json
+import logging
 import uuid
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
 from langchain_core.messages import AIMessage
-
 from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
@@ -23,6 +24,8 @@ from storage.context_loader import load_model_context
 from storage.test_repository import get_test, update_test
 from utils.msg_types import MsgType
 from utils.saver import history_saver, get_history_from_state
+
+logger = logging.getLogger(__name__)
 
 
 def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
@@ -117,7 +120,7 @@ async def pre_routing(state: QueryState):
         update_test(state["session"], {"query_decomposed": stored_query_decomposed})
 
     if incoming_query and stored_sql != incoming_query:
-        print("not validated query")
+        logger.diag("[pre_routing] SQL entrant ≠ SQL stocké → re-validation requise")
         return {
             "has_existing_tests": has_existing_tests,
             "model_context": model_context,
@@ -237,22 +240,33 @@ def build_query_graph():
 
     def route_input(state: QueryState):
         if state.get("error"):
+            logger.diag("[route_input] → history_saver (error=%s)", state.get("error"))
             return "history_saver"
         route = state.get("route", "").lower()
         if route == "conversational_agent":
+            logger.diag("[route_input] → conversational_agent")
             return "conversational_agent"
         if route == "assertion_modifier":
+            logger.diag("[route_input] → assertion_modifier")
             return "assertion_modifier"
         if "executor" in route:
+            logger.diag("[route_input] → executor (route=%s)", route)
             return "executor"
         if route == "other":
+            logger.diag("[route_input] → other")
             return "other"
         if len(state.get("used_columns", [])) == 0:
+            logger.diag("[route_input] → executor (used_columns vides)")
             return "executor"
+        logger.diag(
+            "[route_input] → generator (%d used_columns)",
+            len(state.get("used_columns", [])),
+        )
         return "generator"
 
     def route_agent_output(state: QueryState):
         tool_call = state.get("agent_tool_call")
+        logger.diag("[route_agent_output] agent_tool_call=%s", tool_call)
         if tool_call in ("generate_test_data", "update_test_data"):
             return "generator"
         if tool_call == "delete_test":
@@ -265,28 +279,58 @@ def build_query_graph():
             return "debug_node"
         if tool_call == "request_reevaluation":
             return "test_evaluator"
+        logger.diag("[route_agent_output] aucun tool_call actionnable → history_saver")
         return "history_saver"
 
     def route_executor(state: QueryState):
         if state.get("error") or state.get("status") == "error":
+            logger.diag(
+                "[route_executor] → history_saver (error=%s status=%s)",
+                state.get("error"),
+                state.get("status"),
+            )
             return "history_saver"
+        logger.diag(
+            "[route_executor] → test_evaluator (status=%s)", state.get("status")
+        )
         return "test_evaluator"
 
     def route_evaluator(state: QueryState):
+        feedback = state.get("evaluation_feedback")
+        retries = state.get("gen_retries", 0)
+        logger.diag(
+            "[route_evaluator] evaluation_feedback=%s gen_retries=%s assertion_only=%s",
+            feedback,
+            retries,
+            state.get("assertion_only"),
+        )
         # Skip retries and suggestions for assertion-only edits (user-initiated)
         if state.get("assertion_only"):
+            logger.diag("[route_evaluator] → history_saver (assertion_only)")
             return "history_saver"
         # SQL structurally requires too many rows — no retry can fix this
-        if state.get("evaluation_feedback") == "too_many_rows":
+        if feedback == "too_many_rows":
+            logger.diag("[route_evaluator] → history_saver (too_many_rows)")
             return "history_saver"
-        if state.get("evaluation_feedback") == "bad_data":
-            # gen_retries >= 0: agent has budget (0 = first call, -1 = already used its shot)
-            if state.get("gen_retries", 0) >= 0:
+        if feedback == "bad_data":
+            if retries >= 0:
+                logger.diag(
+                    "[route_evaluator] → conversational_agent (bad_data retries=%d)",
+                    retries,
+                )
                 return "conversational_agent"
+            logger.diag(
+                "[route_evaluator] → suggestions_generator (bad_data retries épuisés)"
+            )
             return "suggestions_generator"
-        if state.get("evaluation_feedback") == "bad_assertions":
-            if state.get("gen_retries", 0) >= 0:
+        if feedback == "bad_assertions":
+            if retries >= 0:
+                logger.diag(
+                    "[route_evaluator] → assertion_corrector (bad_assertions retries=%d)",
+                    retries,
+                )
                 return "assertion_corrector"
+        logger.diag("[route_evaluator] → suggestions_generator (feedback=%s)", feedback)
         return "suggestions_generator"
 
     builder.add_edge(START, "pre_routing")

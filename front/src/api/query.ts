@@ -30,48 +30,43 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly, forceRoute
+      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly, forceRoute, silent
     } = params;
 
     if (!userInput && !query && !userTables && !profileResult) return;
     dispatch(setLoading(true));
 
-    const userMessageId = uuidv4();
+    // For silent ops (sql_update, rerun test), reuse parentMessageId so bot responses
+    // attach directly to the existing thread without a new user message bubble.
+    const userMessageId = silent ? (parentMessageId || uuidv4()) : uuidv4();
     const request_id = uuidv4();
 
-    if (profileResult) {
-      dispatch(addTextMessage({
-        id: userMessageId,
-        type: 'user',
-        contents: { text: 'ðŸ“Š RÃ©sultats de profiling uploadÃ©s' },
-        parent: ChangedMessageId,
-        children: [],
-      }));
-    } else if (userTables) {
-      dispatch(addTextMessage({
-        id: userMessageId,
-        type: 'user',
-        contents: { text: 'Modification des exemples', tables: userTables },
-        parent: ChangedMessageId,
-        children: [],
-      }));
-    } else if (userInput) {
-      dispatch(addTextMessage({
-        id: userMessageId,
-        type: 'user',
-        contents: { text: userInput },
-        parent: parentMessageId || undefined,
-        children: [],
-      }));
-    } else if (context === 'sql_update') {
-      dispatch(addTextMessage({
-        id: userMessageId,
-        type: 'user',
-        contents: { text: 'Mise Ã  jour SQL' },
-        contentType: 'sql_update',
-        parent: parentMessageId || undefined,
-        children: [],
-      }));
+    if (!silent) {
+      if (profileResult) {
+        dispatch(addTextMessage({
+          id: userMessageId,
+          type: 'user',
+          contents: { text: '📊 Résultats de profiling uploadés' },
+          parent: ChangedMessageId,
+          children: [],
+        }));
+      } else if (userTables) {
+        dispatch(addTextMessage({
+          id: userMessageId,
+          type: 'user',
+          contents: { text: 'Modification des exemples', tables: userTables },
+          parent: ChangedMessageId,
+          children: [],
+        }));
+      } else if (userInput) {
+        dispatch(addTextMessage({
+          id: userMessageId,
+          type: 'user',
+          contents: { text: userInput },
+          parent: parentMessageId || undefined,
+          children: [],
+        }));
+      }
     }
 
     let step = '';
