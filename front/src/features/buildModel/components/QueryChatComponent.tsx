@@ -687,6 +687,36 @@ const ChatComponent: React.FC = () => {
     }
   }, [currentModelId, sqlQuery, dispatch, t]);
 
+  const handleRefreshProfile = useCallback(async () => {
+    if (!currentModelId || !sqlQuery.trim()) return;
+    try {
+      const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [], force: true });
+      if (result.profile_error) {
+        dispatch(setError(result.profile_error));
+        return;
+      }
+      if (result.profile_complete) return; // nothing to profile (no used_columns)
+      if (result.profile_request?.profile_query && result.auto_profile_available) {
+        const req = result.profile_request;
+        setPendingAutoProfile({
+          profileRequest: req,
+          onConfirm: async () => {
+            setIsAutoProfileRunning(true);
+            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
+            setIsAutoProfileRunning(false);
+            setPendingAutoProfile(null);
+          },
+          onSkip: async () => {
+            setPendingAutoProfile(null);
+          },
+        });
+      }
+    } catch (e) {
+      console.error('[handleRefreshProfile]', e);
+      dispatch(setError('Erreur lors du rafraîchissement du profil.'));
+    }
+  }, [currentModelId, sqlQuery, dispatch]);
+
   const handleClearHistory = async () => {
     if (!currentModelId) return;
     await clearHistoryApi(currentModelId);
@@ -1092,6 +1122,7 @@ const ChatComponent: React.FC = () => {
               onRerun={handleReevaluate}
               rerunning={!!(loading || isSending)}
               sqlDirty={sqlDirty}
+              onRefreshProfile={handleRefreshProfile}
             />
             <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
               <TestsPanel

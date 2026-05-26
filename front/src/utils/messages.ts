@@ -50,6 +50,7 @@ export function formatMessage(message: any): Message {
       newMessage.contents.profileRequest = {
         message: parsed.message,
         profile_query: parsed.profile_query,
+        profile_queries: parsed.profile_queries,
         missing_columns: parsed.missing_columns,
       };
       break;

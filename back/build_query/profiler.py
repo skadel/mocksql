@@ -2451,6 +2451,44 @@ def build_profile_query(
     return union_sql
 
 
+def build_profile_queries(
+    schema: dict,
+    used_columns: list[dict],
+    dialect: str = "bigquery",
+    options: dict | None = None,
+    sql_query: str | None = None,
+) -> list[str]:
+    """Split the profile query into one query per table entry.
+
+    Returns a list of SQL strings — one per entry in *used_columns*.  Join and
+    derived-expression branches (which depend on *sql_query*) are appended to
+    the **first** query only so they share the same CTE context.
+
+    Each individual query is a valid UNION ALL that can be executed
+    independently; partial failures no longer block the other tables.
+    The rows produced by all queries share the same column schema, so
+    :func:`parse_profile_query_result` can process the concatenated result.
+
+    Falls back to :func:`build_profile_query` (single query) when
+    *used_columns* has exactly one entry.
+    """
+    if len(used_columns) <= 1:
+        return [build_profile_query(schema, used_columns, dialect, options, sql_query)]
+
+    queries: list[str] = []
+    for i, entry in enumerate(used_columns):
+        q = build_profile_query(
+            schema=schema,
+            used_columns=[entry],
+            dialect=dialect,
+            options=options,
+            # Join + derived branches only on the first table to avoid duplication.
+            sql_query=sql_query if i == 0 else None,
+        )
+        queries.append(q)
+    return queries
+
+
 # ─── Derived-expression profiling ────────────────────────────────────────────
 
 

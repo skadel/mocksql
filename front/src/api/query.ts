@@ -325,6 +325,7 @@ export interface CheckProfileParams {
   missing_columns?: any[];
   expected_joins?: any[];
   profile_result?: string;
+  force?: boolean;
 }
 
 export interface CheckProfileResult {

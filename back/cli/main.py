@@ -546,7 +546,20 @@ def ui(
     typer.echo(f"Starting MockSQL at {url} ...")
 
     if not no_browser:
-        threading.Timer(1.5, lambda: webbrowser.open(url)).start()
+
+        def _open_when_ready() -> None:
+            import urllib.error
+            import urllib.request
+
+            for _ in range(30):
+                try:
+                    urllib.request.urlopen(f"http://localhost:{port}/", timeout=1)
+                    break
+                except (urllib.error.URLError, OSError):
+                    threading.Event().wait(0.5)
+            webbrowser.open(url)
+
+        threading.Thread(target=_open_when_ready, daemon=True).start()
 
     uvicorn.run(server_module, host="0.0.0.0", port=port)
 

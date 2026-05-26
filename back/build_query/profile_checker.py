@@ -3,7 +3,7 @@ import json
 from typing import Optional
 
 
-from build_query.profiler import build_profile_query
+from build_query.profiler import build_profile_query, build_profile_queries
 from build_query.state import QueryState
 from storage.test_repository import get_test
 
@@ -423,27 +423,43 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
     sql_query = state.get("optimized_sql") or state.get("query") or None
     missing_resolved = _resolve_full_table_names(missing, schemas)
     partition_limit: int | None = state.get("profile_partition_limit", 3)
+    profiler_schema = _to_profiler_schema(schemas)
+    profiler_options = {"partition_limit": partition_limit}
     profile_sql = build_profile_query(
-        schema=_to_profiler_schema(schemas),
+        schema=profiler_schema,
         used_columns=missing_resolved,
         dialect=dialect,
         sql_query=sql_query,
-        options={"partition_limit": partition_limit},
+        options=profiler_options,
+    )
+    queries = build_profile_queries(
+        schema=profiler_schema,
+        used_columns=missing_resolved,
+        dialect=dialect,
+        sql_query=sql_query,
+        options=profiler_options,
     )
     expected_joins = _extract_expected_join_pairs(sql_query or "", dialect)
 
     profile_billing_tb: Optional[float] = None
-    if dialect == "bigquery" and profile_sql:
+    if dialect == "bigquery" and queries:
         from models.env_variables import BQ_TEST_PROJECT
 
         billing_project = BQ_TEST_PROJECT
         if billing_project:
-            profile_billing_tb = await _estimate_profile_bytes(
-                profile_sql, billing_project
+            billing_results = await asyncio.gather(
+                *[_estimate_profile_bytes(q, billing_project) for q in queries],
+                return_exceptions=True,
             )
+            total: float = 0.0
+            for r in billing_results:
+                if isinstance(r, float):
+                    total += r
+            profile_billing_tb = total if total > 0 else None
 
     return {
         "profile_sql": profile_sql,
+        "profile_queries": queries,
         "missing_columns": missing_resolved,
         "expected_joins": expected_joins,
         "profile_billing_tb": profile_billing_tb,

@@ -580,21 +580,21 @@ _MAX_CONSTRAINT_GROUPS = (
 )
 
 
-def _collect_safe_cast_constraints(
+def _collect_format_constraints(
     select: exp.Select,
     alias_map: dict[str, str],
     resolver: _LineageResolver,
     filters: list[FilterConstraint],
 ) -> None:
-    """Add safe_cast_not_null constraints for each SAFE_CAST in *select*.
+    """Add format constraints for each SAFE_CAST, CAST, PARSE_DATE, etc. in *select*.
 
     Scans SELECT projections, WHERE, and JOIN-ON expressions.
     Does not descend into subqueries or CTE definitions — those are handled
     by the recursive _walk_tree / CTE loop in extract_constraints.
     """
 
-    def _iter_try_casts(node: exp.Expression):
-        """Yield TryCast nodes, not descending into Subquery or With subtrees."""
+    def _iter_format_nodes(node: exp.Expression):
+        """Yield format-related nodes, not descending into Subquery or With subtrees."""
         for child in node.args.values():
             items = child if isinstance(child, list) else [child]
             for item in items:
@@ -602,13 +602,13 @@ def _collect_safe_cast_constraints(
                     continue
                 if isinstance(item, (exp.Subquery, exp.With)):
                     continue
-                if isinstance(item, exp.TryCast):
+                if isinstance(item, (exp.TryCast, exp.Cast, exp.StrToDate, exp.TimeToStr)):
                     yield item
-                yield from _iter_try_casts(item)
+                yield from _iter_format_nodes(item)
 
-    seen: set[tuple[str, str, str]] = set()
-    for try_cast in _iter_try_casts(select):
-        inner_col = _find_column_in(try_cast.this)
+    seen: set[tuple[str, str, str, str]] = set()
+    for node in _iter_format_nodes(select):
+        inner_col = _find_column_in(node)
         if inner_col is None:
             continue
         ref = _col_ref(inner_col, alias_map)
@@ -616,16 +616,29 @@ def _collect_safe_cast_constraints(
             continue
         src_cols = resolver.resolve_all(ref)
         ref = resolver.resolve(ref)
-        to_type = try_cast.args.get("to")
-        type_str = to_type.sql(dialect=resolver._dialect).upper() if to_type else ""
-        key = (ref.table, ref.column, type_str)
+        
+        op = "safe_cast_not_null" if isinstance(node, exp.TryCast) else "format_constraint"
+        
+        if isinstance(node, (exp.TryCast, exp.Cast)):
+            to_type = node.args.get("to")
+            val_str = to_type.sql(dialect=resolver._dialect).upper() if to_type else ""
+        elif isinstance(node, exp.StrToDate):
+            fmt = node.args.get("format")
+            val_str = f"PARSE_DATE {fmt.sql(dialect=resolver._dialect)}" if fmt else "PARSE_DATE"
+        elif isinstance(node, exp.TimeToStr):
+            fmt = node.args.get("format")
+            val_str = f"FORMAT_DATE {fmt.sql(dialect=resolver._dialect)}" if fmt else "FORMAT_DATE"
+        else:
+            val_str = "FORMAT"
+
+        key = (ref.table, ref.column, op, val_str)
         if key not in seen:
             seen.add(key)
             filters.append(
                 FilterConstraint(
                     column=ref,
-                    op="safe_cast_not_null",
-                    value=type_str,
+                    op=op,
+                    value=val_str,
                     source_columns=src_cols,
                 )
             )
@@ -1368,7 +1381,7 @@ def _walk_select_grouped(
                 shared_functional,
             )
 
-    _collect_safe_cast_constraints(select, alias_map, resolver, shared_filters)
+    _collect_format_constraints(select, alias_map, resolver, shared_filters)
 
     # ── WHERE → flat recursive walk (AND/OR branches merged into one group) ────
     real_tables = {v for v in alias_map.values() if v and not v.startswith("__")}

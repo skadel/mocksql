@@ -1,6 +1,7 @@
 import React from 'react';
-import { Box, Button, Chip, CircularProgress, Typography } from '@mui/material';
+import { Box, Button, Chip, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
+import RefreshIcon from '@mui/icons-material/Refresh';
 import ScienceIcon from '@mui/icons-material/Science';
 
 interface ArtefactHeaderProps {
@@ -8,9 +9,10 @@ interface ArtefactHeaderProps {
   onRerun: () => void;
   rerunning: boolean;
   sqlDirty?: boolean;
+  onRefreshProfile?: () => void;
 }
 
-const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty }) => {
+const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile }) => {
   return (
     <Box
       sx={{
@@ -47,7 +49,22 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
         />
       )}
 
-      <Box sx={{ marginLeft: 'auto' }}>
+      <Box sx={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+        {onRefreshProfile && (
+          <Tooltip title="Rafraîchir le schéma et le profil des tables" arrow placement="top">
+            <IconButton
+              size="small"
+              onClick={onRefreshProfile}
+              disabled={rerunning}
+              sx={{
+                color: '#6b8287',
+                '&:hover': { color: '#1ca8a4', bgcolor: '#ecf7f6' },
+              }}
+            >
+              <RefreshIcon sx={{ fontSize: 16 }} />
+            </IconButton>
+          </Tooltip>
+        )}
         <Button
           size="small"
           variant="outlined"

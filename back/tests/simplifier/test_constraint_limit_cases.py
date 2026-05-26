@@ -205,8 +205,8 @@ class TestAntiJoin:
 # ─── SAFE_CAST constraints ────────────────────────────────────────────────────
 
 
-class TestSafeCastConstraints:
-    """SAFE_CAST → safe_cast_not_null FilterConstraint."""
+class TestFormatConstraints:
+    """SAFE_CAST, CAST, PARSE_DATE, FORMAT_DATE → format constraints."""
 
     def test_safe_cast_in_select(self):
         sql = """
@@ -308,6 +308,39 @@ class TestSafeCastConstraints:
             if f.op == "safe_cast_not_null" and f.column == col("a", "col")
         ]
         assert len(safe_cast) == 1
+
+    def test_cast_in_select(self):
+        sql = """
+        SELECT CAST(a.col AS INT64)
+        FROM myproject.analytics.a AS a
+        """
+        filters, _, _, _ = _flat(extract_constraints(sql))
+        assert any(
+            f.column == col("a", "col") and f.op == "format_constraint" and "INT64" in f.value.upper()
+            for f in filters
+        )
+
+    def test_parse_date_in_select(self):
+        sql = """
+        SELECT PARSE_DATE('%Y%m', a.dt)
+        FROM myproject.analytics.a AS a
+        """
+        filters, _, _, _ = _flat(extract_constraints(sql))
+        assert any(
+            f.column == col("a", "dt") and f.op == "format_constraint" and "PARSE_DATE" in f.value.upper()
+            for f in filters
+        )
+
+    def test_format_date_in_select(self):
+        sql = """
+        SELECT FORMAT_DATE('%Y%m', a.dt)
+        FROM myproject.analytics.a AS a
+        """
+        filters, _, _, _ = _flat(extract_constraints(sql))
+        assert any(
+            f.column == col("a", "dt") and f.op == "format_constraint" and "FORMAT_DATE" in f.value.upper()
+            for f in filters
+        )
 
 
 # ─── _build_column_sql ────────────────────────────────────────────────────────

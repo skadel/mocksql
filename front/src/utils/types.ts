@@ -38,6 +38,7 @@ export interface DebugCountStepsResult {
 export interface ProfileRequest {
   message: string;
   profile_query: string;
+  profile_queries?: string[];
   missing_columns: Array<{ table: string; used_columns: string[] }>;
   expected_joins?: Array<{ left_table: string; right_table: string }>;
   billing_tb?: number;

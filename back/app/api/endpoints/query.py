@@ -210,12 +210,17 @@ class CheckProfileRequest(BaseModel):
     dialect: str
     session: str
     used_columns: list
+    force: bool = False
 
 
 @router.post("/check-profile")
 async def check_profile_route(body: CheckProfileRequest):
     import logging
-    from build_query.profile_checker import check_profile, build_profile_request
+    from build_query.profile_checker import (
+        check_profile,
+        build_profile_request,
+        _find_missing_columns,
+    )
 
     used_columns = body.used_columns
     if not used_columns and body.session:
@@ -236,23 +241,32 @@ async def check_profile_route(body: CheckProfileRequest):
         "request_id": "",
     }
 
-    try:
-        checked = await check_profile(state)
-    except Exception as exc:
-        logging.getLogger(__name__).error("[check_profile] profiler error: %s", exc)
-        return {"profile_complete": False, "profile_error": str(exc)}
+    if body.force:
+        # Force refresh: treat all used_columns as missing (ignore cached profile)
+        missing_columns = _find_missing_columns({}, used_columns)
+        if not missing_columns:
+            return {"profile_complete": True}
+    else:
+        try:
+            checked = await check_profile(state)
+        except Exception as exc:
+            logging.getLogger(__name__).error("[check_profile] profiler error: %s", exc)
+            return {"profile_complete": False, "profile_error": str(exc)}
 
-    if checked["profile_complete"]:
-        return {"profile_complete": True}
+        if checked["profile_complete"]:
+            return {"profile_complete": True}
+
+        missing_columns = checked["missing_columns"]
 
     try:
-        request = await build_profile_request(state, checked["missing_columns"])
+        request = await build_profile_request(state, missing_columns)
     except Exception as exc:
         logging.getLogger(__name__).error("[build_profile_request] error: %s", exc)
         return {"profile_complete": False, "profile_error": str(exc)}
 
     profile_request: dict = {
         "profile_query": request.get("profile_sql", ""),
+        "profile_queries": request.get("profile_queries", []),
         "missing_columns": request.get("missing_columns", []),
         "expected_joins": request.get("expected_joins", []),
     }
