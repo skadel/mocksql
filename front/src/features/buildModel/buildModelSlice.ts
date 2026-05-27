@@ -411,6 +411,7 @@ export const buildModelSlice = createSlice({
       .addCase(chatQuery.pending, (state, action) => {
         state.loading = true;
         state.streamingReasoning = undefined;
+        state.lastReasoning = undefined;
         const { testIndex, assertionOnly } = action.meta.arg;
         state.loadingTestIndex = testIndex;
         if (testIndex !== undefined && state.testResults?.length) {
@@ -429,6 +430,7 @@ export const buildModelSlice = createSlice({
       .addCase(chatQuery.fulfilled, (state) => {
         state.loading = false;
         state.loading_message = undefined;
+        state.lastReasoning = state.streamingReasoning || undefined;
         state.streamingReasoning = undefined;
         state.loadingTestIndex = undefined;
       })

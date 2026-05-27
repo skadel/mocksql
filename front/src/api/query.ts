@@ -264,7 +264,8 @@ export const chatQuery = createAsyncThunk(
                   if (testIndex !== undefined) nm.testIndex = testIndex;
                   else if (context === 'sql_update') nm.context = 'sql_update';
                 }
-                dispatch(appendQueryComponentMessage(nm));
+                const isIntermediate = m.additional_kwargs?.intermediate === true;
+                dispatch(appendQueryComponentMessage(isIntermediate ? { ...nm, silent: true } as any : nm));
               });
             }
           }

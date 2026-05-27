@@ -137,6 +137,7 @@ export interface BuildModelState {
     name?: string;
     lastUserInput: string;
     streamingReasoning?: string;
+    lastReasoning?: string;
     sqlHistory: SqlHistoryEntry[];
 
     // New properties for storing table changes

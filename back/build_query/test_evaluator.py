@@ -189,13 +189,20 @@ async def evaluate_tests(state: QueryState):
                         trace_lines.append(
                             f"  - {step['label']} → {cnt} ligne(s){zero_marker}"
                         )
-            explanation = "Diagnostic DuckDB :\n" + "\n".join(trace_lines)
+            diag = "Diagnostic DuckDB :\n" + "\n".join(trace_lines)
             if failing_cte:
-                explanation += f"\nModifiez les données pour satisfaire les conditions de la CTE `{failing_cte}`."
+                diag += f"\nModifiez les données pour satisfaire les conditions de la CTE `{failing_cte}`."
+            display_reason = (
+                f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
+                if failing_cte
+                else "Les données d'entrée ne produisent aucun résultat."
+            )
         elif failing_cte:
-            explanation = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
+            diag = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
+            display_reason = f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
         else:
-            explanation = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
+            diag = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
+            display_reason = "Les données d'entrée ne produisent aucun résultat."
 
         logger.diag(
             "[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d",
@@ -236,13 +243,15 @@ async def evaluate_tests(state: QueryState):
         state_update: dict = {
             "messages": [
                 AIMessage(
-                    content=f"**Insuffisant** —\n{explanation}",
+                    content=f"**Insuffisant** — {display_reason}",
                     id=str(uuid.uuid4()),
                     additional_kwargs={
                         "type": MsgType.EVALUATION,
                         "parent": last_results.id,
                         "request_id": state.get("request_id"),
                         "test_index": current_test.get("test_index"),
+                        "diag": diag,
+                        "intermediate": True,
                     },
                 )
             ],

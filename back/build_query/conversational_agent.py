@@ -85,7 +85,9 @@ async def conversational_agent(state: QueryState):
         if eval_msgs:
             latest_eval = eval_msgs[-1]
             eval_test_idx = latest_eval.additional_kwargs.get("test_index")
-            eval_verdict_text = latest_eval.content
+            eval_verdict_text = (
+                latest_eval.additional_kwargs.get("diag") or latest_eval.content
+            )
             retries_left = state.get("gen_retries", 0)
 
             # Find the failing test case to expose its data to the agent

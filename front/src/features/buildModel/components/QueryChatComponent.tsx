@@ -108,6 +108,7 @@ const ChatComponent: React.FC = () => {
     loading,
     loading_message,
     streamingReasoning,
+    lastReasoning,
     error,
     selectedChildIndices,
     query: storedQuery,
@@ -1108,6 +1109,7 @@ const ChatComponent: React.FC = () => {
             onRestoreState={handleRestoreState}
             restoredMessageId={restoredMessageId}
             streamingReasoning={streamingReasoning}
+            lastReasoning={lastReasoning}
             onStopStream={handleStopStream}
             sendMessage={sendMessage}
             sqlQuery={sqlQuery}

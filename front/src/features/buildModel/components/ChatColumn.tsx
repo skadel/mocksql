@@ -1,6 +1,7 @@
-import React, { useRef, useEffect } from 'react';
-import { Alert, Box, IconButton, LinearProgress, Tooltip, Typography } from '@mui/material';
+import React, { useRef, useEffect, useState } from 'react';
+import { Alert, Box, Collapse, IconButton, LinearProgress, Tooltip, Typography } from '@mui/material';
 import CloseIcon from '@mui/icons-material/Close';
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import HistoryIcon from '@mui/icons-material/History';
 import DroppableTextField from '../../../shared/DroppableTextField';
@@ -57,6 +58,7 @@ interface ChatColumnProps {
   onRestoreState: (sql?: string, optimizedSql?: string, messageId?: string, restoredTestResults?: any[]) => void;
   restoredMessageId?: string;
   streamingReasoning?: string;
+  lastReasoning?: string;
   onStopStream: () => void;
   sendMessage: (...args: any[]) => void;
   sqlQuery: string;
@@ -85,6 +87,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   onRestoreState,
   restoredMessageId,
   streamingReasoning,
+  lastReasoning,
   onStopStream,
   sendMessage,
   sqlQuery,
@@ -94,6 +97,11 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   const showHistoryBanner = renderMessages.length > HISTORY_RESET_THRESHOLD;
   const estimatedTokens = showHistoryBanner ? estimateTokens(renderMessages) : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [reasoningOpen, setReasoningOpen] = useState(false);
+
+  useEffect(() => {
+    if (lastReasoning) setReasoningOpen(false);
+  }, [lastReasoning]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -368,6 +376,55 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
                 {loading_message}
               </Typography>
             )}
+          </Box>
+        )}
+
+        {!isLoading && lastReasoning && (
+          <Box sx={{ mt: 0.5, mb: 0.5 }}>
+            <Box
+              onClick={() => setReasoningOpen(o => !o)}
+              sx={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 0.5,
+                cursor: 'pointer',
+                color: '#6b8287',
+                '&:hover': { color: '#3b5357' },
+              }}
+            >
+              <ExpandMoreIcon
+                sx={{
+                  fontSize: 14,
+                  transition: 'transform 0.2s',
+                  transform: reasoningOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+                }}
+              />
+              <Typography variant="caption" sx={{ fontSize: 11, fontWeight: 500 }}>
+                Réflexion
+              </Typography>
+            </Box>
+            <Collapse in={reasoningOpen}>
+              <Typography
+                variant="caption"
+                sx={{
+                  display: 'block',
+                  mt: 0.5,
+                  px: 1.25,
+                  py: 0.75,
+                  bgcolor: '#eef3f4',
+                  borderRadius: '8px',
+                  fontSize: 11,
+                  color: '#6b8287',
+                  fontStyle: 'italic',
+                  whiteSpace: 'pre-wrap',
+                  lineHeight: 1.6,
+                  maxHeight: 260,
+                  overflow: 'auto',
+                }}
+              >
+                {lastReasoning}
+              </Typography>
+            </Collapse>
           </Box>
         )}
 
