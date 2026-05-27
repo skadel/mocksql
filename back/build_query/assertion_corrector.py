@@ -102,7 +102,9 @@ Puis évalue la qualité de ces nouvelles assertions :
     llm = make_llm()
     structured_llm = llm.with_structured_output(_ImprovedAssertions)
     try:
+        logger.diag("[assertion_corrector] PROMPT LLM:\n%s", prompt[:3000])
         result: _ImprovedAssertions = await structured_llm.ainvoke(prompt)
+        logger.diag("[assertion_corrector] reasoning:\n%s", result.reasoning[:1000])
         logger.diag(
             "[assertion_corrector] verdict=%s reason_type=%s assertions=%s",
             result.verdict,

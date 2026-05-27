@@ -55,6 +55,7 @@ Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
 
     llm = make_llm().with_structured_output(_ReevalResult)
     try:
+        logger.diag("[evaluator] PROMPT LLM (réévaluation):\n%s", prompt[:3000])
         result = await llm.ainvoke(
             [
                 SystemMessage(content="Tu es un expert en tests SQL pour MockSQL."),

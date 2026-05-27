@@ -942,7 +942,7 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
     llm = make_llm()
     structured_llm = llm.with_structured_output(_AssertionsAndEvaluation)
     try:
-        logger.diag("[assertions_eval] prompt (extrait):\n%s", prompt[:1500])
+        logger.diag("[assertions_eval] prompt (extrait):\n%s", prompt[:3000])
         result: _AssertionsAndEvaluation = await structured_llm.ainvoke(prompt)
         logger.diag("[assertions_eval] reasoning:\n%s", result.reasoning)
         logger.diag(

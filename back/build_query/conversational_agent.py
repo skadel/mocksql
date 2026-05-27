@@ -318,9 +318,22 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
     _UID_RETRY_MAX = 2
     uid_retries = 0
 
+    logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
+    logger.diag(
+        "[conv_agent] messages_for_llm: %d msgs — dernier:\n%s",
+        len(messages_for_llm),
+        messages_for_llm[-1].content[:500] if messages_for_llm else "(vide)",
+    )
+
     while True:
         result = await llm.ainvoke(messages_for_llm)
         tool_calls = getattr(result, "tool_calls", [])
+        logger.diag(
+            "[conv_agent] LLM → tool_calls=%s content=%r",
+            [f"{tc['name']}({list(tc.get('args', {}).keys())})" for tc in tool_calls]
+            or "(aucun)",
+            (result.content or "")[:200],
+        )
 
         if not tool_calls:
             logger.diag("[conv_agent] LLM n'a appelé aucun outil → réponse texte libre")

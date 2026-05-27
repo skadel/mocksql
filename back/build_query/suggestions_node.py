@@ -1,10 +1,12 @@
 import json
+import logging
 import uuid
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import AIMessage
 from langchain_core.prompts import ChatPromptTemplate
 
+import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.prompt_tools import _format_profile_block
 from build_query.state import QueryState
@@ -12,6 +14,8 @@ from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
 from utils.test_utils import build_test_detail
+
+logger = logging.getLogger(__name__)
 
 
 # 1. Structure Pydantic (avec Chain of Thought)
@@ -202,6 +206,25 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
     )
 
     try:
+        try:
+            _formatted = prompt_template.format_messages(
+                dialect=dialect,
+                sql=sql,
+                instruction_block=instruction_block,
+                existing_tests_block=existing_tests_block,
+                profile_section=profile_section,
+            )
+            logger.diag(
+                "[suggestions] PROMPT LLM — system (extrait):\n%s",
+                _formatted[0].content[:500],
+            )
+            logger.diag(
+                "[suggestions] PROMPT LLM — user (extrait):\n%s",
+                _formatted[1].content[:2000],
+            )
+        except Exception:
+            pass
+
         result = await chain.ainvoke(
             {
                 "dialect": dialect,
@@ -210,6 +233,15 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                 "existing_tests_block": existing_tests_block,
                 "profile_section": profile_section,
             }
+        )
+        logger.diag(
+            "[suggestions] analyse_des_manques:\n%s",
+            result.analyse_des_manques[:1500],
+        )
+        logger.diag(
+            "[suggestions] suggestions générées (%d):\n%s",
+            len(result.suggestions),
+            "\n".join(f"  [{i + 1}] {s}" for i, s in enumerate(result.suggestions)),
         )
         suggestions = result.suggestions[:3]
 
