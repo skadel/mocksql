@@ -35,10 +35,44 @@ async def evaluate(state: QueryState):
     return await validate_query(code, project, dialect, parent, state)
 
 
+def _normalize_column_qualifiers(sql: str, dialect: str) -> str:
+    """Strip catalog/db from column refs that use the full backtick-quoted table path.
+
+    BigQuery API rejects `dataset.table`.column as a column qualifier (treats the
+    backtick-quoted dotted identifier as an unresolved name), even though the
+    BigQuery console accepts it.  Converting to table.column fixes the dry-run.
+    """
+    try:
+        from sqlglot.optimizer.scope import traverse_scope
+
+        tree = sqlglot.parse(sql, read=dialect)
+        if not tree:
+            return sql
+        root = tree[0]
+        for scope in traverse_scope(root):
+            known: set[tuple] = set()
+            for source in scope.sources.values():
+                if isinstance(source, exp.Table):
+                    known.add((source.catalog or "", source.db or "", source.this.name))
+            for col in scope.expression.find_all(exp.Column):
+                col_db = col.text("db")
+                if col_db:
+                    key = (col.text("catalog") or "", col_db, col.text("table"))
+                    if key in known:
+                        col.set("catalog", None)
+                        col.set("db", None)
+        return root.sql(dialect=dialect)
+    except Exception:
+        return sql
+
+
 async def validate_query(code, project, dialect, parent, state):
     route = state.get("route", "").lower()
     try:
-        await compile_query(code, project, dialect)
+        # BigQuery API ne supporte pas `dataset.table`.col comme qualificateur de
+        # colonne — normaliser avant le dry-run sans modifier la sémantique.
+        compile_code = _normalize_column_qualifiers(code, dialect)
+        await compile_query(compile_code, project, dialect)
     except Exception as e:
         return handle_compile_phase_exceptions(
             exc=e, code=code, route=route, parent=parent, state=state

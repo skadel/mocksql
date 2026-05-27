@@ -1,4 +1,5 @@
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
+import DownloadIcon from '@mui/icons-material/Download';
 import InfoIcon from '@mui/icons-material/Info';
 import UploadIcon from '@mui/icons-material/Upload';
 import {
@@ -27,18 +28,41 @@ interface BigQueryUploaderProps {
   uploadLabel?: string;
   instructionsTitle?: string;
   downloadFormat?: string;
+  downloadFilename?: string;
   inline?: boolean;
 }
 
-const SqlBlock: React.FC<{ sqlQuery: string }> = ({ sqlQuery }) => (
+const downloadSql = (sql: string, filename: string) => {
+  const blob = new Blob([sql], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const SqlBlock: React.FC<{ sqlQuery: string; downloadFilename?: string }> = ({ sqlQuery, downloadFilename }) => (
   <Box sx={{ bgcolor: '#f5f5f5', borderRadius: 2 }}>
-    <Box sx={{ display: 'flex', justifyContent: 'flex-end', px: 1, pt: 1 }}>
-      <CodeBlockIconButton
-        onClick={() => navigator.clipboard.writeText(sqlQuery)}
-        size="small"
-      >
-        <ContentCopyIcon fontSize="small" />
-      </CodeBlockIconButton>
+    <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 0.5, px: 1, pt: 1 }}>
+      {downloadFilename && (
+        <Tooltip title="Télécharger la requête (.sql)">
+          <CodeBlockIconButton
+            onClick={() => downloadSql(sqlQuery, downloadFilename)}
+            size="small"
+          >
+            <DownloadIcon fontSize="small" />
+          </CodeBlockIconButton>
+        </Tooltip>
+      )}
+      <Tooltip title="Copier">
+        <CodeBlockIconButton
+          onClick={() => navigator.clipboard.writeText(sqlQuery)}
+          size="small"
+        >
+          <ContentCopyIcon fontSize="small" />
+        </CodeBlockIconButton>
+      </Tooltip>
     </Box>
     <Box sx={{ overflow: 'auto', p: 2, pt: 0 }}>
       <Box
@@ -58,6 +82,7 @@ const BigQueryUploader = React.forwardRef<BigQueryUploaderHandle, BigQueryUpload
   uploadLabel = 'Uploader les résultats',
   instructionsTitle = 'Instructions',
   downloadFormat,
+  downloadFilename,
   inline = false,
 }, ref) => {
   const [open, setOpen] = useState(false);
@@ -106,7 +131,7 @@ const BigQueryUploader = React.forwardRef<BigQueryUploaderHandle, BigQueryUpload
         <Typography variant="body2" sx={{ mb: 1 }}>
           Ouvrez <strong>BigQuery</strong>, exécutez la requête ci-dessous, téléchargez les résultats au format <strong>{fmt}</strong> et importez-les.
         </Typography>
-        <SqlBlock sqlQuery={sqlQuery} />
+        <SqlBlock sqlQuery={sqlQuery} downloadFilename={downloadFilename} />
         <Box sx={{ mt: 2 }}>{uploadButton}</Box>
       </Box>
     );
@@ -137,7 +162,7 @@ const BigQueryUploader = React.forwardRef<BigQueryUploaderHandle, BigQueryUpload
                 Exécutez la requête SQL suivante dans l'éditeur de requêtes.
               </Typography>
               <Box sx={{ mb: 2 }}>
-                <SqlBlock sqlQuery={sqlQuery} />
+                <SqlBlock sqlQuery={sqlQuery} downloadFilename={downloadFilename} />
               </Box>
             </li>
             <li>

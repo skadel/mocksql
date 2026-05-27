@@ -1132,11 +1132,15 @@ def strip_qualifiers_with_scope(
 
     # 2. Parcourir chaque Scope (chaque SELECT ou sous‑requête)
     for scope in traverse_scope(tree):
+        # Collecte les tables renommées : (catalog, db, name) pour corriger les colonnes
+        tables_being_renamed: set[tuple] = set()
+
         # 3. Récupérer toutes les tables dans ce scope
         for table in find_all_in_scope(scope.expression, exp.Table):
             if table.db and table.db != "":
                 db = table.db
                 original = table.this.name
+                catalog = table.catalog or ""
                 if suffix:
                     new_name = (
                         f"{db}_{original}_{suffix.replace('-', '_')}"
@@ -1145,12 +1149,26 @@ def strip_qualifiers_with_scope(
                     )
                 else:
                     new_name = original
+                tables_being_renamed.add((catalog, db, original))
                 # 5. Supprimer project et dataset, et renommer la table
                 table.set("catalog", None)
                 table.set("db", None)
                 table.set("this", exp.to_identifier(new_name))
 
-    # 6. Regénérer la requête nettoyée avec backticks si besoin
+        # 6. Supprimer catalog/db des colonnes qui référencent une table renommée.
+        # Sans ça, une colonne qualifiée `project.dataset.table`.col reste avec ses
+        # qualificateurs après le renommage de la table, ce qui produit une référence
+        # invalide en DuckDB (ex: "bigquery-public-data"."the_met"."objects"."col").
+        for col in scope.expression.find_all(exp.Column):
+            col_db = col.text("db")
+            if col_db:
+                col_catalog = col.text("catalog") or ""
+                col_table = col.text("table")
+                if (col_catalog, col_db, col_table) in tables_being_renamed:
+                    col.set("catalog", None)
+                    col.set("db", None)
+
+    # 7. Regénérer la requête nettoyée avec backticks si besoin
     return tree.sql(dialect=dialect)
 
 

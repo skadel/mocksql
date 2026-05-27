@@ -46,6 +46,7 @@ const SingleQueryLayout: React.FC<{
     uploadLabel="Uploader les résultats JSON"
     instructionsTitle="Instructions pour le profiling"
     downloadFormat="JSON"
+    downloadFilename="profiling_query.sql"
     inline
   />
 );
@@ -121,6 +122,7 @@ const MultiQueryLayout: React.FC<{
               uploadLabel={done ? 'Remplacer les résultats' : 'Uploader les résultats JSON'}
               instructionsTitle={`Instructions — ${label}`}
               downloadFormat="JSON"
+              downloadFilename={`profiling_${label.replace(/[^a-zA-Z0-9_]/g, '_')}.sql`}
               inline
             />
           </Paper>
