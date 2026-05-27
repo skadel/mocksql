@@ -16,9 +16,8 @@ logger = logging.getLogger(__name__)
 
 
 def _format_debug_message(msg: BaseMessage) -> BaseMessage:
-    """Return a copy of a DEBUG message with human-readable content instead of raw JSON."""
-    msg_type = get_message_type(msg)
-    if msg_type not in (MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS):
+    """Return a copy of a DEBUG_RUN_CTE message with human-readable content."""
+    if get_message_type(msg) != MsgType.DEBUG_RUN_CTE:
         return msg
     try:
         data = json.loads(msg.content)
@@ -27,15 +26,8 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
 
     cte = data.get("cte_name", "?")
     if data.get("error"):
-        formatted = f"[debug] {cte} → erreur : {data['error']}"
-    elif msg_type == MsgType.DEBUG_COUNT_STEPS:
-        steps = data.get("steps", [])
-        lines = [f'[count_cte_steps] CTE "{cte}" :']
-        for step in steps:
-            marker = " ⚠️" if step["count"] == 0 else ""
-            lines.append(f"  {step['label']} → {step['count']} ligne(s){marker}")
-        formatted = "\n".join(lines)
-    else:  # DEBUG_RUN_CTE
+        formatted = f"[run_cte] {cte} → erreur : {data['error']}"
+    else:
         rows = data.get("rows", [])
         row_count = data.get("row_count", 0)
         col_filter = data.get("column")
@@ -166,12 +158,11 @@ async def conversational_agent(state: QueryState):
 Tentatives de correction restantes : {retries_left}
 
 **Outils disponibles :**
-- `count_cte_steps` — diagnostiquer où les données bloquent dans les CTEs
-- `run_cte` — inspecter le contenu d'une CTE intermédiaire
+- `run_cte` — inspecter le contenu réel (valeurs) d'une CTE intermédiaire
 - `update_test_data` — corriger les données d'entrée avec une instruction précise
-- `request_reevaluation` — demander une réévaluation LLM si le diagnostic montre que les données sont correctes (ex : 0 ligne est le comportement attendu pour ce scénario)
+- `request_reevaluation` — demander une réévaluation LLM si les données sont correctes (ex : 0 ligne est le comportement attendu pour ce scénario)
 
-⚠️ Règle impérative : une fois le diagnostic posé, appelle soit `update_test_data` si les données sont incorrectes, soit `request_reevaluation` si elles sont correctes et que l'évaluation initiale était erronée. Ne demande pas de confirmation."""
+⚠️ Règle impérative : si la cause est évidente d'après le diagnostic ci-dessus, appelle directement `update_test_data`. Utilise `run_cte` uniquement pour inspecter les valeurs d'une CTE si nécessaire. Appelle `request_reevaluation` si le comportement est intentionnel. Ne demande pas de confirmation."""
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]
@@ -179,7 +170,7 @@ Tentatives de correction restantes : {retries_left}
 
     debug_retries = state.get("debug_retries") or 0
     debug_budget_note = f"\nRounds de debug restants : {debug_retries}." + (
-        " Tu ne peux plus appeler run_cte ni count_cte_steps — prends une décision (demander une précision à l'utilisateur ou regénérer le test)."
+        " Tu ne peux plus appeler run_cte — prends une décision (demander une précision à l'utilisateur ou regénérer le test)."
         if debug_retries == 0
         else ""
     )
@@ -208,7 +199,6 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         "update_test_description",
         "update_test_data",
         "run_cte",
-        "count_cte_steps",
         "request_reevaluation",
     }
 
@@ -249,19 +239,10 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
 
     @tool
     def run_cte(test_uid: str, cte_name: str, column: str = "") -> str:
-        """Exécute la requête SQL jusqu'à la CTE nommée avec les données du test et retourne les lignes.
-        Utilise cet outil pour voir ce que contient une CTE intermédiaire ou finale.
-        column est optionnel : si fourni, ne sélectionne que cette colonne (ex : 'revenue').
-        Tu peux appeler plusieurs outils de debug (run_cte, count_cte_steps) en même temps."""
+        """Exécute la requête SQL jusqu'à la CTE nommée avec les données du test et retourne les lignes réelles.
+        Utilise cet outil pour inspecter les valeurs d'une CTE intermédiaire ou finale.
+        column est optionnel : si fourni, ne sélectionne que cette colonne (ex : 'revenue')."""
         return f"{test_uid}:{cte_name}:{column}"
-
-    @tool
-    def count_cte_steps(test_uid: str, cte_name: str) -> str:
-        """Analyse pas à pas le nombre de lignes survivant à chaque JOIN et chaque condition WHERE
-        d'une CTE, via une seule requête DuckDB avec des CASE WHEN cumulatifs.
-        Utilise cet outil pour diagnostiquer pourquoi une CTE retourne 0 ligne.
-        Tu peux appeler plusieurs outils de debug (run_cte, count_cte_steps) en même temps."""
-        return f"{test_uid}:{cte_name}"
 
     @tool
     def request_reevaluation(test_uid: str, reason: str) -> str:
@@ -280,7 +261,7 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         generate_suggestions,
         request_reevaluation,
     ]
-    debug_tools = [run_cte, count_cte_steps] if debug_retries > 0 else []
+    debug_tools = [run_cte] if debug_retries > 0 else []
     llm = make_llm().bind_tools(base_tools + debug_tools)
     history = get_history_from_state(
         state,
@@ -290,7 +271,6 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
             MsgType.RESULTS,
             MsgType.EXAMPLES,
             MsgType.DEBUG_RUN_CTE,
-            MsgType.DEBUG_COUNT_STEPS,
         ],
     )
     user_input = state.get("input", "")
@@ -322,13 +302,14 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         else:
             trigger = (
                 f"Le test [{failing_uid_trigger}] a été jugé Insuffisant à cause des données d'entrée. "
-                f"Si la cause est évidente (données incorrectes), appelle directement `update_test_data`. "
+                f"Le diagnostic CTE est disponible dans le contexte ci-dessus. "
+                f"Si la cause est évidente, appelle directement `update_test_data`. "
                 f"Si le comportement observé est en réalité attendu pour ce scénario, appelle `request_reevaluation`. "
-                f"Sinon, diagnostique d'abord avec `count_cte_steps` sur les CTEs suspectes."
+                f"Utilise `run_cte` uniquement si tu as besoin d'inspecter les valeurs réelles d'une CTE spécifique."
             )
         messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
 
-    _DEBUG_TOOLS = {"run_cte", "count_cte_steps"}
+    _DEBUG_TOOLS = {"run_cte"}
 
     agent_tool_call: str | None = None
     agent_tool_args: dict = {}

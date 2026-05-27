@@ -213,12 +213,18 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
             except Exception:
                 pass
 
+    has_failing = any(not a.get("passed") for a in assertion_results)
+
     updated_test = {
         **current_test,
         "assertion_results": assertion_results,
-        "verdict": improved.verdict,
-        "reason_type": improved.reason_type,
-        "evaluation_explanation": improved.explanation,
+        "verdict": "Insuffisant" if has_failing else improved.verdict,
+        "reason_type": "bad_assertions" if has_failing else improved.reason_type,
+        "evaluation_explanation": (
+            "Les assertions générées ne correspondent pas au résultat de la requête."
+            if has_failing
+            else improved.explanation
+        ),
         "assertion_fix": None,
     }
     updated_all_tests = [

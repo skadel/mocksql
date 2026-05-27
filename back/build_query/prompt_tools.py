@@ -453,6 +453,10 @@ puis générez un unique test unitaire en format JSON.
 7. **Ne pas inclure la requête SQL** dans le résultat.
 8. **Un seul test** dans la clé `unit_tests`.
 9. **Conditions OR / groupes de contraintes multiples** : quand le SQL contient plusieurs branches alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** par test et construire des données qui satisfont uniquement cette branche. Ne pas essayer de couvrir plusieurs alternatives à la fois. La description doit nommer explicitement la branche choisie (ex. "Pour un utilisateur premium …" plutôt que "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les autres branches alimentent les suggestions.
+10. **Heuristiques Métier Obligatoires** :
+    - **Règle Agrégation** : Si le SQL contient CORR(), AVG(), STDDEV() ou d'autres fonctions statistiques complexes, générez toujours 3 à 5 lignes distinctes par groupe pour éviter un résultat constant (1.0 ou 0) ou des divisions par zéro.
+    - **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles.
+    - **Règle Cas Limites** : Ne testez qu'une seule branche OR ou CASE WHEN à la fois.
 
 **Ce que cet outil NE doit PAS tester** (laisser au moteur de warehouse) :
 - Les expressions constantes dans le SELECT final (ex. `SELECT 'valeur_fixe' AS col`) : résultat trivial, aucune logique métier à valider.
@@ -461,31 +465,16 @@ puis générez un unique test unitaire en format JSON.
 - Les règles de calcul que toute implémentation SQL correcte produirait identiquement.
 Privilégier des scénarios où **la logique métier** — les filtres, jointures, conditions temporelles, règles de déduplication — est réellement testée.
 
-**Format de sortie obligatoire** : un objet JSON unique, sans commentaire ni texte additionnel, sous la forme :
-```json
-{
-  "unit_test_description": "Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat métier attendu]",
-  "unit_test_build_reasoning": "...",
-  "tags": ["Logique métier", "..."],
-  "data": {
-    "Table1Name": [
-      { "ColA": "...", "ColB": "..." }
-    ],
-    "Table2Name": [
-      { "ColX": "...", "ColY": "..." }
-    ]
-  }
-}
-```
+**Format de sortie obligatoire** : un objet JSON unique.
+- `unit_test_build_reasoning`: Simulez mentalement la traversée des données à travers chaque CTE et filtre — listez les clauses éliminatoires (WHERE, JOIN strict), indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent. **Ce champ doit être rempli en premier.**
 - `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
-- `unit_test_build_reasoning`: Expliquez brièvement la logique de génération des données en vous concentrant sur les contraintes.
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
 
 ⚠️ **Toute casse incorrecte dans les noms de tables sera considérée comme une erreur.**
 ⚠️ **Les clés de `data` doivent être `{dataset}_{table}` (ex. `covid19_open_data_covid19_open_data`), jamais le nom court seul (ex. `covid19_open_data`).**
 
-Ne produisez qu'une seule réponse en JSON conforme, sans texte additionnel."""
+Répondez uniquement avec l'objet JSON demandé, sans texte additionnel."""
     )
 
     system_msg = SystemMessage(content=system_message_content)
@@ -583,7 +572,11 @@ def update_data_prompt(
         "du SQL (OFFSET, RANK, ROW_NUMBER, LIMIT, JOIN) retournent un résultat non vide. "
         "Ne livrez jamais uniquement les lignes explicitement demandées : vérifiez que le volume total permet à la requête "
         "de traverser toutes ses CTEs et filtres jusqu'au SELECT final.\n\n"
-        "**Format :** répondez uniquement avec le JSON demandé, sans explication ni justification.\n"
+        "**Heuristiques Métier Obligatoires** :\n"
+        "- **Règle Agrégation** : Si le SQL contient CORR(), AVG(), STDDEV() ou d'autres fonctions statistiques, générez toujours 3 à 5 lignes distinctes par groupe pour éviter un résultat constant (1.0 ou 0) ou des divisions par zéro.\n"
+        "- **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles.\n"
+        "- **Règle Cas Limites** : Ne testez qu'une seule branche OR ou CASE WHEN à la fois.\n\n"
+        "Répondez uniquement avec l'objet JSON demandé, sans texte additionnel.\n"
         + context_block
     )
     system_msg = SystemMessage(content=system_message_content)

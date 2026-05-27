@@ -313,7 +313,7 @@ def build_query_graph():
             logger.diag("[route_evaluator] → history_saver (too_many_rows)")
             return "history_saver"
         if feedback == "bad_data":
-            if retries >= 0:
+            if retries > 0:
                 logger.diag(
                     "[route_evaluator] → conversational_agent (bad_data retries=%d)",
                     retries,

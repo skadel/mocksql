@@ -168,23 +168,74 @@ async def evaluate_tests(state: QueryState):
                 "status": "complete",
             }
 
-        # No structural constraint → données incorrectes, déclenche le retry conversational_agent
         gen_retries = (
-            state.get("gen_retries") if state.get("gen_retries") is not None else 1
+            state.get("gen_retries") if state.get("gen_retries") is not None else 3
         )
+
+        cte_trace = current_test.get("cte_trace", {})
         failing_cte = current_test.get("failing_cte", "")
-        if failing_cte:
+        if cte_trace:
+            trace_lines = []
+            for name, info in cte_trace.items():
+                row_count = info.get("row_count", 0)
+                marker = " ← filtre bloquant" if row_count == 0 else ""
+                trace_lines.append(f"- `{name}` : {row_count} ligne(s){marker}")
+                steps = info.get("steps")
+                if steps and row_count == 0:
+                    for step in steps:
+                        cnt = step.get("count", -1)
+                        zero_marker = " ← filtre actif ici" if cnt == 0 else ""
+                        trace_lines.append(
+                            f"  - {step['label']} → {cnt} ligne(s){zero_marker}"
+                        )
+            explanation = "Diagnostic DuckDB :\n" + "\n".join(trace_lines)
+            if failing_cte:
+                explanation += f"\nModifiez les données pour satisfaire les conditions de la CTE `{failing_cte}`."
+        elif failing_cte:
             explanation = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
         else:
             explanation = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
+
         logger.diag(
             "[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d",
             gen_retries,
         )
+
+        if gen_retries == 0:
+            logger.warning(
+                "[evaluator] Circuit breaker déclenché pour le test %s",
+                current_test.get("test_index"),
+            )
+            stub_test = dict(current_test)
+            for table_name in stub_test.get("data", {}):
+                stub_test["data"][table_name] = []
+            stub_test["tags"] = list(
+                set(
+                    stub_test.get("tags", [])
+                    + ["FAILED_AUTO_GEN", "MANUAL_REVIEW_NEEDED"]
+                )
+            )
+
+            return {
+                "examples": [
+                    AIMessage(
+                        content=json.dumps(stub_test),
+                        id=str(uuid.uuid4()),
+                        additional_kwargs={
+                            "type": MsgType.EXAMPLES,
+                            "parent": last_results.id,
+                            "request_id": state.get("request_id"),
+                        },
+                    )
+                ],
+                "evaluation_feedback": "bad_data",
+                "status": "complete",
+            }
+
         state_update: dict = {
             "messages": [
                 AIMessage(
-                    content=f"**Insuffisant** — {explanation}",
+                    content=f"**Insuffisant** —\n{explanation}",
                     id=str(uuid.uuid4()),
                     additional_kwargs={
                         "type": MsgType.EVALUATION,
@@ -196,9 +247,8 @@ async def evaluate_tests(state: QueryState):
             ],
             "evaluation_feedback": "bad_data",
             "status": "empty_results",
+            "gen_retries": gen_retries - 1,
         }
-        if gen_retries > 0:
-            state_update["gen_retries"] = gen_retries - 1
         return state_update
 
     verdict = current_test.get("verdict")
@@ -216,6 +266,9 @@ async def evaluate_tests(state: QueryState):
     gen_retries = (
         state.get("gen_retries") if state.get("gen_retries") is not None else 1
     )
+    debug_retries = (
+        state.get("debug_retries") if state.get("debug_retries") is not None else 2
+    )
 
     evaluation_feedback = (
         reason_type if verdict == "Insuffisant" and reason_type else None
@@ -223,6 +276,14 @@ async def evaluate_tests(state: QueryState):
     triggers_agent_retry = evaluation_feedback == "bad_data" and not state.get(
         "assertion_only"
     )
+    triggers_assertion_retry = evaluation_feedback == "bad_assertions"
+
+    new_status = "complete"
+    if triggers_agent_retry and gen_retries > 0:
+        new_status = "empty_results"
+    elif triggers_assertion_retry and debug_retries > 0:
+        new_status = "bad_assertions"
+
     state_update: dict = {
         "messages": [
             AIMessage(
@@ -237,12 +298,12 @@ async def evaluate_tests(state: QueryState):
             )
         ],
         "evaluation_feedback": evaluation_feedback,
-        "status": "empty_results"
-        if (triggers_agent_retry and gen_retries > 0)
-        else "complete",
+        "status": new_status,
     }
 
     if triggers_agent_retry:
         state_update["gen_retries"] = gen_retries - 1
+    if triggers_assertion_retry:
+        state_update["debug_retries"] = debug_retries - 1
 
     return state_update

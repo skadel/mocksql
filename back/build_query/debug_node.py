@@ -4,7 +4,7 @@ from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
-from build_query.debug_executor import execute_run_cte, execute_count_cte_steps
+from build_query.debug_executor import execute_run_cte
 from build_query.examples_executor import filter_schemas_by_used_columns
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
@@ -16,10 +16,9 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
     tool_call = state.get("agent_tool_call")
     args = state.get("agent_tool_args") or {}
 
-    # Build a normalised list of calls regardless of single vs batch invocation
     if tool_call == "debug_batch":
         calls = args.get("calls", [])
-    elif tool_call in ("run_cte", "count_cte_steps"):
+    elif tool_call == "run_cte":
         calls = [{"tool": tool_call, "args": args}]
     else:
         return {}
@@ -66,9 +65,6 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
                 column=call_args.get("column") or None,
             )
             msg_type = MsgType.DEBUG_RUN_CTE
-        elif call_tool == "count_cte_steps":
-            result = await execute_count_cte_steps(**common)
-            msg_type = MsgType.DEBUG_COUNT_STEPS
         else:
             continue
 

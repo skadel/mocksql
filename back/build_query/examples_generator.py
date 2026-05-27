@@ -267,81 +267,81 @@ def _build_eval_context(state, existing_tests: list) -> str:
     if state.get("evaluation_feedback") != "bad_data":
         return ""
 
-    eval_msgs = [
-        m
-        for m in state.get("messages", [])
-        if get_message_type(m) == MsgType.EVALUATION
-    ]
+    messages = state.get("messages", [])
+
+    # Reconstruct history of failures for the current test_index
+    # The current test_index is the one being evaluated/regenerated.
+    # We find the target test_index from the latest EVALUATION message.
+    eval_msgs = [m for m in messages if get_message_type(m) == MsgType.EVALUATION]
     if not eval_msgs:
         return ""
 
-    latest_eval = eval_msgs[-1]
-    eval_test_idx = latest_eval.additional_kwargs.get("test_index")
-    verdict_text = latest_eval.content
+    target_test_idx = eval_msgs[-1].additional_kwargs.get("test_index")
 
-    failing_test = next(
-        (t for t in existing_tests if str(t.get("test_index")) == str(eval_test_idx)),
-        None,
-    )
+    history_blocks = []
+    iteration = 1
+
+    # Iterate through messages to pair RESULTS with their corresponding EVALUATION
+    results_map = {m.id: m for m in messages if get_message_type(m) == MsgType.RESULTS}
+
+    for eval_msg in eval_msgs:
+        if eval_msg.additional_kwargs.get("test_index") != target_test_idx:
+            continue
+
+        parent_id = eval_msg.additional_kwargs.get("parent")
+        result_msg = results_map.get(parent_id)
+
+        if result_msg:
+            try:
+                results_data = json.loads(result_msg.content)
+                if not isinstance(results_data, list):
+                    results_data = [results_data]
+
+                # Find the test case in the results
+                test_case = next(
+                    (
+                        t
+                        for t in results_data
+                        if str(t.get("test_index")) == str(target_test_idx)
+                    ),
+                    None,
+                )
+                if test_case:
+                    input_data = test_case.get("data", {})
+                    try:
+                        input_summary = json.dumps(input_data, ensure_ascii=False)
+                        if len(input_summary) > 200:
+                            input_summary = input_summary[:200] + "...}"
+                    except Exception:
+                        input_summary = str(input_data)[:200]
+
+                    verdict_text = eval_msg.content.replace(
+                        "**Insuffisant** — ", ""
+                    ).strip()
+                    history_blocks.append(
+                        f"- **Itération {iteration}** : Données `{input_summary}` → Échec : {verdict_text}"
+                    )
+                    iteration += 1
+            except Exception:
+                pass
 
     lines = [
-        "\n⚠️ **Contexte de correction** — Ce test a été jugé Insuffisant (données incorrectes).",
-        f"\n**Verdict de l'évaluateur :**\n{verdict_text}\n",
+        "\n### ⚠️ Historique des tentatives échouées",
+        "Voici ce que vous avez déjà essayé sans succès. **NE REPRODUISEZ PAS LA MÊME APPROCHE.**",
     ]
 
-    if failing_test:
-        input_data = failing_test.get("data", {})
-        results_json = failing_test.get("results_json", "[]")
-        assertion_results = failing_test.get("assertion_results", [])
-
-        if input_data:
-            try:
-                input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)
-            except Exception:
-                input_summary = str(input_data)
-            lines.append(
-                f"**Données d'entrée actuelles (à corriger) :**\n```json\n{input_summary}\n```\n"
-            )
-
-        if results_json and results_json != "[]":
-            try:
-                parsed = (
-                    json.loads(results_json)
-                    if isinstance(results_json, str)
-                    else results_json
-                )
-                results_summary = json.dumps(parsed[:10], ensure_ascii=False, indent=2)
-            except Exception:
-                results_summary = str(results_json)[:500]
-            lines.append(
-                f"**Sortie DuckDB obtenue :**\n```json\n{results_summary}\n```\n"
-            )
-        else:
-            lines.append("**Sortie DuckDB obtenue :** vide (0 lignes)\n")
-
-        failing_assertions = [
-            a for a in (assertion_results or []) if a.get("status") != "pass"
-        ]
-        if failing_assertions:
-            try:
-                assertions_summary = json.dumps(
-                    failing_assertions, ensure_ascii=False, indent=2
-                )
-            except Exception:
-                assertions_summary = str(failing_assertions)[:500]
-            lines.append(
-                f"**Assertions en échec :**\n```json\n{assertions_summary}\n```\n"
-            )
+    if history_blocks:
+        lines.extend(history_blocks)
 
     lines.append(
-        "**Ta mission :** génère de nouvelles données d'entrée qui corrigent exactement le problème identifié ci-dessus.\n"
+        "\n**Consigne** : Si le changement des valeurs marginales ne fonctionne pas, repensez la **structure** (ex: ajoutez plus de lignes, modifiez la distribution des données pour contourner un filtre).\n"
     )
     return "\n".join(lines)
 
 
-def _get_failing_cte_from_results(history) -> tuple:
-    """Scans history for the last RESULTS message that has a failing CTE."""
-    for msg in reversed(history):
+def _get_failing_cte_from_results(messages) -> tuple:
+    """Scans messages for the last RESULTS message that has a failing CTE."""
+    for msg in reversed(messages):
         if get_message_type(msg) == MsgType.RESULTS:
             try:
                 results = json.loads(msg.content)
@@ -354,6 +354,30 @@ def _get_failing_cte_from_results(history) -> tuple:
             except Exception:
                 pass
     return None, {}
+
+
+def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
+    """Format enriched CTE trace into a diagnostic block for the generator prompt."""
+    lines = ["⚠️ **Diagnostic DuckDB (tentative précédente) :**"]
+    for cte_name, info in cte_trace.items():
+        row_count = info.get("row_count", -1)
+        if row_count == -1:
+            lines.append(f"- `{cte_name}` : erreur d'exécution")
+            continue
+        marker = " ← **0 ligne — filtre bloquant**" if row_count == 0 else ""
+        lines.append(f"- `{cte_name}` : {row_count} ligne(s){marker}")
+        steps = info.get("steps")
+        if steps and row_count == 0:
+            for step in steps:
+                label = step.get("label", "?")
+                cnt = step.get("count", -1)
+                zero_marker = " ← filtre actif ici" if cnt == 0 else ""
+                lines.append(f"  - {label} → {cnt} ligne(s){zero_marker}")
+    lines.append(
+        f"\nLa CTE `{failing_cte}` produit 0 ligne. "
+        "Génère des données qui satisfont toutes les conditions de filtre identifiées ci-dessus."
+    )
+    return "\n".join(lines)
 
 
 async def retrieve_existing_tests(session_id: str, state) -> list:
@@ -562,24 +586,73 @@ async def generate_examples_(
         "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
     )
 
-    # Build LLM schema with Faker-eligible columns removed to shrink the prompt
-    llm_filtered_schema = filtered_schema
+    # Precompute constraints per column
+    col_hints = {}
+    if sim_result is not None:
+        table_to_uc = {}
+        for entry in used_columns:
+            db = entry.get("database", "")
+            table = entry["table"]
+            uc_key = f"{db}_{table}" if db else table
+            table_to_uc[table.lower()] = uc_key
+
+        for ref, constraints_list in sim_result.source_columns.items():
+            if not constraints_list:
+                continue
+            table_lower = ref.table.lower()
+            col_lower = ref.column.lower()
+            uc_key = table_to_uc.get(table_lower)
+            if uc_key:
+                hints = _format_filter_constraints(constraints_list)
+                if hints:
+                    col_hints.setdefault((uc_key, col_lower), []).extend(hints)
+
+        for eq_class in sim_result.equivalence_classes:
+            refs = list(eq_class)
+            joined = " = ".join(f"{r.table}.{r.column}" for r in refs)
+            for ref in refs:
+                uc_key = table_to_uc.get(ref.table.lower())
+                if uc_key:
+                    col_hints.setdefault((uc_key, ref.column.lower()), []).append(
+                        f"Égalité stricte avec {joined}"
+                    )
+
+        for col_a, col_b in sim_result.col_inequalities:
+            for ref, other in [(col_a, col_b), (col_b, col_a)]:
+                uc_key = table_to_uc.get(ref.table.lower())
+                if uc_key:
+                    col_hints.setdefault((uc_key, ref.column.lower()), []).append(
+                        f"Anti-join (NOT IN) avec {other.table}.{other.column}"
+                    )
+
+    # Build LLM schema with Faker-eligible columns removed and constraint hints injected
+    llm_filtered_schema = []
     excluded_col_names: list[str] = []
+    for table_entry in filtered_schema:
+        uc_key = table_entry["table_name"]
+        new_columns = []
+        for c in table_entry["columns"]:
+            col_name = c["name"].lower()
+            # Skip if Faker will fill this
+            if faker_cols and uc_key in faker_cols and col_name in faker_cols[uc_key]:
+                excluded_col_names.append(f"{uc_key}.{col_name}")
+                continue
+
+            c_copy = dict(c)
+            hints = col_hints.get((uc_key, col_name))
+            if hints:
+                hint_str = " | ATTENTION contrainte SQL : " + " ; ".join(hints)
+                existing_desc = c_copy.get("description")
+                if existing_desc:
+                    c_copy["description"] = str(existing_desc) + hint_str
+                else:
+                    c_copy["description"] = hint_str.lstrip(" | ")
+            new_columns.append(c_copy)
+
+        if new_columns:
+            llm_filtered_schema.append({**table_entry, "columns": new_columns})
+
     if faker_cols:
-        llm_filtered_schema = []
-        for table_entry in filtered_schema:
-            uc_key = table_entry["table_name"]
-            if uc_key not in faker_cols:
-                llm_filtered_schema.append(table_entry)
-            else:
-                remaining = [
-                    c
-                    for c in table_entry["columns"]
-                    if c["name"].lower() not in faker_cols[uc_key]
-                ]
-                if remaining:
-                    llm_filtered_schema.append({**table_entry, "columns": remaining})
-                excluded_col_names.extend(f"{uc_key}.{c}" for c in faker_cols[uc_key])
         logger.debug(
             "[generator] Faker pre-fill: %d col(s) across %d table(s) removed from LLM schema — %s",
             sum(len(cols) for cols in faker_cols.values()),
@@ -601,7 +674,7 @@ async def generate_examples_(
         history,
         used_columns,
         parser.get_format_instructions(),
-        constraints_hint=constraints,
+        constraints_hint="",
         excluded_columns=excluded_col_names,
         eval_context=eval_context,
     )
@@ -695,6 +768,7 @@ def get_generation_output_type(data_model, existing_tests):
 
     return create_model(
         "UnitTestData",
+        unit_test_build_reasoning=(str, Field(description=reasoning_desc)),
         test_name=(
             str,
             Field(
@@ -721,7 +795,6 @@ def get_generation_output_type(data_model, existing_tests):
                 )
             ),
         ),
-        unit_test_build_reasoning=(str, Field(description=reasoning_desc)),
         tags=(
             List[str],
             Field(
@@ -792,6 +865,13 @@ async def create_appropriate_prompt(
             eval_context=eval_context,
         )
     elif state.get("status") == "empty_results":
+        failing_cte, cte_trace = _get_failing_cte_from_results(
+            state.get("messages", [])
+        )
+        trace_hint = (
+            _format_cte_trace_hint(failing_cte, cte_trace) if failing_cte else ""
+        )
+        combined_eval = "\n\n".join(part for part in [eval_context, trace_hint] if part)
         return generate_data_prompt(
             history,
             dialect,
@@ -801,6 +881,7 @@ async def create_appropriate_prompt(
             sql=stripped_sql,
             profile=profile,
             model_context=model_context,
+            eval_context=combined_eval,
         )
     else:
         return None

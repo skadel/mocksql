@@ -316,7 +316,9 @@ class TestFormatConstraints:
         """
         filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
-            f.column == col("a", "col") and f.op == "format_constraint" and "INT64" in f.value.upper()
+            f.column == col("a", "col")
+            and f.op == "format_constraint"
+            and "INT64" in f.value.upper()
             for f in filters
         )
 
@@ -327,7 +329,9 @@ class TestFormatConstraints:
         """
         filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
-            f.column == col("a", "dt") and f.op == "format_constraint" and "PARSE_DATE" in f.value.upper()
+            f.column == col("a", "dt")
+            and f.op == "format_constraint"
+            and "PARSE_DATE" in f.value.upper()
             for f in filters
         )
 
@@ -338,7 +342,9 @@ class TestFormatConstraints:
         """
         filters, _, _, _ = _flat(extract_constraints(sql))
         assert any(
-            f.column == col("a", "dt") and f.op == "format_constraint" and "FORMAT_DATE" in f.value.upper()
+            f.column == col("a", "dt")
+            and f.op == "format_constraint"
+            and "FORMAT_DATE" in f.value.upper()
             for f in filters
         )
 

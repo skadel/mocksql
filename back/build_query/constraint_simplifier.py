@@ -602,7 +602,9 @@ def _collect_format_constraints(
                     continue
                 if isinstance(item, (exp.Subquery, exp.With)):
                     continue
-                if isinstance(item, (exp.TryCast, exp.Cast, exp.StrToDate, exp.TimeToStr)):
+                if isinstance(
+                    item, (exp.TryCast, exp.Cast, exp.StrToDate, exp.TimeToStr)
+                ):
                     yield item
                 yield from _iter_format_nodes(item)
 
@@ -616,18 +618,30 @@ def _collect_format_constraints(
             continue
         src_cols = resolver.resolve_all(ref)
         ref = resolver.resolve(ref)
-        
-        op = "safe_cast_not_null" if isinstance(node, exp.TryCast) else "format_constraint"
-        
+
+        op = (
+            "safe_cast_not_null"
+            if isinstance(node, exp.TryCast)
+            else "format_constraint"
+        )
+
         if isinstance(node, (exp.TryCast, exp.Cast)):
             to_type = node.args.get("to")
             val_str = to_type.sql(dialect=resolver._dialect).upper() if to_type else ""
         elif isinstance(node, exp.StrToDate):
             fmt = node.args.get("format")
-            val_str = f"PARSE_DATE {fmt.sql(dialect=resolver._dialect)}" if fmt else "PARSE_DATE"
+            val_str = (
+                f"PARSE_DATE {fmt.sql(dialect=resolver._dialect)}"
+                if fmt
+                else "PARSE_DATE"
+            )
         elif isinstance(node, exp.TimeToStr):
             fmt = node.args.get("format")
-            val_str = f"FORMAT_DATE {fmt.sql(dialect=resolver._dialect)}" if fmt else "FORMAT_DATE"
+            val_str = (
+                f"FORMAT_DATE {fmt.sql(dialect=resolver._dialect)}"
+                if fmt
+                else "FORMAT_DATE"
+            )
         else:
             val_str = "FORMAT"
 
@@ -1626,11 +1640,21 @@ def build_conditions_hint(
         statement, alias_map, resolver, dialect
     )
 
+    lineages: list[str] = []
+    seen_lineage: set[str] = set()
+    for (_tbl, _col), resolved in resolver._cache.items():
+        if resolved.lineage and resolved.lineage not in seen_lineage:
+            seen_lineage.add(resolved.lineage)
+            col_label = f"{resolved.real_table or resolved.table}.{resolved.column}"
+            lineages.append(f"{col_label} : {resolved.lineage}")
+
     result: dict = {}
     if conditions:
         result["conditions"] = conditions
     if format_constraints:
         result["format_constraints"] = format_constraints
+    if lineages:
+        result["lineages"] = lineages
     return result
 
 

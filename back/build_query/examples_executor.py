@@ -283,12 +283,6 @@ def _extract_columns(expr: exp.Expression) -> List[exp.Expression]:
     return list(expr.find_all(exp.Column))
 
 
-# TODO fonction (pas utilisée) sensé servir pour débug quand j'ai un status = "empty_results"
-# je devrais utiliser cette fonction;
-# en fait c'est sensé m'aider à voir quelle étape est en train de rendre mon résultat vide;
-# renommer cette fonction et rajouter son utilisation
-# voir dans d'autres branche comment c'est utilisé ça peut être utile.
-# aussi voir _build_countif_expressions peut être que ça peut servir la même logique
 def _decompose_cte_in_steps(cte_sql_code: str, dialect: str) -> List[Dict[str, str]]:
     """
     Décompose le code SQL d'une CTE (ou requête) en plusieurs étapes, avec :
@@ -495,12 +489,135 @@ def _build_cte_sql_with_suffix(
     return sql_code
 
 
+def _extract_right_key_from_join(join_expr: exp.Expression) -> Optional[exp.Column]:
+    """Return the right-side column of the first equality in the ON clause."""
+    on = join_expr.args.get("on")
+    if on:
+        for eq in on.find_all(exp.EQ):
+            right = eq.expression
+            if isinstance(right, exp.Column):
+                return right
+        cols = list(on.find_all(exp.Column))
+        if cols:
+            return cols[-1]
+    using = join_expr.args.get("using")
+    if using and isinstance(using, list):
+        for item in using:
+            if isinstance(item, exp.Column):
+                return item
+            if isinstance(item, exp.Identifier):
+                return exp.column(item.name)
+    return None
+
+
+def _build_count_steps_query(
+    cte_code: str,
+    preceding_ctes: List[Dict[str, str]],
+    dialect: str,
+) -> tuple[str, List[str]]:
+    """Single query with SUM(CASE WHEN …) columns for each JOIN then each WHERE condition.
+
+    All INNER JOINs are converted to LEFT JOINs so every base row is preserved.
+    Returns (full_sql, labels) where labels[i] describes the i-th SELECT column.
+    """
+    tree = sqlglot.parse_one(cte_code, read=dialect)
+    from_expr: Optional[exp.Expression] = tree.args.get("from") or tree.args.get(
+        "from_"
+    )
+    joins: List[exp.Expression] = tree.args.get("joins") or []
+    where: Optional[exp.Expression] = tree.args.get("where")
+
+    labels: List[str] = []
+    select_parts: List[str] = ["COUNT(*) AS base_count"]
+    base_name = from_expr.this.alias_or_name if from_expr else "base"
+    labels.append(base_name)
+
+    join_null_conditions: List[str] = []
+    left_join_sqls: List[str] = []
+
+    for i, join in enumerate(joins):
+        join_copy = join.copy()
+        join_copy.set("side", "LEFT")
+        join_copy.set("kind", None)
+        left_join_sqls.append(join_copy.sql(dialect=dialect))
+
+        right_col = _extract_right_key_from_join(join)
+        if right_col:
+            col_sql = right_col.sql(dialect=dialect)
+            join_null_conditions.append(f"{col_sql} IS NOT NULL")
+            cumul = " AND ".join(join_null_conditions)
+            select_parts.append(
+                f"SUM(CASE WHEN {cumul} THEN 1 ELSE 0 END) AS after_join_{i + 1}"
+            )
+            labels.append(f"+ JOIN ({col_sql} IS NOT NULL)")
+        else:
+            select_parts.append(f"COUNT(*) AS after_join_{i + 1}")
+            labels.append(f"+ JOIN {i + 1}")
+
+    where_conds = _extract_conditions(where.this) if where else []
+    cumul_parts = list(join_null_conditions)
+
+    for j, cond in enumerate(where_conds):
+        cond_sql = cond.sql(dialect=dialect)
+        cumul_parts.append(f"({cond_sql})")
+        cumul = " AND ".join(cumul_parts)
+        select_parts.append(
+            f"SUM(CASE WHEN {cumul} THEN 1 ELSE 0 END) AS after_cond_{j + 1}"
+        )
+        labels.append(f"+ WHERE {cond_sql}")
+
+    from_sql = from_expr.sql(dialect=dialect) if from_expr else ""
+    joins_sql = ("\n" + "\n".join(left_join_sqls)) if left_join_sqls else ""
+    body = f"SELECT\n  {',\n  '.join(select_parts)}\n{from_sql}{joins_sql}"
+
+    if preceding_ctes:
+        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding_ctes]
+        return f"WITH {', '.join(with_parts)}\n{body}", labels
+
+    return body, labels
+
+
+async def _run_cte_step_trace(
+    ctes: list, failing_idx: int, suffix: str, project: str, dialect: str, con
+) -> list:
+    """Step-level breakdown for a failing CTE (row_count==0).
+
+    Runs a single query with cumulative SUM(CASE WHEN …) columns so the generator knows
+    exactly which JOIN condition or WHERE predicate filters out all rows.
+    Returns [{label, count}].
+    """
+    cte = ctes[failing_idx]
+    preceding = [c for c in ctes[:failing_idx] if c["name"] != "final_query"]
+
+    try:
+        full_sql, labels = _build_count_steps_query(cte["code"], preceding, dialect)
+    except Exception:
+        return []
+
+    try:
+        df, _ = await run_query_on_test_dataset(full_sql, suffix, project, dialect, con)
+    except Exception:
+        return []
+
+    if df.empty:
+        return [{"label": lbl, "count": 0} for lbl in labels]
+
+    row = df.iloc[0].to_dict()
+    col_names = list(row.keys())
+    return [
+        {"label": lbl, "count": int(row.get(col_names[i], 0) or 0)}
+        for i, lbl in enumerate(labels)
+        if i < len(col_names)
+    ]
+
+
 async def _run_cte_trace(
     ctes: list, suffix: str, project: str, dialect: str, con
 ) -> dict:
     """
     For each CTE, builds a WITH ... SELECT * FROM cteN query and runs it to capture row counts.
-    Returns {"cte_name": {"row_count": N}} for every non-final CTE.
+    For CTEs that return 0 rows, also runs a step-by-step breakdown (per JOIN/WHERE condition).
+    Returns {"cte_name": {"row_count": N, "steps": [...]}} for every non-final CTE.
     """
     trace = {}
     for i, cte in enumerate(ctes):
@@ -512,7 +629,15 @@ async def _run_cte_trace(
         sql = "WITH " + ",\n".join(with_parts) + f"\nSELECT * FROM `{cte['name']}`"
         try:
             df, _ = await run_query_on_test_dataset(sql, suffix, project, dialect, con)
-            trace[cte["name"]] = {"row_count": df.shape[0]}
+            row_count = df.shape[0]
+            result: dict = {"row_count": row_count}
+            if row_count == 0:
+                steps = await _run_cte_step_trace(
+                    ctes, i, suffix, project, dialect, con
+                )
+                if steps:
+                    result["steps"] = steps
+            trace[cte["name"]] = result
         except Exception as e:
             trace[cte["name"]] = {"row_count": -1, "error": str(e)}
     return trace
@@ -646,11 +771,20 @@ async def _run_single_test_case(
             "assertion_results": assertion_results,
         }
         if eval_result is not None:
-            result["verdict"] = eval_result.verdict
-            result["reason_type"] = eval_result.reason_type
-            result["evaluation_explanation"] = eval_result.explanation
-            if eval_result.assertion_fix is not None:
-                result["assertion_fix"] = eval_result.assertion_fix.model_dump()
+            has_failing = any(not a.get("passed") for a in assertion_results)
+            if has_failing:
+                result["verdict"] = "Insuffisant"
+                result["reason_type"] = "bad_assertions"
+                result["evaluation_explanation"] = (
+                    "Les assertions générées ne correspondent pas au résultat de la requête."
+                )
+                result.pop("assertion_fix", None)
+            else:
+                result["verdict"] = eval_result.verdict
+                result["reason_type"] = eval_result.reason_type
+                result["evaluation_explanation"] = eval_result.explanation
+                if eval_result.assertion_fix is not None:
+                    result["assertion_fix"] = eval_result.assertion_fix.model_dump()
         return result
 
     except Exception as e:
