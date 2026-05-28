@@ -18,6 +18,9 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
 )
 
+# Tests créés mais pas encore persistés (en attente de validation réussie).
+_pending_tests: Dict[str, Dict[str, Any]] = {}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -230,6 +233,9 @@ def get_test(
     session_id: str, model_name: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Find a test by session ID. If model_name is known, tries direct lookup first."""
+    if session_id in _pending_tests:
+        return _pending_tests[session_id]
+
     if model_name:
         p = _test_path(model_name)
         if p.exists():
@@ -248,7 +254,11 @@ def get_test(
 
 
 def create_test(model_name: str) -> Dict[str, Any]:
-    """Return existing test for this model, or create a new one."""
+    """Return existing test for this model, or create a new one.
+
+    New tests are kept in memory (_pending_tests) and only written to disk
+    when update_test is first called — preventing empty files when validation fails.
+    """
     p = _test_path(model_name)
     if p.exists():
         existing = _read_json(p)
@@ -274,20 +284,24 @@ def create_test(model_name: str) -> Dict[str, Any]:
         "last_error": "",
         "test_cases": [],
     }
-    _write_json(p, test)
+    _pending_tests[test_id] = test
     return test
 
 
 def update_test(
     session_id: str, updates: Dict[str, Any], model_name: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
-    """Merge `updates` into the test file. Returns updated test or None if not found."""
+    """Merge `updates` into the test file. Returns updated test or None if not found.
+
+    First write for a pending test flushes it from memory to disk.
+    """
     test = get_test(session_id, model_name)
     if test is None:
         return None
     mn = test["model_name"]
     test.update(updates)
     test["updated_at"] = datetime.now().isoformat()
+    _pending_tests.pop(session_id, None)
     _write_json(_test_path(mn), test)
     return test
 

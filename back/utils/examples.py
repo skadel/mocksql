@@ -1132,6 +1132,17 @@ def strip_qualifiers_with_scope(
 
     # 2. Parcourir chaque Scope (chaque SELECT ou sous‑requête)
     for scope in traverse_scope(tree):
+        # Noms courts de tables utilisés comme qualificateurs de colonnes dans ce scope.
+        # On collecte `col.table` (la partie la plus proche du nom de colonne) qu'il
+        # s'agisse d'un qualificateur 1-part déjà simplifié (objects.col) ou d'un
+        # qualificateur multi-part (project.dataset.objects.col) qui sera nettoyé :
+        # dans les deux cas, `col.table = "objects"` après le nettoyage.
+        col_table_names: set[str] = {
+            col.text("table")
+            for col in scope.expression.find_all(exp.Column)
+            if col.text("table")
+        }
+
         # Collecte les tables renommées : (catalog, db, name) pour corriger les colonnes
         tables_being_renamed: set[tuple] = set()
 
@@ -1141,6 +1152,7 @@ def strip_qualifiers_with_scope(
                 db = table.db
                 original = table.this.name
                 catalog = table.catalog or ""
+                existing_alias = table.alias
                 if suffix:
                     new_name = (
                         f"{db}_{original}_{suffix.replace('-', '_')}"
@@ -1154,6 +1166,20 @@ def strip_qualifiers_with_scope(
                 table.set("catalog", None)
                 table.set("db", None)
                 table.set("this", exp.to_identifier(new_name))
+                # Quand la table est réellement renommée (suffix fourni) et que des
+                # colonnes du scope utilisent le nom court original comme qualificateur
+                # (ex: objects.col), forcer un alias explicite pour que DuckDB puisse
+                # les résoudre.  On ne touche pas les tables qui ont déjà un alias
+                # explicite (l'utilisateur a écrit FROM ... AS alias).
+                if (
+                    not existing_alias
+                    and new_name != original
+                    and original in col_table_names
+                ):
+                    table.set(
+                        "alias",
+                        exp.TableAlias(this=exp.to_identifier(original)),
+                    )
 
         # 6. Supprimer catalog/db des colonnes qui référencent une table renommée.
         # Sans ça, une colonne qualifiée `project.dataset.table`.col reste avec ses

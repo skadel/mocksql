@@ -137,6 +137,26 @@ def _resolve_schemas(
     ]
 
 
+# ── Assertion SQL remapping ───────────────────────────────────────────────────
+
+
+def _remap_assertion_sql(sql: str, data_keys: list[str], case_suffix: str) -> str:
+    """Replace old session-scoped DuckDB table names with the current case_suffix.
+
+    Assertions saved during `generate` contain hardcoded table names like
+    "the_met_objects_<old_uuid>". When replaying with `test`, tables are
+    created with a new suffix, so we patch the SQL before evaluation.
+    """
+    for base in data_keys:
+        # Match double-quoted DuckDB table names: "base_<anything>"
+        sql = re.sub(
+            r'"(' + re.escape(base) + r')_[^"]+"',
+            f'"\\1_{case_suffix}"',
+            sql,
+        )
+    return sql
+
+
 # ── Single test-case execution ────────────────────────────────────────────────
 
 
@@ -205,10 +225,22 @@ async def _run_one_case(
             sql, case_suffix, "cli", dialect, con
         )
 
+        remapped_assertions = [
+            {
+                **a,
+                "sql": _remap_assertion_sql(
+                    a.get("sql", ""), list(data.keys()), case_suffix
+                ),
+            }
+            for a in saved_assertions
+        ]
+
         view_name = f"__result__{case_suffix}"
         con.register(view_name, result_df)
         try:
-            assertion_results = _evaluate_assertions(saved_assertions, view_name, con)
+            assertion_results = _evaluate_assertions(
+                remapped_assertions, view_name, con
+            )
         finally:
             con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
 
