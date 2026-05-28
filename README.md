@@ -26,7 +26,7 @@ MockSQL se décline en deux modes :
 ## Démarrage rapide
 
 ```bash
-pip install dist/mocksql-*.whl
+pip install mocksql
 export VERTEX_PROJECT=<votre-projet-gcp>
 
 mocksql init
