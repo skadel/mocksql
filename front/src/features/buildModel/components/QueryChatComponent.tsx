@@ -3,9 +3,10 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, InputAdornment, LinearProgress, TextField, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, Tooltip, Typography } from '@mui/material';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
+import DownloadIcon from '@mui/icons-material/Download';
 import SearchIcon from '@mui/icons-material/Search';
 import ScienceIcon from '@mui/icons-material/Science';
 import { Container } from '../../../style/StyledComponents';
@@ -48,6 +49,7 @@ const ChatComponent: React.FC = () => {
   const [restoredMessageId, setRestoredMessageId] = useState<string | undefined>(undefined);
   const [isSending, setIsSending] = useState(false);
   const [selectedTestIndex, setSelectedTestIndex] = useState<number | null>(null);
+  const [addTestTrigger, setAddTestTrigger] = useState(0);
   const [sqlDirty, setSqlDirty] = useState(false);
   const [pendingFirstLoad, setPendingFirstLoad] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -773,6 +775,7 @@ const ChatComponent: React.FC = () => {
 
   const handleAddTest = useCallback(() => {
     setSelectedTestIndex(null);
+    setAddTestTrigger(n => n + 1);
   }, []);
 
   const handleSelectTestForModification = useCallback((idx: number) => {
@@ -1115,6 +1118,7 @@ const ChatComponent: React.FC = () => {
             sqlQuery={sqlQuery}
             onClearHistory={handleClearHistory}
             onRequestProfile={handleRequestProfile}
+            focusTrigger={addTestTrigger}
           />
 
           {/* Main area — tests + footer */}
@@ -1226,19 +1230,42 @@ const ChatComponent: React.FC = () => {
               </Box>
             </Box>
 
-            {/* Billing — inline, non-obtrusive */}
-            {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-                <Typography variant="caption" sx={{ color: '#aaa' }}>Scan estimé :</Typography>
-                <Chip
-                  label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
-                    ? '< 0,001'
-                    : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
+            {/* Billing + download SQL */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+              {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
+                <>
+                  <Typography variant="caption" sx={{ color: '#aaa' }}>Scan estimé :</Typography>
+                  <Chip
+                    label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
+                      ? '< 0,001'
+                      : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
+                    size="small"
+                    sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
+                  />
+                </>
+              )}
+              <Tooltip title="Télécharger la requête SQL de profiling (.sql)">
+                <IconButton
                   size="small"
-                  sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
-                />
-              </Box>
-            )}
+                  onClick={() => {
+                    const queries = pendingAutoProfile.profileRequest.profile_queries;
+                    const sql = queries && queries.length > 1
+                      ? queries.map((q, i) => `-- Requête ${i + 1}\n${q}`).join('\n\n')
+                      : pendingAutoProfile.profileRequest.profile_query;
+                    const blob = new Blob([sql], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = 'profiling_query.sql';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                  sx={{ color: '#bbb', '&:hover': { color: '#1ca8a4' } }}
+                >
+                  <DownloadIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Box>
 
             {isAutoProfileRunning && (
               <Box sx={{ mt: 1, pb: 1 }}>

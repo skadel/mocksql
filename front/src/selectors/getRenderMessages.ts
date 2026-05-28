@@ -141,6 +141,24 @@ export const getRenderMessages = createSelector(
       // Debug messages are embedded inside their parent as a collapsed section, not standalone.
       if (DEBUG_TYPES.has(getContentType(msg) ?? '')) return;
 
+      // sql_update messages are already represented by SqlChangeDivider — skip the bubble
+      // but still recurse into children so bot responses are rendered.
+      if (getContentType(msg) === 'sql_update') {
+        const children = getChildren(msg.id).filter(c => !DEBUG_TYPES.has(getContentType(c) ?? ''));
+        if (children.length > 1) {
+          const branches: (Message | MessageGroup)[][] = [];
+          for (const child of children) {
+            const branch: (Message | MessageGroup)[] = [];
+            processRec(child, branch);
+            branches.push(branch);
+          }
+          out.push({ type: 'group', parentId: msg.id, branches });
+        } else if (children.length === 1) {
+          processRec(children[0], out);
+        }
+        return;
+      }
+
       const last = out[out.length - 1];
 
       if (last && isMessage(last)) {

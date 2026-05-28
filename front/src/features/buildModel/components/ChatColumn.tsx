@@ -64,6 +64,7 @@ interface ChatColumnProps {
   sqlQuery: string;
   onClearHistory: () => void;
   onRequestProfile?: () => void;
+  focusTrigger?: number;
 }
 
 const ChatColumn: React.FC<ChatColumnProps> = ({
@@ -93,15 +94,21 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   sqlQuery,
   onClearHistory,
   onRequestProfile,
+  focusTrigger,
 }) => {
   const showHistoryBanner = renderMessages.length > HISTORY_RESET_THRESHOLD;
   const estimatedTokens = showHistoryBanner ? estimateTokens(renderMessages) : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
 
   useEffect(() => {
     if (lastReasoning) setReasoningOpen(false);
   }, [lastReasoning]);
+
+  useEffect(() => {
+    if (focusTrigger) inputRef.current?.focus();
+  }, [focusTrigger]);
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -452,6 +459,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           sendMessage={onSend}
           stopStream={onStopStream}
           disabled={isSending}
+          inputRef={inputRef}
           placeholder={
             isSending
               ? 'En cours…'

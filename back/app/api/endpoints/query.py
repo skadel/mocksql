@@ -521,13 +521,36 @@ async def stream_events_route(body: StreamEventsRequest):
             return _make_serializable(obj.dict())
         return str(obj)
 
+    _CAPTURED_STEPS = {"parser", "generator", "executor"}
+    _EXCLUDED_EVENT_TYPES = {
+        "on_llm_start",
+        "on_llm_end",
+        "on_chat_model_start",
+        "on_chat_model_end",
+        "on_tool_start",
+        "on_tool_end",
+    }
+
     async def event_generator():
         try:
             async for event in graph.astream_events(
                 graph_input,
                 version="v2",
                 config={"recursion_limit": 50},
+                exclude_types=list(_EXCLUDED_EVENT_TYPES),
             ):
+                ev_type = event.get("event", "")
+                ev_name = event.get("name", "")
+
+                if (
+                    ev_type in ("on_chain_start", "on_chain_end")
+                    and ev_name not in _CAPTURED_STEPS
+                ):
+                    continue
+                if ev_type == "on_chain_stream" and ev_name != "routing":
+                    if not event.get("data", {}).get("chunk", {}).get("messages"):
+                        continue
+
                 yield f"data: {json.dumps(_make_serializable(event))}\n\n"
         except asyncio.CancelledError:
             return  # client disconnected — stop streaming silently

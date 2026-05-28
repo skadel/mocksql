@@ -14,6 +14,7 @@ type DroppableTextFieldProps = {
   disabled?: boolean;
   onFocus?: () => void;
   placeholder?: string;
+  inputRef?: React.Ref<HTMLInputElement>;
 };
 
 const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
@@ -24,6 +25,7 @@ const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
   disabled = false,
   onFocus,
   placeholder = 'Écrivez votre message…',
+  inputRef,
 }) => {
   const dispatch = useAppDispatch();
   const { loading } = useAppSelector((state) => state.buildModel);
@@ -146,6 +148,7 @@ const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
           ),
         }}
         inputProps={{ readOnly: disabled }}
+        inputRef={inputRef}
       />
 
     </div>

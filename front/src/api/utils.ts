@@ -132,6 +132,10 @@ export async function streamThunk(
           networkHint.includes('NetworkError')
         ) {
           dispatch(setError("Connexion perdue — vérifiez votre connexion réseau et réessayez."));
+        } else if (networkHint.includes('NOT_FOUND') && networkHint.toLowerCase().includes('model')) {
+          const modelMatch = networkHint.match(/model\s+['"](.*?)['"]/i) || networkHint.match(/calling model\s+'([^']+)'/i);
+          const modelName = modelMatch ? modelMatch[1] : 'le modèle LLM configuré';
+          dispatch(setError(`Modèle LLM introuvable : "${modelName}". Vérifiez le nom du modèle dans la configuration du backend.`));
         } else {
           dispatch(setError("Une erreur est survenue lors de l'exécution"));
         }
