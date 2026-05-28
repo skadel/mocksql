@@ -30,7 +30,10 @@ def _load_schema_cache(cache_path: str) -> list[dict]:
     if not p.exists():
         return []
     with open(p, encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    if isinstance(data, dict):
+        return data.get("tables", [])
+    return data
 
 
 def _read_json(p: Path) -> dict | None:

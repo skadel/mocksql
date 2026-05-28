@@ -93,6 +93,24 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
         return "[]"
 
 
+async def _bad_data_exhausted(state: QueryState):
+    """Signal the frontend that bad_data retries are exhausted — show retry button."""
+    return {
+        "messages": [
+            AIMessage(
+                content="",
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.RETRY_PROMPT,
+                    "parent": state.get("parent_message_id"),
+                    "request_id": state.get("request_id"),
+                    "test_index": state.get("test_index"),
+                },
+            )
+        ]
+    }
+
+
 async def pre_routing(state: QueryState):
     """
     Load stored sql + used_columns from the test file.
@@ -234,6 +252,7 @@ def build_query_graph():
     builder.add_node("executor", run_on_examples)
     builder.add_node("assertion_corrector", correct_assertions)
     builder.add_node("test_evaluator", evaluate_tests)
+    builder.add_node("bad_data_exhausted", _bad_data_exhausted)
     builder.add_node("suggestions_generator", generate_suggestions)
     builder.add_node("history_saver", history_saver)
     builder.add_node("other", _handle_other)
@@ -320,9 +339,9 @@ def build_query_graph():
                 )
                 return "conversational_agent"
             logger.diag(
-                "[route_evaluator] → suggestions_generator (bad_data retries épuisés)"
+                "[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)"
             )
-            return "suggestions_generator"
+            return "bad_data_exhausted"
         if feedback == "bad_assertions":
             if retries >= 0:
                 logger.diag(
@@ -346,6 +365,7 @@ def build_query_graph():
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("suggestions_generator", "history_saver")
     builder.add_edge("other", "history_saver")

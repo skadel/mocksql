@@ -1,11 +1,15 @@
 import asyncio
 import logging
 import os
+import sys
 from pathlib import Path
 
 import typer
 import yaml
 from dotenv import load_dotenv
+
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[union-attr]
 
 import utils.logger  # noqa: F401 — registers DIAG level (15) before basicConfig
 
