@@ -24,9 +24,22 @@ def get_mocksql_dir() -> Path:
     return (Path(os.getcwd()) / ".mocksql").resolve()
 
 
+_GITIGNORE_CONTENT = "data/\n"
+
+
+def ensure_mocksql_dir(mocksql_dir: Path) -> None:
+    mocksql_dir.mkdir(parents=True, exist_ok=True)
+    gitignore = mocksql_dir / ".gitignore"
+    if not gitignore.exists():
+        gitignore.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
+
+
 def get_duckdb_path() -> str:
-    cfg = load_config()
-    return cfg.get("duckdb_path") or os.getenv("DUCKDB_PATH", "data/mocksql.duckdb")
+    # env var override kept for tests (:memory:) and CI
+    env_override = os.getenv("DUCKDB_PATH")
+    if env_override:
+        return env_override
+    return str(get_mocksql_dir() / "data" / "mocksql.duckdb")
 
 
 def get_langchain_api_key() -> str | None:

@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from storage.config import (
+    ensure_mocksql_dir,
     get_mocksql_dir,
     get_models_path,
     get_preprocessor_fn,
@@ -28,7 +29,9 @@ _pending_tests: Dict[str, Dict[str, Any]] = {}
 
 
 def _tests_root() -> Path:
-    return get_mocksql_dir() / "tests"
+    mocksql_dir = get_mocksql_dir()
+    ensure_mocksql_dir(mocksql_dir)
+    return mocksql_dir / "tests"
 
 
 def _test_path(model_name: str) -> Path:

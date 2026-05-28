@@ -133,8 +133,6 @@ def init(
             f"LLM provider ({'/'.join(LLM_PROVIDERS)})", default="vertexai"
         )
 
-    duckdb_path = str((path / "data" / "mocksql.duckdb").resolve())
-
     test_dataset = typer.prompt(
         "BigQuery test dataset (where temp tables are created during validation)",
         default="test_dataset",
@@ -152,7 +150,6 @@ def init(
         "version": "2",
         "dialect": dialect,
         "models_path": models_path,
-        "duckdb_path": duckdb_path,
         "llm": {
             "provider": llm_provider,
         },
@@ -165,7 +162,13 @@ def init(
         config["langchain_api_key"] = langchain_api_key
 
     path.mkdir(parents=True, exist_ok=True)
-    (path / "data").mkdir(exist_ok=True)
+
+    from storage.config import ensure_mocksql_dir
+
+    mocksql_dir = (path / ".mocksql").resolve()
+    ensure_mocksql_dir(mocksql_dir)
+    (mocksql_dir / "data").mkdir(exist_ok=True)
+    duckdb_path = str(mocksql_dir / "data" / "mocksql.duckdb")
 
     with open(config_path, "w") as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
@@ -210,6 +213,9 @@ def profile(
 
     from cli.profile import run_profile
 
+    config = config.resolve()
+    if not output_dir.is_absolute():
+        output_dir = (config.parent / output_dir).resolve()
     asyncio.run(run_profile(model, config, output_dir))
 
 
@@ -239,6 +245,9 @@ def generate(
 
     from cli.generate import run_generate
 
+    config = config.resolve()
+    if not output_dir.is_absolute():
+        output_dir = (config.parent / output_dir).resolve()
     asyncio.run(run_generate(model, config, output_dir, profile=profile))
 
 
