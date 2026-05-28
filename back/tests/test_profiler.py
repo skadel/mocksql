@@ -23,6 +23,7 @@ from build_query.profiler import (
     _resolve_alias_to_table,
     describe_join,
     _build_partition_where,
+    _format_day_partition_values,
 )
 
 
@@ -2244,6 +2245,85 @@ class TestBuildPartitionWhere(unittest.TestCase):
             7,
         )
         self.assertIn("LIMIT 7", result)
+
+    def test_literal_in_clause_with_prefetched_values(self):
+        result = _build_partition_where(
+            "project.dataset.events",
+            {
+                "type": "time",
+                "field": "event_date",
+                "granularity": "DAY",
+                "col_type": "DATE",
+                "values": ["20240115", "20240114", "20240113"],
+            },
+            "bigquery",
+            3,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("2024-01-15", result)
+        self.assertIn("2024-01-14", result)
+        self.assertIn("2024-01-13", result)
+        self.assertNotIn("SELECT", result)
+        self.assertNotIn("LIMIT", result)
+        self.assertIn("event_date", result)
+
+    def test_literal_in_clause_ingestion_time(self):
+        result = _build_partition_where(
+            "project.dataset.logs",
+            {
+                "type": "time",
+                "field": None,
+                "granularity": "DAY",
+                "col_type": "DATE",
+                "values": ["20240115", "20240114"],
+            },
+            "bigquery",
+            3,
+        )
+        self.assertIn("_PARTITIONDATE", result)
+        self.assertIn("2024-01-15", result)
+        self.assertNotIn("SELECT", result)
+
+    def test_timestamp_col_uses_date_wrapper(self):
+        result = _build_partition_where(
+            "project.dataset.events",
+            {
+                "type": "time",
+                "field": "created_at",
+                "granularity": "DAY",
+                "col_type": "TIMESTAMP",
+                "values": ["20240115", "20240114"],
+            },
+            "bigquery",
+            3,
+        )
+        self.assertIsNotNone(result)
+        self.assertIn("DATE(`created_at`)", result)
+        self.assertIn("2024-01-15", result)
+        self.assertNotIn("SELECT", result)
+
+    def test_non_day_granularity_falls_back_to_subquery(self):
+        result = _build_partition_where(
+            "project.dataset.events",
+            {
+                "type": "time",
+                "field": "event_month",
+                "granularity": "MONTH",
+                "values": ["202401", "202312"],
+            },
+            "bigquery",
+            3,
+        )
+        self.assertIn("SELECT", result)
+        self.assertIn("LIMIT 3", result)
+
+    def test_format_day_partition_values(self):
+        self.assertEqual(
+            _format_day_partition_values(["20240115", "20240114", "20240113"]),
+            ["2024-01-15", "2024-01-14", "2024-01-13"],
+        )
+        self.assertEqual(_format_day_partition_values(["202401", "bad"]), [])
+        self.assertEqual(_format_day_partition_values([]), [])
 
 
 class TestBuildProfileQueryPartitioned(unittest.TestCase):

@@ -76,13 +76,21 @@ _API_TIMEOUT = 60.0
 _CLI_TIMEOUT = 60
 
 
-def _extract_partition_info(bq_table: Any) -> dict | None:
+def _extract_partition_info(bq_table: Any, fields: list | None = None) -> dict | None:
     """Extract partition metadata from a BigQuery Table object."""
     if bq_table.time_partitioning:
+        field_name = bq_table.time_partitioning.field
+        col_type = "DATE"
+        if field_name and fields:
+            col_type = next(
+                (f["type"] for f in fields if f["name"] == field_name),
+                "DATE",
+            )
         return {
             "type": "time",
             "granularity": bq_table.time_partitioning.type_,  # DAY, HOUR, MONTH, YEAR
-            "field": bq_table.time_partitioning.field,  # None = ingestion time (_PARTITIONDATE)
+            "field": field_name,  # None = ingestion time (_PARTITIONDATE)
+            "col_type": col_type,
         }
     if bq_table.range_partitioning:
         return {
@@ -90,6 +98,39 @@ def _extract_partition_info(bq_table: Any) -> dict | None:
             "field": bq_table.range_partitioning.field,
         }
     return None
+
+
+async def _fetch_partition_values_api(
+    client: Any,
+    proj: str,
+    dataset: str,
+    table: str,
+    limit: int = 3,
+) -> tuple[list[str], bool]:
+    """Fetch the last *limit* partition IDs from INFORMATION_SCHEMA.PARTITIONS.
+
+    Returns (values, has_null_partition) where values are raw partition_ids
+    (e.g. '20240115' for DAY granularity), excluding __NULL__ and __UNPARTITIONED__.
+    Ordering DESC puts __NULL__/__UNPARTITIONED__ first (underscore > digits in ASCII),
+    so fetching limit+5 rows is enough to capture both special entries and real dates.
+    """
+    query = (
+        f"SELECT partition_id "
+        f"FROM `{proj}.{dataset}.INFORMATION_SCHEMA.PARTITIONS` "
+        f"WHERE table_name = '{table}' "
+        f"ORDER BY partition_id DESC "
+        f"LIMIT {limit + 5}"
+    )
+    rows = await asyncio.wait_for(
+        asyncio.to_thread(lambda: list(client.query(query).result())),
+        timeout=_API_TIMEOUT,
+    )
+    all_ids = [row["partition_id"] for row in rows if row["partition_id"] is not None]
+    has_null = "__NULL__" in all_ids
+    values = [pid for pid in all_ids if pid not in ("__NULL__", "__UNPARTITIONED__")][
+        :limit
+    ]
+    return values, has_null
 
 
 async def _fetch_table_via_api(
@@ -105,7 +146,21 @@ async def _fetch_table_via_api(
         {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
         for row in _flatten_bq_schema(fields)
     ]
-    return rows, _extract_partition_info(bq_table)
+    partition = _extract_partition_info(bq_table, fields)
+    if (
+        partition
+        and partition.get("type") == "time"
+        and partition.get("granularity") == "DAY"
+    ):
+        try:
+            values, has_null = await _fetch_partition_values_api(
+                client, proj, dataset, table
+            )
+            partition["values"] = values
+            partition["has_null_partition"] = has_null
+        except Exception as exc:
+            print(f"[import] partition values fetch failed for {ref}: {exc}")
+    return rows, partition
 
 
 _AUTH_KEYWORDS = (
@@ -121,20 +176,12 @@ def _is_auth_error(exc: Exception) -> bool:
     return any(kw in msg for kw in _AUTH_KEYWORDS)
 
 
-async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
+async def _run_bq_cli(
+    cmd: list[str], billing_project: str, timeout: int = _CLI_TIMEOUT
+) -> str:
+    """Run a bq CLI command and return stdout, raising on auth errors or non-zero exit."""
     import subprocess
 
-    proj, dataset, table = parse_ref(ref, billing_project)
-    bq_ref = f"{proj}:{dataset}.{table}"
-    cmd = [
-        "bq",
-        f"--project_id={billing_project}",
-        "show",
-        "--schema",
-        "--format=prettyjson",
-        bq_ref,
-    ]
-    print(f"[import-cli] {cmd}")
     extra: dict = {}
     if os.name == "nt":
         extra["creationflags"] = subprocess.CREATE_NO_WINDOW
@@ -148,26 +195,111 @@ async def _fetch_table_via_cli(ref: str, billing_project: str) -> list:
                 text=True,
                 shell=True,
                 stdin=subprocess.DEVNULL,
-                timeout=_CLI_TIMEOUT,
+                timeout=timeout,
                 env=env,
                 **extra,
             )
         )
     except subprocess.TimeoutExpired:
-        raise RuntimeError(f"bq CLI timed out after {_CLI_TIMEOUT}s for {bq_ref}")
-    _auth_kws = ("login", "credential", "auth", "password")
+        raise RuntimeError(f"bq CLI timed out after {timeout}s: {cmd}")
     combined = (result.stdout + result.stderr).lower()
-    if any(kw in combined for kw in _auth_kws):
-        raise RuntimeError(
-            f"bq CLI not authenticated for {bq_ref}. Run: gcloud auth login"
-        )
+    if any(kw in combined for kw in ("login", "credential", "auth", "password")):
+        raise RuntimeError("bq CLI not authenticated. Run: gcloud auth login")
     if result.returncode != 0:
-        raise RuntimeError(f"bq show failed for {bq_ref}: {result.stderr.strip()}")
-    fields = json.loads(result.stdout)
-    return [
-        {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
-        for row in _flatten_bq_schema(fields)
+        raise RuntimeError(f"bq CLI failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+async def _fetch_table_via_cli(
+    ref: str, billing_project: str
+) -> tuple[list, dict | None]:
+    """Fetch schema rows and partition metadata using the bq CLI.
+
+    Uses ``bq show --format=prettyjson`` (full metadata) instead of
+    ``bq show --schema`` so that timePartitioning info is available.
+    """
+    proj, dataset, table = parse_ref(ref, billing_project)
+    bq_ref = f"{proj}:{dataset}.{table}"
+    cmd = [
+        "bq",
+        f"--project_id={billing_project}",
+        "show",
+        "--format=prettyjson",
+        bq_ref,
     ]
+    print(f"[import-cli] {cmd}")
+    stdout = await _run_bq_cli(cmd, billing_project)
+    metadata = json.loads(stdout)
+    raw_fields = (metadata.get("schema") or {}).get("fields", [])
+    rows = [
+        {"table_catalog": proj, "table_schema": dataset, "table_name": table, **row}
+        for row in _flatten_bq_schema(raw_fields)
+    ]
+    partition = _extract_partition_info_from_cli_metadata(metadata, raw_fields)
+    return rows, partition
+
+
+def _extract_partition_info_from_cli_metadata(
+    metadata: dict, fields: list
+) -> dict | None:
+    """Parse partition metadata from the ``bq show --format=prettyjson`` output."""
+    tp = metadata.get("timePartitioning")
+    if tp:
+        field_name = tp.get("field") or None
+        col_type = "DATE"
+        if field_name and fields:
+            col_type = next(
+                (f["type"] for f in fields if f.get("name") == field_name),
+                "DATE",
+            )
+        return {
+            "type": "time",
+            "granularity": tp.get("type", "DAY"),
+            "field": field_name,
+            "col_type": col_type,
+        }
+    rp = metadata.get("rangePartitioning")
+    if rp:
+        return {
+            "type": "range",
+            "field": (rp.get("field") or {}).get("field")
+            if isinstance(rp.get("field"), dict)
+            else rp.get("field"),
+        }
+    return None
+
+
+async def _fetch_partition_values_cli(
+    ref: str,
+    billing_project: str,
+    limit: int = 3,
+) -> tuple[list[str], bool]:
+    """Fetch the last *limit* partition IDs via ``bq query`` on INFORMATION_SCHEMA."""
+    proj, dataset, table = parse_ref(ref, billing_project)
+    sql = (
+        f"SELECT partition_id "
+        f"FROM `{proj}.{dataset}.INFORMATION_SCHEMA.PARTITIONS` "
+        f"WHERE table_name = '{table}' "
+        f"ORDER BY partition_id DESC "
+        f"LIMIT {limit + 5}"
+    )
+    cmd = [
+        "bq",
+        f"--project_id={billing_project}",
+        "query",
+        "--use_legacy_sql=false",
+        "--format=json",
+        "--quiet",
+        sql,
+    ]
+    stdout = await _run_bq_cli(cmd, billing_project)
+    rows = json.loads(stdout) if stdout.strip() else []
+    all_ids = [row["partition_id"] for row in rows if row.get("partition_id")]
+    has_null = "__NULL__" in all_ids
+    values = [pid for pid in all_ids if pid not in ("__NULL__", "__UNPARTITIONED__")][
+        :limit
+    ]
+    return values, has_null
 
 
 async def _fetch_single_table(
@@ -187,8 +319,23 @@ async def _fetch_single_table(
                 )
             print(f"[import] API failed for {ref} ({api_exc}), trying CLI fallback")
             try:
-                rows = await _fetch_table_via_cli(ref, billing_project)
-                return ref, rows, None, None
+                rows, partition = await _fetch_table_via_cli(ref, billing_project)
+                if (
+                    partition
+                    and partition.get("type") == "time"
+                    and partition.get("granularity") == "DAY"
+                ):
+                    try:
+                        values, has_null = await _fetch_partition_values_cli(
+                            ref, billing_project
+                        )
+                        partition["values"] = values
+                        partition["has_null_partition"] = has_null
+                    except Exception as pv_exc:
+                        print(
+                            f"[import-cli] partition values fetch failed for {ref}: {pv_exc}"
+                        )
+                return ref, rows, partition, None
             except Exception as cli_exc:
                 return ref, [], None, str(cli_exc)
 

@@ -13,7 +13,6 @@ import ReplayIcon from '@mui/icons-material/Replay';
 import WarningAmberIcon from '@mui/icons-material/WarningAmber';
 import CommentIcon from '@mui/icons-material/Comment';
 import FilterListIcon from '@mui/icons-material/FilterList';
-import SyncIcon from '@mui/icons-material/Sync';
 import FolderOpenIcon from '@mui/icons-material/FolderOpen';
 import DifferenceIcon from '@mui/icons-material/Difference';
 import {
@@ -618,36 +617,15 @@ export interface SqlStripProps {
   sqlHistory?: SqlHistoryEntry[];
   onHistorySelect?: (entry: SqlHistoryEntry) => void;
   historyRestoreTrigger?: number;
-  /** File name shown in the reload banner (e.g. "peak_growth.sql") */
   sqlFileName?: string;
-  /** Fetches the latest SQL from the source file; returns null on failure */
-  onReloadFile?: () => Promise<string | null>;
 }
 
-type ReloadStatus = 'idle' | 'loading' | 'changed' | 'same';
-
-function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName, onReloadFile }: SqlStripProps) {
+function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName }: SqlStripProps) {
   const [open, setOpen] = useState(true);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
-  const [reloadStatus, setReloadStatus] = useState<ReloadStatus>('idle');
   const prevDisabled = useRef(disabled);
   const prevTrigger = useRef(historyRestoreTrigger);
-
-  async function handleReloadFile() {
-    if (!onReloadFile || reloadStatus === 'loading') return;
-    setReloadStatus('loading');
-    const newSql = await onReloadFile();
-    if (newSql === null) { setReloadStatus('idle'); return; }
-    if (newSql.trim() !== sql.trim()) {
-      setReloadStatus('changed');
-      onUpdate?.(newSql);
-      setTimeout(() => setReloadStatus('idle'), 3000);
-    } else {
-      setReloadStatus('same');
-      setTimeout(() => setReloadStatus('idle'), 2000);
-    }
-  }
 
   useEffect(() => {
     if (prevDisabled.current && !disabled && !hasError) setOpen(false);
@@ -685,24 +663,6 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
 
   return (
     <>
-      {/* Reload banner — shown when file changed */}
-      {reloadStatus === 'changed' && (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: '6px', bgcolor: '#e9f7f0', borderBottom: '1px solid #b2e0ce' }}>
-          <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d' }} />
-          <Typography sx={{ fontSize: 11.5, color: '#23a26d', fontWeight: 600 }}>
-            Fichier rechargé — tests relancés
-          </Typography>
-        </Box>
-      )}
-      {reloadStatus === 'same' && (
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, px: 2, py: '6px', bgcolor: '#e9f7f0', borderBottom: '1px solid #b2e0ce' }}>
-          <CheckCircleIcon sx={{ fontSize: 14, color: '#23a26d' }} />
-          <Typography sx={{ fontSize: 11.5, color: '#23a26d', fontWeight: 600 }}>
-            Fichier synchronisé — aucun changement détecté
-          </Typography>
-        </Box>
-      )}
-
       <Box sx={{ bgcolor: SURFACE, borderBottom: `1px solid ${BORDER}`, flexShrink: 0 }}>
         <Box
           onClick={handleToggle}
@@ -723,30 +683,6 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
             </Typography>
           )}
           {open && <Box sx={{ flex: 1 }} />}
-          {onReloadFile && (
-            <Tooltip title="Recharger le fichier SQL et relancer les tests">
-              <Box
-                component="button"
-                onClick={(e: React.MouseEvent) => { e.stopPropagation(); handleReloadFile(); }}
-                disabled={reloadStatus === 'loading' || disabled}
-                sx={{
-                  display: 'inline-flex', alignItems: 'center', gap: '4px',
-                  px: '9px', py: '4px', fontSize: 11.5, fontWeight: 600,
-                  border: `1px solid ${BORDER}`, borderRadius: '7px',
-                  bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit', flexShrink: 0,
-                  '&:hover': { borderColor: '#2BB0A8', color: '#2BB0A8', bgcolor: '#f0fafa' },
-                  '&:disabled': { opacity: 0.5, cursor: 'not-allowed' },
-                }}
-              >
-                <SyncIcon sx={{
-                  fontSize: 13,
-                  '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
-                  animation: reloadStatus === 'loading' ? 'spin 0.8s linear infinite' : 'none',
-                }} />
-                Recharger
-              </Box>
-            </Tooltip>
-          )}
           {hasHistory && (
             <Tooltip title={`Historique (${sqlHistory!.length})`}>
               <TealIconButton
@@ -870,6 +806,7 @@ interface TestCardProps {
   areCommentsOpen: boolean;
   comments: Comment[];
   isLoading?: boolean;
+  showRetryPrompt?: boolean;
   onStartEdit: () => void;
   onSaveEdit: () => void;
   onEditDescription: (val: string) => void;
@@ -888,6 +825,7 @@ function TestCard({
   test, idx, selectedTestIndex,
   isEditing, editedDescription, isCollapsed,
   areCommentsOpen, comments, isLoading,
+  showRetryPrompt,
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
@@ -1006,6 +944,21 @@ function TestCard({
           </Box>
         )}
       </Box>
+
+      {/* Retry prompt — affiché quand bad_data retries épuisés */}
+      {showRetryPrompt && onRerunTest && (
+        <Box sx={{ px: 2, pb: 1.5 }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<ReplayIcon sx={{ fontSize: 14 }} />}
+            onClick={onRerunTest}
+            sx={{ fontSize: 12, borderColor: '#d89323', color: '#8a5c00', '&:hover': { borderColor: '#b37820', bgcolor: '#fffbf0' } }}
+          >
+            Continuer à essayer de corriger ce test ?
+          </Button>
+        </Box>
+      )}
 
       {/* Action bar */}
       <Box sx={{ display: 'flex', gap: 0.5, px: 1.5, pb: 1, justifyContent: 'flex-end', flexWrap: 'wrap' }}>
@@ -1422,6 +1375,7 @@ interface TestsPanelProps {
   onOpenChat?: () => void;
   onSuggestionClick?: (text: string) => void;
   modelId?: string;
+  retryBadDataTestIndex?: number | null;
   sqlProps?: SqlStripProps;
   staleInfo?: StaleInfo;
 }
@@ -1430,6 +1384,7 @@ interface TestsPanelProps {
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
   onUpload, onRerunTest, onOpenChat, onSuggestionClick, modelId,
+  retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
   const dispatch = useAppDispatch();
@@ -1699,6 +1654,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onEditAssertions={onEditAssertions ? () => onEditAssertions(idx) : undefined}
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
                   onUpload={onUpload}
+                  showRetryPrompt={retryBadDataTestIndex != null && retryBadDataTestIndex === test.test_index}
                 />
               );
             })}

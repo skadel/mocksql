@@ -29,3 +29,4 @@ class MsgType(str, Enum):
     SUGGESTIONS = "suggestions"
     GENERATE_TEST_SCENARIO = "generate_test_scenario"
     DEBUG_RUN_CTE = "debug_run_cte"
+    RETRY_PROMPT = "retry_prompt"

@@ -138,6 +138,13 @@ export function formatMessage(message: any): Message {
       newMessage.contents.text = message.content;
       break;
 
+    case 'retry_prompt': {
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
+      }
+      break;
+    }
+
     case MsgType.DEBUG_RUN_CTE: {
       try {
         newMessage.contents.debugRunCte = JSON.parse(message.content) as DebugRunCteResult;

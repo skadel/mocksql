@@ -157,6 +157,7 @@ export interface BuildModelState {
     workspaceMode: boolean;
     suggestions: string[];
     loadingTestIndex?: number;
+    retryBadDataTestIndex?: number | null;
 }
 
 

@@ -76,6 +76,7 @@ const ChatComponent: React.FC = () => {
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
+  const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
 
@@ -119,6 +120,7 @@ const ChatComponent: React.FC = () => {
     restoredMessageId: storedRestoredMessageId,
     lastError,
     testResults,
+    retryBadDataTestIndex,
   } = useAppSelector((state) => state.buildModel);
 
   const messagesRef = useRef(messages);
@@ -136,6 +138,37 @@ const ChatComponent: React.FC = () => {
     : '';
 
   messagesRef.current = messages;
+
+  // -------- Filesystem change detection (focus + 60s polling)
+  useEffect(() => {
+    if (!currentModelPath || !sqlQuery) return;
+    const path = currentModelPath;
+    const sql = sqlQuery;
+
+    async function check() {
+      if (isSending) return;
+      try {
+        const fileSql = await fetchModelSql(path);
+        if (fileSql && fileSql.trim() !== sql.trim()) {
+          setPendingFileSql(fileSql);
+        }
+      } catch { /* ignore */ }
+    }
+
+    const interval = setInterval(check, 60_000);
+    const onFocus = () => check();
+    const onVisibility = () => { if (document.visibilityState === 'visible') check(); };
+
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentModelPath, sqlQuery, isSending]);
 
   const renderMessages = useAppSelector(getRenderMessages);
   const lastMsgHasError = useMemo(() => {
@@ -568,6 +601,7 @@ const ChatComponent: React.FC = () => {
   const handleSQLUpdate = useCallback(
     async (newSql: string) => {
       if (isSending || !newSql.trim() || !currentModelId) return;
+      setPendingFileSql(null);
       setIsSending(true);
       setSqlDirty(true);
       setSqlQuery(newSql);
@@ -1138,6 +1172,7 @@ const ChatComponent: React.FC = () => {
                 onRerunTest={handleRerunTest}
                 onSuggestionClick={(text) => setUserInput(text)}
                 selectedTestIndex={selectedTestIndex}
+                retryBadDataTestIndex={retryBadDataTestIndex}
                 sqlProps={{
                   sql: sqlQuery,
                   onUpdate: handleSQLUpdate,
@@ -1149,26 +1184,33 @@ const ChatComponent: React.FC = () => {
                   loading: isSending,
                   hasError: lastMsgHasError,
                   sqlFileName: currentModelName || undefined,
-                  onReloadFile: currentModelPath
-                    ? async () => {
-                        try { return await fetchModelSql(currentModelPath); }
-                        catch { return null; }
-                      }
-                    : undefined,
                 }}
-                staleInfo={currentModel?.isStale ? {
-                  isStale: true,
-                  commitsSince: currentModel.commitsSince ?? 0,
-                  lastTestedAt: currentModel.updateDate,
-                  onReevaluate: handleReevaluate,
-                  currentSql: sqlQuery,
-                  onFetchNewSql: currentModelPath
-                    ? async () => {
-                        try { return await fetchModelSql(currentModelPath); }
-                        catch { return null; }
+                staleInfo={
+                  pendingFileSql
+                    ? {
+                        isStale: true,
+                        commitsSince: 0,
+                        lastTestedAt: currentModel?.updateDate,
+                        onReevaluate: () => handleSQLUpdate(pendingFileSql),
+                        currentSql: sqlQuery,
+                        onFetchNewSql: async () => pendingFileSql,
                       }
-                    : undefined,
-                } : undefined}
+                    : currentModel?.isStale
+                    ? {
+                        isStale: true,
+                        commitsSince: currentModel.commitsSince ?? 0,
+                        lastTestedAt: currentModel.updateDate,
+                        onReevaluate: handleReevaluate,
+                        currentSql: sqlQuery,
+                        onFetchNewSql: currentModelPath
+                          ? async () => {
+                              try { return await fetchModelSql(currentModelPath); }
+                              catch { return null; }
+                            }
+                          : undefined,
+                      }
+                    : undefined
+                }
                 onUpload={(uploadedData) => {
                   const lastMsg = renderMessages[renderMessages.length - 1] as any;
                   sendMessage('', sqlQuery, lastMsg?.id, lastMsg?.id, uploadedData, false);

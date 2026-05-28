@@ -32,6 +32,7 @@ const initialState: BuildModelState = {
   lastError: undefined,
   workspaceMode: false,
   suggestions: [],
+  retryBadDataTestIndex: undefined,
 };
 
 // Fonction utilitaire pour remonter du message jusqu'à la racine
@@ -149,6 +150,10 @@ export const buildModelSlice = createSlice({
 
       if (msg.contentType === 'suggestions') {
         if (Array.isArray(msg.contents.suggestions)) state.suggestions = msg.contents.suggestions;
+      }
+
+      if (msg.contentType === 'retry_prompt') {
+        state.retryBadDataTestIndex = msg.testIndex ?? null;
       }
 
       if (!silent) {
@@ -412,6 +417,7 @@ export const buildModelSlice = createSlice({
         state.loading = true;
         state.streamingReasoning = undefined;
         state.lastReasoning = undefined;
+        state.retryBadDataTestIndex = undefined;
         const { testIndex, assertionOnly } = action.meta.arg;
         state.loadingTestIndex = testIndex;
         if (testIndex !== undefined && state.testResults?.length) {

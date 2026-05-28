@@ -1414,6 +1414,15 @@ def _table_expr(table: str) -> exp.Table:
     return exp.Table(this=exp.Identifier(this=parts[0], quoted=True))
 
 
+def _format_day_partition_values(partition_ids: list[str]) -> list[str]:
+    """Convert YYYYMMDD strings to YYYY-MM-DD, skipping malformed entries."""
+    result = []
+    for pid in partition_ids:
+        if len(pid) == 8 and pid.isdigit():
+            result.append(f"{pid[:4]}-{pid[4:6]}-{pid[6:8]}")
+    return result
+
+
 def _build_partition_where(
     table: str, partition: dict, dialect: str, limit: int
 ) -> str | None:
@@ -1422,12 +1431,32 @@ def _build_partition_where(
     Only time-partitioned tables are supported (range partitioning is skipped).
     For ingestion-time partitioning (field=None) the pseudo-column _PARTITIONDATE
     is used.  For column-based partitioning the named field is used.
+
+    When the partition dict contains pre-fetched ``values`` (list of YYYYMMDD
+    strings, populated at schema-import time from INFORMATION_SCHEMA.PARTITIONS),
+    a literal IN clause is generated instead of a correlated subquery — this
+    avoids full-table scans on large partitioned tables.
     """
     if not partition or partition.get("type") != "time":
         return None
     field = partition.get("field")
     col = field if field else "_PARTITIONDATE"
     col_q = _col_id(col, dialect)
+
+    values: list[str] = partition.get("values") or []
+    granularity: str = partition.get("granularity", "DAY")
+    col_type: str = (partition.get("col_type") or "DATE").upper()
+
+    if values and granularity == "DAY":
+        date_strs = _format_day_partition_values(values)
+        if date_strs:
+            date_literals = ", ".join(f"DATE '{d}'" for d in date_strs)
+            if col_type in ("TIMESTAMP", "DATETIME"):
+                col_expr = f"DATE({col_q})"
+            else:
+                col_expr = col_q
+            return f"{col_expr} IN ({date_literals})"
+
     tbl_q = _table_expr(table).sql(dialect=dialect)
     return f"{col_q} IN (SELECT DISTINCT {col_q} FROM {tbl_q} ORDER BY {col_q} DESC LIMIT {limit})"
 
