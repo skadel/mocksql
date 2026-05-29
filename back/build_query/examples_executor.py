@@ -911,6 +911,7 @@ Puis produis :
 1. Entre 1 et plusieurs assertions SQL dbt-style sur `__result__` — autant que nécessaire pour valider ce scénario (1 suffit si le test est simple, plusieurs si la requête couvre plusieurs calculs ou cas).
    - Convention : 0 ligne si OK, des lignes si KO.
    - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse).
+   - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Pour vérifier un MAX ou une valeur relative, utilise une sous-requête sur `__result__` uniquement : `SELECT * FROM __result__ WHERE val != (SELECT MAX(val) FROM __result__)`
    - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
      `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
 
@@ -1045,6 +1046,7 @@ Contexte :
 
 Corrige uniquement le SQL pour qu'il soit valide en DuckDB.
 Règle : l'assertion doit retourner 0 ligne si OK, des lignes si KO.
+INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Si l'assertion originale référençait une autre table (source ou suffixée), réécris-la pour n'utiliser que `__result__` et ses colonnes du schéma ci-dessus.
 Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
@@ -1068,6 +1070,17 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
     except Exception as e:
         logger.diag("[regen_assertion] ERREUR: %s", e)
     return None
+
+
+_SUFFIXED_TABLE_RE = re.compile(
+    r'"[^"]+_[0-9a-f]{8}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{4}_[0-9a-f]{12}[^"]*"'
+)
+
+
+def _assertion_references_source_tables(sql: str) -> bool:
+    """Return True if the assertion SQL contains session-suffixed table names (UUID pattern).
+    These are invalid outside the current DuckDB session and must be rejected."""
+    return bool(_SUFFIXED_TABLE_RE.search(sql))
 
 
 async def _evaluate_assertions_with_retry(
@@ -1109,9 +1122,16 @@ async def _evaluate_assertions_with_retry(
                 result_df=result_df,
                 test_description=test_description,
             )
-            if new_assertion:
+            if new_assertion and not _assertion_references_source_tables(
+                new_assertion.get("sql", "")
+            ):
                 new_eval = _evaluate_assertions([new_assertion], view_name, con)
                 results[i] = new_eval[0]
+            elif new_assertion:
+                logger.diag(
+                    "[assertion_retry] assertion régénérée rejetée — référence table non-__result__: %s",
+                    new_assertion.get("sql", "")[:200],
+                )
 
     return results
 

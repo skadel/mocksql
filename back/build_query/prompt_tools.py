@@ -511,7 +511,7 @@ Génère un test unitaire conforme aux consignes ci-dessus, avec :
 - Données complètes, sans colonnes nulles ni vides (sauf si l'instruction le demande explicitement)
 - Attention stricte à la **casse exacte** des noms de tables dans le JSON
 - Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
-- Si le SQL a des conditions OR ou plusieurs branches CASE, choisir **une seule branche** et nommer explicitement la branche dans la description
+- Si le SQL a des conditions OR, plusieurs branches CASE, ou plusieurs branches UNION ALL, choisir **une seule branche** et nommer explicitement la branche dans la description — les tables spécifiques aux autres branches peuvent être laissées à null, mais les tables partagées entre branches doivent être remplies avec des valeurs cohérentes avec la branche choisie
 {non_empty_constraint}
 Voici les colonnes qui doivent être générées (les clés `data` doivent utiliser exactement le format `{{dataset}}_{{table}}` ci-dessous) :
 {[{"table_key": f"{u.get('database', '')}_{u.get('table', '')}" if u.get("database") else u.get("table", ""), "columns": u.get("used_columns", [])} for u in used_columns]}
