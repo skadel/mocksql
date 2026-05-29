@@ -250,6 +250,13 @@ def insert_examples(
         return None
 
     for table_name, records in data_dict.items():
+        if not isinstance(records, list):
+            logger.debug(
+                "Skipping table '%s' — no rows (got %r)",
+                table_name,
+                type(records).__name__,
+            )
+            continue
         logger.info(
             "Traitement de la table: %s (%d enregistrements)", table_name, len(records)
         )
