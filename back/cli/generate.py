@@ -228,7 +228,7 @@ def _extract_test_cases(final_state: dict) -> list | None:
         if not isinstance(content, list) or not content:
             continue
 
-        if content[0].get("data") is not None:
+        if isinstance(content[0], dict) and content[0].get("data") is not None:
             return content
 
     return None
