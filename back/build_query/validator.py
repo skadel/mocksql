@@ -16,6 +16,7 @@ from common_vars import get_tables_mapping
 from models.env_variables import DUCKDB_PATH, BQ_TEST_PROJECT
 from utils.errors import handle_compile_phase_exceptions, handle_post_compile_exceptions
 from utils.saver import get_message_type
+from utils.sql_code import get_all_columns_with_sources
 
 _bq_client: bigquery.Client | None = None
 
@@ -434,81 +435,6 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     expr = qualify_columns(expr, schema, infer_schema=True)
     expr = _fix_unnest_alias_conflicts(expr)
     return _fix_unnest_scope_leak(expr)
-
-
-def get_all_columns_with_sources(sql_expression):
-    col_with_sources = {}
-
-    def extract_columns_from_scope(scope):
-        for column in scope.columns:
-            table_alias = column.table
-            project_text = None
-            database_text = None
-            table_name_text = None
-            alias_text = None
-
-            if table_alias in scope.sources:
-                source = scope.sources[table_alias]
-
-                # On ignore les fausses tables créées par les UNNEST
-                if isinstance(source, exp.Unnest):
-                    continue
-
-                if isinstance(source, exp.Table):
-                    table_token = source.this
-                    table_name_text = table_token.this if table_token else table_alias
-                    alias = source.args.get("alias")
-                    alias_text = alias.text("this") if alias else table_name_text
-                    project_text = source.catalog
-                    database_text = source.db
-                else:
-                    table_name_text = table_alias
-                    alias_text = table_alias
-            else:
-                table_name_text = table_alias
-                alias_text = table_alias
-
-            # Sécurité pour ne pas stocker de sources vides
-            if not table_name_text:
-                continue
-
-            key = (project_text, database_text, table_name_text)
-            if key not in col_with_sources:
-                col_with_sources[key] = {
-                    "project": project_text,
-                    "database": database_text,
-                    "table": table_name_text,
-                    "alias": alias_text,
-                    "used_columns": set(),
-                }
-
-            col_with_sources[key]["used_columns"].add(column.name.lower())
-
-    # 1. Parcours classique des scopes
-    scopes = traverse_scope(sql_expression)
-    for scope in scopes:
-        extract_columns_from_scope(scope)
-
-    # 2. L'APPROCHE CHIRURGICALE : On extrait uniquement les morceaux de colonnes
-    global_columns = set()
-    for col in sql_expression.find_all(exp.Column):
-        # col.parts sépare les éléments (ex: hits.product.v2productname -> ['hits', 'product', 'v2productname'])
-        if hasattr(col, "parts"):
-            for part in col.parts:
-                global_columns.add(part.name.lower())
-        else:
-            global_columns.add(col.name.lower())
-
-    # 3. Formatage
-    result = []
-    for _, info in sorted(
-        col_with_sources.items(), key=lambda x: (x[0][0] or "", x[0][1] or "", x[0][2])
-    ):
-        info["used_columns"] = list(info["used_columns"])
-        info["used_identifiers"] = list(global_columns)
-        result.append(info)
-
-    return result
 
 
 def find_columns_used(data):

@@ -1,6 +1,11 @@
 import json
 
 import sqlglot as sg
+from sqlglot import MappingSchema
+from sqlglot import expressions as exp
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.qualify_columns import qualify_columns
+from sqlglot.optimizer.qualify_tables import qualify_tables
 from sqlglot.optimizer.scope import traverse_scope
 
 from utils.examples import strip_qualifiers_with_scope
@@ -336,3 +341,113 @@ def safe_process_sql(content, dialect, remove_db=False):
     except (json.JSONDecodeError, TypeError):
         # Si le content n'est pas un JSON valide, on renvoie simplement le contenu original
         return content
+
+
+def get_all_columns_with_sources(sql_expression: sg.exp.Expression) -> list[dict]:
+    """Retourne pour chaque table source les colonnes réellement référencées dans l'AST qualifié."""
+    col_with_sources: dict[tuple, dict] = {}
+
+    def _extract(scope) -> None:
+        for column in scope.columns:
+            table_alias = column.table
+            project_text = None
+            database_text = None
+            table_name_text = None
+            alias_text = None
+
+            if table_alias in scope.sources:
+                source = scope.sources[table_alias]
+                if isinstance(source, exp.Unnest):
+                    continue
+                if isinstance(source, exp.Table):
+                    table_token = source.this
+                    table_name_text = table_token.this if table_token else table_alias
+                    alias = source.args.get("alias")
+                    alias_text = alias.text("this") if alias else table_name_text
+                    project_text = source.catalog
+                    database_text = source.db
+                else:
+                    table_name_text = table_alias
+                    alias_text = table_alias
+            else:
+                table_name_text = table_alias
+                alias_text = table_alias
+
+            if not table_name_text:
+                continue
+
+            key = (project_text, database_text, table_name_text)
+            if key not in col_with_sources:
+                col_with_sources[key] = {
+                    "project": project_text,
+                    "database": database_text,
+                    "table": table_name_text,
+                    "alias": alias_text,
+                    "used_columns": set(),
+                }
+            col_with_sources[key]["used_columns"].add(column.name.lower())
+
+    global_columns: set[str] = set()
+    for col in sql_expression.find_all(exp.Column):
+        if hasattr(col, "parts"):
+            for part in col.parts:
+                global_columns.add(part.name.lower())
+        else:
+            global_columns.add(col.name.lower())
+
+    for scope in traverse_scope(sql_expression):
+        _extract(scope)
+
+    result = []
+    for _, info in sorted(
+        col_with_sources.items(), key=lambda x: (x[0][0] or "", x[0][1] or "", x[0][2])
+    ):
+        info["used_columns"] = list(info["used_columns"])
+        info["used_identifiers"] = list(global_columns)
+        result.append(info)
+    return result
+
+
+def extract_used_columns_from_sql(
+    sql: str, dialect: str, schemas: list[dict]
+) -> list[str]:
+    """Extrait les colonnes réellement référencées dans sql et retourne la liste JSON-encodée.
+
+    Utilise sqlglot qualify_tables + qualify_columns pour résoudre les alias, puis
+    get_all_columns_with_sources pour ne conserver que les colonnes des vraies tables
+    (celles avec un database, donc pas les CTEs).
+    """
+    mapping: dict[str, dict] = {}
+    for tbl in schemas:
+        parts = tbl["table_name"].split(".")
+        key = ".".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+        mapping[key] = {
+            col["name"]: col.get("bq_ddl_type") or col.get("type", "STRING")
+            for col in tbl.get("columns", [])
+            if "." not in col["name"]
+        }
+
+    schema = MappingSchema()
+    for table_name, cols in mapping.items():
+        schema.add_table(table_name, cols, dialect=dialect)
+
+    parsed = sg.parse_one(sql, read=dialect)
+    parsed = normalize_identifiers(parsed, dialect=dialect)
+    parsed = qualify_tables(parsed)
+    parsed = qualify_columns(parsed, schema, infer_schema=True)
+
+    result = []
+    for entry in get_all_columns_with_sources(parsed):
+        if not entry.get("database"):
+            continue  # CTE ou ref non résolue
+        result.append(
+            json.dumps(
+                {
+                    "project": entry["project"] or "",
+                    "database": entry["database"],
+                    "table": entry["table"],
+                    "used_columns": sorted(entry["used_columns"]),
+                }
+            )
+        )
+    return result
