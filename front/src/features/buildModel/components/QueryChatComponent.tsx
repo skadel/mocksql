@@ -19,7 +19,7 @@ import ArtefactHeader from './ArtefactHeader';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
 import SqlEditor from '../../../shared/SqlEditor';
-import { chatQuery, stopStream, validateQueryApi, checkProfileApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
+import { chatQuery, stopStream, validateQueryApi, checkProfileApi, buildProfileRequestApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
 import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
@@ -59,9 +59,10 @@ const ChatComponent: React.FC = () => {
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
   const [pendingAutoProfile, setPendingAutoProfile] = useState<{
-    profileRequest: ProfileRequest;
+    profileRequest: ProfileRequest | null;
     onConfirm: () => Promise<void>;
     onSkip: () => Promise<void>;
+    onCancel: () => void;
   } | null>(null);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -399,38 +400,50 @@ const ChatComponent: React.FC = () => {
     const usedColumns = validateResult.used_columns ?? [];
     try {
       const profileResult = await checkProfileApi({ sql, project: '', dialect: DIALECT, session: sessionId, used_columns: usedColumns });
-      if (!profileResult.profile_complete && profileResult.profile_request) {
-        if (profileResult.auto_profile_available && profileResult.profile_request.profile_query) {
-          setValidationStatus('valid');
-          navigate(`/models/${sessionId}`);
-          dispatch(setCurrentId(sessionId));
-          const req = profileResult.profile_request;
-          const doStream = () => {
-            setPendingFirstLoad(true);
-            isGeneratingRef.current = true;
-            dispatch(chatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' }));
-          };
-          setPendingAutoProfile({
-            profileRequest: req,
-            onConfirm: async () => {
-              setIsAutoProfileRunning(true);
-              try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: sessionId }); } catch {}
-              setIsAutoProfileRunning(false);
-              setPendingAutoProfile(null);
-              doStream();
-            },
-            onSkip: async () => {
-              setPendingAutoProfile(null);
-              try { await skipProfilingApi({ session: sessionId }); } catch {}
-              doStream();
-            },
-          });
-          pendingSessionRef.current = null;
-          setIsSending(false);
-          return;
-        } else {
-          try { await skipProfilingApi({ session: sessionId }); } catch {}
-        }
+      if (!profileResult.profile_complete && profileResult.auto_profile_available && profileResult.missing_columns?.length) {
+        setValidationStatus('valid');
+        navigate(`/models/${sessionId}`);
+        dispatch(setCurrentId(sessionId));
+        const doStream = () => {
+          setPendingFirstLoad(true);
+          isGeneratingRef.current = true;
+          dispatch(chatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' }));
+        };
+        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
+        setPendingAutoProfile({
+          profileRequest: null,
+          onConfirm: async () => {
+            const req = resolvedReq;
+            if (!req) return;
+            setIsAutoProfileRunning(true);
+            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: sessionId }); } catch {}
+            setIsAutoProfileRunning(false);
+            setPendingAutoProfile(null);
+            doStream();
+          },
+          onSkip: async () => {
+            setPendingAutoProfile(null);
+            try { await skipProfilingApi({ session: sessionId }); } catch {}
+            doStream();
+          },
+          onCancel: () => {
+            setPendingAutoProfile(null);
+            dispatch(resetContext());
+            dispatch(setCurrentId(''));
+            navigate('/');
+          },
+        });
+        buildProfileRequestApi({ sql, project: '', dialect: DIALECT, session: sessionId, missing_columns: profileResult.missing_columns })
+          .then(({ profile_request }) => {
+            resolvedReq = profile_request;
+            setPendingAutoProfile((prev) => prev ? { ...prev, profileRequest: profile_request } : prev);
+          })
+          .catch(() => {});
+        pendingSessionRef.current = null;
+        setIsSending(false);
+        return;
+      } else if (!profileResult.profile_complete) {
+        try { await skipProfilingApi({ session: sessionId }); } catch {}
       }
     } catch {}
 
@@ -698,11 +711,13 @@ const ChatComponent: React.FC = () => {
       }
       if (result.profile_complete) {
         doStream();
-      } else if (result.profile_request?.profile_query && result.auto_profile_available) {
-        const req = result.profile_request;
+      } else if (result.auto_profile_available && result.missing_columns?.length) {
+        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
         setPendingAutoProfile({
-          profileRequest: req,
+          profileRequest: null,
           onConfirm: async () => {
+            const req = resolvedReq;
+            if (!req) return;
             setIsAutoProfileRunning(true);
             try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
             setIsAutoProfileRunning(false);
@@ -714,7 +729,14 @@ const ChatComponent: React.FC = () => {
             try { await skipProfilingApi({ session: currentModelId }); } catch {}
             doStream();
           },
+          onCancel: () => setPendingAutoProfile(null),
         });
+        buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns })
+          .then(({ profile_request }) => {
+            resolvedReq = profile_request;
+            setPendingAutoProfile((prev) => prev ? { ...prev, profileRequest: profile_request } : prev);
+          })
+          .catch(() => {});
       } else {
         doStream();
       }
@@ -732,12 +754,14 @@ const ChatComponent: React.FC = () => {
         dispatch(setError(result.profile_error));
         return;
       }
-      if (result.profile_complete) return; // nothing to profile (no used_columns)
-      if (result.profile_request?.profile_query && result.auto_profile_available) {
-        const req = result.profile_request;
+      if (result.profile_complete) return;
+      if (result.auto_profile_available && result.missing_columns?.length) {
+        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
         setPendingAutoProfile({
-          profileRequest: req,
+          profileRequest: null,
           onConfirm: async () => {
+            const req = resolvedReq;
+            if (!req) return;
             setIsAutoProfileRunning(true);
             try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
             setIsAutoProfileRunning(false);
@@ -746,7 +770,14 @@ const ChatComponent: React.FC = () => {
           onSkip: async () => {
             setPendingAutoProfile(null);
           },
+          onCancel: () => setPendingAutoProfile(null),
         });
+        buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns })
+          .then(({ profile_request }) => {
+            resolvedReq = profile_request;
+            setPendingAutoProfile((prev) => prev ? { ...prev, profileRequest: profile_request } : prev);
+          })
+          .catch(() => {});
       }
     } catch (e) {
       console.error('[handleRefreshProfile]', e);
@@ -1272,42 +1303,55 @@ const ChatComponent: React.FC = () => {
               </Box>
             </Box>
 
-            {/* Billing + download SQL */}
-            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
-              {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
-                <>
-                  <Typography variant="caption" sx={{ color: '#aaa' }}>Scan estimé :</Typography>
-                  <Chip
-                    label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
-                      ? '< 0,001'
-                      : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
+            {/* Billing + download SQL — affichés uniquement quand le build-profile-request est résolu */}
+            {pendingAutoProfile.profileRequest === null ? (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1, color: '#bbb' }}>
+                <LinearProgress
+                  variant="indeterminate"
+                  sx={{ flex: 1, height: 4, borderRadius: 2, bgcolor: '#f0f0f0', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }}
+                />
+                <Typography variant="caption" sx={{ color: '#aaa', whiteSpace: 'nowrap' }}>
+                  Estimation en cours…
+                </Typography>
+              </Box>
+            ) : (
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+                {pendingAutoProfile.profileRequest.billing_tb !== undefined && (
+                  <>
+                    <Typography variant="caption" sx={{ color: '#aaa' }}>Scan estimé :</Typography>
+                    <Chip
+                      label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
+                        ? '< 0,001'
+                        : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
+                      size="small"
+                      sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
+                    />
+                  </>
+                )}
+                <Tooltip title="Télécharger la requête SQL de profiling (.sql)">
+                  <IconButton
                     size="small"
-                    sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
-                  />
-                </>
-              )}
-              <Tooltip title="Télécharger la requête SQL de profiling (.sql)">
-                <IconButton
-                  size="small"
-                  onClick={() => {
-                    const queries = pendingAutoProfile.profileRequest.profile_queries;
-                    const sql = queries && queries.length > 1
-                      ? queries.map((q, i) => `-- Requête ${i + 1}\n${q}`).join('\n\n')
-                      : pendingAutoProfile.profileRequest.profile_query;
-                    const blob = new Blob([sql], { type: 'text/plain' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = 'profiling_query.sql';
-                    a.click();
-                    URL.revokeObjectURL(url);
-                  }}
-                  sx={{ color: '#bbb', '&:hover': { color: '#1ca8a4' } }}
-                >
-                  <DownloadIcon fontSize="small" />
-                </IconButton>
-              </Tooltip>
-            </Box>
+                    onClick={() => {
+                      const req = pendingAutoProfile.profileRequest!;
+                      const queries = req.profile_queries;
+                      const sql = queries && queries.length > 1
+                        ? queries.map((q, i) => `-- Requête ${i + 1}\n${q}`).join('\n\n')
+                        : req.profile_query;
+                      const blob = new Blob([sql], { type: 'text/plain' });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a');
+                      a.href = url;
+                      a.download = 'profiling_query.sql';
+                      a.click();
+                      URL.revokeObjectURL(url);
+                    }}
+                    sx={{ color: '#bbb', '&:hover': { color: '#1ca8a4' } }}
+                  >
+                    <DownloadIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Box>
+            )}
 
             {isAutoProfileRunning && (
               <Box sx={{ mt: 1, pb: 1 }}>
@@ -1323,6 +1367,14 @@ const ChatComponent: React.FC = () => {
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
             <Button
+              variant="text"
+              onClick={() => pendingAutoProfile.onCancel()}
+              disabled={isAutoProfileRunning}
+              sx={{ textTransform: 'none', color: '#999', mr: 'auto', '&:hover': { bgcolor: 'transparent', color: '#666' } }}
+            >
+              Annuler
+            </Button>
+            <Button
               variant="outlined"
               onClick={() => pendingAutoProfile.onSkip()}
               disabled={isAutoProfileRunning}
@@ -1333,7 +1385,7 @@ const ChatComponent: React.FC = () => {
             <Button
               variant="contained"
               onClick={pendingAutoProfile.onConfirm}
-              disabled={isAutoProfileRunning}
+              disabled={isAutoProfileRunning || pendingAutoProfile.profileRequest === null}
               sx={{ textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' } }}
             >
               {isAutoProfileRunning ? t('loading.profiling_short') : t('action.run_profiling')}

@@ -1,7 +1,7 @@
 import UploadIcon from '@mui/icons-material/Upload';
 import { Dialog, DialogActions, DialogContent, DialogTitle, Tooltip, Typography } from '@mui/material';
+import ExcelJS from 'exceljs';
 import React, { useRef, useState } from 'react';
-import * as XLSX from 'xlsx';
 import { MutedIconButton, PrimaryButton } from '../style/AppButtons';
 import { StyledButton } from '../style/StyledComponents';
 
@@ -16,34 +16,40 @@ const ExcelUploader: React.FC<ExcelUploaderProps> = ({ onUpload }) => {
     const handleOpen = () => setOpen(true);
     const handleClose = () => setOpen(false);
 
-    const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const file = event.target.files?.[0];
-        if (file) {
-            const reader = new FileReader();
-            reader.onload = (e) => {
-                const data = new Uint8Array(e.target?.result as ArrayBuffer);
-                const workbook = XLSX.read(data, { type: 'array' });
-                const result: Record<string, any[]> = {};
+        if (!file) return;
 
-                workbook.SheetNames.forEach((sheetName) => {
-                    const worksheet = workbook.Sheets[sheetName];
-                    const rawData = XLSX.utils.sheet_to_json(worksheet, { defval: null });
+        const buffer = await file.arrayBuffer();
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(buffer);
 
-                    const processedData = rawData.map((row) => {
-                        // Assert the type of row to avoid TypeScript errors
-                        return Object.fromEntries(
-                            Object.entries(row as Record<string, any>).map(([key, value]) => [key, value === '' ? null : value])
-                        );
+        const result: Record<string, any[]> = {};
+
+        workbook.eachSheet((worksheet) => {
+            const rows: Record<string, any>[] = [];
+            let headers: string[] = [];
+
+            worksheet.eachRow((row, rowNumber) => {
+                const values = (row.values as any[]).slice(1); // ExcelJS row values are 1-indexed
+                if (rowNumber === 1) {
+                    headers = values.map((v) => String(v ?? ''));
+                } else {
+                    const obj: Record<string, any> = {};
+                    headers.forEach((h, i) => {
+                        const val = values[i];
+                        obj[h] = val === undefined || val === '' ? null : val;
                     });
-                    result[sheetName] = processedData;
-                });
+                    rows.push(obj);
+                }
+            });
 
-                console.log(result);
-                onUpload(result);
-                handleClose();
-            };
-            reader.readAsArrayBuffer(file);
-        }
+            result[worksheet.name] = rows;
+        });
+
+        console.log(result);
+        onUpload(result);
+        handleClose();
     };
 
     return (

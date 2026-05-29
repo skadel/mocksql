@@ -333,13 +333,43 @@ export interface CheckProfileResult {
   profile_complete: boolean;
   profile_error?: string;
   auto_profile_available?: boolean;
-  profile_request?: import('../utils/types').ProfileRequest;
+  missing_columns?: any[];
 }
 
 export const checkProfileApi = async (params: CheckProfileParams): Promise<CheckProfileResult> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
     `${import.meta.env.VITE_BACKEND_URL}/api/check-profile`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify(params),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw data;
+  return data;
+};
+
+export interface BuildProfileRequestParams {
+  sql: string;
+  project: string;
+  dialect: string;
+  session: string;
+  missing_columns: any[];
+}
+
+export interface BuildProfileRequestResult {
+  profile_request: import('../utils/types').ProfileRequest;
+}
+
+export const buildProfileRequestApi = async (params: BuildProfileRequestParams): Promise<BuildProfileRequestResult> => {
+  const token = localStorage.getItem('jwt') || '';
+  const response = await fetch(
+    `${import.meta.env.VITE_BACKEND_URL}/api/build-profile-request`,
     {
       method: 'POST',
       headers: {

@@ -1,7 +1,7 @@
 import DownloadIcon from '@mui/icons-material/Download';
 import { Tooltip } from '@mui/material';
+import ExcelJS from 'exceljs';
 import React from 'react';
-import * as XLSX from 'xlsx';
 import { MutedIconButton } from '../style/AppButtons';
 
 interface ExcelDownloaderProps {
@@ -10,16 +10,11 @@ interface ExcelDownloaderProps {
 }
 
 const ExcelDownloader: React.FC<ExcelDownloaderProps> = ({ data, fileName = 'data.xlsx' }) => {
-    const downloadExcel = () => {
-        // Create a new workbook
-        const workbook = XLSX.utils.book_new();
+    const downloadExcel = async () => {
+        const workbook = new ExcelJS.Workbook();
 
-        // Iterate over each key in the data object
         const usedNames = new Set<string>();
         Object.keys(data).forEach((key) => {
-            // Convert each array in the data object to a worksheet
-            const worksheet = XLSX.utils.json_to_sheet(data[key]);
-            // Append the worksheet to the workbook with the key as the sheet name
             let sheetName = key.slice(0, 31);
             if (usedNames.has(sheetName)) {
                 let i = 1;
@@ -27,21 +22,27 @@ const ExcelDownloader: React.FC<ExcelDownloaderProps> = ({ data, fileName = 'dat
                 sheetName = `${sheetName.slice(0, 28)}_${i}`;
             }
             usedNames.add(sheetName);
-            XLSX.utils.book_append_sheet(workbook, worksheet, sheetName);
+
+            const worksheet = workbook.addWorksheet(sheetName);
+            const rows = data[key];
+            if (rows.length > 0) {
+                const headers = Object.keys(rows[0]);
+                worksheet.addRow(headers);
+                rows.forEach((row) => worksheet.addRow(headers.map((h) => row[h])));
+            }
         });
 
-        // Write the workbook and create a blob
-        const excelBuffer = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
-        const blob = new Blob([excelBuffer], { type: 'application/octet-stream' });
+        const buffer = await workbook.xlsx.writeBuffer();
+        const blob = new Blob([buffer], {
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        });
         const url = window.URL.createObjectURL(blob);
 
-        // Create a link and trigger the download
         const link = document.createElement('a');
         link.href = url;
         link.setAttribute('download', fileName);
         document.body.appendChild(link);
         link.click();
-
         document.body.removeChild(link);
         window.URL.revokeObjectURL(url);
     };
