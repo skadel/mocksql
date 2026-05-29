@@ -23,9 +23,9 @@ Exemples :
 
 ```
 VERTEX_PROJECT=pipetalk-493612
-CREDS=/c/Users/skhir/pipetalk-493612-5423f51f8585.json
-BACK=/c/Users/skhir/workspace/mocksql/back
 GEMINI_MODEL=gemini-3.1-flash-lite-preview   ← NE PAS changer ce nom de modèle
+ROOT=$(git rev-parse --show-toplevel)
+BACK=$ROOT/back
 ```
 
 > Le modèle LLM **doit** être `gemini-3.1-flash-lite-preview`. Le défaut du backend (`gemini-2.0-flash-lite`) n'existe pas sur ce projet Vertex et retourne 404.
@@ -43,40 +43,36 @@ GEMINI_MODEL=gemini-3.1-flash-lite-preview   ← NE PAS changer ce nom de modèl
 ```bash
 # Lister les .sql disponibles
 ls <projet>/models/*.sql | xargs -I{} basename {} .sql
-
-# Lister les tests déjà générés
-ls <projet>/.mocksql/tests/*.json | xargs -I{} basename {} .json
 ```
 
-Les modèles sans `.json` correspondant → à générer à l'étape 3.
+Tous les modèles `.sql` sont (re)générés à chaque évaluation — même si un `.json` existe déjà.
 
-> **Tables wildcard** (`ga_sessions_*`, etc.) : le CLI ne peut pas résoudre leur schéma.
-> Ces modèles afficheront `[WARN] Unqualified table refs` puis `[ERROR] No schemas available` — c'est normal, les ignorer silencieusement.
+### 3. Générer les tests
 
-### 3. Générer les tests manquants
-
-Pour chaque modèle sans test (sauf ceux avec tables wildcard) :
+Pour chaque modèle :
 
 ```bash
+ROOT=$(git rev-parse --show-toplevel)
 VERTEX_PROJECT=pipetalk-493612 \
-GOOGLE_APPLICATION_CREDENTIALS=/c/Users/skhir/pipetalk-493612-5423f51f8585.json \
 DUCKDB_PATH=<projet>/.mocksql/mocksql.duckdb \
-poetry -C /c/Users/skhir/workspace/mocksql/back run mocksql generate \
+poetry -C $ROOT/back run mocksql generate \
   <projet>/models/<model>.sql \
   --config <projet>/mocksql.yml \
   --output <projet>/.mocksql/tests
 ```
+
+> Les credentials GCP sont lus depuis `back/.env` via `load_dotenv()` au démarrage du backend. Si la commande hang sur les appels BigQuery, vérifier que `GOOGLE_APPLICATION_CREDENTIALS` est bien défini dans `back/.env` avec un chemin absolu vers la clé de service account.
 
 ### 4. Lancer l'eval
 
 Passer **uniquement** les modèles qui ont un `.json` dans `.mocksql/tests/` :
 
 ```bash
+ROOT=$(git rev-parse --show-toplevel)
 VERTEX_PROJECT=pipetalk-493612 \
-GOOGLE_APPLICATION_CREDENTIALS=/c/Users/skhir/pipetalk-493612-5423f51f8585.json \
 GOOGLE_CLOUD_PROJECT=pipetalk-493612 \
-poetry -C /c/Users/skhir/workspace/mocksql/back run python \
-  /c/Users/skhir/workspace/mocksql/examples/eval/run_eval.py \
+poetry -C $ROOT/back run python \
+  $ROOT/examples/eval/run_eval.py \
   --project <projet_absolu> \
   [--models <model1> <model2> ...] \
   --gcp-project pipetalk-493612 \

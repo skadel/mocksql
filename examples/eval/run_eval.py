@@ -15,6 +15,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+_BACK_ENV = Path(__file__).parent.parent.parent / "back" / ".env"
+load_dotenv(_BACK_ENV)
+
 sys.path.insert(0, str(Path(__file__).parent))
 from judge import judge_first_test
 
