@@ -48,7 +48,9 @@ def match_refs_against_cache(
             continue
 
         # Try suffix match (dataset.table or just table)
-        candidates = [v for k, v in cached_by_name.items() if k.endswith(qualified_lower)]
+        candidates = [
+            v for k, v in cached_by_name.items() if k.endswith(qualified_lower)
+        ]
         if candidates:
             matched.extend(candidates)
         else:

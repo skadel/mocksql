@@ -46,7 +46,7 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
         raise typer.Exit(1)
 
     typer.echo(f"Reading {model}...")
-    sql = read_sql(model, preprocessor_fn, config.parent)
+    sql = read_sql(model, preprocessor_fn, config.parent, dialect)
 
     refs = extract_real_table_refs(sql, dialect)
     if not refs:

@@ -18,7 +18,11 @@ from cli.schema_cache import (
 )
 from storage.config import load_preprocessor_fn
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
-from utils.sql_code import extract_real_table_refs, extract_used_columns_from_sql
+from utils.sql_code import (
+    extract_real_table_refs,
+    extract_select_statement,
+    extract_used_columns_from_sql,
+)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -36,14 +40,22 @@ def load_config(config_path: Path) -> dict:
 # ── SQL reading ───────────────────────────────────────────────────────────────
 
 
-def read_sql(model_path: Path, preprocessor_fn: str | None, config_dir: Path) -> str:
+def read_sql(
+    model_path: Path,
+    preprocessor_fn: str | None,
+    config_dir: Path,
+    dialect: str = "bigquery",
+) -> str:
     if not model_path.exists():
         raise FileNotFoundError(f"Model not found: {model_path}")
     raw_sql = model_path.read_text(encoding="utf-8")
-    if not preprocessor_fn:
-        return raw_sql
-    fn = load_preprocessor_fn(preprocessor_fn, config_dir)
-    return fn(raw_sql)
+    sql = (
+        load_preprocessor_fn(preprocessor_fn, config_dir)(raw_sql)
+        if preprocessor_fn
+        else raw_sql
+    )
+    clean = extract_select_statement(sql, dialect)
+    return clean if clean is not None else sql
 
 
 # ── State builder ─────────────────────────────────────────────────────────────
@@ -308,9 +320,9 @@ async def run_generate(
     )
     preprocessor_fn = cfg.get("preprocessor_fn")
 
-    # Step 1 — read SQL
+    # Step 1 — read SQL (DECLARE/SET preambles are stripped inside read_sql)
     typer.echo(f"Reading {model}...")
-    sql = read_sql(model, preprocessor_fn, config.parent)
+    sql = read_sql(model, preprocessor_fn, config.parent, dialect)
 
     # Step 1.5 — fail fast if the query requires generating too many rows
     from build_query.constraint_simplifier import (

@@ -54,16 +54,10 @@ def check_models(
         models_path = config_path.parent / models_path
 
     preprocessor_fn: str | None = cfg.get("preprocessor_fn")
+    dialect: str = cfg.get("dialect", "bigquery")
     tests_root = config_path.parent / ".mocksql" / "tests"
 
-    preprocess = None
-    if preprocessor_fn:
-        from storage.config import load_preprocessor_fn
-
-        try:
-            preprocess = load_preprocessor_fn(preprocessor_fn, config_path.parent)
-        except Exception:
-            pass
+    from cli.generate import read_sql
 
     test_index = _index_test_files(tests_root)
 
@@ -94,8 +88,12 @@ def check_models(
                 has_failures = True
             continue
 
-        raw_sql = sql_file.read_text(encoding="utf-8")
-        current_sql = preprocess(raw_sql) if preprocess else raw_sql
+        try:
+            current_sql = read_sql(
+                sql_file, preprocessor_fn, config_path.parent, dialect
+            )
+        except Exception:
+            current_sql = sql_file.read_text(encoding="utf-8")
 
         try:
             doc = json.loads(test_file.read_text(encoding="utf-8"))

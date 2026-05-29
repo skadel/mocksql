@@ -662,9 +662,8 @@ async def generate_examples_(
 
     data_model = create_pydantic_models(llm_filtered_schema)
     output_type = get_generation_output_type(data_model, existing_tests)
-    parser = create_output_fixing_parser(
-        PydanticOutputParser(pydantic_object=output_type)
-    )
+    raw_parser = PydanticOutputParser(pydantic_object=output_type)
+    parser = create_output_fixing_parser(raw_parser)
 
     eval_context = _build_eval_context(state, existing_tests)
 
@@ -673,7 +672,7 @@ async def generate_examples_(
         existing_tests,
         history,
         used_columns,
-        parser.get_format_instructions(),
+        raw_parser.get_format_instructions(),
         constraints_hint="",
         excluded_columns=excluded_col_names,
         eval_context=eval_context,
