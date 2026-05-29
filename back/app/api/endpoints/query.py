@@ -218,7 +218,6 @@ async def check_profile_route(body: CheckProfileRequest):
     import logging
     from build_query.profile_checker import (
         check_profile,
-        build_profile_request,
         _find_missing_columns,
     )
 
@@ -242,7 +241,6 @@ async def check_profile_route(body: CheckProfileRequest):
     }
 
     if body.force:
-        # Force refresh: treat all used_columns as missing (ignore cached profile)
         missing_columns = _find_missing_columns({}, used_columns)
         if not missing_columns:
             return {"profile_complete": True}
@@ -258,11 +256,44 @@ async def check_profile_route(body: CheckProfileRequest):
 
         missing_columns = checked["missing_columns"]
 
+    return {
+        "profile_complete": False,
+        "auto_profile_available": AUTO_PROFILING,
+        "missing_columns": missing_columns,
+    }
+
+
+class BuildProfileRequestBody(BaseModel):
+    sql: str
+    project: str
+    dialect: str
+    session: str
+    missing_columns: list
+
+
+@router.post("/build-profile-request")
+async def build_profile_request_route(body: BuildProfileRequestBody):
+    import logging
+    from build_query.profile_checker import build_profile_request
+
+    state = {
+        "project": body.project,
+        "user": "local",
+        "dialect": body.dialect,
+        "session": body.session,
+        "query": body.sql,
+        "used_columns": [],
+        "schemas": [],
+        "messages": [],
+        "parent_message_id": "",
+        "request_id": "",
+    }
+
     try:
-        request = await build_profile_request(state, missing_columns)
+        request = await build_profile_request(state, body.missing_columns)
     except Exception as exc:
         logging.getLogger(__name__).error("[build_profile_request] error: %s", exc)
-        return {"profile_complete": False, "profile_error": str(exc)}
+        raise HTTPException(status_code=500, detail=str(exc))
 
     profile_request: dict = {
         "profile_query": request.get("profile_sql", ""),
@@ -274,11 +305,7 @@ async def check_profile_route(body: CheckProfileRequest):
     if billing_tb is not None:
         profile_request["billing_tb"] = billing_tb
 
-    return {
-        "profile_complete": False,
-        "auto_profile_available": AUTO_PROFILING,
-        "profile_request": profile_request,
-    }
+    return {"profile_request": profile_request}
 
 
 class SkipProfilingRequest(BaseModel):

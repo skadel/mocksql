@@ -162,22 +162,11 @@ class TestCheckProfile:
         assert resp.status_code == 200
         assert resp.json()["profile_complete"] is True
 
-    async def test_profile_incomplete_returns_request(self, client):
+    async def test_profile_incomplete_returns_missing_columns(self, client):
         check_result = {"profile_complete": False, "missing_columns": ["col1"]}
-        profile_req = {
-            "profile_sql": "SELECT col1 FROM orders",
-            "missing_columns": ["col1"],
-            "expected_joins": [],
-        }
-        with (
-            patch(
-                "build_query.profile_checker.check_profile",
-                new=AsyncMock(return_value=check_result),
-            ),
-            patch(
-                "build_query.profile_checker.build_profile_request",
-                new=AsyncMock(return_value=profile_req),
-            ),
+        with patch(
+            "build_query.profile_checker.check_profile",
+            new=AsyncMock(return_value=check_result),
         ):
             resp = await client.post(
                 "/api/check-profile",
@@ -193,8 +182,8 @@ class TestCheckProfile:
         assert resp.status_code == 200
         data = resp.json()
         assert data["profile_complete"] is False
-        assert "profile_request" in data
-        assert data["profile_request"]["profile_query"] == "SELECT col1 FROM orders"
+        assert data["missing_columns"] == ["col1"]
+        assert "auto_profile_available" in data
 
     async def test_missing_fields_returns_422(self, client):
         resp = await client.post("/api/check-profile", json={"sql": VALID_SQL})
