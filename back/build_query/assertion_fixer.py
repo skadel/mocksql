@@ -166,18 +166,20 @@ def _build_prompt(sql: str, test: dict, evaluator_explanation: str) -> str:
 L'évaluateur a jugé ce test Insuffisant à cause des assertions (logique incorrecte,
 conditions inversées, valeurs attendues erronées, etc.).
 
-Corrige la description du test pour qu'elle décrive **précisément et correctement**
-ce que le test doit vérifier. Cette description sera utilisée pour générer de nouvelles
-assertions SQL — elle doit être suffisamment précise pour éviter les ambiguïtés.
+Génère une nouvelle description qui décrit le scénario métier à valider.
 
-Ne touche PAS aux données d'entrée (`data`).
+Règles strictes :
+- La description doit être **métier et courte** (max 15 mots) — elle décrit CE QUE le test vérifie, pas POURQUOI l'ancienne version était incorrecte.
+- Ne mentionne PAS la correction, les assertions précédentes, ni l'explication du verdict.
+- Écris comme si c'était un nouveau test, sans référence au problème rencontré.
+- Ne touche PAS aux données d'entrée (`data`).
 
 Réponds avec un objet JSON strict :
 ```json
 {{
   "test_name": "Nom court du scénario (3–6 mots)",
-  "unit_test_description": "Vérifie que … (description précise, sans ambiguïté, actionnable)",
-  "unit_test_build_reasoning": "Explication de la correction appliquée",
+  "unit_test_description": "Vérifie que … — formulation métier courte, sans mention de la correction",
+  "unit_test_build_reasoning": "Explication interne de la correction (non affichée à l'utilisateur)",
   "tags": ["Logique métier"],
   "suggestions": ["Vérifie que ...", "S'assure que ..."]
 }}
