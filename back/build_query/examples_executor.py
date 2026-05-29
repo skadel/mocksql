@@ -157,7 +157,10 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     )
     results_kwargs = {
         "type": MsgType.RESULTS,
-        "parent": state.get("parent_message_id")
+        "parent": (
+            state.get("user_message_id") if state.get("input", "").strip() else None
+        )
+        or state.get("parent_message_id")
         or (state["messages"][-1].id if state.get("messages") else None),
         "request_id": state.get("request_id"),
         **({"sql": sql} if sql else {}),

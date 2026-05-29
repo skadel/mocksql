@@ -323,9 +323,13 @@ def build_query_graph():
             retries,
             state.get("assertion_only"),
         )
-        # Skip retries and suggestions for assertion-only edits (user-initiated)
-        if state.get("assertion_only"):
-            logger.diag("[route_evaluator] → history_saver (assertion_only)")
+        # Skip retries and suggestions for assertion-only edits or simple reruns
+        if state.get("assertion_only") or state.get("rerun_only"):
+            logger.diag(
+                "[route_evaluator] → history_saver (assertion_only=%s rerun_only=%s)",
+                state.get("assertion_only"),
+                state.get("rerun_only"),
+            )
             return "history_saver"
         # SQL structurally requires too many rows — no retry can fix this
         if feedback == "too_many_rows":

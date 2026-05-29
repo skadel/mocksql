@@ -21,9 +21,13 @@ def load_report(path: Path) -> dict:
 
 
 def score(model_result: dict) -> float:
-    d = model_result.get("cohérence_données") or 0
-    t = model_result.get("cohérence_test") or 0
-    return round((d + t) / 2, 2)
+    values = [
+        model_result.get("cohérence_données") or 0,
+        model_result.get("cohérence_test") or 0,
+        model_result.get("lisibilité_métier") or 0,
+    ]
+    non_zero = [v for v in values if v > 0]
+    return round(sum(non_zero) / len(non_zero), 2) if non_zero else 0
 
 
 def compare(before_path: Path, after_path: Path, threshold: float) -> None:

@@ -13,7 +13,14 @@ def escape_unescaped_placeholders(text):
 
 
 def _strip_code_fences(msg) -> AIMessage:
-    text = msg.content if hasattr(msg, "content") else str(msg)
+    content = msg.content if hasattr(msg, "content") else str(msg)
+    if isinstance(content, list):
+        text = "".join(
+            block.get("text", "") if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    else:
+        text = content
     text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
     text = re.sub(r"\n?```\s*$", "", text.strip())
     return AIMessage(content=text.strip())

@@ -501,6 +501,13 @@ Répondez uniquement avec l'objet JSON demandé, sans texte additionnel."""
         else "- Respecte strictement l'instruction utilisateur pour ce scénario — un résultat vide est acceptable si l'instruction le demande.\n"
     )
 
+    constraints_reminder = (
+        f"\n⚠️ **Rappel des contraintes SQL à respecter (anti-joins, filtres, jointures) :**\n"
+        f"```json\n{constraints_hint}\n```\n"
+        if constraints_hint
+        else ""
+    )
+
     final_human_message_content = f"""
 Génère un test unitaire conforme aux consignes ci-dessus, avec :
 - Un seul test
@@ -515,7 +522,7 @@ Génère un test unitaire conforme aux consignes ci-dessus, avec :
 {non_empty_constraint}
 Voici les colonnes qui doivent être générées (les clés `data` doivent utiliser exactement le format `{{dataset}}_{{table}}` ci-dessous) :
 {[{"table_key": f"{u.get('database', '')}_{u.get('table', '')}" if u.get("database") else u.get("table", ""), "columns": u.get("used_columns", [])} for u in used_columns]}
-{instruction_block}{sql_block}{constraints_block}{profile_block}
+{instruction_block}{sql_block}{constraints_reminder}{profile_block}
 {format_instructions}
 
 Date et heure actuelles : {formatted_datetime}

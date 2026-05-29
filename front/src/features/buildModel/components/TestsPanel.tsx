@@ -1590,9 +1590,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
           <Typography variant="body2" sx={{ color: '#999', textAlign: 'center' }}>
             Aucun test généré pour l'instant.
           </Typography>
-          <OutlinedPrimaryButton startIcon={<AddIcon />} onClick={onAddTest} size="small">
-            Ajouter un test
-          </OutlinedPrimaryButton>
         </Box>
       )}
 
@@ -1666,16 +1663,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
             )}
           </Box>
 
-          <Box sx={{ mt: 1.5, px: 0.5 }}>
-            <Chip
-              label="Ajouter un test"
-              size="small"
-              clickable
-              icon={<AddIcon style={{ fontSize: 12 }} />}
-              onClick={onAddTest}
-              sx={{ fontSize: 11, height: 24, bgcolor: '#f0fafa', color: TEAL, border: '1px solid #d0eeec', '&:hover': { bgcolor: '#d0eeec' } }}
-            />
-          </Box>
         </Box>
       )}
     </Box>

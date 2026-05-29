@@ -10,9 +10,10 @@ interface ArtefactHeaderProps {
   rerunning: boolean;
   sqlDirty?: boolean;
   onRefreshProfile?: () => void;
+  refreshing?: boolean;
 }
 
-const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile }) => {
+const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile, refreshing }) => {
   return (
     <Box
       sx={{
@@ -55,13 +56,17 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
             <IconButton
               size="small"
               onClick={onRefreshProfile}
-              disabled={rerunning}
+              disabled={rerunning || refreshing}
               sx={{
-                color: '#6b8287',
+                color: refreshing ? '#1ca8a4' : '#6b8287',
                 '&:hover': { color: '#1ca8a4', bgcolor: '#ecf7f6' },
               }}
             >
-              <RefreshIcon sx={{ fontSize: 16 }} />
+              <RefreshIcon sx={{
+                fontSize: 16,
+                animation: refreshing ? 'spin 0.8s linear infinite' : 'none',
+                '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+              }} />
             </IconButton>
           </Tooltip>
         )}

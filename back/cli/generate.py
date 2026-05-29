@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import sqlglot
 import yaml
 
 from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
@@ -141,7 +142,7 @@ def build_initial_state(
 
 
 def _build_cli_graph():
-    """CLI graph: generator → executor → test_evaluator, with bad_data and bad_assertions retry loops."""
+    """CLI graph: generator → executor → test_evaluator → suggestions_generator, with retry loops."""
     from langgraph.graph import END, START, StateGraph
 
     from build_query.assertion_corrector import correct_assertions
@@ -149,6 +150,7 @@ def _build_cli_graph():
     from build_query.examples_executor import run_on_examples
     from build_query.examples_generator import generate_examples
     from build_query.state import QueryState
+    from build_query.suggestions_node import generate_suggestions
     from build_query.test_evaluator import evaluate_tests
 
     builder = StateGraph(QueryState)
@@ -157,6 +159,7 @@ def _build_cli_graph():
     builder.add_node("test_evaluator", evaluate_tests)
     builder.add_node("conversational_agent", conversational_agent)
     builder.add_node("assertion_corrector", correct_assertions)
+    builder.add_node("suggestions_generator", generate_suggestions)
 
     def route_executor(state: QueryState):
         if state.get("error") or state.get("status") == "error":
@@ -173,7 +176,7 @@ def _build_cli_graph():
             return "conversational_agent"
         if state.get("evaluation_feedback") == "bad_assertions":
             return "assertion_corrector"
-        return END
+        return "suggestions_generator"
 
     builder.add_edge(START, "generator")
     builder.add_edge("generator", "executor")
@@ -181,6 +184,7 @@ def _build_cli_graph():
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("conversational_agent", "generator")
+    builder.add_edge("suggestions_generator", END)
 
     return builder.compile()
 
@@ -230,21 +234,40 @@ def _extract_test_cases(final_state: dict) -> list | None:
     return None
 
 
+def _extract_suggestions(final_state: dict) -> list[str]:
+    """Extract suggestions from the SUGGESTIONS message in final state."""
+    from utils.msg_types import MsgType
+    from utils.saver import get_message_type
+
+    for msg in reversed(final_state.get("messages", [])):
+        if get_message_type(msg) == MsgType.SUGGESTIONS:
+            try:
+                suggestions = json.loads(msg.content)
+                if isinstance(suggestions, list):
+                    return [s for s in suggestions if isinstance(s, str)]
+            except Exception:
+                pass
+    return []
+
+
 def _write_test_file(
     model: Path,
     output_dir: Path,
     sql: str,
     used_columns: list[str],
     test_cases: list,
+    suggestions: list[str] | None = None,
 ) -> Path:
     """Write a single {stem}.json test file in the format expected by test_runner."""
     output_dir.mkdir(parents=True, exist_ok=True)
     out_path = output_dir / f"{model.stem}.json"
-    doc = {
+    doc: dict = {
         "sql": sql,
         "used_columns": used_columns,
         "test_cases": test_cases,
     }
+    if suggestions:
+        doc["suggestions"] = suggestions
     out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
     return out_path
 
@@ -435,6 +458,21 @@ async def run_generate(
         state["profile_complete"] = True
 
     _inject_schemas_into_cache(project_id, schemas)
+
+    # Qualify the SQL using the same optimize_query path as the UI validator.
+    # This applies qualify_columns + _fix_unnest_alias_conflicts + _fix_unnest_scope_leak,
+    # which prevents DuckDB "Ambiguous reference" errors on UNNEST aliases.
+    from common_vars import get_tables_mapping
+    from build_query.validator import optimize_query
+
+    try:
+        tables_mapping = await get_tables_mapping(project_id)
+        parsed_ast = sqlglot.parse_one(sql, read=dialect)
+        qualified_ast = optimize_query(parsed_ast, tables_mapping, dialect=dialect)
+        state["optimized_sql"] = qualified_ast.sql(dialect=dialect, pretty=True)
+    except Exception as e:
+        typer.echo(f"[WARN] SQL qualification failed ({e}), using raw SQL.")
+
     _patch_db_calls()
 
     # Step 5 — run CLI graph
@@ -448,10 +486,16 @@ async def run_generate(
 
     # Step 6 — write outputs
     test_cases = _extract_test_cases(final_state)
+    suggestions = _extract_suggestions(final_state)
     if test_cases:
         out_path = _write_test_file(
-            model, output_dir, sql, state["used_columns"], test_cases
+            model, output_dir, sql, state["used_columns"], test_cases, suggestions
         )
         typer.echo(f"[OK] {len(test_cases)} test case(s) written to {out_path}")
     else:
         typer.echo("[WARN] No output produced — check the SQL and schemas.")
+
+    if suggestions:
+        typer.echo("\nSuggestions de cas non couverts :")
+        for i, s in enumerate(suggestions, 1):
+            typer.echo(f"  {i}. {s}")

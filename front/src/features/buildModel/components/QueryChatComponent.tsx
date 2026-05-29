@@ -19,7 +19,7 @@ import ArtefactHeader from './ArtefactHeader';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
 import SqlEditor from '../../../shared/SqlEditor';
-import { chatQuery, stopStream, validateQueryApi, checkProfileApi, buildProfileRequestApi, skipProfilingApi, importMissingTablesApi, autoProfileApi } from '../../../api/query';
+import { chatQuery, stopStream, validateQueryApi, checkProfileApi, buildProfileRequestApi, skipProfilingApi, importMissingTablesApi, autoProfileApi, refreshSchemasApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
 import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
@@ -748,40 +748,22 @@ const ChatComponent: React.FC = () => {
 
   const handleRefreshProfile = useCallback(async () => {
     if (!currentModelId || !sqlQuery.trim()) return;
+    setIsAutoProfileRunning(true);
     try {
+      await refreshSchemasApi({ tables: [] });
       const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [], force: true });
       if (result.profile_error) {
         dispatch(setError(result.profile_error));
         return;
       }
-      if (result.profile_complete) return;
-      if (result.auto_profile_available && result.missing_columns?.length) {
-        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
-        setPendingAutoProfile({
-          profileRequest: null,
-          onConfirm: async () => {
-            const req = resolvedReq;
-            if (!req) return;
-            setIsAutoProfileRunning(true);
-            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
-            setIsAutoProfileRunning(false);
-            setPendingAutoProfile(null);
-          },
-          onSkip: async () => {
-            setPendingAutoProfile(null);
-          },
-          onCancel: () => setPendingAutoProfile(null),
-        });
-        buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns })
-          .then(({ profile_request }) => {
-            resolvedReq = profile_request;
-            setPendingAutoProfile((prev) => prev ? { ...prev, profileRequest: profile_request } : prev);
-          })
-          .catch(() => {});
-      }
+      if (!result.missing_columns?.length) return;
+      const { profile_request } = await buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns });
+      await autoProfileApi({ profile_sql: profile_request.profile_query, project: '', session: currentModelId });
     } catch (e) {
       console.error('[handleRefreshProfile]', e);
       dispatch(setError('Erreur lors du rafraîchissement du profil.'));
+    } finally {
+      setIsAutoProfileRunning(false);
     }
   }, [currentModelId, sqlQuery, dispatch]);
 
@@ -868,6 +850,7 @@ const ChatComponent: React.FC = () => {
       parentMessageId: lastMessageId,
       testIndex: idx,
       forceRoute: 'generator',
+      rerunOnly: true,
       silent: true,
     }));
   }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t]);
@@ -1194,6 +1177,7 @@ const ChatComponent: React.FC = () => {
               rerunning={!!(loading || isSending)}
               sqlDirty={sqlDirty}
               onRefreshProfile={handleRefreshProfile}
+              refreshing={isAutoProfileRunning}
             />
             <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
               <TestsPanel

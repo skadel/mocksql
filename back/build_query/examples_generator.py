@@ -673,7 +673,7 @@ async def generate_examples_(
         history,
         used_columns,
         raw_parser.get_format_instructions(),
-        constraints_hint="",
+        constraints_hint=constraints,
         excluded_columns=excluded_col_names,
         eval_context=eval_context,
     )

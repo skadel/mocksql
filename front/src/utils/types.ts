@@ -287,6 +287,7 @@ export interface ChatQueryParams {
   testIndex?: number;
   context?: 'sql_update';
   assertionOnly?: boolean;
+  rerunOnly?: boolean;
   forceRoute?: string;
   silent?: boolean;
 }

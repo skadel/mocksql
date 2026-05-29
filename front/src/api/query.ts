@@ -30,7 +30,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly, forceRoute, silent
+      parentMessageId, userTables, profileResult, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent
     } = params;
 
     if (!userInput && !query && !userTables && !profileResult) return;
@@ -120,6 +120,7 @@ export const chatQuery = createAsyncThunk(
             test_index: testIndex ?? null,
             rerun_all_tests: context === 'sql_update',
             assertion_only: assertionOnly ?? false,
+            rerun_only: rerunOnly ?? false,
             profile_complete: null,
             profile: null,
             profile_billing_tb: null,
@@ -469,6 +470,28 @@ export const autoProfileApi = async (params: AutoProfileParams): Promise<void> =
   );
   const data = await response.json();
   if (!response.ok) throw data;
+};
+
+export interface RefreshSchemasParams {
+  tables?: string[];
+}
+
+export const refreshSchemasApi = async (params: RefreshSchemasParams = {}): Promise<{ refreshed: number; tables: string[] }> => {
+  const token = localStorage.getItem('jwt') || '';
+  const response = await fetch(
+    `${import.meta.env.VITE_BACKEND_URL}/api/refresh-schemas`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ tables: params.tables ?? [] }),
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw data;
+  return data;
 };
 
 export interface ImportMissingTablesParams {

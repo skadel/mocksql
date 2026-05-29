@@ -97,6 +97,7 @@ def run_eval(
         print(
             f"donnees={judgment.get('cohérence_données', '?')} "
             f"test={judgment.get('cohérence_test', '?')} "
+            f"lisibilite={judgment.get('lisibilité_métier', '?')} "
             f"{'OK' if is_valid else 'KO'}"
         )
 
@@ -106,6 +107,7 @@ def run_eval(
                 "exec_status": exec_status,
                 "cohérence_données": judgment.get("cohérence_données"),
                 "cohérence_test": judgment.get("cohérence_test"),
+                "lisibilité_métier": judgment.get("lisibilité_métier"),
                 "reasoning": judgment.get("reasoning", ""),
                 "is_valid": is_valid,
             }
