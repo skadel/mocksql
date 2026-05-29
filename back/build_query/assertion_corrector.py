@@ -32,6 +32,47 @@ class _ImprovedAssertions(BaseModel):
     explanation: str
 
 
+def _format_correction_history(attempts: List[Dict]) -> str:
+    if not attempts:
+        return ""
+    lines = ["\n\nTentatives précédentes — à ne PAS reproduire :\n"]
+    for i, attempt in enumerate(attempts, 1):
+        lines.append(f"Tentative {i} :")
+        for a in attempt.get("assertions", []):
+            outcome = a.get("outcome", "?")
+            lines.append(f'  • "{a["description"]}"')
+            lines.append(f"    SQL : {a['sql']}")
+            lines.append(f"    → {outcome}")
+        if attempt.get("explanation"):
+            lines.append(f"  Bilan : {attempt['explanation']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _build_attempt_record(assertion_results: List[Dict], explanation: str) -> Dict:
+    """Build a history entry from the current correction attempt."""
+    assertions_log = []
+    for a in assertion_results:
+        if a.get("error"):
+            outcome = f"ERREUR SQL : {a['error']}"
+        elif not a.get("passed"):
+            rows = a.get("failing_rows", [])
+            sample = (
+                json.dumps(rows[:2], ensure_ascii=False, default=str) if rows else ""
+            )
+            outcome = f"VIOLATION DE DONNÉES{' — ex : ' + sample if sample else ''}"
+        else:
+            outcome = "PASSÉ ✓"
+        assertions_log.append(
+            {
+                "description": a.get("description", ""),
+                "sql": a.get("sql", ""),
+                "outcome": outcome,
+            }
+        )
+    return {"assertions": assertions_log, "explanation": explanation}
+
+
 async def _generate_improved_assertions(
     duckdb_sql: str,
     test_data: Any,
@@ -39,6 +80,7 @@ async def _generate_improved_assertions(
     test_description: str,
     evaluation_explanation: str,
     assertion_fix: Optional[Dict],
+    correction_attempts: Optional[List[Dict]] = None,
 ) -> _ImprovedAssertions:
     schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
     schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
@@ -54,12 +96,14 @@ async def _generate_improved_assertions(
                 f"\n\nVérifications suggérées par l'évaluateur :\n{lines}"
             )
 
+    history_block = _format_correction_history(correction_attempts or [])
+
     prompt = f"""Tu es un expert en tests SQL dbt-style avec DuckDB.
 
 Le test suivant a été évalué "Insuffisant" car les assertions générées ne vérifient pas réellement la logique métier.
 Problème identifié : {evaluation_explanation}
 
-Description du test : {test_description}{suggestions_block}
+Description du test : {test_description}{suggestions_block}{history_block}
 
 Données d'entrée :
 {json.dumps(test_data, ensure_ascii=False, default=str)}
@@ -127,8 +171,8 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
     Corrige les assertions faibles (bad_assertions) sans ré-exécuter le SQL.
 
     Lit results_json depuis le dernier message RESULTS, génère de meilleures
-    assertions via LLM en exploitant assertion_fix, les évalue en DuckDB,
-    et émet un nouveau message RESULTS avec le verdict mis à jour.
+    assertions via LLM en exploitant assertion_fix et correction_attempts,
+    les évalue en DuckDB, et émet un nouveau message RESULTS avec le verdict mis à jour.
     """
     if state.get("error"):
         return {}
@@ -167,6 +211,7 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
     evaluation_explanation = current_test.get(
         "evaluation_explanation", "assertions insuffisantes"
     )
+    correction_attempts: List[Dict] = current_test.get("correction_attempts") or []
 
     improved = await _generate_improved_assertions(
         duckdb_sql=sql,
@@ -175,6 +220,7 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
         test_description=current_test.get("unit_test_description", ""),
         evaluation_explanation=evaluation_explanation,
         assertion_fix=assertion_fix,
+        correction_attempts=correction_attempts,
     )
 
     if not improved.assertions:
@@ -215,19 +261,47 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
             except Exception:
                 pass
 
-    has_failing = any(not a.get("passed") for a in assertion_results)
+    # In dbt-style testing, passed=False with no error means the assertion runs correctly
+    # and finds a data violation — that's bad_data, not bad_assertions.
+    # Only SQL syntax errors (error field set) indicate a bad assertion.
+    has_sql_error = any(a.get("error") for a in assertion_results)
+    has_data_violation = any(
+        not a.get("passed") and not a.get("error") for a in assertion_results
+    )
+
+    if has_sql_error:
+        verdict_final = "Insuffisant"
+        reason_final = "bad_assertions"
+        explanation_final = (
+            "Les assertions générées ne correspondent pas au résultat de la requête."
+        )
+    elif has_data_violation:
+        # Assertions are logically correct but the test data violates the business rule
+        verdict_final = "Insuffisant"
+        reason_final = "bad_data"
+        explanation_final = improved.explanation
+    else:
+        verdict_final = improved.verdict
+        reason_final = improved.reason_type
+        explanation_final = improved.explanation
+
+    updated_attempts = correction_attempts + [
+        _build_attempt_record(assertion_results, explanation_final)
+    ]
+    logger.diag(
+        "[assertion_corrector] correction_attempts: %d → %d",
+        len(correction_attempts),
+        len(updated_attempts),
+    )
 
     updated_test = {
         **current_test,
         "assertion_results": assertion_results,
-        "verdict": "Insuffisant" if has_failing else improved.verdict,
-        "reason_type": "bad_assertions" if has_failing else improved.reason_type,
-        "evaluation_explanation": (
-            "Les assertions générées ne correspondent pas au résultat de la requête."
-            if has_failing
-            else improved.explanation
-        ),
+        "verdict": verdict_final,
+        "reason_type": reason_final,
+        "evaluation_explanation": explanation_final,
         "assertion_fix": None,
+        "correction_attempts": updated_attempts,
     }
     updated_all_tests = [
         updated_test if t.get("test_index") == current_test.get("test_index") else t
@@ -253,5 +327,6 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
                     **({"optimized_sql": optimized_kw} if optimized_kw else {}),
                 },
             )
-        ]
+        ],
+        "gen_retries": max(0, state.get("gen_retries", 0) - 1),
     }

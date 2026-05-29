@@ -347,7 +347,7 @@ def build_query_graph():
             )
             return "bad_data_exhausted"
         if feedback == "bad_assertions":
-            if retries >= 0:
+            if retries > 0:
                 logger.diag(
                     "[route_evaluator] → assertion_corrector (bad_assertions retries=%d)",
                     retries,
