@@ -1594,8 +1594,98 @@ def build_conditions_hint(
 
     window_aliases = _collect_window_aliases(statement)
 
-    cond_parts: list[str] = []
+    def _collect_union_branches(node) -> list:
+        """Recursively collect leaf SELECT nodes from a UNION tree."""
+        if isinstance(node, exp.Union):
+            return _collect_union_branches(node.this) + _collect_union_branches(
+                node.expression
+            )
+        return [node]
+
+    def _collect_select_conds(
+        sel, alias_map, resolver, window_aliases, dialect
+    ) -> list[str]:
+        """Collect WHERE/JOIN ON/QUALIFY condition strings from a single SELECT."""
+        parts: list[str] = []
+        seen: set[str] = set()
+
+        def _add(s: str | None) -> None:
+            if s and s not in seen:
+                seen.add(s)
+                parts.append(s)
+
+        where = sel.args.get("where")
+        if where:
+            _add(
+                _serialize_cond(
+                    where.this, alias_map, resolver, window_aliases, dialect
+                )
+            )
+        for join in sel.args.get("joins") or []:
+            on = join.args.get("on")
+            if on:
+                _add(_serialize_cond(on, alias_map, resolver, window_aliases, dialect))
+        qualify = sel.args.get("qualify")
+        if qualify:
+            qualify_node = qualify.this if isinstance(qualify, exp.Qualify) else qualify
+            _add(
+                _serialize_cond(
+                    qualify_node, alias_map, resolver, window_aliases, dialect
+                )
+            )
+        return parts
+
+    def _safe_and_part(s: str) -> str:
+        if " OR " in s and not (s.startswith("(") and s.endswith(")")):
+            return f"({s})"
+        return s
+
+    def _union_to_branch_conds(union_node) -> list[str]:
+        """Return per-branch condition strings from a UNION node, deduplicated."""
+        branches = _collect_union_branches(union_node)
+        branch_conds: list[str] = []
+        seen_branch: set[str] = set()
+        for branch_sel in branches:
+            parts = _collect_select_conds(
+                branch_sel, alias_map, resolver, window_aliases, dialect
+            )
+            if parts:
+                bc = " AND ".join(_safe_and_part(p) for p in parts)
+                if bc not in seen_branch:
+                    seen_branch.add(bc)
+                    branch_conds.append(bc)
+        return branch_conds
+
+    # Identify which SELECT nodes belong to UNION branches (at any level of the tree,
+    # including inside CTEs) so we can present their conditions per-branch instead of
+    # ANDing contradictory constraints (e.g. year=2016 AND year=2017 AND year=2018).
+    #
+    # Only process "root" Union nodes — i.e. Union nodes whose parent is NOT another
+    # Union. For nested UNION ALL (A UNION ALL B UNION ALL C), sqlglot builds
+    # Union(Union(A,B), C). Processing only the outermost Union gives all 3 branches
+    # without duplicates.
+    union_branch_selects: set[int] = set()
+    union_cond_parts: list[str] = []
+    for union_node in statement.find_all(exp.Union):
+        if isinstance(union_node.parent, exp.Union):
+            continue  # skip nested; will be handled by the top-level Union
+        branch_conds = _union_to_branch_conds(union_node)
+        if len(branch_conds) > 1:
+            labeled = " | ".join(
+                f"[Branch {i + 1}] {bc}" for i, bc in enumerate(branch_conds)
+            )
+            union_cond_parts.append(labeled)
+        elif branch_conds:
+            union_cond_parts.append(branch_conds[0])
+        # Mark these SELECT nodes so we skip them in the flat scan below
+        for branch_sel in _collect_union_branches(union_node):
+            union_branch_selects.add(id(branch_sel))
+
+    # Collect conditions from SELECT nodes that are NOT inside a UNION branch
+    cond_parts: list[str] = list(union_cond_parts)
     seen_cond: set[str] = set()
+    for s in union_cond_parts:
+        seen_cond.add(s)
 
     def _add_cond(s: str | None) -> None:
         if s and s not in seen_cond:
@@ -1603,37 +1693,12 @@ def build_conditions_hint(
             cond_parts.append(s)
 
     for sel in statement.find_all(exp.Select):
-        # WHERE
-        where = sel.args.get("where")
-        if where:
-            _add_cond(
-                _serialize_cond(
-                    where.this, alias_map, resolver, window_aliases, dialect
-                )
-            )
-        # JOIN ON
-        for join in sel.args.get("joins") or []:
-            on = join.args.get("on")
-            if on:
-                _add_cond(
-                    _serialize_cond(on, alias_map, resolver, window_aliases, dialect)
-                )
-        # QUALIFY
-        qualify = sel.args.get("qualify")
-        if qualify:
-            qualify_node = qualify.this if isinstance(qualify, exp.Qualify) else qualify
-            _add_cond(
-                _serialize_cond(
-                    qualify_node, alias_map, resolver, window_aliases, dialect
-                )
-            )
-
-    # When joining multiple parts with AND, wrap parts that contain a top-level OR
-    # (without surrounding parens) to preserve AND/OR precedence.
-    def _safe_and_part(s: str) -> str:
-        if " OR " in s and not (s.startswith("(") and s.endswith(")")):
-            return f"({s})"
-        return s
+        if id(sel) in union_branch_selects:
+            continue
+        for part in _collect_select_conds(
+            sel, alias_map, resolver, window_aliases, dialect
+        ):
+            _add_cond(part)
 
     conditions = " AND ".join(_safe_and_part(p) for p in cond_parts)
     format_constraints = _collect_format_constraints_strings(
