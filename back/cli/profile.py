@@ -17,12 +17,11 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
 
     validate_required_env()
 
-    from cli.generate import (
-        load_config,
+    from cli.generate import load_config, read_sql
+    from cli.schema_cache import (
         load_schema_cache,
         match_refs_against_cache,
         merge_into_cache,
-        read_sql,
         save_schema_cache,
     )
     from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref

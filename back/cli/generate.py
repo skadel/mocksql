@@ -10,9 +10,15 @@ from typing import Any
 import yaml
 
 from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
+from cli.schema_cache import (
+    load_schema_cache,
+    match_refs_against_cache,
+    merge_into_cache,
+    save_schema_cache,
+)
 from storage.config import load_preprocessor_fn
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
-from utils.sql_code import extract_real_table_refs
+from utils.sql_code import extract_real_table_refs, extract_used_columns_from_sql
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -40,66 +46,18 @@ def read_sql(model_path: Path, preprocessor_fn: str | None, config_dir: Path) ->
     return fn(raw_sql)
 
 
-# ── Schema cache ──────────────────────────────────────────────────────────────
-
-
-def load_schema_cache(cache_path: str) -> list[dict]:
-    p = Path(cache_path)
-    if not p.exists():
-        return []
-    with open(p) as f:
-        return json.load(f)
-
-
-def save_schema_cache(cache_path: str, tables: list[dict]) -> None:
-    p = Path(cache_path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w") as f:
-        json.dump(tables, f, indent=2)
-
-
-def merge_into_cache(existing: list[dict], new_tables: list[dict]) -> list[dict]:
-    by_name = {t["table_name"]: t for t in existing}
-    for tbl in new_tables:
-        by_name[tbl["table_name"]] = tbl
-    return list(by_name.values())
-
-
-# ── Table ref matching ────────────────────────────────────────────────────────
-
-
-def match_refs_against_cache(
-    refs: list, cached: list[dict]
-) -> tuple[list[dict], list[str]]:
-    """Return (matched_schemas, missing_qualified_refs)."""
-    cached_by_name = {t["table_name"].lower(): t for t in cached}
-
-    matched: list[dict] = []
-    missing: list[str] = []
-
-    for ref in refs:
-        # Build qualified name from sqlglot Table node
-        parts = [p for p in [ref.catalog, ref.db, ref.name] if p]
-        qualified = ".".join(parts).lower()
-
-        if qualified in cached_by_name:
-            matched.append(cached_by_name[qualified])
-            continue
-
-        # Try suffix match (dataset.table or just table)
-        candidates = [v for k, v in cached_by_name.items() if k.endswith(qualified)]
-        if candidates:
-            matched.extend(candidates)
-        else:
-            missing.append(qualified)
-
-    return matched, missing
-
-
 # ── State builder ─────────────────────────────────────────────────────────────
 
 
-def build_used_columns(schemas: list[dict]) -> list[str]:
+def build_used_columns(
+    schemas: list[dict], sql: str = "", dialect: str = "bigquery"
+) -> list[str]:
+    if sql:
+        try:
+            return extract_used_columns_from_sql(sql, dialect, schemas)
+        except Exception:
+            pass
+
     result = []
     for tbl in schemas:
         parts = tbl["table_name"].split(".")
@@ -136,7 +94,7 @@ def build_initial_state(
         "session": session_id,
         "project": project_id,
         "schemas": schemas,
-        "used_columns": build_used_columns(schemas),
+        "used_columns": build_used_columns(schemas, sql, dialect),
         "used_columns_changed": True,
         "gen_retries": 1,
         "debug_retries": 2,
@@ -277,6 +235,30 @@ def _write_test_file(
     }
     out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
     return out_path
+
+
+# ── Business context ──────────────────────────────────────────────────────────
+
+
+def _load_model_context(model_name: str, models_base: Path) -> str:
+    """Collect mocksql.md files for model_name relative to models_base."""
+    if not model_name:
+        return ""
+    parts = Path(model_name).parts
+    fragments: list[str] = []
+    for i in range(len(parts)):
+        level_dir = models_base.joinpath(*parts[:i])
+        candidate = level_dir / "mocksql.md"
+        if candidate.exists():
+            text = candidate.read_text(encoding="utf-8").strip()
+            if text:
+                fragments.append(text)
+    file_md = models_base / f"{model_name}.md"
+    if file_md.exists():
+        text = file_md.read_text(encoding="utf-8").strip()
+        if text:
+            fragments.append(text)
+    return "\n\n---\n\n".join(fragments)
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────
@@ -422,7 +404,20 @@ async def run_generate(
     # Step 4 — build state + inject schemas into in-memory cache
     project_id = model.stem
     session_id = str(uuid.uuid4())
+
+    models_path_str = cfg.get("models_path", "./models")
+    models_base = (config.parent / models_path_str).resolve()
+    try:
+        model_name = model.resolve().relative_to(models_base).with_suffix("").as_posix()
+    except ValueError:
+        model_name = model.stem
+
+    model_context = _load_model_context(model_name, models_base) or None
+
     state = build_initial_state(sql, dialect, schemas, project_id, session_id)
+    if model_context:
+        state["model_context"] = model_context
+        typer.echo(f"[OK] Business context loaded ({len(model_context)} chars).")
     if profile_data:
         state["profile"] = profile_data
         state["profile_complete"] = True
