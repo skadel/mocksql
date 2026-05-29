@@ -31,7 +31,13 @@ class TestSuggestionsOutput(BaseModel):
         )
     )
     suggestions: list[str] = Field(
-        description="Liste exacte de 3 suggestions de cas de tests d'une phrase commençant par un verbe.",
+        description=(
+            "Liste exacte de 3 suggestions de cas de tests, chacune formulée en langage métier. "
+            "Chaque suggestion commence par un verbe et décrit un comportement observable pour le domaine "
+            "(ex : un total incohérent, des lignes manquantes, un classement incorrect). "
+            "Ne jamais mentionner de fonctions SQL, d'opérateurs ou de détails d'implémentation "
+            "(pas de EXTRACT, COUNT DISTINCT, LAG, NULL, JOIN, CTE, etc.) dans le texte final."
+        ),
         min_length=1,
         max_length=3,
     )
@@ -187,9 +193,12 @@ JOINs :
 - Comptage d'entités via JOIN sur table de faits : si le SQL compte des entités distinctes (clients, points de vente, commandes) en les joingnant à une table où elles apparaissent plusieurs fois (contrats, transactions, événements), chaque entité est comptée N fois sauf si un DISTINCT ou une dédoublication explicite est en place — c'est l'un des bugs les plus fréquents en BI, souvent invisible car le résultat reste plausible (ex. +5%)
 - NULL dans la clé de jointure : un NULL ne matche jamais un autre NULL en SQL → lignes silencieusement perdues avec INNER JOIN
 
-Pour ces patterns, formule la suggestion en rendant explicite ce que l'utilisateur pourrait croire à tort — par exemple : "Vérifie que le total global de [métrique] correspond à la somme des valeurs par [dimension] — ce qui n'est pas garanti avec COUNT DISTINCT."
+Pour ces patterns, formule la suggestion en décrivant uniquement le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite toute mention de fonctions SQL, d'opérateurs ou de détails d'implémentation — l'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *pourquoi techniquement*.
 
-Si un profil statistique est fourni, au moins une suggestion doit cibler un cas qui existe réellement dans les données — formule-la ainsi : "[PROD] Vérifie que..." pour la distinguer des suggestions génériques.""",
+Mauvais exemple : "Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
+Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la somme des totaux mensuels — un écart indiquerait des incidents invisibles dans le rapport annuel."
+
+Si un profil statistique est fourni, au moins une suggestion doit cibler un cas qui existe réellement dans les données — formule-la ainsi : "[PROD] Vérifie que..." pour la distinguer des suggestions génériques. Cette suggestion doit aussi rester en langage métier.""",
             ),
         ]
     )
