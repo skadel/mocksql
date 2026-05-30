@@ -450,12 +450,19 @@ export interface FetchPageResponse {
 
 export interface AutoProfileParams {
   profile_sql: string;
+  profile_queries?: string[];
   project: string;
   user?: string;
   session: string;
 }
 
-export const autoProfileApi = async (params: AutoProfileParams): Promise<void> => {
+export interface AutoProfileResponse {
+  saved: boolean;
+  profile_status: 'complete' | 'partial' | 'failed';
+  errors?: Array<{ query_index: number; error: string }>;
+}
+
+export const autoProfileApi = async (params: AutoProfileParams): Promise<AutoProfileResponse> => {
   const token = localStorage.getItem('jwt') || '';
   const response = await fetch(
     `${import.meta.env.VITE_BACKEND_URL}/api/auto-profile`,
@@ -470,6 +477,7 @@ export const autoProfileApi = async (params: AutoProfileParams): Promise<void> =
   );
   const data = await response.json();
   if (!response.ok) throw data;
+  return data as AutoProfileResponse;
 };
 
 export interface RefreshSchemasParams {

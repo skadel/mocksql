@@ -42,6 +42,8 @@ export interface ProfileRequest {
   missing_columns: Array<{ table: string; used_columns: string[] }>;
   expected_joins?: Array<{ left_table: string; right_table: string }>;
   billing_tb?: number;
+  profileStatus?: 'complete' | 'partial' | 'failed';
+  profileErrors?: Array<{ query_index: number; error: string }>;
 }
 
 export interface MessageContents {

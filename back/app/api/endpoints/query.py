@@ -322,6 +322,7 @@ async def skip_profiling_route(body: SkipProfilingRequest):
 
 class AutoProfileRequest(BaseModel):
     profile_sql: str
+    profile_queries: List[str] = []
     project: str
     user: str = "local"
     session: str
@@ -340,21 +341,39 @@ async def auto_profile_route(body: AutoProfileRequest):
     )
 
     billing_project = BQ_TEST_PROJECT
+    client = _bq.Client(project=billing_project)
 
-    try:
-        client = _bq.Client(project=billing_project)
-        rows = await asyncio.to_thread(
-            lambda: list(client.query(body.profile_sql).result())
-        )
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"BigQuery profiling error: {exc}")
+    async def _run_query(sql: str) -> list:
+        return await asyncio.to_thread(lambda: list(client.query(sql).result()))
 
-    raw_profile = [dict(row) for row in rows]
+    raw_rows: list = []
+    errors: list = []
+
+    if body.profile_queries:
+        for i, q in enumerate(body.profile_queries):
+            try:
+                rows = await _run_query(q)
+                raw_rows.extend(rows)
+            except Exception as exc:
+                errors.append({"query_index": i, "error": str(exc)})
+    else:
+        # Fallback: single combined query (legacy callers)
+        try:
+            raw_rows = await _run_query(body.profile_sql)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"BigQuery profiling error: {exc}"
+            )
+
+    profile_status = "complete" if not errors else "partial" if raw_rows else "failed"
+
+    if not raw_rows:
+        return {"saved": False, "profile_status": profile_status, "errors": errors}
+
+    raw_profile = [dict(row) for row in raw_rows]
     incoming_profile = _normalize_profile(raw_profile)
     if not incoming_profile:
-        raise HTTPException(
-            status_code=400, detail="Le profiling n'a retourné aucun résultat"
-        )
+        return {"saved": False, "profile_status": "failed", "errors": errors}
 
     # Enrich join entries with their CTE SQL (phase 1) so the profile is self-contained
     if incoming_profile.get("joins"):
@@ -373,7 +392,7 @@ async def auto_profile_route(body: AutoProfileRequest):
     merged = _merge_profiles(stored_profile, incoming_profile)
     _save_model_profile(merged)
 
-    return {"saved": True}
+    return {"saved": True, "profile_status": profile_status, "errors": errors}
 
 
 class ImportMissingTablesRequest(BaseModel):

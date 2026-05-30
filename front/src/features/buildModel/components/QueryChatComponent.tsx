@@ -65,6 +65,10 @@ const ChatComponent: React.FC = () => {
     onCancel: () => void;
   } | null>(null);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
+  const [autoProfileWarning, setAutoProfileWarning] = useState<{
+    status: 'partial' | 'failed';
+    errors: Array<{ query_index: number; error: string }>;
+  } | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [_validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
   const [submissionStep, setSubmissionStep] = useState<string | null>(null);
@@ -416,7 +420,12 @@ const ChatComponent: React.FC = () => {
             const req = resolvedReq;
             if (!req) return;
             setIsAutoProfileRunning(true);
-            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: sessionId }); } catch {}
+            try {
+              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: sessionId });
+              if (result.profile_status !== 'complete') {
+                setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
+              }
+            } catch {}
             setIsAutoProfileRunning(false);
             setPendingAutoProfile(null);
             doStream();
@@ -717,7 +726,12 @@ const ChatComponent: React.FC = () => {
             const req = resolvedReq;
             if (!req) return;
             setIsAutoProfileRunning(true);
-            try { await autoProfileApi({ profile_sql: req.profile_query, project: '', session: currentModelId }); } catch {}
+            try {
+              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: currentModelId });
+              if (result.profile_status !== 'complete') {
+                setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
+              }
+            } catch {}
             setIsAutoProfileRunning(false);
             setPendingAutoProfile(null);
             doStream();
@@ -756,7 +770,10 @@ const ChatComponent: React.FC = () => {
       }
       if (!result.missing_columns?.length) return;
       const { profile_request } = await buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns });
-      await autoProfileApi({ profile_sql: profile_request.profile_query, project: '', session: currentModelId });
+      const refreshResult = await autoProfileApi({ profile_sql: profile_request.profile_query, profile_queries: profile_request.profile_queries, project: '', session: currentModelId });
+      if (refreshResult.profile_status !== 'complete') {
+        setAutoProfileWarning({ status: refreshResult.profile_status, errors: refreshResult.errors ?? [] });
+      }
     } catch (e) {
       console.error('[handleRefreshProfile]', e);
       dispatch(setError('Erreur lors du rafraîchissement du profil.'));
@@ -1177,6 +1194,13 @@ const ChatComponent: React.FC = () => {
               onRefreshProfile={handleRefreshProfile}
               refreshing={isAutoProfileRunning}
             />
+            {autoProfileWarning && (
+              <AutoProfileWarningBanner
+                status={autoProfileWarning.status}
+                errors={autoProfileWarning.errors}
+                onClose={() => setAutoProfileWarning(null)}
+              />
+            )}
             <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
               <TestsPanel
                 onAddTest={handleAddTest}
@@ -1394,6 +1418,55 @@ const ChatComponent: React.FC = () => {
         </Dialog>
       )}
     </Container>
+  );
+};
+
+const AutoProfileWarningBanner: React.FC<{
+  status: 'partial' | 'failed';
+  errors: Array<{ query_index: number; error: string }>;
+  onClose: () => void;
+}> = ({ status, errors, onClose }) => {
+  const [expanded, setExpanded] = React.useState(false);
+  const isPartial = status === 'partial';
+
+  return (
+    <Alert
+      severity={isPartial ? 'warning' : 'error'}
+      onClose={onClose}
+      sx={{ mx: 2, mt: 1, borderRadius: 2 }}
+    >
+      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+        {isPartial
+          ? `Profil partiellement importé — ${errors.length} requête(s) ont échoué.`
+          : 'Le profiling a échoué (toutes les requêtes en erreur).'}
+      </Typography>
+      <Typography variant="body2" sx={{ mt: 0.25 }}>
+        {isPartial
+          ? 'Le générateur utilisera les données disponibles.'
+          : 'La qualité des données générées sera moindre — génération en cours sans profil.'}
+      </Typography>
+      {errors.length > 0 && (
+        <Box sx={{ mt: 0.5 }}>
+          <Button
+            size="small"
+            variant="text"
+            sx={{ p: 0, minWidth: 0, textTransform: 'none', fontSize: 12 }}
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? 'Masquer les erreurs ↑' : 'Voir les erreurs ↓'}
+          </Button>
+          {expanded && (
+            <Box sx={{ mt: 0.75, pl: 1, borderLeft: '2px solid', borderColor: isPartial ? 'warning.main' : 'error.main' }}>
+              {errors.map((e) => (
+                <Typography key={e.query_index} variant="caption" sx={{ display: 'block', fontFamily: 'monospace', color: 'text.secondary' }}>
+                  Requête {e.query_index + 1} : {e.error}
+                </Typography>
+              ))}
+            </Box>
+          )}
+        </Box>
+      )}
+    </Alert>
   );
 };
 
