@@ -21,6 +21,7 @@ from build_query.profiler import (
     _resolve_cte_source,
     _extract_subquery_aliases,
     _resolve_alias_to_table,
+    _collect_join_specs,
     describe_join,
     _build_partition_where,
     _format_day_partition_values,
@@ -2395,6 +2396,227 @@ class TestBuildProfileQueryPartitioned(unittest.TestCase):
         self.assertGreater(len(col_branches), 0)
         for branch in col_branches:
             self.assertNotIn("region_id", branch)
+
+
+# ─── _collect_join_specs: function expressions in ON clause ───────────────────
+
+
+class TestCollectJoinSpecsFuncExpr(unittest.TestCase):
+    """_collect_join_specs with function calls in the ON condition.
+
+    When the join condition is ON t2.col = FUNC(cte.other_col), the left_table
+    must be derived from the column references inside the function ('cte'), NOT
+    from the primary FROM table of the containing SELECT.
+
+    If it falls back to the primary FROM table, _build_join_query will produce:
+        SELECT FUNC(cte.col) AS join_key FROM primary_table GROUP BY 1
+    where 'cte' is out of scope → BigQuery raises "Unrecognized name: cte".
+    """
+
+    def test_substr_cte_alias_assigns_cte_as_left_table(self):
+        """ON target.dpt = SUBSTR(cte.copost, 1, 2) → left_table must be 'cte'.
+
+        'cte' is in scope as a JOIN participant and as a CTE in the WITH clause.
+        The generated left subquery must use FROM cte, not FROM main_table.
+        """
+        sql = (
+            "WITH cte AS (SELECT copost FROM source_table) "
+            "SELECT * FROM main_table "
+            "JOIN cte ON cte.id = main_table.id "
+            "JOIN target ON target.dpt = SUBSTR(cte.copost, 1, 2)"
+        )
+        specs = _collect_join_specs(sql)
+        target_specs = [s for s in specs if s["right_table"] == "target"]
+        self.assertEqual(
+            len(target_specs), 1, "Expected exactly one spec for target JOIN"
+        )
+        self.assertEqual(
+            target_specs[0]["left_table"],
+            "cte",
+            f"left_table should be 'cte', got '{target_specs[0]['left_table']}'",
+        )
+
+    def test_substr_fully_qualified_cte_production_repro(self):
+        """Production repro: coface CTE + territoire_prospect joined via SUBSTR.
+
+        Mirrors the actual BigQuery error:
+          "Unrecognized name: coface at [349:1147]"
+        from ON territoire_prospect.dpt = SUBSTR(coface.copost, 1, 2)
+        where coface is a CTE wrapping a fully-qualified table.
+        """
+        sql = (
+            "WITH coface AS (SELECT copost FROM `proj.ds.coface_src`) "
+            "SELECT * FROM `proj.ds.DS_RCOMP` AS rcomp "
+            "JOIN coface ON coface.id = rcomp.id "
+            "JOIN `proj.ds.territoire_prospect` AS territoire_prospect "
+            "  ON territoire_prospect.dpt = SUBSTR(coface.copost, 1, 2)"
+        )
+        specs = _collect_join_specs(sql)
+        tp_specs = [s for s in specs if "territoire_prospect" in s["right_table"]]
+        self.assertEqual(len(tp_specs), 1)
+        self.assertEqual(
+            tp_specs[0]["left_table"],
+            "coface",
+            f"left_table should be 'coface', got '{tp_specs[0]['left_table']}'",
+        )
+
+    def test_concat_two_tables_spec_skipped(self):
+        """CONCAT(a.x, b.y) references two tables → no spec emitted for that JOIN.
+
+        We cannot build a single-FROM subquery for a key expression that spans
+        two different tables. The spec must be omitted entirely.
+        """
+        sql = "SELECT * FROM a JOIN b ON b.id = a.id JOIN c ON c.dpt = CONCAT(a.x, b.y)"
+        specs = _collect_join_specs(sql)
+        c_specs = [s for s in specs if s["right_table"] == "c"]
+        self.assertEqual(
+            len(c_specs),
+            0,
+            "Spec with a multi-table function expression must be skipped",
+        )
+
+    def test_valid_join_unaffected_when_sibling_spec_skipped(self):
+        """The valid a→b JOIN is not dropped when the a→c spec is skipped."""
+        sql = "SELECT * FROM a JOIN b ON b.id = a.id JOIN c ON c.dpt = CONCAT(a.x, b.y)"
+        specs = _collect_join_specs(sql)
+        ab_specs = [s for s in specs if s["right_table"] == "b"]
+        self.assertEqual(len(ab_specs), 1)
+        self.assertEqual(ab_specs[0]["left_table"], "a")
+
+    def test_plain_column_join_unaffected(self):
+        """Regression: ON a.id = b.id still produces left_table='a', right_table='b'."""
+        specs = _collect_join_specs("SELECT * FROM a JOIN b ON a.id = b.id")
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["left_table"], "a")
+        self.assertEqual(specs[0]["right_table"], "b")
+
+    def test_func_expr_single_ref_matches_primary_table(self):
+        """SUBSTR(main.col, 1, 2) where main IS the primary FROM → left_table='main'."""
+        sql = "SELECT * FROM main JOIN target ON target.dpt = SUBSTR(main.col, 1, 2)"
+        specs = _collect_join_specs(sql)
+        target_specs = [s for s in specs if s["right_table"] == "target"]
+        self.assertEqual(len(target_specs), 1)
+        self.assertEqual(target_specs[0]["left_table"], "main")
+
+
+# ─── build_profile_query: func expr join metadata and SQL validity ─────────────
+
+
+_FUNC_EXPR_SCHEMA = {
+    "tables": [
+        {
+            "name": "DS_RCOMP",
+            "columns": [
+                {"name": "id", "type": "STRING"},
+                {"name": "copost", "type": "STRING"},
+            ],
+        },
+        {
+            "name": "territoire_prospect",
+            "columns": [{"name": "dpt", "type": "STRING"}],
+        },
+    ]
+}
+
+# Mirrors the structure that caused the BigQuery error:
+# "Unrecognized name: coface at [349:1147]"
+# Before fix: left_table = "DS_RCOMP" (fallback), left_expr_sql still has coface.copost
+# → SELECT SUBSTR(coface.copost, 1, 2) FROM `DS_RCOMP` GROUP BY 1  -- coface out of scope
+# After fix: left_table = "coface" (CTE, in scope via WITH clause)
+# → SELECT SUBSTR(coface.copost, 1, 2) FROM coface GROUP BY 1  -- valid
+_FUNC_EXPR_SQL = (
+    "WITH coface AS (SELECT id, copost FROM DS_RCOMP) "
+    "SELECT * FROM DS_RCOMP AS rcomp "
+    "JOIN coface ON coface.id = rcomp.id "
+    "JOIN territoire_prospect "
+    "  ON territoire_prospect.dpt = SUBSTR(coface.copost, 1, 2)"
+)
+
+_FUNC_EXPR_USED = [
+    {"table": "DS_RCOMP", "used_columns": ["id", "copost"]},
+    {"table": "territoire_prospect", "used_columns": ["dpt"]},
+]
+
+
+class TestBuildProfileQueryFuncExprJoin(unittest.TestCase):
+    """build_profile_query with function-expression join keys.
+
+    Regression suite for the BigQuery error "Unrecognized name: coface"
+    caused by generating SELECT SUBSTR(coface.copost, 1, 2) FROM DS_RCOMP.
+    """
+
+    def _q(self):
+        return build_profile_query(
+            _FUNC_EXPR_SCHEMA,
+            _FUNC_EXPR_USED,
+            dialect="bigquery",
+            sql_query=_FUNC_EXPR_SQL,
+        )
+
+    def test_territoire_join_branch_left_table_is_coface(self):
+        """The stored left_table for the territoire_prospect join must be 'coface'.
+
+        Before fix: 'DS_RCOMP' AS left_table (wrong — generates coface out of scope).
+        After fix:  'coface' AS left_table  (correct — coface is in the WITH clause).
+        """
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        tp_parts = [p for p in join_parts if "territoire_prospect" in p]
+        self.assertGreaterEqual(len(tp_parts), 1)
+        for part in tp_parts:
+            self.assertIn(
+                "'coface'",
+                part,
+                "left_table metadata must reference 'coface', not 'DS_RCOMP'",
+            )
+
+    def test_territoire_join_subquery_does_not_reference_coface_from_ds_rcomp(self):
+        """The left subquery must NOT query DS_RCOMP while using coface in its expression.
+
+        The broken pattern is:
+            SELECT SUBSTR(coface.copost, 1, 2) AS join_key
+            FROM `DS_RCOMP`   ← coface not in scope here → BigQuery error
+        After fix, either:
+          - FROM coface (CTE reference)  — expression SUBSTR(coface.copost, ...) in scope
+          - FROM DS_RCOMP with bare expression SUBSTR(copost, ...) — also valid
+        """
+        q = self._q()
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        tp_parts = [p for p in join_parts if "territoire_prospect" in p]
+        self.assertGreaterEqual(len(tp_parts), 1)
+        for part in tp_parts:
+            # The broken pattern: coface.copost referenced inside a DS_RCOMP subquery
+            self.assertFalse(
+                "coface.copost" in part and "FROM `DS_RCOMP`" in part,
+                "coface.copost must not appear in a subquery that FROM DS_RCOMP",
+            )
+
+    def test_multi_table_func_expr_no_join_branch_generated(self):
+        """A join ON CONCAT(a.x, b.y) must produce no profiling branch.
+
+        We cannot safely profile a key that spans two tables.
+        """
+        schema = {
+            "tables": [
+                {"name": "a", "columns": [{"name": "x", "type": "STRING"}]},
+                {"name": "b", "columns": [{"name": "y", "type": "STRING"}]},
+                {"name": "c", "columns": [{"name": "dpt", "type": "STRING"}]},
+            ]
+        }
+        sql = "SELECT * FROM a JOIN b ON b.id = a.id JOIN c ON c.dpt = CONCAT(a.x, b.y)"
+        used = [
+            {"table": "a", "used_columns": ["x"]},
+            {"table": "b", "used_columns": ["y"]},
+            {"table": "c", "used_columns": ["dpt"]},
+        ]
+        q = build_profile_query(schema, used, sql_query=sql)
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        c_parts = [p for p in join_parts if "'c'" in p or '"c"' in p]
+        self.assertEqual(
+            len(c_parts),
+            0,
+            "No join branch should be generated for a multi-table function expression",
+        )
 
 
 if __name__ == "__main__":

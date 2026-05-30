@@ -1152,6 +1152,18 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
                     else ""
                 )
 
+                if not l_resolved:
+                    # For complex expressions (e.g. SUBSTR(coface.copost, 1, 2)),
+                    # infer left_table from Column nodes inside the expression.
+                    inner_tables = {
+                        resolve(c.table) for c in l_expr.find_all(exp.Column) if c.table
+                    }
+                    if len(inner_tables) == 1:
+                        l_resolved = next(iter(inner_tables))
+                    elif len(inner_tables) >= 2:
+                        # Ambiguous: expression spans multiple tables — skip spec.
+                        return
+
                 specs.append(
                     {
                         "left_table": l_resolved or _lp,
@@ -1769,7 +1781,31 @@ def _build_join_query(
     str_dtype = exp.DataType.build(str_t)
     float_t = "FLOAT"
 
-    l_src_table = l_source["source_table"] if l_source else left_table
+    # When left_table is a CTE name AND the join key is a complex expression (function,
+    # SUBSTR, CASE, …), query the CTE directly rather than resolving to the physical
+    # source table. Resolving to the physical table would put the CTE alias out of
+    # scope (e.g. SELECT SUBSTR(coface.copost, 1, 2) FROM DS_RCOMP → BigQuery error).
+    # For simple column refs (e.g. a.id) the existing resolution path is correct and
+    # the metadata should reflect the real source table — so we only bypass when the
+    # expression is non-trivial.
+    def _left_has_complex_expr() -> bool:
+        for s in pair_specs:
+            try:
+                node = sqlglot.parse_one(s.get("left_expr_sql", ""))
+                if not isinstance(node, exp.Column):
+                    return True
+            except Exception:
+                pass
+        return False
+
+    _effective_l_source = (
+        None
+        if (cte_names and left_table in cte_names and _left_has_complex_expr())
+        else l_source
+    )
+    l_src_table = (
+        _effective_l_source["source_table"] if _effective_l_source else left_table
+    )
     r_src_table = r_source["source_table"] if r_source else right_table
 
     def _table_ref(name: str) -> exp.Expression:
@@ -1794,7 +1830,9 @@ def _build_join_query(
             node = exp.Column(this=node.this)
         return node
 
-    l_key_nodes = [_spec_key(i, "left", l_source) for i in range(len(pair_specs))]
+    l_key_nodes = [
+        _spec_key(i, "left", _effective_l_source) for i in range(len(pair_specs))
+    ]
     r_key_nodes = [_spec_key(i, "right", r_source) for i in range(len(pair_specs))]
 
     # For a single condition: use the column directly.
@@ -1838,7 +1876,7 @@ def _build_join_query(
         )
         .from_(_table_ref(l_src_table))
         .group_by(exp.Literal.number(1)),
-        l_source,
+        _effective_l_source,
     )
     r_sub = _apply_where(
         exp.select(
@@ -1856,7 +1894,7 @@ def _build_join_query(
         .from_(_table_ref(l_src_table))
         .group_by(exp.Literal.number(1))
         .limit(100),
-        l_source,
+        _effective_l_source,
     )
     ks_outer = exp.select(
         exp.Anonymous(
