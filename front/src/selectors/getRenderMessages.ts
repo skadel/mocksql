@@ -8,6 +8,9 @@ const isMessage = (item: any): item is Message => !!item && item.id !== undefine
 
 const MERGEABLE_CT = new Set<string>(['stream_part', 'tool_progress', 'partial', 'intermediate']);
 
+// These types are always rendered as standalone bubbles — never merged into adjacent messages.
+const NON_COALESCING_TYPES = new Set<string>(['suggestions', 'evaluation', 'generate_test_scenario']);
+
 const getContentType = (m: Message): string | null =>
   ((m as any).contentType as string | undefined) ?? null;
 
@@ -146,13 +149,18 @@ export const getRenderMessages = createSelector(
       if (getContentType(msg) === 'sql_update') {
         const children = getChildren(msg.id).filter(c => !DEBUG_TYPES.has(getContentType(c) ?? ''));
         if (children.length > 1) {
-          const branches: (Message | MessageGroup)[][] = [];
-          for (const child of children) {
-            const branch: (Message | MessageGroup)[] = [];
-            processRec(child, branch);
-            branches.push(branch);
+          const hasUserChild = children.some(c => c.type === 'user');
+          if (hasUserChild) {
+            const branches: (Message | MessageGroup)[][] = [];
+            for (const child of children) {
+              const branch: (Message | MessageGroup)[] = [];
+              processRec(child, branch);
+              branches.push(branch);
+            }
+            out.push({ type: 'group', parentId: msg.id, branches });
+          } else {
+            for (const child of children) processRec(child, out);
           }
-          out.push({ type: 'group', parentId: msg.id, branches });
         } else if (children.length === 1) {
           processRec(children[0], out);
         }
@@ -167,8 +175,8 @@ export const getRenderMessages = createSelector(
         } else if (
           last.type === 'bot' &&
           msg.type === 'bot' &&
-          getContentType(msg) !== 'suggestions' &&
-          getContentType(last) !== 'suggestions' &&
+          !NON_COALESCING_TYPES.has(getContentType(msg) ?? '') &&
+          !NON_COALESCING_TYPES.has(getContentType(last) ?? '') &&
           getNearestUserAncestor(last) === getNearestUserAncestor(msg)
         ) {
           out[out.length - 1] = coalesceBotMessages(last, msg);
@@ -179,31 +187,50 @@ export const getRenderMessages = createSelector(
         out.push(msg);
       }
 
-      // Filter out debug children for branching — they are rendered inside the parent.
+      // Filter out debug children — they are rendered inside the parent.
       const children = getChildren(msg.id).filter(
         c => !DEBUG_TYPES.has(getContentType(c) ?? '')
       );
       if (children.length > 1) {
-        const branches: (Message | MessageGroup)[][] = [];
-        for (const child of children) {
-          const branch: (Message | MessageGroup)[] = [];
-          processRec(child, branch);
-          branches.push(branch);
+        // Create a MessageGroup only when children include user messages (true branching from edits).
+        // When all children are bot messages they are sequential responses — render them linearly
+        // so that the coalescing/non-coalescing rules above apply uniformly to SSE and reload.
+        const hasUserChild = children.some(c => c.type === 'user');
+        if (hasUserChild) {
+          const branches: (Message | MessageGroup)[][] = [];
+          for (const child of children) {
+            const branch: (Message | MessageGroup)[] = [];
+            processRec(child, branch);
+            branches.push(branch);
+          }
+          out.push({ type: 'group', parentId: msg.id, branches });
+        } else {
+          for (const child of children) {
+            processRec(child, out);
+          }
         }
-        out.push({ type: 'group', parentId: msg.id, branches });
       } else if (children.length === 1) {
         processRec(children[0], out);
       }
     };
 
     if (roots.length > 1) {
-      const rootBranches: (Message | MessageGroup)[][] = [];
-      for (const r of roots) {
-        const br: (Message | MessageGroup)[] = [];
-        processRec(r, br);
-        rootBranches.push(br);
+      // Only create a root-level group when there are truly alternative conversation threads
+      // (multiple user-type roots = the user sent different first messages).
+      // Orphaned bot roots (e.g. evaluation messages whose parent link was lost on reload)
+      // are treated as sequential items rendered linearly.
+      const userRoots = roots.filter(r => r.type === 'user');
+      if (userRoots.length > 1) {
+        const rootBranches: (Message | MessageGroup)[][] = [];
+        for (const r of roots) {
+          const br: (Message | MessageGroup)[] = [];
+          processRec(r, br);
+          rootBranches.push(br);
+        }
+        processed.push({ type: 'group', parentId: 'root_message', branches: rootBranches });
+      } else {
+        roots.forEach(r => processRec(r, processed));
       }
-      processed.push({ type: 'group', parentId: 'root_message', branches: rootBranches });
     } else {
       roots.forEach(r => processRec(r, processed));
     }

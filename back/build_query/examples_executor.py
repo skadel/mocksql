@@ -791,12 +791,31 @@ async def _run_single_test_case(
         return result
 
     except Exception as e:
+        if _is_duckdb_data_error(e):
+            logger.warning(
+                "[executor] Erreur de données DuckDB → bad_data_error: %s", e
+            )
+            return {
+                **base,
+                "status": "bad_data_error",
+                "exec_error": str(e),
+                "results_json": "[]",
+                "assertion_results": [],
+            }
         return {
             **base,
             "status": "error",
             "error": str(e),
             "results_json": "[]",
         }
+
+
+_DUCKDB_DATA_ERROR_PREFIXES = ("Invalid Input Error", "Conversion Error")
+
+
+def _is_duckdb_data_error(exc: Exception) -> bool:
+    msg = str(exc)
+    return any(msg.startswith(p) for p in _DUCKDB_DATA_ERROR_PREFIXES)
 
 
 def _prepare_test_data(
@@ -1262,6 +1281,8 @@ def _determine_global_status(all_tests_results: List[Dict[str, Any]]) -> str:
     first = all_tests_results[0]
     if first.get("status") == "error":
         return "error"
+    if first.get("status") == "bad_data_error":
+        return "bad_data_error"
     if first.get("status") == "empty_results":
         return "empty_results"
     return "complete"

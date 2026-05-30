@@ -263,13 +263,19 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
 
     # --- 4. Détermination du parent_id ---
     messages = state.get("messages", [])
-    parent_id = state.get("parent_message_id") or state.get("user_message_id")
-    for m in reversed(messages):
-        if get_message_type(m) == MsgType.EVALUATION:
-            parent_id = m.id
-            break
-        if get_message_type(m) == MsgType.RESULTS:
-            parent_id = m.id
+    parent_id = state.get("user_message_id") or state.get("parent_message_id")
+
+    # When triggered by an explicit user request via conversational_agent, keep
+    # user_message_id as parent so the suggestion bubble attaches to the request.
+    # In the normal post-evaluate flow (agent_tool_call is unset), attach to the
+    # last EVALUATION or RESULTS message from the current run instead.
+    if state.get("agent_tool_call") != "generate_suggestions":
+        for m in reversed(messages):
+            if get_message_type(m) == MsgType.EVALUATION:
+                parent_id = m.id
+                break
+            if get_message_type(m) == MsgType.RESULTS:
+                parent_id = m.id
 
     # --- 5. Retour au state LangGraph ---
     return {

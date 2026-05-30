@@ -63,7 +63,7 @@ export const chatQuery = createAsyncThunk(
           id: userMessageId,
           type: 'user',
           contents: { text: userInput },
-          parent: parentMessageId || undefined,
+          parent: (ChangedMessageId && ChangedMessageId !== '') ? ChangedMessageId : (parentMessageId || undefined),
           children: [],
         }));
       }

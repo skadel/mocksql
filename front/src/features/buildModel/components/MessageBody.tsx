@@ -238,9 +238,29 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       )}
 
-      {/* Notification de génération de test sur scénario */}
+      {/* Correction de test — séparateur "Test modifié" + scénario */}
       {msg.contentType === 'generate_test_scenario' && msg.contents.text && (
         <Box>
+          {/* Séparateur visuel */}
+          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 1 }}>
+            <Box sx={{ flex: 1, height: '1px', bgcolor: '#ffe082' }} />
+            <Chip
+              label="Test modifié"
+              size="small"
+              sx={{
+                fontSize: 10,
+                height: 20,
+                bgcolor: '#fffde7',
+                color: '#7a5f00',
+                border: '1px solid #ffe082',
+                fontWeight: 700,
+                letterSpacing: '0.03em',
+              }}
+            />
+            <Box sx={{ flex: 1, height: '1px', bgcolor: '#ffe082' }} />
+          </Box>
+
+          {/* Réflexion collapsible */}
           {msg.contents.reasoning && (
             <Box sx={{ mb: 0.75 }}>
               <Box
@@ -261,18 +281,19 @@ const MessageBody: React.FC<MessageBodyProps> = ({
               </Collapse>
             </Box>
           )}
+
+          {/* Description du scénario de correction */}
           <Box
             sx={{
-              mt: 0.5,
               p: 1.25,
-              bgcolor: '#f0fafa',
+              bgcolor: '#fffde7',
               borderRadius: '8px',
-              border: '1px solid #c8e6e4',
-              borderLeft: '3px solid #1ca8a4',
+              border: '1px solid #ffe082',
+              borderLeft: '3px solid #f9a825',
             }}
           >
-            <Typography sx={{ fontSize: 11, color: '#1ca8a4', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 0.5 }}>
-              Génération de test pour le scénario suivant
+            <Typography sx={{ fontSize: 11, color: '#f9a825', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 0.5 }}>
+              Modification pour le scénario suivant
             </Typography>
             <Typography variant="body2" sx={{ color: '#333', lineHeight: 1.5 }}>
               {msg.contents.text}

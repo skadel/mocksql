@@ -3,7 +3,7 @@ import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, Tooltip, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, Tooltip, Typography } from '@mui/material';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -570,9 +570,7 @@ const ChatComponent: React.FC = () => {
   useEffect(() => {
     if (!tablesToImport) return;
     const globalAuto = localStorage.getItem('autoImport_always') === 'true';
-    const projectAuto = currentProjectId
-      ? localStorage.getItem(`autoImport_project_${currentProjectId}`) === 'true'
-      : false;
+    const projectAuto = localStorage.getItem(`autoImport_project_${currentProjectId}`) === 'true';
     if (globalAuto || projectAuto) {
       handleAutoImport();
     }
@@ -1359,10 +1357,10 @@ const ChatComponent: React.FC = () => {
               Annuler
             </Button>
             <Button
-              variant="outlined"
+              variant="text"
               onClick={() => pendingAutoProfile.onSkip()}
               disabled={isAutoProfileRunning}
-              sx={{ textTransform: 'none', color: '#999', borderColor: '#ddd', '&:hover': { borderColor: '#aaa', bgcolor: 'transparent' } }}
+              sx={{ textTransform: 'none', color: '#bbb', fontSize: 12, '&:hover': { bgcolor: 'transparent', color: '#888' } }}
             >
               {t('profiling.skip_label')}
             </Button>
@@ -1370,9 +1368,27 @@ const ChatComponent: React.FC = () => {
               variant="contained"
               onClick={pendingAutoProfile.onConfirm}
               disabled={isAutoProfileRunning || pendingAutoProfile.profileRequest === null}
-              sx={{ textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' } }}
+              startIcon={
+                !isAutoProfileRunning && pendingAutoProfile.profileRequest === null
+                  ? <CircularProgress size={14} sx={{ color: 'white' }} />
+                  : undefined
+              }
+              sx={{
+                textTransform: 'none',
+                bgcolor: '#1ca8a4',
+                '&:hover': { bgcolor: '#159e9a' },
+                '&.Mui-disabled': {
+                  bgcolor: pendingAutoProfile.profileRequest === null ? '#1ca8a4' : undefined,
+                  color: pendingAutoProfile.profileRequest === null ? 'white' : undefined,
+                  opacity: pendingAutoProfile.profileRequest === null ? 0.85 : undefined,
+                },
+              }}
             >
-              {isAutoProfileRunning ? t('loading.profiling_short') : t('action.run_profiling')}
+              {isAutoProfileRunning
+                ? t('loading.profiling_short')
+                : pendingAutoProfile.profileRequest === null
+                  ? 'Estimation…'
+                  : t('action.run_profiling')}
             </Button>
           </DialogActions>
         </Dialog>

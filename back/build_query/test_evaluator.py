@@ -131,6 +131,61 @@ async def evaluate_tests(state: QueryState):
     ):
         return await _reevaluate_empty_result(state, current_test, last_results)
 
+    # DuckDB data error (Invalid Input Error, Conversion Error): wrong format/type in generated data.
+    if current_test.get("status") == "bad_data_error":
+        exec_error = current_test.get("exec_error", "")
+        display_reason = (
+            "Les données générées contiennent des valeurs au mauvais format."
+        )
+        diag = f"Erreur DuckDB lors de l'exécution :\n{exec_error}"
+        gen_retries = (
+            state.get("gen_retries") if state.get("gen_retries") is not None else 3
+        )
+        if gen_retries == 0:
+            stub_test = dict(current_test)
+            for table_name in stub_test.get("data", {}):
+                stub_test["data"][table_name] = []
+            stub_test["tags"] = list(
+                set(
+                    stub_test.get("tags", [])
+                    + ["FAILED_AUTO_GEN", "MANUAL_REVIEW_NEEDED"]
+                )
+            )
+            return {
+                "examples": [
+                    AIMessage(
+                        content=json.dumps(stub_test),
+                        id=str(uuid.uuid4()),
+                        additional_kwargs={
+                            "type": MsgType.EXAMPLES,
+                            "parent": last_results.id,
+                            "request_id": state.get("request_id"),
+                        },
+                    )
+                ],
+                "evaluation_feedback": "bad_data",
+                "status": "complete",
+            }
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"**Insuffisant** — {display_reason}",
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.EVALUATION,
+                        "parent": last_results.id,
+                        "request_id": state.get("request_id"),
+                        "test_index": current_test.get("test_index"),
+                        "diag": diag,
+                        "intermediate": True,
+                    },
+                )
+            ],
+            "evaluation_feedback": "bad_data",
+            "status": "empty_results",
+            "gen_retries": gen_retries - 1,
+        }
+
     # Fast path: empty_results due to structural SQL constraint (no LLM needed).
     if current_test.get("status") == "empty_results":
         from build_query.constraint_simplifier import (

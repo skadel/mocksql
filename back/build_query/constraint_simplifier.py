@@ -49,6 +49,7 @@ SimplificationResult fields
 from __future__ import annotations
 
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -1543,6 +1544,54 @@ def _walk_tree_grouped(
     return [ConstraintGroup()]
 
 
+# ─── Null-contradiction filter ────────────────────────────────────────────────
+
+_IS_NULL_EXACT = re.compile(r"^(\S+)\s+IS\s+NULL$", re.IGNORECASE)
+_IS_NOT_NULL_EXACT_1 = re.compile(r"^NOT\s+(\S+)\s+IS\s+NULL$", re.IGNORECASE)
+_IS_NOT_NULL_EXACT_2 = re.compile(r"^(\S+)\s+IS\s+NOT\s+NULL$", re.IGNORECASE)
+
+
+def _remove_null_contradictions(parts: list[str]) -> list[str]:
+    """Remove contradictory IS NULL / IS NOT NULL pairs from cond_parts.
+
+    When the SQL uses separate CTEs as UNION ALL branches (e.g. one CTE that
+    filters `WHERE NOT col IS NULL` and another that filters `WHERE col IS NULL`),
+    the flat CTE scan collects both conditions and ANDs them — making it
+    impossible for the LLM to satisfy simultaneously.  Removing both predicates
+    lets the LLM choose freely which branch to satisfy (guided by the full SQL).
+
+    Only standalone exact-match entries are removed (not conditions embedded
+    inside a larger AND chain), which is the common pattern for branch-CTE
+    WHERE clauses.
+    """
+    is_null_idxs: dict[str, list[int]] = {}
+    is_not_null_idxs: dict[str, list[int]] = {}
+
+    for i, p in enumerate(parts):
+        stripped = p.strip()
+        m = _IS_NULL_EXACT.match(stripped)
+        if m:
+            is_null_idxs.setdefault(m.group(1).lower(), []).append(i)
+            continue
+        m = _IS_NOT_NULL_EXACT_1.match(stripped)
+        if m:
+            is_not_null_idxs.setdefault(m.group(1).lower(), []).append(i)
+            continue
+        m = _IS_NOT_NULL_EXACT_2.match(stripped)
+        if m:
+            is_not_null_idxs.setdefault(m.group(1).lower(), []).append(i)
+
+    contradictory = set(is_null_idxs) & set(is_not_null_idxs)
+    if not contradictory:
+        return parts
+
+    remove: set[int] = set()
+    for col in contradictory:
+        remove.update(is_null_idxs[col])
+        remove.update(is_not_null_idxs[col])
+    return [p for i, p in enumerate(parts) if i not in remove]
+
+
 # ─── Conditions hint builder ─────────────────────────────────────────────────
 
 
@@ -1699,6 +1748,8 @@ def build_conditions_hint(
             sel, alias_map, resolver, window_aliases, dialect
         ):
             _add_cond(part)
+
+    cond_parts = _remove_null_contradictions(cond_parts)
 
     conditions = " AND ".join(_safe_and_part(p) for p in cond_parts)
     format_constraints = _collect_format_constraints_strings(
