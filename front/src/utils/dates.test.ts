@@ -13,7 +13,7 @@ const t = (key: string, opts?: { count?: number }): string => {
 
 describe('relativeDate', () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['Date'] });
   });
 
   afterEach(() => {
