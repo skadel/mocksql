@@ -99,6 +99,9 @@ back/data/
 docs/vision-produit.md
 vision.md
 
+################################## Demo (local uniquement — jamais commité)
+demo/
+
 ################################## Examples
 
 # État local généré par MockSQL (DuckDB, cache schéma, tests générés)

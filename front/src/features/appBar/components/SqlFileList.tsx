@@ -208,6 +208,7 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
     <>
       <Box
         onClick={handleClick}
+        data-testid={`file-row-${model.name || model.session_id}`}
         sx={{
           display: 'flex',
           alignItems: 'center',

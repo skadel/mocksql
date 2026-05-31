@@ -978,7 +978,7 @@ const ChatComponent: React.FC = () => {
                         '&.Mui-focused fieldset': { borderColor: '#2BB0A8' },
                       },
                     }}
-                    inputProps={{ sx: { py: '7px', px: '4px' } }}
+                    inputProps={{ sx: { py: '7px', px: '4px' }, 'data-testid': 'file-search-input' }}
                   />
                   <Typography sx={{ fontSize: 11, color: '#6b8287', whiteSpace: 'nowrap', flexShrink: 0 }}>
                     {(() => {
@@ -1000,6 +1000,7 @@ const ChatComponent: React.FC = () => {
                         <Box
                           key={f.name}
                           onClick={() => setSelectedModelName(f.name)}
+                          data-testid={`generate-file-row-${f.name}`}
                           sx={{
                             display: 'grid',
                             gridTemplateColumns: '18px 1fr auto auto',
@@ -1095,6 +1096,7 @@ const ChatComponent: React.FC = () => {
               </Box>
               <Button
                 variant="contained"
+                data-testid="generate-button"
                 disabled={!selectedModelName || isSending}
                 onClick={handleFileSubmit}
                 startIcon={isSending ? undefined : <AutoAwesomeIcon sx={{ fontSize: 15 }} />}

@@ -245,7 +245,7 @@ def filter_schemas_by_used_columns(
                 filtered_schemas.append(
                     {
                         "table_name": table_schema["table_name"],
-                        "description": table_schema["description"],
+                        "description": table_schema.get("description", ""),
                         "columns": filtered_columns,
                         "primary_keys": table_schema.get("primary_keys", []),
                     }

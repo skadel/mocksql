@@ -117,6 +117,7 @@ const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
             <InputAdornment position="end">
               {loading ? (
                 <CenteredIconButton
+                  data-testid="stop-button"
                   onClick={handleStop}
                   disabled={false}
                   sx={{
@@ -130,6 +131,7 @@ const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
                 </CenteredIconButton>
               ) : (
                 <CenteredIconButton
+                  data-testid="send-button"
                   onClick={handleSend}
                   disabled={disabled}
                   sx={{
@@ -147,7 +149,7 @@ const DroppableTextField: React.FC<DroppableTextFieldProps> = ({
             </InputAdornment>
           ),
         }}
-        inputProps={{ readOnly: disabled }}
+        inputProps={{ readOnly: disabled, 'data-testid': 'chat-input' }}
         inputRef={inputRef}
       />
 

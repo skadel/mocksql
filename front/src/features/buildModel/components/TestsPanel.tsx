@@ -146,7 +146,7 @@ function CoverageBar({ tests }: { tests: any[] }) {
   const partial   = bucketData.filter((b) => b.n > 0 && b.comp < 85);
 
   return (
-    <Box sx={{ bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '12px', p: '14px 16px', mb: 1.5 }}>
+    <Box data-testid="coverage-bar" sx={{ bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '12px', p: '14px 16px', mb: 1.5 }}>
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
           <CoverageRing score={score} fg={toneFg} />
@@ -855,6 +855,7 @@ function TestCard({
   return (
     <Box
       id={`test-${idx + 1}`}
+      data-testid={`test-card-${idx + 1}`}
       sx={{
         bgcolor: selectedTestIndex === idx ? '#f0fafa' : SURFACE,
         border: `1px solid ${BORDER}`,
