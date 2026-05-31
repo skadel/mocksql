@@ -840,6 +840,9 @@ def _dispatch_pred(
     if isinstance(pred, exp.Like):
         col_node = pred.this
         pat_node = pred.args.get("expression") or pred.args.get("pattern")
+        # sqlglot ≥30.8 encodes NOT LIKE as Like(negate=True) instead of Not(Like(...))
+        negated = bool(pred.args.get("negate"))
+        op = "not_like" if negated else "like"
         if _is_column(col_node) and pat_node:
             raw = _col_ref(col_node, alias_map)
             if raw:
@@ -848,7 +851,7 @@ def _dispatch_pred(
                 filters.append(
                     FilterConstraint(
                         column=ref,
-                        op="like",
+                        op=op,
                         value=_literal_value(pat_node) or _sql_of(pat_node),
                         source_columns=src_cols,
                     )
@@ -864,7 +867,7 @@ def _dispatch_pred(
                     filters.append(
                         FilterConstraint(
                             column=ref,
-                            op="like",
+                            op=op,
                             value=_literal_value(pat_node) or _sql_of(pat_node),
                             source_columns=src_cols,
                         )
