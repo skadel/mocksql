@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.conversational_agent import conversational_agent
+from build_query.data_patcher import data_patcher_node
 from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
 from build_query.update_test_node import update_test_node
@@ -244,6 +245,7 @@ def build_query_graph():
     builder.add_node("pre_routing", pre_routing)
     builder.add_node("routing", routing)
     builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("data_patcher", data_patcher_node)
     builder.add_node("debug_node", debug_test_node)
     builder.add_node("delete_test_node", delete_test_node)
     builder.add_node("update_test_node", update_test_node)
@@ -286,6 +288,8 @@ def build_query_graph():
     def route_agent_output(state: QueryState):
         tool_call = state.get("agent_tool_call")
         logger.diag("[route_agent_output] agent_tool_call=%s", tool_call)
+        if tool_call in ("patch_test_field", "remove_test_row", "add_test_row"):
+            return "data_patcher"
         if tool_call in ("generate_test_data", "update_test_data"):
             return "generator"
         if tool_call == "delete_test":
@@ -365,6 +369,7 @@ def build_query_graph():
     builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("update_test_node", "history_saver")
+    builder.add_edge("data_patcher", "executor")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)

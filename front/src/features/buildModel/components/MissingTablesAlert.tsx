@@ -46,7 +46,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
   };
 
   return (
-    <Box sx={{ mt: 2 }}>
+    <Box data-testid="missing-tables-alert" sx={{ mt: 2 }}>
       {/* Main import card — amber/duck theme */}
       <Box
         sx={{
@@ -104,6 +104,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
           {missingTables.map((table, i) => (
             <Box
               key={table}
+              data-testid={`import-table-row-${table}`}
               sx={{
                 bgcolor: '#fff',
                 border: '1px solid #f0dea2',
@@ -181,6 +182,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
             )}
             {onImport && (
               <WarningContainedButton
+                data-testid="import-button"
                 size="small"
                 startIcon={
                   importing

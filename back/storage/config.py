@@ -5,9 +5,20 @@ from pathlib import Path
 import yaml
 
 
+def _base_dir() -> Path:
+    base = os.getenv("MOCKSQL_BASE_DIR")
+    if base:
+        return Path(base).resolve()
+    return Path(os.getcwd())
+
+
+def get_mocksql_dir() -> Path:
+    return _base_dir() / ".mocksql"
+
+
 @lru_cache(maxsize=1)
 def load_config() -> dict:
-    path = Path(os.getcwd()) / "mocksql.yml"
+    path = _base_dir() / "mocksql.yml"
     if not path.exists():
         return {}
     with open(path, encoding="utf-8") as f:
@@ -17,11 +28,7 @@ def load_config() -> dict:
 def get_models_path() -> Path:
     cfg = load_config()
     raw = cfg.get("models_path", "./models")
-    return (Path(os.getcwd()) / raw).resolve()
-
-
-def get_mocksql_dir() -> Path:
-    return (Path(os.getcwd()) / ".mocksql").resolve()
+    return (_base_dir() / raw).resolve()
 
 
 _GITIGNORE_CONTENT = "data/\n"
@@ -56,8 +63,7 @@ def get_langchain_tracing() -> bool:
 
 
 def is_initialized() -> bool:
-    """Return True if mocksql.yml exists in the current working directory."""
-    return (Path(os.getcwd()) / "mocksql.yml").exists()
+    return (_base_dir() / "mocksql.yml").exists()
 
 
 def get_llm_model() -> str:

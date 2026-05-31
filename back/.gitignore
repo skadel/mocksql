@@ -65,6 +65,10 @@ documents.json
 
 data/
 
+# MockSQL local state (generated at runtime)
+.mocksql/
+mocksql.yml
+
 # Generated UI package artifacts (populated by make build-ui)
 ui/static/
 ui/server.py

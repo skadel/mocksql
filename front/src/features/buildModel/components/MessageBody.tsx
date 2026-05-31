@@ -458,6 +458,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             {(msg.contents.suggestions as string[]).map((s, i) => (
               <Box
                 key={i}
+                data-testid={`suggestion-${i}`}
                 component="button"
                 onClick={() => onSuggestionClick?.(s)}
                 sx={{

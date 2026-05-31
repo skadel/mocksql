@@ -55,6 +55,19 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
     )
 
 
+def _format_data_indexed(data: dict) -> str:
+    """Affiche les données d'un test avec les indices de lignes pour référencer [table][i]."""
+    lines = []
+    for table, rows in (data or {}).items():
+        lines.append(f"Table {table}:")
+        for i, row in enumerate(rows or []):
+            try:
+                lines.append(f"  [{i}] {json.dumps(row, ensure_ascii=False)}")
+            except Exception:
+                lines.append(f"  [{i}] {row!r}")
+    return "\n".join(lines) if lines else "(aucune donnée)"
+
+
 async def conversational_agent(state: QueryState):
     """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
     logger.diag(
@@ -106,13 +119,7 @@ async def conversational_agent(state: QueryState):
                 assertion_results = failing_test.get("assertion_results", [])
 
                 if input_data:
-                    try:
-                        input_summary = json.dumps(
-                            input_data, ensure_ascii=False, indent=2
-                        )
-                    except Exception:
-                        input_summary = str(input_data)
-                    test_data_block += f"\n\nDonnées d'entrée du test {eval_test_idx} :\n```json\n{input_summary}\n```"
+                    test_data_block += f"\n\nDonnées d'entrée du test {eval_test_idx} :\n{_format_data_indexed(input_data)}"
 
                 if results_json and results_json != "[]":
                     try:
@@ -161,10 +168,13 @@ Tentatives de correction restantes : {retries_left}
 
 **Outils disponibles :**
 - `run_cte` — inspecter le contenu réel (valeurs) d'une CTE intermédiaire
-- `update_test_data` — corriger les données d'entrée avec une instruction précise
+- `patch_test_field` — modifier un champ précis : table, indice de ligne, champ, valeur (pas d'appel LLM)
+- `remove_test_row` — supprimer une ligne par son indice (pas d'appel LLM)
+- `add_test_row` — ajouter une ligne dans une ou plusieurs tables (génération LLM scopée)
+- `update_test_data` — régénérer complètement les données avec une instruction (à utiliser si la correction est complexe)
 - `request_reevaluation` — demander une réévaluation LLM si les données sont correctes (ex : 0 ligne est le comportement attendu pour ce scénario)
 
-⚠️ Règle impérative : si la cause est évidente d'après le diagnostic ci-dessus, appelle directement `update_test_data`. Utilise `run_cte` uniquement pour inspecter les valeurs d'une CTE si nécessaire. Appelle `request_reevaluation` si le comportement est intentionnel. Ne demande pas de confirmation."""
+⚠️ Règle impérative : préfère `patch_test_field` / `remove_test_row` / `add_test_row` pour les corrections chirurgicales. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Utilise `run_cte` uniquement pour inspecter les valeurs d'une CTE si nécessaire. Appelle `request_reevaluation` si le comportement est intentionnel. Ne demande pas de confirmation."""
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]
@@ -202,6 +212,9 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         "update_test_data",
         "run_cte",
         "request_reevaluation",
+        "patch_test_field",
+        "remove_test_row",
+        "add_test_row",
     }
 
     @tool
@@ -240,6 +253,33 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         return instructions
 
     @tool
+    def patch_test_field(
+        test_uid: str, table: str, row_index: int, field: str, value_json: str
+    ) -> str:
+        """Modifie la valeur d'un champ dans une ligne existante des données d'entrée d'un test.
+        table: nom de la table tel qu'affiché dans les données (ex: 'chicago_taxi_trips_taxi_trips')
+        row_index: indice 0-based de la ligne à modifier (visible dans l'affichage [0], [1]…)
+        field: nom du champ à modifier
+        value_json: valeur JSON encodée à affecter (ex: "null" pour NULL, "42" pour entier, '"texte"' pour chaîne, '"2024-01-01"' pour date)"""
+        return f"{test_uid}:{table}:{row_index}:{field}:{value_json}"
+
+    @tool
+    def remove_test_row(test_uid: str, table: str, row_index: int) -> str:
+        """Supprime une ligne des données d'entrée d'un test.
+        table: nom de la table
+        row_index: indice 0-based de la ligne à supprimer"""
+        return f"{test_uid}:{table}:{row_index}"
+
+    @tool
+    def add_test_row(test_uid: str, tables: list[str], instruction: str = "") -> str:
+        """Ajoute une nouvelle ligne dans les tables spécifiées pour un test existant.
+        tables: liste des noms de tables qui ont besoin d'une nouvelle ligne
+                (plusieurs tables si le scénario nécessite des lignes cohérentes sur un JOIN)
+        instruction: contexte court sur ce que doit représenter la nouvelle ligne
+                     (ex: 'Regular tier driver', 'client sans commande')"""
+        return f"{test_uid}:{','.join(tables)}:{instruction}"
+
+    @tool
     def run_cte(test_uid: str, cte_name: str, column: str = "") -> str:
         """Exécute la requête SQL jusqu'à la CTE nommée avec les données du test et retourne les lignes réelles.
         Utilise cet outil pour inspecter les valeurs d'une CTE intermédiaire ou finale.
@@ -262,6 +302,9 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         update_test_description,
         generate_suggestions,
         request_reevaluation,
+        patch_test_field,
+        remove_test_row,
+        add_test_row,
     ]
     debug_tools = [run_cte] if debug_retries > 0 else []
     llm = make_llm().bind_tools(base_tools + debug_tools)

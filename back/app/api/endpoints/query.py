@@ -537,6 +537,25 @@ class StreamEventsRequest(BaseModel):
 _query_graph = None
 
 
+@router.post("/dev/clear-schemas")
+async def dev_clear_schemas_route():
+    """Réinitialise les schémas (pas le profil) — usage démo/dev uniquement."""
+    import json
+    from pathlib import Path
+    import models.schemas as _schemas_mod
+    from models.env_variables import SCHEMA_CACHE_PATH
+
+    p = Path(SCHEMA_CACHE_PATH)
+    raw = json.loads(p.read_text()) if p.exists() else {}
+    raw["tables"] = []
+    p.write_text(json.dumps(raw, indent=2))
+    _schemas_mod._cache = None
+    _schemas_mod._cache_by_name = None
+    _schemas_mod._cache_time = None
+    _schemas_mod._profile_cache = None
+    return {"cleared": True}
+
+
 def _get_query_graph():
     global _query_graph
     if _query_graph is None:
