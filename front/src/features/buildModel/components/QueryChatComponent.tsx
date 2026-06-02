@@ -1,4 +1,5 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation, Trans } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
@@ -84,6 +85,20 @@ const ChatComponent: React.FC = () => {
   const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
+  const [demoZoom, setDemoZoom] = useState<'chat' | 'tests' | null>(null);
+
+  useEffect(() => {
+    if (import.meta.env.VITE_DEMO_MODE !== 'true') return;
+    const handleDemoKey = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      if (e.key === 'c' || e.key === 'C') setDemoZoom(z => z === 'chat' ? null : 'chat');
+      else if (e.key === 't' || e.key === 'T') setDemoZoom(z => z === 'tests' ? null : 'tests');
+      else if (e.key === 'Escape') setDemoZoom(null);
+    };
+    window.addEventListener('keydown', handleDemoKey);
+    return () => window.removeEventListener('keydown', handleDemoKey);
+  }, []);
 
   // Fetch SQL preview when a model is selected in the entry phase
   useEffect(() => {
@@ -1149,9 +1164,30 @@ const ChatComponent: React.FC = () => {
 
       {/* ── STEP 2: Workspace ── */}
       {uiPhase === 'workspace' && (
-        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'row', minHeight: 0, overflow: 'hidden' }}>
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'row', minHeight: 0, overflow: demoZoom ? 'visible' : 'hidden', position: 'relative' }}>
+
+          {/* Demo zoom backdrop */}
+          {demoZoom && createPortal(
+            <Box
+              onClick={() => setDemoZoom(null)}
+              sx={{
+                position: 'fixed', inset: 0, zIndex: 1299,
+                bgcolor: 'rgba(0,0,0,0.65)',
+                transition: 'opacity 0.3s',
+              }}
+            />,
+            document.body
+          )}
 
           {/* Chat column — permanent left panel */}
+          <Box sx={{
+            position: 'relative',
+            zIndex: demoZoom === 'chat' ? 1300 : 'auto',
+            transform: demoZoom === 'chat' ? 'scale(1.35)' : 'scale(1)',
+            transformOrigin: 'center center',
+            transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+            flexShrink: 0,
+          }}>
           <ChatColumn
             fileName={currentModelName ? `${currentModelName}.sql` : 'requête.sql'}
             onChangeFile={() => {
@@ -1185,9 +1221,17 @@ const ChatComponent: React.FC = () => {
             onRequestProfile={handleRequestProfile}
             focusTrigger={addTestTrigger}
           />
+          </Box>
 
           {/* Main area — tests + footer */}
-          <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
+          <Box sx={{
+            flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0,
+            position: 'relative',
+            zIndex: demoZoom === 'tests' ? 1300 : 'auto',
+            transform: demoZoom === 'tests' ? 'scale(1.25)' : 'scale(1)',
+            transformOrigin: 'center center',
+            transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+          }}>
             <ArtefactHeader
               testCount={testResults?.length ?? 0}
               onRerun={handleReevaluate}
