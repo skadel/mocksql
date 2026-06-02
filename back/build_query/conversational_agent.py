@@ -217,7 +217,15 @@ Tests existants :
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
-Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval_context}"""
+Réponds en français, de manière concise et naturelle.
+
+Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
+(ex : l'utilisateur attend un tri par volume mais la requête utilise MAX() alphabétique,
+ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétique),
+utilise `ask_clarification` pour signaler l'incohérence et demander confirmation avant d'agir.
+
+Ne produis pas de texte de réflexion quand tu appelles un outil — l'outil parle pour toi.
+Réserve le texte libre aux réponses purement conversationnelles (sans outil).{debug_budget_note}{eval_context}"""
 
     # Build uid→test lookup (test_uid is assigned by retrieve_existing_tests above)
     uid_to_test: dict = {t["test_uid"]: t for t in existing_tests if t.get("test_uid")}
@@ -312,7 +320,18 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         reason : justification courte expliquant pourquoi le comportement est correct."""
         return f"{test_uid}:{reason}"
 
+    @tool
+    def ask_clarification(question: str) -> str:
+        """Pose une question de clarification à l'utilisateur avant d'agir.
+        Utilise cet outil quand la demande est ambiguë ou quand tu détectes une incohérence
+        entre l'intention exprimée et le comportement réel de la requête SQL.
+        Exemple : l'utilisateur demande de tester "le domaine le plus pertinent" mais la requête
+        utilise MAX() alphabétique — signale-le et demande si c'est intentionnel.
+        question : la question à poser à l'utilisateur (claire, concise, en français)."""
+        return question
+
     base_tools = [
+        ask_clarification,
         generate_test_data,
         delete_test,
         update_test_data,
@@ -531,6 +550,9 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
             id=str(uuid.uuid4()),
             additional_kwargs={
                 "type": MsgType.GENERATE_TEST_SCENARIO,
+                "action": "add"
+                if agent_tool_call == "generate_test_data"
+                else "update",
                 "parent": last_msg_id,
                 "request_id": state.get("request_id"),
             },
@@ -538,6 +560,20 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         msgs_to_add.append(scenario_msg)
         last_msg_id = scenario_msg.id
         update["agent_message_id"] = scenario_msg.id
+    elif agent_tool_call == "ask_clarification":
+        question = agent_tool_args.get("question", "")
+        if question:
+            msgs_to_add.append(
+                AIMessage(
+                    content=question,
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.OTHER,
+                        "parent": last_msg_id,
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            )
 
     # Gemini with bind_tools may return content as a list of parts instead of a plain string
     raw_content = result.content
@@ -548,7 +584,10 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
             if isinstance(part, dict) and part.get("type") == "text"
         )
 
-    if raw_content:
+    # Only display raw LLM text when no tool was called (pure conversational response).
+    # When a tool is called, the raw_content is internal reasoning — not user-facing.
+    # ask_clarification already emits its question above; action tools speak for themselves.
+    if raw_content and agent_tool_call is None:
         msgs_to_add.append(
             AIMessage(
                 content=raw_content,

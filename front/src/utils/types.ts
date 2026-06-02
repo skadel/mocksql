@@ -73,6 +73,7 @@ export interface MessageContents {
   debugRunCte?: DebugRunCteResult;
   debugCountSteps?: DebugCountStepsResult;
   diagnostic?: DiagnosticBlock;
+  action?: string;
 }
 
 export interface Message {

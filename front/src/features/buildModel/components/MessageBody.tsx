@@ -303,7 +303,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 1 }}>
             <Box sx={{ flex: 1, height: '1px', bgcolor: '#ffe082' }} />
             <Chip
-              label="Test modifié"
+              label={msg.contents.action === 'add' ? 'Nouveau test' : 'Test modifié'}
               size="small"
               sx={{
                 fontSize: 10,
@@ -351,7 +351,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             }}
           >
             <Typography sx={{ fontSize: 11, color: '#f9a825', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 0.5 }}>
-              Modification pour le scénario suivant
+              {msg.contents.action === 'add' ? 'Nouveau scénario ajouté' : 'Modification pour le scénario suivant'}
             </Typography>
             <Typography variant="body2" sx={{ color: '#333', lineHeight: 1.5 }}>
               {msg.contents.text}

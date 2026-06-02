@@ -136,6 +136,7 @@ export function formatMessage(message: any): Message {
 
     case 'generate_test_scenario':
       newMessage.contents.text = message.content;
+      newMessage.contents.action = message.additional_kwargs?.action ?? 'update';
       break;
 
     case 'retry_prompt': {
