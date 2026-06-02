@@ -109,8 +109,8 @@ def build_initial_state(
         "schemas": schemas,
         "used_columns": build_used_columns(schemas, sql, dialect),
         "used_columns_changed": True,
-        "gen_retries": 1,
-        "debug_retries": 2,
+        "gen_retries": 3,
+        "debug_retries": 3,
         "status": None,
         "input": "",
         "user_tables": "",
@@ -138,73 +138,6 @@ def build_initial_state(
     }
 
 
-# ── CLI graph (DB-free) ───────────────────────────────────────────────────────
-
-
-def _build_cli_graph():
-    """CLI graph: generator → executor → test_evaluator → suggestions_generator, with retry loops."""
-    from langgraph.graph import END, START, StateGraph
-
-    from build_query.assertion_corrector import correct_assertions
-    from build_query.conversational_agent import conversational_agent
-    from build_query.data_patcher import data_patcher_node
-    from build_query.examples_executor import run_on_examples
-    from build_query.examples_generator import generate_examples
-    from build_query.state import QueryState
-    from build_query.suggestions_node import generate_suggestions
-    from build_query.test_evaluator import evaluate_tests
-
-    _DATA_PATCH_TOOLS = {
-        "patch_test_field",
-        "remove_test_row",
-        "add_test_row",
-        "data_batch",
-    }
-
-    builder = StateGraph(QueryState)
-    builder.add_node("generator", generate_examples)
-    builder.add_node("executor", run_on_examples)
-    builder.add_node("test_evaluator", evaluate_tests)
-    builder.add_node("conversational_agent", conversational_agent)
-    builder.add_node("data_patcher", data_patcher_node)
-    builder.add_node("assertion_corrector", correct_assertions)
-    builder.add_node("suggestions_generator", generate_suggestions)
-
-    def route_executor(state: QueryState):
-        if state.get("error") or state.get("status") == "error":
-            return END
-        return "test_evaluator"
-
-    def route_evaluator(state: QueryState):
-        if state.get("evaluation_feedback") == "too_many_rows":
-            return END
-        if (
-            state.get("evaluation_feedback") == "bad_data"
-            and state.get("gen_retries", 0) > 0
-        ):
-            return "conversational_agent"
-        if state.get("evaluation_feedback") == "bad_assertions":
-            return "assertion_corrector"
-        return "suggestions_generator"
-
-    def route_agent_output(state: QueryState):
-        tool_call = state.get("agent_tool_call")
-        if tool_call in _DATA_PATCH_TOOLS:
-            return "data_patcher"
-        return "generator"
-
-    builder.add_edge(START, "generator")
-    builder.add_edge("generator", "executor")
-    builder.add_conditional_edges("executor", route_executor)
-    builder.add_conditional_edges("test_evaluator", route_evaluator)
-    builder.add_edge("assertion_corrector", "test_evaluator")
-    builder.add_conditional_edges("conversational_agent", route_agent_output)
-    builder.add_edge("data_patcher", "executor")
-    builder.add_edge("suggestions_generator", END)
-
-    return builder.compile()
-
-
 def _inject_schemas_into_cache(project_id: str, schemas: list[dict]) -> None:
     """Pre-populate the in-memory schema cache so generator/executor skip the DB."""
     import models.schemas as _s
@@ -215,13 +148,13 @@ def _inject_schemas_into_cache(project_id: str, schemas: list[dict]) -> None:
 
 
 def _patch_db_calls() -> None:
-    """Replace DB-hitting helpers with no-ops for CLI usage."""
-    import build_query.examples_executor as _ex
+    """Neutralise history_saver for CLI — no session exists in DB to save to."""
+    import build_query.query_chain as _qc
 
-    async def _no_db(_session_id: str):
-        return []
+    async def _noop(_state):
+        return {}
 
-    _ex._load_existing_tests_from_db = _no_db
+    _qc.history_saver = _noop
 
 
 # ── Output extraction ─────────────────────────────────────────────────────────
@@ -489,15 +422,24 @@ async def run_generate(
     except Exception as e:
         typer.echo(f"[WARN] SQL qualification failed ({e}), using raw SQL.")
 
+    from build_query.query_chain import _lightweight_query_decomposed
+
+    state["query_decomposed"] = _lightweight_query_decomposed(
+        state.get("optimized_sql") or sql, dialect
+    )
+
     _patch_db_calls()
 
-    # Step 5 — run CLI graph
+    # Step 5 — run graph (same as UI, history_saver neutralised above)
+    from build_query.query_chain import build_query_graph
+
     typer.echo(f"Generating tests for {project_id} ({len(schemas)} table(s))...")
-    graph = _build_cli_graph()
-    final_state = await graph.ainvoke(state)
+    graph = build_query_graph()
+    final_state = await graph.ainvoke(state, config={"recursion_limit": 50})
 
     if final_state.get("error"):
-        typer.echo(f"[ERROR] {final_state['error']}")
+        err = final_state["error"]
+        typer.echo(f"[ERROR] {err[:500]}{'…' if len(err) > 500 else ''}")
         raise typer.Exit(1)
 
     # Step 6 — write outputs

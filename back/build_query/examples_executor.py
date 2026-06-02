@@ -718,10 +718,16 @@ async def _run_single_test_case(
             )
 
         # Création des tables de test dans DuckDB + insertion
+        # Toujours overwrite=True : chaque passage (retry inclus) repart sur des tables fraîches.
+        # L'ancien overwrite=False sur empty_results accumulait les anciennes lignes + les nouvelles,
+        # causant des conflits dans les CTEs qui lisent les mêmes tables (ex: SIRET_ONUS).
+        logger.diag(
+            "[executor] overwrite=True (status précédent=%s)", state.get("status")
+        )
         duckdb_tables_schema = create_test_tables(
             tables=schemas,
             suffix=suffix,
-            overwrite=(state["status"] != "empty_results"),
+            overwrite=True,
             con=con,
             dialect=dialect,
         )
@@ -1065,6 +1071,13 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
             result.reason_type,
             len(result.assertions),
         )
+        for i, a in enumerate(result.assertions):
+            logger.diag(
+                "[assertions_eval] [%d] %s | sql: %s",
+                i,
+                a.description,
+                a.sql,
+            )
         return result
     except Exception as e:
         logger.diag("[assertions_eval] ERREUR: %s", e)

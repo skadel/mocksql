@@ -1158,49 +1158,113 @@ def _resolve_pred_node(
         return node.sql(dialect=dialect)
 
 
+def _detect_anti_join_aliases(sel: exp.Select) -> set[str]:
+    """Return table aliases forming LEFT/RIGHT/FULL JOIN … WHERE alias.col IS NULL patterns.
+
+    These are anti-join patterns where the JOIN result is used to EXCLUDE rows
+    (rather than to include them). The alias should be skipped when serializing
+    IS NULL predicates in the conditions hint.
+    """
+    outer_join_aliases: set[str] = set()
+    for join in sel.args.get("joins") or []:
+        if (join.args.get("side") or "").upper() in {"LEFT", "RIGHT", "FULL"}:
+            src = join.this
+            if isinstance(src, exp.Table):
+                alias = (src.alias or src.name).lower()
+            elif isinstance(src, exp.Subquery):
+                alias = (src.alias or "").lower()
+            else:
+                continue
+            if alias:
+                outer_join_aliases.add(alias)
+
+    anti_join_aliases: set[str] = set()
+    where = sel.args.get("where")
+    if where and outer_join_aliases:
+        for pred in _flatten_and(where.this):
+            if isinstance(pred, exp.Is):
+                right_node = pred.args.get("expression") or pred.args.get("to")
+                if _is_column(pred.this) and isinstance(right_node, exp.Null):
+                    tbl = (pred.this.table or "").lower()
+                    if tbl in outer_join_aliases:
+                        anti_join_aliases.add(tbl)
+    return anti_join_aliases
+
+
 def _serialize_cond(
     node: exp.Expression,
     alias_map: dict[str, str],
     resolver: "_LineageResolver",
     window_aliases: set[str],
     dialect: str,
+    anti_join_aliases: frozenset[str] = frozenset(),
 ) -> str | None:
     """Recursively serialise *node* preserving AND/OR structure.
 
-    Returns ``None`` for volume constraints (window alias filters) so they are
-    silently dropped by callers.
+    Returns ``None`` for volume constraints (window alias filters) and for
+    anti-join IS NULL predicates so they are silently dropped by callers.
 
     * ``exp.And``   → ``"left AND right"`` (None parts filtered)
     * ``exp.Or``    → ``"left OR right"``  (no extra parens — caller wraps if needed)
     * ``exp.Paren`` → ``"(inner)"``
     * volume pred   → ``None``
+    * anti-join IS NULL (alias.col IS NULL where alias in anti_join_aliases) → ``None``
     * leaf pred     → ``_resolve_pred_node()``
     """
     if isinstance(node, exp.Paren):
-        inner = _serialize_cond(node.this, alias_map, resolver, window_aliases, dialect)
+        inner = _serialize_cond(
+            node.this, alias_map, resolver, window_aliases, dialect, anti_join_aliases
+        )
         return f"({inner})" if inner else None
 
     if isinstance(node, exp.And):
         left = _serialize_cond(
-            node.args["this"], alias_map, resolver, window_aliases, dialect
+            node.args["this"],
+            alias_map,
+            resolver,
+            window_aliases,
+            dialect,
+            anti_join_aliases,
         )
         right = _serialize_cond(
-            node.args["expression"], alias_map, resolver, window_aliases, dialect
+            node.args["expression"],
+            alias_map,
+            resolver,
+            window_aliases,
+            dialect,
+            anti_join_aliases,
         )
         parts = [p for p in (left, right) if p]
         return " AND ".join(parts) if parts else None
 
     if isinstance(node, exp.Or):
         left = _serialize_cond(
-            node.args["this"], alias_map, resolver, window_aliases, dialect
+            node.args["this"],
+            alias_map,
+            resolver,
+            window_aliases,
+            dialect,
+            anti_join_aliases,
         )
         right = _serialize_cond(
-            node.args["expression"], alias_map, resolver, window_aliases, dialect
+            node.args["expression"],
+            alias_map,
+            resolver,
+            window_aliases,
+            dialect,
+            anti_join_aliases,
         )
         parts = [p for p in (left, right) if p]
         if not parts:
             return None
         return " OR ".join(parts)
+
+    # Skip anti-join IS NULL predicates — they are exclusion markers, not data constraints.
+    if anti_join_aliases and isinstance(node, exp.Is):
+        right = node.args.get("expression") or node.args.get("to")
+        if _is_column(node.this) and isinstance(right, exp.Null):
+            if (node.this.table or "").lower() in anti_join_aliases:
+                return None
 
     if _is_volume_pred(node, window_aliases):
         return None
@@ -1428,6 +1492,29 @@ def _walk_select_grouped(
                 if f.column.table == "__unknown__"
                 else f
                 for f in where_filters
+            ]
+
+    # Anti-join IS NULL predicates (LEFT JOIN … WHERE alias.col IS NULL) are structural
+    # exclusion markers captured in col_inequalities — not positive data constraints.
+    # Only remove IS NULL filters for columns whose table alias is in anti_join_sources
+    # (i.e., the nullable side of the outer join). Plain WHERE col IS NULL predicates
+    # on non-join columns must be preserved.
+    if anti_join_sources and where:
+        anti_join_is_null_cols: set[ColumnRef] = set()
+        for pred in _flatten_and(where.this):
+            if isinstance(pred, exp.Is):
+                right_node = pred.args.get("expression") or pred.args.get("to")
+                if _is_column(pred.this) and isinstance(right_node, exp.Null):
+                    tbl = (pred.this.table or "").lower()
+                    if tbl in anti_join_sources:
+                        ref = _col_ref(pred.this, alias_map)
+                        if ref:
+                            anti_join_is_null_cols.add(resolver.resolve(ref))
+        if anti_join_is_null_cols:
+            where_filters = [
+                f
+                for f in where_filters
+                if not (f.op == "is_null" and f.column in anti_join_is_null_cols)
             ]
 
     result_groups: list[ConstraintGroup] = [
@@ -1658,6 +1745,7 @@ def build_conditions_hint(
         sel, alias_map, resolver, window_aliases, dialect
     ) -> list[str]:
         """Collect WHERE/JOIN ON/QUALIFY condition strings from a single SELECT."""
+        anti_join_aliases = frozenset(_detect_anti_join_aliases(sel))
         parts: list[str] = []
         seen: set[str] = set()
 
@@ -1670,19 +1758,38 @@ def build_conditions_hint(
         if where:
             _add(
                 _serialize_cond(
-                    where.this, alias_map, resolver, window_aliases, dialect
+                    where.this,
+                    alias_map,
+                    resolver,
+                    window_aliases,
+                    dialect,
+                    anti_join_aliases,
                 )
             )
         for join in sel.args.get("joins") or []:
             on = join.args.get("on")
             if on:
-                _add(_serialize_cond(on, alias_map, resolver, window_aliases, dialect))
+                _add(
+                    _serialize_cond(
+                        on,
+                        alias_map,
+                        resolver,
+                        window_aliases,
+                        dialect,
+                        anti_join_aliases,
+                    )
+                )
         qualify = sel.args.get("qualify")
         if qualify:
             qualify_node = qualify.this if isinstance(qualify, exp.Qualify) else qualify
             _add(
                 _serialize_cond(
-                    qualify_node, alias_map, resolver, window_aliases, dialect
+                    qualify_node,
+                    alias_map,
+                    resolver,
+                    window_aliases,
+                    dialect,
+                    anti_join_aliases,
                 )
             )
         return parts
@@ -1733,7 +1840,45 @@ def build_conditions_hint(
         for branch_sel in _collect_union_branches(union_node):
             union_branch_selects.add(id(branch_sel))
 
-    # Collect conditions from SELECT nodes that are NOT inside a UNION branch
+    # Build the set of SELECT node IDs to skip in the flat scan:
+    #  • UNION branch SELECTs (already handled above via _union_to_branch_conds)
+    #  • Bodies of anti-join CTEs (LEFT JOIN cte WHERE cte.col IS NULL) — these define
+    #    the excluded set, not the included set, so their conditions must not constrain data
+    #  • NOT IN (SELECT …) subquery bodies — same reasoning as anti-join CTEs
+    skip_select_ids: set[int] = set(union_branch_selects)
+
+    with_clause_node = statement.args.get("with_")
+    if with_clause_node:
+        anti_join_cte_names: set[str] = set()
+        for sel in statement.find_all(exp.Select):
+            for anti_alias in _detect_anti_join_aliases(sel):
+                real_tbl = alias_map.get(anti_alias, anti_alias)
+                if real_tbl in resolver._cte_names:
+                    anti_join_cte_names.add(real_tbl)
+        for cte in with_clause_node.expressions or []:
+            if (cte.alias or "").lower() in anti_join_cte_names and cte.this:
+                for sub_sel in cte.this.find_all(exp.Select):
+                    skip_select_ids.add(id(sub_sel))
+
+    # NOT IN (SELECT …) — sqlglot may encode as In(not=True) or Not(this=In(…))
+    for in_node in statement.find_all(exp.In):
+        is_not_in = in_node.args.get("not") or isinstance(in_node.parent, exp.Not)
+        if not is_not_in:
+            continue
+        query_node = in_node.args.get("query")
+        if query_node is not None:
+            for sub_sel in (
+                [query_node]
+                if isinstance(query_node, exp.Select)
+                else query_node.find_all(exp.Select)
+            ):
+                skip_select_ids.add(id(sub_sel))
+        for expr in in_node.expressions:
+            if isinstance(expr, exp.Subquery):
+                for sub_sel in expr.find_all(exp.Select):
+                    skip_select_ids.add(id(sub_sel))
+
+    # Collect conditions from SELECT nodes that are not in skip_select_ids
     cond_parts: list[str] = list(union_cond_parts)
     seen_cond: set[str] = set()
     for s in union_cond_parts:
@@ -1745,7 +1890,7 @@ def build_conditions_hint(
             cond_parts.append(s)
 
     for sel in statement.find_all(exp.Select):
-        if id(sel) in union_branch_selects:
+        if id(sel) in skip_select_ids:
             continue
         for part in _collect_select_conds(
             sel, alias_map, resolver, window_aliases, dialect

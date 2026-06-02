@@ -102,6 +102,30 @@ async def data_patcher_node(state: QueryState):
             return {}
 
         data = copy.deepcopy(test_case.get("data") or {})
+
+        failing_assertions = [
+            a
+            for a in (test_case.get("assertion_results") or [])
+            if a.get("status") != "pass"
+        ]
+        if failing_assertions:
+            logger.diag(
+                "[data_patcher] data_batch test=%s — %d assertion(s) en échec avant patch:\n%s",
+                test_index,
+                len(failing_assertions),
+                json.dumps(
+                    [
+                        {
+                            "description": a.get("description", "?"),
+                            "error": a.get("error", ""),
+                        }
+                        for a in failing_assertions
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
         logger.diag(
             "[data_patcher] data_batch test=%s — %d opération(s): %s",
             test_index,
@@ -126,7 +150,7 @@ async def data_patcher_node(state: QueryState):
         )
         return {
             "examples": [msg],
-            "test_index": test_index,
+            "test_index": int(test_index) if str(test_index).isdigit() else None,
         }
 
     # Comportement existant — opération chirurgicale unique
@@ -145,6 +169,31 @@ async def data_patcher_node(state: QueryState):
         return {}
 
     data = copy.deepcopy(test_case.get("data") or {})
+
+    failing_assertions = [
+        a
+        for a in (test_case.get("assertion_results") or [])
+        if a.get("status") != "pass"
+    ]
+    if failing_assertions:
+        logger.diag(
+            "[data_patcher] %s test=%s — %d assertion(s) en échec avant patch:\n%s",
+            tool_call,
+            test_index,
+            len(failing_assertions),
+            json.dumps(
+                [
+                    {
+                        "description": a.get("description", "?"),
+                        "error": a.get("error", ""),
+                    }
+                    for a in failing_assertions
+                ],
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+
     data = await apply_single_patch(state, test_case, data, tool_call, args)
 
     updated_test = {**test_case, "data": data}
@@ -160,7 +209,7 @@ async def data_patcher_node(state: QueryState):
     )
     return {
         "examples": [msg],
-        "test_index": test_index,
+        "test_index": int(test_index) if str(test_index).isdigit() else None,
         "rerun_only": True,
     }
 
@@ -196,7 +245,10 @@ async def _add_rows(
         [
             (
                 "system",
-                "Tu génères des données de test SQL pour MockSQL.\n\n"
+                "Tu génères des données de test SQL pour MockSQL.",
+            ),
+            (
+                "human",
                 "SQL testé :\n{sql}\n\n"
                 "Scénario du test : {test_desc}\n\n"
                 "Lignes existantes dans ce test :\n{existing_rows}\n\n"

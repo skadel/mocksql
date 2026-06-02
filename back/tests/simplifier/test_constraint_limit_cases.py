@@ -98,16 +98,26 @@ class TestAntiJoin:
         ineq_pairs = [frozenset({a, b}) for a, b in col_ineq]
         assert frozenset({col("a", "id"), col("b", "id")}) in ineq_pairs
 
-    def test_left_join_right_is_null_filter_preserved(self):
-        """The IS NULL filter on b.id must still appear in filters."""
+    def test_left_join_right_is_null_filter_not_in_positive_filters(self):
+        """Anti-join IS NULL (b.id IS NULL) must NOT appear as a positive is_null filter.
+
+        It is a structural exclusion marker already captured in col_inequalities.
+        Keeping it as a positive filter would contradict any IS NOT NULL constraint
+        on the same resolved base-table column.
+        """
         sql = """
         SELECT *
         FROM myproject.analytics.a AS a
         LEFT JOIN myproject.analytics.b AS b ON a.id = b.id
         WHERE b.id IS NULL
         """
-        filters, _, _, _ = _flat(extract_constraints(sql))
-        assert any(f.column == col("b", "id") and f.op == "is_null" for f in filters)
+        filters, _, _, col_ineq = _flat(extract_constraints(sql))
+        assert not any(
+            f.column == col("b", "id") and f.op == "is_null" for f in filters
+        )
+        # The anti-join IS captured in col_inequalities
+        ineq_pairs = [frozenset({a, b}) for a, b in col_ineq]
+        assert frozenset({col("a", "id"), col("b", "id")}) in ineq_pairs
 
     def test_left_join_no_null_filter_keeps_equality(self):
         """Without IS NULL in WHERE, a LEFT JOIN equality is still captured."""

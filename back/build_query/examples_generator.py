@@ -514,8 +514,12 @@ def _resolve_target_key(state, existing_list: list) -> Optional[str]:
     Only overwrite if the frontend explicitly passed test_index, or during a retry.
     """
     test_index = state.get("test_index")
-    if test_index is not None and 0 <= test_index < len(existing_list):
-        return existing_list[test_index]["test_index"]
+    try:
+        test_index_int = int(test_index) if test_index is not None else None
+    except (TypeError, ValueError):
+        test_index_int = None
+    if test_index_int is not None and 0 <= test_index_int < len(existing_list):
+        return existing_list[test_index_int]["test_index"]
     if state.get("status") == "empty_results" and existing_list:
         return existing_list[0]["test_index"]  # always retry the first (standard) test
     return None
@@ -703,7 +707,16 @@ async def generate_examples_(
     logger.diag("%s\n", "=" * 60)
 
     llm = make_llm()
-    generated_data = await (prompt | llm | parser).ainvoke({})
+    logger.diag("[generator] appel LLM model=%s", get_llm_model())
+    try:
+        generated_data = await (prompt | llm | parser).ainvoke({})
+    except Exception as _parse_exc:
+        logger.diag(
+            "[generator] PARSING FAILURE type=%s msg=%s",
+            type(_parse_exc).__name__,
+            str(_parse_exc)[:500],
+        )
+        raise
 
     filled_data = _convert_datetime_fields(generated_data.data.dict())
 
@@ -839,7 +852,10 @@ async def create_appropriate_prompt(
         )
     elif state.get("input", "").strip():
         if state.get("test_index") is not None:
-            idx = state["test_index"]
+            try:
+                idx = int(state["test_index"])
+            except (TypeError, ValueError):
+                idx = -1
             existing_test = (
                 existing_tests[idx] if 0 <= idx < len(existing_tests) else None
             )

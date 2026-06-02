@@ -7,6 +7,8 @@
 
 **Couche de tests unitaires native pour les data engineers.** MockSQL prend un fichier `.sql`, génère automatiquement des données de test via LLM, les exécute localement sur DuckDB (0 € facturé sur BigQuery), attribue un verdict argumenté à chaque test, et suggère les cas limites non couverts.
 
+MockSQL ne passe pas le SQL brut au LLM. Il parse d'abord la requête avec **SQLGlot** pour extraire les colonnes utilisées, les filtres, les JOINs — puis fournit ces contraintes au LLM comme contexte structuré. Les données générées sont ensuite exécutées sur **DuckDB** : si un CTE retourne 0 lignes, MockSQL identifie lequel et relance automatiquement la génération jusqu'à obtenir des résultats non-vides. Une fois les tests générés, un **chat contextuel** permet de les affiner, en ajouter ou en modifier directement en langage naturel — ancré sur un test spécifique ou sur l'ensemble du modèle.
+
 Les bibliothèques de mocking SQL existantes vous demandent d'**écrire les données de test à la main**. MockSQL prend le contrepied :
 
 | | Bibliothèques de mocking SQL | MockSQL |

@@ -81,6 +81,11 @@ def get_llm_streaming() -> bool:
     return os.getenv("LLM_STREAMING", "true").lower() == "true"
 
 
+def get_llm_location() -> str | None:
+    cfg = load_config()
+    return cfg.get("llm", {}).get("location") or os.getenv("LLM_LOCATION")
+
+
 def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 
