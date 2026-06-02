@@ -13,7 +13,18 @@ export const MsgType = {
   PROFILE_QUERY: 'profile_query',
   DEBUG_RUN_CTE: 'debug_run_cte',
   DEBUG_COUNT_STEPS: 'debug_count_steps',
+  BAD_DATA_DIAGNOSTIC: 'bad_data_diagnostic',
 } as const;
+
+export interface DiagnosticBlock {
+  root_cause: string;
+  sql_pattern: string;
+  data_issue: string;
+  fix_summary: string;
+  fix_recipe: string;
+  affected_tables: string[];
+  affected_ctes: string[];
+}
 
 export interface DebugRunCteResult {
   cte_name: string;
@@ -61,6 +72,7 @@ export interface MessageContents {
   reasoning?: string;
   debugRunCte?: DebugRunCteResult;
   debugCountSteps?: DebugCountStepsResult;
+  diagnostic?: DiagnosticBlock;
 }
 
 export interface Message {

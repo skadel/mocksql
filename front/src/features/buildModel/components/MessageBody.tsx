@@ -1,12 +1,13 @@
 import React, { useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Alert, Box, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
+import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import DisplayTable from './DisplayTable';
 import { StyledButton } from '../../../style/StyledComponents';
-import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, Message } from '../../../utils/types';
+import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
 
 type MessageBodyProps = {
   msg: Message;
@@ -114,6 +115,63 @@ const DebugCountStepsContent: React.FC<{ d: DebugCountStepsResult }> = ({ d }) =
     </Box>
   );
 };
+
+const DIAG_ROWS: Array<{ key: keyof DiagnosticBlock; label: string }> = [
+  { key: 'root_cause', label: 'Cause' },
+  { key: 'sql_pattern', label: 'Pattern' },
+  { key: 'data_issue', label: 'Données' },
+  { key: 'fix_summary', label: 'Fix' },
+  { key: 'affected_tables', label: 'Tables' },
+  { key: 'affected_ctes', label: 'CTEs' },
+];
+
+const BadDataDiagnosticAccordion: React.FC<{ diagnostic: DiagnosticBlock }> = ({ diagnostic }) => (
+  <Accordion
+    disableGutters
+    defaultExpanded={false}
+    data-testid="bad-data-diagnostic"
+    sx={{
+      boxShadow: 'none',
+      border: 'none',
+      bgcolor: 'grey.50',
+      borderRadius: '8px !important',
+      mt: 1,
+      '&:before': { display: 'none' },
+    }}
+  >
+    <AccordionSummary
+      expandIcon={<ExpandMoreIcon sx={{ fontSize: 16, color: '#888' }} />}
+      sx={{ minHeight: 32, py: 0, px: 1.5, '& .MuiAccordionSummary-content': { my: 0.5 } }}
+    >
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+        <SearchIcon sx={{ fontSize: 14, color: '#888' }} />
+        <Typography variant="caption" sx={{ color: '#888', fontWeight: 600, letterSpacing: '0.03em' }}>
+          Analyse diagnostique
+        </Typography>
+      </Box>
+    </AccordionSummary>
+    <AccordionDetails sx={{ px: 1.5, pb: 1.5, pt: 0, maxHeight: 300, overflowY: 'auto' }}>
+      <Table size="small">
+        <TableBody>
+          {DIAG_ROWS.map(({ key, label }) => {
+            const val = diagnostic[key];
+            const display = Array.isArray(val) ? (val.length > 0 ? val.join(', ') : '—') : (val || '—');
+            return (
+              <TableRow key={key} sx={{ '&:last-child td': { border: 0 }, verticalAlign: 'top' }}>
+                <TableCell sx={{ fontSize: 11, fontWeight: 700, color: '#666', py: 0.5, px: 0.75, width: 72, whiteSpace: 'nowrap', border: 0 }}>
+                  {label}
+                </TableCell>
+                <TableCell sx={{ fontSize: 12, color: '#333', py: 0.5, px: 0.75, lineHeight: 1.5, border: 0 }}>
+                  {display}
+                </TableCell>
+              </TableRow>
+            );
+          })}
+        </TableBody>
+      </Table>
+    </AccordionDetails>
+  </Accordion>
+);
 
 const MessageBody: React.FC<MessageBodyProps> = ({
   msg,
@@ -533,6 +591,11 @@ const MessageBody: React.FC<MessageBodyProps> = ({
             </Box>
           </Collapse>
         </Box>
+      )}
+
+      {/* Diagnostic bad_data — accordéon collapsé */}
+      {msg.contentType === 'bad_data_diagnostic' && msg.contents.diagnostic && (
+        <BadDataDiagnosticAccordion diagnostic={msg.contents.diagnostic} />
       )}
 
       {/* Erreur */}

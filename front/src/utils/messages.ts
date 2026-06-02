@@ -1,4 +1,4 @@
-import { DebugRunCteResult, DebugCountStepsResult, Message, MessageContents, MsgType } from "./types";
+import { DebugRunCteResult, DebugCountStepsResult, DiagnosticBlock, Message, MessageContents, MsgType } from "./types";
 
 export function getLastMessage(messages, selectedChildIndices) {
   if (!messages || messages.length === 0) return null;
@@ -159,6 +159,18 @@ export function formatMessage(message: any): Message {
         newMessage.contents.debugCountSteps = JSON.parse(message.content) as DebugCountStepsResult;
       } catch {
         newMessage.contents.error = message.content;
+      }
+      break;
+    }
+
+    case MsgType.BAD_DATA_DIAGNOSTIC: {
+      try {
+        newMessage.contents.diagnostic = JSON.parse(message.content) as DiagnosticBlock;
+      } catch {
+        // no text fallback — message is intentionally silent if unparseable
+      }
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
       }
       break;
     }

@@ -98,9 +98,20 @@ async def conversational_agent(state: QueryState):
         if eval_msgs:
             latest_eval = eval_msgs[-1]
             eval_test_idx = latest_eval.additional_kwargs.get("test_index")
-            eval_verdict_text = (
-                latest_eval.additional_kwargs.get("diag") or latest_eval.content
-            )
+            diag_struct = latest_eval.additional_kwargs.get("diagnostic")
+            if diag_struct:
+                eval_verdict_text = (
+                    f"**Cause racine :** {diag_struct['root_cause']}\n"
+                    f"**Pattern SQL :** {diag_struct['sql_pattern']}\n"
+                    f"**Problème dans les données :** {diag_struct['data_issue']}\n"
+                    f"**Correction attendue :** {diag_struct['fix_recipe']}\n"
+                    f"**Tables concernées :** {', '.join(diag_struct['affected_tables'])}\n"
+                    f"**CTEs concernées :** {', '.join(diag_struct['affected_ctes'])}"
+                )
+            else:
+                eval_verdict_text = (
+                    latest_eval.additional_kwargs.get("diag") or latest_eval.content
+                )
             retries_left = state.get("gen_retries", 0)
 
             # Find the failing test case to expose its data to the agent
@@ -167,14 +178,20 @@ async def conversational_agent(state: QueryState):
 Tentatives de correction restantes : {retries_left}
 
 **Outils disponibles :**
-- `run_cte` — inspecter le contenu réel (valeurs) d'une CTE intermédiaire
-- `patch_test_field` — modifier un champ précis : table, indice de ligne, champ, valeur (pas d'appel LLM)
-- `remove_test_row` — supprimer une ligne par son indice (pas d'appel LLM)
-- `add_test_row` — ajouter une ligne dans une ou plusieurs tables (génération LLM scopée)
-- `update_test_data` — régénérer complètement les données avec une instruction (à utiliser si la correction est complexe)
-- `request_reevaluation` — demander une réévaluation LLM si les données sont correctes (ex : 0 ligne est le comportement attendu pour ce scénario)
+- `run_cte` — inspecter une CTE intermédiaire (debug)
+- `patch_test_field` — modifier un champ précis sur une ligne existante
+- `remove_test_row` — supprimer une ligne par son indice
+- `add_test_row` — ajouter une nouvelle ligne (génération LLM scopée)
 
-⚠️ Règle impérative : préfère `patch_test_field` / `remove_test_row` / `add_test_row` pour les corrections chirurgicales. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Utilise `run_cte` uniquement pour inspecter les valeurs d'une CTE si nécessaire. Appelle `request_reevaluation` si le comportement est intentionnel. Ne demande pas de confirmation."""
+⚡ Tu peux combiner `patch_test_field`, `remove_test_row` et `add_test_row` dans une même réponse :
+   toutes les opérations seront appliquées dans l'ordre avant la ré-exécution.
+   Exemple pour dupliquer une ligne : appelle `patch_test_field` sur les lignes [1] et [2]
+   pour leur donner la même date que [0], sans appeler `add_test_row`.
+   Préfère les patches sur des lignes existantes aux ajouts LLM quand c'est possible.
+- `update_test_data` — régénérer complètement les données (si la correction est trop complexe)
+- `request_reevaluation` — si le comportement observé est intentionnel
+
+⚠️ Règle impérative : préfère les corrections chirurgicales groupées à la régénération complète. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Ne demande pas de confirmation."""
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]
@@ -355,6 +372,7 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
 
     _DEBUG_TOOLS = {"run_cte"}
+    _DATA_PATCH_TOOLS = {"patch_test_field", "remove_test_row", "add_test_row"}
 
     agent_tool_call: str | None = None
     agent_tool_args: dict = {}
@@ -384,8 +402,9 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
             logger.diag("[conv_agent] LLM n'a appelé aucun outil → réponse texte libre")
             break
 
-        # Separate debug calls (can be batched) from action calls (take only first)
+        # Collect debug calls (batch), data patch calls (batch), and first other action
         pending_debug_calls = []
+        pending_data_calls = []
         first_action_tc = None
 
         for tc in tool_calls:
@@ -397,13 +416,31 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
                 elif uid:
                     continue  # silently skip invalid uid in batch mode
                 pending_debug_calls.append({"tool": tc["name"], "args": args})
-            elif first_action_tc is None and tc["name"] not in _DEBUG_TOOLS:
+            elif tc["name"] in _DATA_PATCH_TOOLS:
+                args = dict(tc["args"])
+                uid = args.get("test_uid", "")
+                if uid and uid in uid_to_test:
+                    args["test_index"] = uid_to_test[uid]["test_index"]
+                elif uid and uid not in uid_to_test:
+                    continue  # silently skip invalid uid in batch
+                pending_data_calls.append({"tool": tc["name"], "args": args})
+            elif first_action_tc is None:
                 first_action_tc = tc
 
-        # If there are debug calls, batch them and skip action processing this round
+        # Priority: debug > data_batch > single action
         if pending_debug_calls:
             agent_tool_call = "debug_batch"
             agent_tool_args = {"calls": pending_debug_calls}
+            break
+
+        if pending_data_calls:
+            agent_tool_call = "data_batch"
+            agent_tool_args = {"calls": pending_data_calls}
+            logger.diag(
+                "[conv_agent] data_batch: %d opération(s) — %s",
+                len(pending_data_calls),
+                [op["tool"] for op in pending_data_calls],
+            )
             break
 
         if first_action_tc is None:
@@ -470,6 +507,10 @@ Réponds en français, de manière concise et naturelle.{debug_budget_note}{eval
         "agent_tool_args": agent_tool_args,
         "input": new_input,
     }
+    if evaluation_feedback == "bad_data":
+        current_retries = state.get("gen_retries")
+        if current_retries is not None and current_retries > 0:
+            update["gen_retries"] = current_retries - 1
     if agent_tool_call == "request_reevaluation":
         update["gen_retries"] = -1
         update["reevaluation_context"] = agent_tool_args.get("reason", "")

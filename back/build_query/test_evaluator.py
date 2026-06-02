@@ -183,7 +183,6 @@ async def evaluate_tests(state: QueryState):
             ],
             "evaluation_feedback": "bad_data",
             "status": "empty_results",
-            "gen_retries": gen_retries - 1,
         }
 
     # Fast path: empty_results due to structural SQL constraint (no LLM needed).
@@ -312,7 +311,6 @@ async def evaluate_tests(state: QueryState):
             ],
             "evaluation_feedback": "bad_data",
             "status": "empty_results",
-            "gen_retries": gen_retries - 1,
         }
         return state_update
 
@@ -349,25 +347,45 @@ async def evaluate_tests(state: QueryState):
     elif triggers_assertion_retry and debug_retries > 0:
         new_status = "bad_assertions"
 
-    state_update: dict = {
-        "messages": [
+    diagnostic = current_test.get("diagnostic")
+    eval_msg_id = str(uuid.uuid4())
+    eval_msg_kwargs: dict = {
+        "type": MsgType.EVALUATION,
+        "parent": last_results.id,
+        "request_id": state.get("request_id"),
+        "test_index": eval_test_index,
+    }
+    if diagnostic and evaluation_feedback == "bad_data":
+        eval_msg_kwargs["diagnostic"] = diagnostic
+
+    messages: list = [
+        AIMessage(
+            content=f"**{verdict}** — {explanation}",
+            id=eval_msg_id,
+            additional_kwargs=eval_msg_kwargs,
+        )
+    ]
+
+    if diagnostic and evaluation_feedback == "bad_data":
+        messages.append(
             AIMessage(
-                content=f"**{verdict}** — {explanation}",
+                content=json.dumps(diagnostic),
                 id=str(uuid.uuid4()),
                 additional_kwargs={
-                    "type": MsgType.EVALUATION,
-                    "parent": last_results.id,
-                    "request_id": state.get("request_id"),
+                    "type": MsgType.BAD_DATA_DIAGNOSTIC,
+                    "parent": eval_msg_id,
                     "test_index": eval_test_index,
+                    "request_id": state.get("request_id"),
                 },
             )
-        ],
+        )
+
+    state_update: dict = {
+        "messages": messages,
         "evaluation_feedback": evaluation_feedback,
         "status": new_status,
     }
 
-    if triggers_agent_retry:
-        state_update["gen_retries"] = gen_retries - 1
     if triggers_assertion_retry:
         state_update["debug_retries"] = debug_retries - 1
 

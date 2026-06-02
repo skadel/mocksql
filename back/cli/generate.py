@@ -147,17 +147,26 @@ def _build_cli_graph():
 
     from build_query.assertion_corrector import correct_assertions
     from build_query.conversational_agent import conversational_agent
+    from build_query.data_patcher import data_patcher_node
     from build_query.examples_executor import run_on_examples
     from build_query.examples_generator import generate_examples
     from build_query.state import QueryState
     from build_query.suggestions_node import generate_suggestions
     from build_query.test_evaluator import evaluate_tests
 
+    _DATA_PATCH_TOOLS = {
+        "patch_test_field",
+        "remove_test_row",
+        "add_test_row",
+        "data_batch",
+    }
+
     builder = StateGraph(QueryState)
     builder.add_node("generator", generate_examples)
     builder.add_node("executor", run_on_examples)
     builder.add_node("test_evaluator", evaluate_tests)
     builder.add_node("conversational_agent", conversational_agent)
+    builder.add_node("data_patcher", data_patcher_node)
     builder.add_node("assertion_corrector", correct_assertions)
     builder.add_node("suggestions_generator", generate_suggestions)
 
@@ -178,12 +187,19 @@ def _build_cli_graph():
             return "assertion_corrector"
         return "suggestions_generator"
 
+    def route_agent_output(state: QueryState):
+        tool_call = state.get("agent_tool_call")
+        if tool_call in _DATA_PATCH_TOOLS:
+            return "data_patcher"
+        return "generator"
+
     builder.add_edge(START, "generator")
     builder.add_edge("generator", "executor")
     builder.add_conditional_edges("executor", route_executor)
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("assertion_corrector", "test_evaluator")
-    builder.add_edge("conversational_agent", "generator")
+    builder.add_conditional_edges("conversational_agent", route_agent_output)
+    builder.add_edge("data_patcher", "executor")
     builder.add_edge("suggestions_generator", END)
 
     return builder.compile()

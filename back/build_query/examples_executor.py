@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Literal, Optional
 import sqlglot
 from langchain_core.messages import AIMessage
 from pandas import DataFrame
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
 
 from utils.llm_errors import normalize_llm_content
@@ -53,6 +53,16 @@ class _AssertionFix(BaseModel):
     suggestions: List[str]
 
 
+class DiagnosticBlock(BaseModel):
+    root_cause: str
+    sql_pattern: str
+    data_issue: str
+    fix_summary: str
+    fix_recipe: str
+    affected_tables: List[str]
+    affected_ctes: List[str]
+
+
 class _AssertionsAndEvaluation(BaseModel):
     reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
     assertions: List[_Assertion] = Field(min_length=1)
@@ -60,6 +70,21 @@ class _AssertionsAndEvaluation(BaseModel):
     reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
     explanation: str
     assertion_fix: Optional[_AssertionFix] = None
+    diagnostic: Optional[DiagnosticBlock] = None
+
+    @model_validator(mode="after")
+    def _diagnostic_required_for_bad_data(self) -> "_AssertionsAndEvaluation":
+        if self.reason_type == "bad_data" and self.diagnostic is None:
+            self.diagnostic = DiagnosticBlock(
+                root_cause="Données d'entrée insuffisantes ou incohérentes avec la logique SQL",
+                sql_pattern="(non déterminé automatiquement)",
+                data_issue="Le LLM n'a pas fourni d'analyse détaillée",
+                fix_summary="Régénérer les données en ciblant la contrainte SQL du test.",
+                fix_recipe="Régénérer les données en ciblant la contrainte SQL identifiée dans le reasoning",
+                affected_tables=[],
+                affected_ctes=[],
+            )
+        return self
 
 
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
@@ -788,6 +813,22 @@ async def _run_single_test_case(
                 result["evaluation_explanation"] = eval_result.explanation
                 if eval_result.assertion_fix is not None:
                     result["assertion_fix"] = eval_result.assertion_fix.model_dump()
+                if (
+                    eval_result.diagnostic is not None
+                    and eval_result.diagnostic.root_cause
+                    != "Données d'entrée insuffisantes ou incohérentes avec la logique SQL"
+                ):
+                    result["diagnostic"] = eval_result.diagnostic.model_dump()
+                elif result.get("reason_type") == "bad_data":
+                    diag = await _generate_diagnostic(
+                        duckdb_sql=final_duckdb_sql,
+                        test_data=test_data,
+                        result_df=final_res_df,
+                        test_description=test_case.get("unit_test_description", ""),
+                        eval_reasoning=eval_result.reasoning,
+                    )
+                    if diag:
+                        result["diagnostic"] = diag.model_dump()
         return result
 
     except Exception as e:
@@ -925,8 +966,25 @@ Exemples de lignes :
 Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
 - Quelle est l'intention de ce test ? Quel comportement SQL veut-il vérifier ?
 - Les données d'entrée sont-elles cohérentes avec cette intention (types, cardinalité, cas limites) ?
+- Si la requête contient GROUP BY + agrégat (COUNT, STDDEV, AVG, SUM, MAX…) : est-ce que
+  TOUS les groupes ont exactement la même cardinalité ? Ex : 1 ligne par groupe partout →
+  COUNT=1 constant → STDDEV=0 → bad_data. En revanche, si les groupes ont des cardinalités
+  différentes (ex : 3, 2, 1, 1, 1) → STDDEV calculable → test valide, ne pas signaler bad_data.
+  La correction est de dupliquer des lignes sur la même clé GROUP BY, pas d'ajouter de nouvelles valeurs.
 - Le résultat DuckDB est-il conforme à ce qu'on attendrait ?
-- Quelles assertions seraient pertinentes pour consolider ce verdict ?
+- Les assertions à générer valident-elles réellement la logique métier ? Regarde les "Exemples de lignes" ci-dessus
+  pour juger : si la colonne vérifiée par `IS NULL` contient déjà des valeurs non-nulles dans les exemples, l'assertion
+  est triviale (retourne toujours 0 ligne). Plus généralement, une assertion est triviale si elle passe quel que soit
+  le contenu réel du résultat — elle ne discrimine pas une bonne réponse d'une mauvaise. Exemples typiques :
+  `WHERE col IS NULL` (colonne jamais nulle), `WHERE 1=0`, ou un `NOT IN (...)` dont la liste englobe tous les
+  cas possibles sauf un. Si toutes les assertions sont triviales et ne vérifient aucune valeur concrète ou invariant
+  réel du résultat, c'est `bad_assertions`.
+  Une bonne assertion pince soit la valeur exacte retournée (`WHERE date != '2026-03-07'`), soit un invariant
+  structurel observable (`WHERE z_score = (SELECT MAX(z_score) FROM __result__)`).
+- Si la requête utilise ORDER BY + LIMIT ou OFFSET : est-ce que plusieurs lignes ont exactement la même
+  valeur de tri à la position retournée ? Si oui, le résultat est non-déterministe (ex : 3 groupes avec
+  le même COUNT → même Z-score → OFFSET 1 retourne n'importe lequel) → `bad_data`. La correction est
+  d'assigner des cardinalités distinctes à chaque groupe de façon à avoir un ordre unique.
 
 Puis produis :
 
@@ -936,12 +994,22 @@ Puis produis :
    - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Pour vérifier un MAX ou une valeur relative, utilise une sous-requête sur `__result__` uniquement : `SELECT * FROM __result__ WHERE val != (SELECT MAX(val) FROM __result__)`
    - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
      `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
+   - INTERDIT — assertions triviales (retournent toujours 0 ligne quelle que soit la valeur du résultat) :
+     ✗ `WHERE col IS NULL` si les exemples ci-dessus montrent des valeurs non-nulles pour cette colonne
+     ✗ `WHERE COUNT(*) = 0` ou `WHERE 1=0` (tautologies)
+     ✗ `WHERE col NOT IN (...)` si la liste couvre toutes les valeurs possibles sauf l'impossible
+     Une assertion triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
+   - OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une assertion qui vérifie
+     la VALEUR CONCRÈTE retournée. Utilise les "Exemples de lignes" pour identifier le résultat attendu.
+     Exemple : si `__result__` contient `{{"date": "2026-01-02"}}`, l'assertion est `WHERE date != '2026-01-02'`.
+     Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
 
 2. Le verdict de qualité :
    - `verdict` : "Excellent", "Bon", ou "Insuffisant"
    - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
      mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
-     (les assertions générées ne permettent pas de valider ce scénario)
+     (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
+     sont triviales : toujours vraies indépendamment de la valeur réelle du résultat)
    - `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
      sans noms de colonnes, de CTEs ni de mots-clés SQL.
      ✓ 'Les données couvrent correctement le scénario nominal.'
@@ -956,6 +1024,29 @@ Puis produis :
        Valeurs dupliquées, Performance
      - `suggestions` : 2–3 vérifications correctives précises ("Vérifie que …")
      Si `reason_type != "bad_assertions"`, `assertion_fix` doit être `null`.
+   - `diagnostic` : OBLIGATOIRE si `reason_type == "bad_data"`, sinon `null`.
+     Quand `reason_type == "bad_data"`, tu DOIS remplir ce bloc — ne laisse pas null :
+     - `root_cause` : phrase courte identifiant la cause (ex: "STDDEV=0 — chaque date n'apparaît qu'une fois")
+     - `sql_pattern` : clause SQL en cause (ex: "COUNT(descript) GROUP BY date → variance nulle")
+     - `data_issue` : ce qui manque dans les données générées (ex: "6 dates distinctes avec 1 ligne chacune, COUNT=1 partout")
+     - `fix_summary` : phrase courte (max 15 mots) lisible par l'utilisateur dans l'UI —
+       décrit le mécanisme sans les valeurs concrètes ni les détails techniques.
+       ✓ Bon : "Dupliquer des lignes sur la même date pour varier le COUNT par groupe."
+       ✓ Bon : "Ajouter une ligne de JOIN manquante pour que la jointure produise un résultat."
+       ✗ Interdit : noms de colonnes, de CTEs, valeurs spécifiques, termes SQL.
+     - `fix_recipe` : instruction opérationnelle complète passée au correcteur — 4 éléments requis :
+       (1) table exacte et champ(s) à modifier (nom exact tel qu'affiché dans "Données d'entrée"),
+       (2) mécanisme précis : pour les bugs GROUP BY/agrégat, écrire impérativement
+           "dupliquer N lignes avec [col_group_by]='[valeur]'" — JAMAIS "ajouter des valeurs variables"
+           ni aucune formulation abstraite,
+       (3) valeurs concrètes tirées des données d'entrée ci-dessus, avec le compte par groupe
+           (ex: "'2016-01-02' × 3 lignes, '2016-01-03' × 2 lignes"),
+       (4) effet attendu sur le calcul SQL (ex: "→ COUNT ∈ {2, 3} → STDDEV > 0").
+       ✗ Interdit : "ajouter des données variables", "modifier les valeurs", tout terme générique.
+       ✓ Bon : "Dans [table], dupliquer la ligne [col]='2016-01-02' pour en avoir 3 copies
+                et [col]='2016-01-03' pour en avoir 2 → COUNT varie → STDDEV > 0."
+     - `affected_tables` : liste des noms de tables dont les données doivent être corrigées
+     - `affected_ctes` : liste des CTEs impactées par le problème
 
 Cas particulier — résultat vide intentionnel : si la description mentionne explicitement
 "plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
@@ -982,6 +1073,67 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
             verdict="Bon",
             explanation="Évaluation indisponible.",
         )
+
+
+async def _generate_diagnostic(
+    duckdb_sql: str,
+    test_data: list,
+    result_df,
+    test_description: str,
+    eval_reasoning: str,
+) -> Optional[DiagnosticBlock]:
+    """Second focused LLM call to produce a surgical DiagnosticBlock when bad_data is detected.
+    Uses DiagnosticBlock directly as structured output schema — all fields required, no Optional."""
+    sample = result_df.head(5).to_dict(orient="records")
+    row_count = len(result_df)
+
+    prompt = f"""Tu es un expert en tests SQL. Le test suivant a été jugé "bad_data" : les données d'entrée ne permettent pas de valider le scénario.
+
+Description du test : {test_description}
+
+Données d'entrée injectées dans DuckDB :
+{test_data}
+
+Requête SQL testée :
+```sql
+{duckdb_sql}
+```
+
+Résultat DuckDB — {row_count} ligne(s) :
+{sample}
+
+Raisonnement de l'évaluateur :
+{eval_reasoning}
+
+Produis une analyse chirurgicale en remplissant TOUS les champs :
+- `root_cause` : phrase courte identifiant la cause racine (ex: "STDDEV=0 — chaque date n'apparaît qu'une fois")
+- `sql_pattern` : clause SQL en cause (ex: "COUNT(descript) GROUP BY date → variance nulle → STDDEV=0")
+- `data_issue` : description précise du défaut dans les données (ex: "6 dates distinctes avec 1 ligne chacune → COUNT=1 partout")
+- `fix_summary` : phrase courte (max 15 mots) lisible par l'utilisateur — mécanisme sans détails techniques
+  ✓ "Dupliquer des lignes sur la même date pour varier le COUNT par groupe."
+  ✗ Noms de colonnes, CTEs, valeurs spécifiques, termes SQL
+- `fix_recipe` : instruction complète pour le correcteur :
+  (1) table exacte et champ(s) à modifier,
+  (2) mécanisme précis — pour GROUP BY/agrégat : "dupliquer N lignes avec [col]='[valeur]'" JAMAIS "ajouter des valeurs variables",
+  (3) valeurs concrètes avec compte par groupe (ex: "'2016-01-02' × 3, '2016-01-03' × 2, '2016-01-01' × 1"),
+  (4) effet attendu (ex: "→ COUNT ∈ {{1,2,3}} → STDDEV > 0").
+- `affected_tables` : noms des tables dont les données doivent être corrigées
+- `affected_ctes` : CTEs impactées par le problème"""
+
+    llm = make_llm()
+    structured_llm = llm.with_structured_output(DiagnosticBlock)
+    try:
+        logger.diag("[diagnostic] appel LLM ciblé bad_data")
+        diag: DiagnosticBlock = await structured_llm.ainvoke(prompt)
+        logger.diag(
+            "[diagnostic] root_cause=%r fix_summary=%r",
+            diag.root_cause,
+            diag.fix_summary,
+        )
+        return diag
+    except Exception as e:
+        logger.diag("[diagnostic] ERREUR: %s", e)
+        return None
 
 
 def _evaluate_assertions(

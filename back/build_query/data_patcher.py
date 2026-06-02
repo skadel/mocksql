@@ -23,28 +23,12 @@ import utils.logger  # noqa: F401
 logger = logging.getLogger(__name__)
 
 
-async def data_patcher_node(state: QueryState):
-    """Applique un patch chirurgical sur les données d'un test existant sans appel au générateur complet."""
-    tool_call = state.get("agent_tool_call", "")
-    args = state.get("agent_tool_args") or {}
-    test_index = args.get("test_index")
-
-    if test_index is None:
-        logger.warning("[data_patcher] test_index absent des agent_tool_args")
-        return {}
-
-    existing_tests = await retrieve_existing_tests(state["session"], state)
-    test_case = next(
-        (t for t in existing_tests if str(t.get("test_index")) == str(test_index)),
-        None,
-    )
-    if test_case is None:
-        logger.warning("[data_patcher] test_index=%s introuvable", test_index)
-        return {}
-
-    data = copy.deepcopy(test_case.get("data") or {})
-
-    if tool_call == "patch_test_field":
+async def apply_single_patch(
+    state: QueryState, test_case: dict, data: dict, tool_name: str, args: dict
+) -> dict:
+    """Applique une opération chirurgicale sur data et retourne data modifié."""
+    test_index = args.get("test_index", "?")
+    if tool_name == "patch_test_field":
         table = args.get("table", "")
         row_idx = int(args.get("row_index", 0))
         field = args.get("field", "")
@@ -63,8 +47,7 @@ async def data_patcher_node(state: QueryState):
                 field,
                 value,
             )
-
-    elif tool_call == "remove_test_row":
+    elif tool_name == "remove_test_row":
         table = args.get("table", "")
         row_idx = int(args.get("row_index", 0))
         if table in data and row_idx < len(data[table]):
@@ -75,14 +58,96 @@ async def data_patcher_node(state: QueryState):
                 table,
                 row_idx,
             )
-
-    elif tool_call == "add_test_row":
+    elif tool_name == "add_test_row":
         tables = args.get("tables") or []
         instruction = args.get("instruction", "")
         data = await _add_rows(state, test_case, data, tables, instruction)
+    return data
+
+
+async def data_patcher_node(state: QueryState):
+    """Applique un patch chirurgical sur les données d'un test existant sans appel au générateur complet."""
+    tool_call = state.get("agent_tool_call", "")
+    args = state.get("agent_tool_args") or {}
+
+    if tool_call == "data_batch":
+        ops = args.get("calls", [])
+        if not ops:
+            logger.warning("[data_patcher] data_batch: liste d'opérations vide")
+            return {}
+
+        test_index = next(
+            (
+                op["args"].get("test_index")
+                for op in ops
+                if op.get("args", {}).get("test_index") is not None
+            ),
+            None,
+        )
+        if test_index is None:
+            logger.warning(
+                "[data_patcher] data_batch: aucun test_index résolu dans les ops"
+            )
+            return {}
+
+        existing_tests = await retrieve_existing_tests(state["session"], state)
+        test_case = next(
+            (t for t in existing_tests if str(t.get("test_index")) == str(test_index)),
+            None,
+        )
+        if test_case is None:
+            logger.warning(
+                "[data_patcher] data_batch: test_index=%s introuvable", test_index
+            )
+            return {}
+
+        data = copy.deepcopy(test_case.get("data") or {})
+        logger.diag(
+            "[data_patcher] data_batch test=%s — %d opération(s): %s",
+            test_index,
+            len(ops),
+            [op["tool"] for op in ops],
+        )
+        for op in ops:
+            data = await apply_single_patch(
+                state, test_case, data, op["tool"], op["args"]
+            )
+
+        updated_test = {**test_case, "data": data}
+        parent = state.get("agent_message_id") or state.get("user_message_id")
+        msg = AIMessage(
+            content=json.dumps(updated_test),
+            id=str(uuid.uuid4()),
+            additional_kwargs={
+                "type": MsgType.EXAMPLES,
+                "parent": parent,
+                "request_id": state.get("request_id"),
+            },
+        )
+        return {
+            "examples": [msg],
+            "test_index": test_index,
+        }
+
+    # Comportement existant — opération chirurgicale unique
+    test_index = args.get("test_index")
+    if test_index is None:
+        logger.warning("[data_patcher] test_index absent des agent_tool_args")
+        return {}
+
+    existing_tests = await retrieve_existing_tests(state["session"], state)
+    test_case = next(
+        (t for t in existing_tests if str(t.get("test_index")) == str(test_index)),
+        None,
+    )
+    if test_case is None:
+        logger.warning("[data_patcher] test_index=%s introuvable", test_index)
+        return {}
+
+    data = copy.deepcopy(test_case.get("data") or {})
+    data = await apply_single_patch(state, test_case, data, tool_call, args)
 
     updated_test = {**test_case, "data": data}
-
     parent = state.get("agent_message_id") or state.get("user_message_id")
     msg = AIMessage(
         content=json.dumps(updated_test),

@@ -288,7 +288,12 @@ def build_query_graph():
     def route_agent_output(state: QueryState):
         tool_call = state.get("agent_tool_call")
         logger.diag("[route_agent_output] agent_tool_call=%s", tool_call)
-        if tool_call in ("patch_test_field", "remove_test_row", "add_test_row"):
+        if tool_call in (
+            "patch_test_field",
+            "remove_test_row",
+            "add_test_row",
+            "data_batch",
+        ):
             return "data_patcher"
         if tool_call in ("generate_test_data", "update_test_data"):
             return "generator"

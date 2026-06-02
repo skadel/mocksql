@@ -31,3 +31,4 @@ class MsgType(str, Enum):
     DEBUG_RUN_CTE = "debug_run_cte"
     DEBUG_COUNT_STEPS = "debug_count_steps"
     RETRY_PROMPT = "retry_prompt"
+    BAD_DATA_DIAGNOSTIC = "bad_data_diagnostic"

@@ -580,7 +580,9 @@ async def generate_examples_(
         and not _is_retry
         and _all_refs_resolved(sim_result, base_tables)
     ):
-        faker_cols = _compute_faker_columns(sim_result, used_columns, base_tables)
+        faker_cols = _compute_faker_columns(
+            sim_result, used_columns, base_tables, sql=optimized_sql, dialect=dialect
+        )
 
     logger.debug(
         "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
@@ -902,7 +904,11 @@ def _all_refs_resolved(sim_result, base_tables: set[str]) -> bool:
 
 
 def _compute_faker_columns(
-    sim_result, used_columns: list, base_tables: set[str]
+    sim_result,
+    used_columns: list,
+    base_tables: set[str],
+    sql: str = "",
+    dialect: str = "bigquery",
 ) -> dict[str, set[str]]:
     """Return {uc_key: {col_names}} for columns safe to Faker-fill.
 
@@ -917,6 +923,27 @@ def _compute_faker_columns(
     for eq_class in sim_result.equivalence_classes:
         for ref in eq_class:
             constrained.add((ref.table.lower(), ref.column.lower()))
+
+    # GROUP BY columns need repeated values across rows — Faker would assign unique values
+    # per row, destroying the aggregation structure (STDDEV=0, wrong counts, etc.).
+    if sql:
+        try:
+            import sqlglot
+            import sqlglot.expressions as exp
+
+            group_by_cols: set[str] = set()
+            for statement in sqlglot.parse(sql, dialect=dialect):
+                if statement is None:
+                    continue
+                for node in statement.walk():
+                    if isinstance(node, exp.Group):
+                        for col in node.find_all(exp.Column):
+                            group_by_cols.add(col.name.lower())
+            for table in base_tables:
+                for col in group_by_cols:
+                    constrained.add((table, col))
+        except Exception:
+            pass
 
     # If the simplifier found no constraints at all (e.g. filters inside an anonymous
     # subquery that it can't propagate), don't Faker-fill anything — the LLM sees the

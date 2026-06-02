@@ -537,6 +537,24 @@ class StreamEventsRequest(BaseModel):
 _query_graph = None
 
 
+class ResetModelRequest(BaseModel):
+    model_name: str
+
+
+@router.post("/dev/reset-model")
+async def dev_reset_model_route(body: ResetModelRequest):
+    """Supprime les tests et l'historique d'un modèle — usage démo/dev uniquement."""
+    from storage.test_repository import get_test, delete_test
+    from models.message_service import delete_all_messages
+
+    test = get_test(body.model_name, body.model_name) or {}
+    session_id = test.get("test_id")
+    if session_id:
+        await delete_all_messages(session_id)
+        delete_test(session_id, body.model_name)
+    return {"reset": True, "session_id": session_id}
+
+
 @router.post("/dev/clear-schemas")
 async def dev_clear_schemas_route():
     """Réinitialise les schémas (pas le profil) — usage démo/dev uniquement."""
