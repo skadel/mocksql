@@ -1,4 +1,21 @@
 import datetime
+import re
+from typing import Annotated
+
+from pydantic import BeforeValidator
+
+
+def _normalize_datetime_str(v):
+    if isinstance(v, str):
+        v = re.sub(r"^(\d{4}-\d{2}-\d{2}) ", r"\1T", v)
+        v = re.sub(r"\+(\d{2})$", r"+\1:00", v)
+    return v
+
+
+# Accepts both strict ISO 8601 and common LLM variants ("2026-01-01 00:00:00+00")
+FlexibleDatetime = Annotated[
+    datetime.datetime, BeforeValidator(_normalize_datetime_str)
+]
 
 
 COMMON_HISTORY_TABLE_NAME = "common_history"
@@ -20,7 +37,7 @@ type_mapping = {
     "FLOAT": float,
     "FLOAT64": float,
     "DATE": datetime.date,
-    "TIMESTAMP": datetime.datetime,
+    "TIMESTAMP": FlexibleDatetime,
 }
 
 
