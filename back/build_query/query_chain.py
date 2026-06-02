@@ -307,6 +307,9 @@ def build_query_graph():
             return "debug_node"
         if tool_call == "request_reevaluation":
             return "test_evaluator"
+        if tool_call == "ask_clarification":
+            logger.diag("[route_agent_output] → history_saver (ask_clarification)")
+            return "history_saver"
         logger.diag("[route_agent_output] aucun tool_call actionnable → history_saver")
         return "history_saver"
 

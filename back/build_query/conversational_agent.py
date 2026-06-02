@@ -355,8 +355,34 @@ Réserve le texte libre aux réponses purement conversationnelles (sans outil).{
         ],
     )
     user_input = state.get("input", "")
+
+    # Reprise stateless après ask_clarification : si la dernière action de l'agent
+    # (dans l'historique) était une question de clarification non résolue, l'input
+    # utilisateur courant en est la réponse → on ré-injecte l'intention pour que
+    # l'agent agisse au lieu de reposer la même question.
+    resume_context = ""
+    if user_input:
+        for m in reversed(history):
+            mtype = get_message_type(m)
+            if mtype == MsgType.OTHER and (m.additional_kwargs or {}).get(
+                "pending_intent"
+            ):
+                pending_intent = m.additional_kwargs["pending_intent"]
+                resume_context = f"""
+
+⚠️ REPRISE APRÈS CLARIFICATION
+Tu avais demandé : "{pending_intent}"
+L'utilisateur vient de répondre : "{user_input}"
+Agis maintenant en conséquence (génère ou corrige le test approprié). Ne repose pas la même question."""
+                break
+            # L'agent a déjà agi après avoir demandé (test généré/exécuté) → pas de reprise
+            if mtype in (MsgType.RESULTS, MsgType.EXAMPLES):
+                break
+
     formatted_history = [_format_debug_message(m) for m in history]
-    messages_for_llm = [SystemMessage(content=system_content)] + formatted_history
+    messages_for_llm = [
+        SystemMessage(content=system_content + resume_context)
+    ] + formatted_history
     if user_input:
         messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
     elif evaluation_feedback == "bad_data":
@@ -569,6 +595,10 @@ Réserve le texte libre aux réponses purement conversationnelles (sans outil).{
                     id=str(uuid.uuid4()),
                     additional_kwargs={
                         "type": MsgType.OTHER,
+                        # Breadcrumb pour la reprise stateless : au tour suivant, l'agent
+                        # détecte que sa dernière question était une clarification non résolue
+                        # et traite l'input utilisateur comme la réponse.
+                        "pending_intent": question,
                         "parent": last_msg_id,
                         "request_id": state.get("request_id"),
                     },
