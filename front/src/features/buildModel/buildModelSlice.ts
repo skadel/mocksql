@@ -3,7 +3,7 @@ import { chatQuery, fetchPage } from '../../api/query';
 import { fetchUniqueColumns, getTableChanges } from '../../api/table';
 import { getMessages, patchModelTests } from '../../api/messages';
 import { handleRejectedCase } from '../../utils/errorCase';
-import { BuildModelState, DisplayTableMeta, Message, SqlHistoryEntry } from '../../utils/types';
+import { BuildModelState, DisplayTableMeta, Message, MessageContents, SqlHistoryEntry } from '../../utils/types';
 import { formatMessage } from '../../utils/messages';
 
 const initialState: BuildModelState = {
@@ -320,6 +320,11 @@ export const buildModelSlice = createSlice({
     setWorkspaceMode(state, action: PayloadAction<boolean>) {
       state.workspaceMode = action.payload;
     },
+    patchMessageContents(state, action: PayloadAction<{ id: string; patch: Partial<MessageContents> }>) {
+      const msg = state.queryComponentGraph[action.payload.id];
+      if (!msg) return;
+      Object.assign(msg.contents, action.payload.patch);
+    },
   },
   extraReducers: (builder) => {
     builder.addCase(getMessages.pending, (state) => {
@@ -359,6 +364,53 @@ export const buildModelSlice = createSlice({
             parentMessage.children.push(newMessage.id);
           }
         });
+
+        // Fold evaluation and suggestions into their target message so history renders as one bubble.
+        // Target: nearest generate_test_scenario or examples ancestor in the parent chain.
+        {
+          const toDelete = new Set<string>();
+          messages.forEach((raw: any) => {
+            const msg = state.queryComponentGraph[raw.id];
+            if (!msg) return;
+            if (msg.contentType !== 'evaluation' && msg.contentType !== 'suggestions') return;
+
+            let targetId: string | null = null;
+            let curId = msg.parent;
+            const visited = new Set<string>();
+            while (curId && !visited.has(curId)) {
+              visited.add(curId);
+              const cur = state.queryComponentGraph[curId];
+              if (!cur) break;
+              if (cur.contentType === 'generate_test_scenario') { targetId = curId; break; }
+              if (cur.contentType === 'examples') { targetId = curId; break; }
+              if (cur.type === 'user') break;
+              curId = cur.parent ?? undefined;
+            }
+
+            if (!targetId) return;
+            const target = state.queryComponentGraph[targetId];
+
+            if (msg.contentType === 'evaluation') {
+              // Only embed evaluation text for conversational flow (generate_test_scenario target).
+              // For initial generation the verdict is already in testResults / TestsPanel.
+              if (target.contentType === 'generate_test_scenario') {
+                target.contents.evaluationText = msg.contents.text;
+              }
+            } else {
+              target.contents.suggestions = msg.contents.suggestions;
+              if (msg.contents.profileAvailable !== undefined) {
+                target.contents.profileAvailable = msg.contents.profileAvailable;
+              }
+            }
+
+            const parentMsg = msg.parent ? state.queryComponentGraph[msg.parent] : null;
+            if (parentMsg?.children) {
+              parentMsg.children = parentMsg.children.filter(id => id !== msg.id);
+            }
+            toDelete.add(msg.id);
+          });
+          toDelete.forEach(id => delete state.queryComponentGraph[id]);
+        }
 
         // Fallback: find last results message for testResults / sql if model had no persisted data
         if (!test_results?.length || !sql) {
@@ -584,7 +636,7 @@ export const { setError, resetMessages, setLoadingMessage, appendComponentToLast
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
   setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
   setTestResults, pushSqlHistory, setRestoredMessageId,
-  appendStreamingReasoning, clearStreamingReasoning, setWorkspaceMode } = buildModelSlice.actions;
+  appendStreamingReasoning, clearStreamingReasoning, setWorkspaceMode, patchMessageContents } = buildModelSlice.actions;
 
 export default buildModelSlice.reducer;
 

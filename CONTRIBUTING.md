@@ -33,7 +33,7 @@ BQ_TEST_PROJECT=my-project-dev   # optionnel, défaut : VERTEX_PROJECT
 Variables spécifiques au backend (`back/.env`) :
 
 ```dotenv
-DEFAULT_MODEL_NAME=gemini-2.0-flash-lite
+DEFAULT_MODEL_NAME=gemini-2.5-flash
 FRONT_URL=http://127.0.0.1:3000
 ```
 

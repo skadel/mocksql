@@ -5,6 +5,7 @@ import {
   appendQueryComponentMessage,
   appendComponentToLastMessage,
   appendStreamingReasoning,
+  patchMessageContents,
   removeMessage,
   setError,
   setLoading,
@@ -77,6 +78,9 @@ export const chatQuery = createAsyncThunk(
     let convStreamText = '';
     // ID of the generate_test_scenario message; used as parent for evaluation in conv flow.
     let convGenerateParentId: string | null = null;
+    // ID of the primary bot message that accumulates evaluation + suggestions into one bubble.
+    // Set to the scenario message (conv flow) or first examples message (initial flow).
+    let generationSummaryId: string | null = null;
 
     dispatch(setError(''));
     const token = localStorage.getItem('jwt') || '';
@@ -216,6 +220,7 @@ export const chatQuery = createAsyncThunk(
                 console.log('[SSE] conv_agent: dispatching real scenario message', msgWithReasoning.id);
                 dispatch(appendQueryComponentMessage(msgWithReasoning));
                 convGenerateParentId = scenarioMsg.id;
+                generationSummaryId = scenarioMsg.id;
                 // Dispatch any accompanying text messages (rare but possible).
                 formattedMsgs
                   .filter((m: any) => m.contentType !== 'generate_test_scenario')
@@ -243,13 +248,14 @@ export const chatQuery = createAsyncThunk(
             } else if (convGenerateParentId && (pd.name === 'executor' || pd.name === 'test_evaluator')) {
               // Conversational generate_test flow:
               // - results/examples → silent (TestsPanel handles display)
-              // - evaluation → visible as its own bubble, re-parented to the scenario message
+              // - evaluation → folded into the scenario message (generationSummaryId)
               messages.forEach((m: any) => {
                 const nm = formatMessage(m);
                 if (nm.contents.tables !== undefined && testIndex !== undefined) nm.testIndex = testIndex;
-                if (nm.contentType === 'evaluation' && pd.name === 'test_evaluator') {
-                  // Show evaluation as a visible bubble under the scenario message
-                  dispatch(appendQueryComponentMessage({ ...nm, parent: convGenerateParentId ?? undefined }));
+                if (nm.contentType === 'evaluation' && pd.name === 'test_evaluator' && generationSummaryId) {
+                  // Fold evaluation text into the scenario bubble instead of a standalone message
+                  dispatch(patchMessageContents({ id: generationSummaryId, patch: { evaluationText: nm.contents.text } }));
+                  dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any)); // testResults.evaluation sync
                 } else {
                   dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any));
                 }
@@ -257,14 +263,43 @@ export const chatQuery = createAsyncThunk(
 
               if (pd.name === 'test_evaluator') {
                 convGenerateParentId = null;
+                // generationSummaryId is kept — suggestions_generator will use it
               }
             } else {
               messages.forEach((m: any) => {
                 const nm = formatMessage(m);
-                if (nm.contents.tables !== undefined) {
+
+                if (nm.contentType === 'examples') {
                   if (testIndex !== undefined) nm.testIndex = testIndex;
                   else if (context === 'sql_update') nm.context = 'sql_update';
+                  // Track the first examples message as the consolidation target
+                  if (!generationSummaryId) generationSummaryId = nm.id;
+                  dispatch(appendQueryComponentMessage(nm));
+                  return;
                 }
+
+                if (nm.contentType === 'results') {
+                  if (testIndex !== undefined) nm.testIndex = testIndex;
+                  // Silent — TestsPanel shows execution results; state sync still happens
+                  dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any));
+                  return;
+                }
+
+                if (nm.contentType === 'evaluation' && generationSummaryId) {
+                  // Fold evaluation into examples bubble (conv flow uses generationSummaryId too)
+                  // Only embed text for conv flow where there's one test; for initial flow the
+                  // verdict is already in testResults / TestsPanel so we skip the text embedding.
+                  dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any)); // testResults sync
+                  return;
+                }
+
+                if (nm.contentType === 'suggestions' && generationSummaryId) {
+                  // Fold suggestions into the primary bubble (examples or scenario)
+                  dispatch(patchMessageContents({ id: generationSummaryId, patch: { suggestions: nm.contents.suggestions, profileAvailable: nm.contents.profileAvailable } }));
+                  dispatch(appendQueryComponentMessage({ ...nm, silent: true } as any)); // state.suggestions sync
+                  return;
+                }
+
                 const isIntermediate = m.additional_kwargs?.intermediate === true;
                 dispatch(appendQueryComponentMessage(isIntermediate ? { ...nm, silent: true } as any : nm));
               });

@@ -451,7 +451,13 @@ async def generate_examples(state: QueryState):
             state, used_columns, existing_tests, history
         )
     except ValueError as exc:
-        error_msg = str(exc)
+        raw = str(exc)
+        # OutputParserException messages include the full LLM completion JSON, which
+        # is very long and not useful to display. Detect and replace with a short message.
+        if "OUTPUT_PARSING_FAILURE" in raw or "Failed to parse" in raw:
+            error_msg = "Le modèle n'a pas pu générer un test valide (erreur de format LLM). Réessaie ou reformule ta demande."
+        else:
+            error_msg = raw
         return {
             "messages": [
                 AIMessage(

@@ -7,6 +7,7 @@ import HistoryIcon from '@mui/icons-material/History';
 import DroppableTextField from '../../../shared/DroppableTextField';
 
 import MessageDisplay from './MessageDisplay';
+import HistoryDrawer from './HistoryDrawer';
 import { Message, SqlHistoryEntry } from '../../../utils/types';
 
 function DbIcon() {
@@ -101,6 +102,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
 
   useEffect(() => {
     if (lastReasoning) setReasoningOpen(false);
@@ -233,7 +235,30 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
         >
           Changer
         </Box>
+        {sqlHistory.length > 0 && (
+          <Box
+            component="button"
+            onClick={() => setHistoryDrawerOpen(true)}
+            title={`Historique SQL (${sqlHistory.length} version${sqlHistory.length > 1 ? 's' : ''})`}
+            sx={{
+              flexShrink: 0, width: 30, height: 30, borderRadius: '8px', border: 'none',
+              bgcolor: 'transparent', color: '#9aabb0', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              '&:hover': { bgcolor: 'rgba(19,35,41,.06)', color: '#3b5357' },
+            }}
+          >
+            <HistoryIcon sx={{ fontSize: 16 }} />
+          </Box>
+        )}
       </Box>
+
+      <HistoryDrawer
+        open={historyDrawerOpen}
+        onClose={() => setHistoryDrawerOpen(false)}
+        fileName={fileName}
+        entries={sqlHistory}
+        onRestore={onSqlRestore}
+      />
 
       {/* Anchor banner — when a test is selected */}
       {selectedTestIndex !== null && (
@@ -387,50 +412,44 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
         )}
 
         {!isLoading && lastReasoning && (
-          <Box sx={{ mt: 0.5, mb: 0.5 }}>
+          <Box sx={{ mt: 0.75, mb: 0.5 }}>
+            {/* Claude-Code-style collapsible "Réflexion" block */}
             <Box
               onClick={() => setReasoningOpen(o => !o)}
               sx={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 0.5,
-                cursor: 'pointer',
-                color: '#6b8287',
+                display: 'flex', alignItems: 'center', gap: '6px',
+                cursor: 'pointer', width: '100%', textAlign: 'left',
+                p: '4px 2px', borderRadius: '6px', color: '#6b8287',
                 '&:hover': { color: '#3b5357' },
               }}
             >
-              <ExpandMoreIcon
-                sx={{
-                  fontSize: 14,
-                  transition: 'transform 0.2s',
-                  transform: reasoningOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
-                }}
-              />
-              <Typography variant="caption" sx={{ fontSize: 11, fontWeight: 500 }}>
-                Réflexion
-              </Typography>
+              {/* Sparkles icon */}
+              <Box component="span" sx={{ color: '#1ca8a4', display: 'inline-flex', flexShrink: 0 }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z"/>
+                </svg>
+              </Box>
+              <Typography component="span" sx={{ fontSize: 12, fontWeight: 600, color: 'inherit' }}>Réflexion</Typography>
+              <Typography component="span" sx={{ fontSize: 11.5, color: '#9aabb0' }}>· terminée</Typography>
+              <Box component="span" sx={{ ml: 'auto', display: 'inline-flex', color: '#9aabb0', transition: 'transform .2s', transform: reasoningOpen ? 'rotate(180deg)' : 'none' }}>
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+              </Box>
             </Box>
             <Collapse in={reasoningOpen}>
-              <Typography
-                variant="caption"
-                sx={{
-                  display: 'block',
-                  mt: 0.5,
-                  px: 1.25,
-                  py: 0.75,
-                  bgcolor: '#eef3f4',
-                  borderRadius: '8px',
-                  fontSize: 11,
-                  color: '#6b8287',
-                  fontStyle: 'italic',
-                  whiteSpace: 'pre-wrap',
-                  lineHeight: 1.6,
-                  maxHeight: 260,
-                  overflow: 'auto',
-                }}
-              >
-                {lastReasoning}
-              </Typography>
+              <Box sx={{
+                mt: '4px', ml: '2px', pl: '8px',
+                borderLeft: '2px solid #dce4e6',
+                display: 'flex', flexDirection: 'column', gap: '6px', pb: '2px',
+              }}>
+                {lastReasoning.split('\n').filter(l => l.trim()).map((line, i) => (
+                  <Box key={i} sx={{ display: 'flex', gap: '7px', alignItems: 'flex-start', pl: '6px' }}>
+                    <Box component="span" sx={{ color: '#1ca8a4', flexShrink: 0, mt: '2px', display: 'inline-flex' }}>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="m9 18 6-6-6-6"/></svg>
+                    </Box>
+                    <Typography sx={{ fontSize: 11.5, color: '#6b8287', lineHeight: 1.5 }}>{line}</Typography>
+                  </Box>
+                ))}
+              </Box>
             </Collapse>
           </Box>
         )}
@@ -444,6 +463,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
 
       {/* Input area */}
       <Box
+        data-testid="demo-zoom-chat"
         sx={{
           flexShrink: 0,
           px: 1.75,

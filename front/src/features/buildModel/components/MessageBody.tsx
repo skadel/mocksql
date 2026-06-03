@@ -357,6 +357,51 @@ const MessageBody: React.FC<MessageBodyProps> = ({
               {msg.contents.text}
             </Typography>
           </Box>
+
+          {/* Évaluation LLM consolidée dans la même bulle */}
+          {msg.contents.evaluationText && (
+            <Box
+              sx={{
+                ...markdownBodySx,
+                mt: 1,
+                p: 1.5,
+                bgcolor: '#f8fffe',
+                borderRadius: '8px',
+                border: '1px solid #c8e6e4',
+                borderLeft: '3px solid #1ca8a4',
+                '& strong': { color: '#1ca8a4' },
+              }}
+            >
+              <ReactMarkdown>{msg.contents.evaluationText}</ReactMarkdown>
+            </Box>
+          )}
+
+          {/* Suggestions consolidées dans la même bulle */}
+          {Array.isArray(msg.contents.suggestions) && msg.contents.suggestions.length > 0 && (
+            <Box sx={{ mt: 1 }}>
+              <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
+                Cas suggérés
+              </Typography>
+              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+                {(msg.contents.suggestions as string[]).map((s, i) => (
+                  <Box
+                    key={i}
+                    component="button"
+                    onClick={() => onSuggestionClick?.(s)}
+                    sx={{
+                      display: 'flex', alignItems: 'flex-start', gap: 1, textAlign: 'left',
+                      p: '9px 11px', borderRadius: '9px', border: '1px solid #d2efec',
+                      bgcolor: '#f8fffe', cursor: 'pointer', fontFamily: 'inherit', width: '100%',
+                      '&:hover': { bgcolor: '#ecf7f6', borderColor: '#2BB0A8' },
+                    }}
+                  >
+                    <Typography sx={{ color: '#2BB0A8', fontWeight: 700, fontSize: 14, flexShrink: 0, lineHeight: 1.4 }}>+</Typography>
+                    <Typography sx={{ flex: 1, fontSize: 13, color: '#333', lineHeight: 1.4 }}>{s}</Typography>
+                  </Box>
+                ))}
+              </Box>
+            </Box>
+          )}
         </Box>
       )}
 
@@ -424,6 +469,49 @@ const MessageBody: React.FC<MessageBodyProps> = ({
                   })()
             }
           </Typography>
+        </Box>
+      )}
+
+      {/* Suggestions consolidées dans le message examples (flux initial) */}
+      {msg.contentType === 'examples' && Array.isArray(msg.contents.suggestions) && msg.contents.suggestions.length > 0 && (
+        <Box sx={{ mt: 1 }}>
+          <Typography sx={{ fontSize: 11, color: '#6b8287', textTransform: 'uppercase', letterSpacing: '0.04em', fontWeight: 600, mb: 0.75 }}>
+            Cas suggérés
+          </Typography>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+            {(msg.contents.suggestions as string[]).map((s, i) => (
+              <Box
+                key={i}
+                component="button"
+                onClick={() => onSuggestionClick?.(s)}
+                sx={{
+                  display: 'flex', alignItems: 'flex-start', gap: 1, textAlign: 'left',
+                  p: '9px 11px', borderRadius: '9px', border: '1px solid #d2efec',
+                  bgcolor: '#f8fffe', cursor: 'pointer', fontFamily: 'inherit', width: '100%',
+                  '&:hover': { bgcolor: '#ecf7f6', borderColor: '#2BB0A8' },
+                }}
+              >
+                <Typography sx={{ color: '#2BB0A8', fontWeight: 700, fontSize: 14, flexShrink: 0, lineHeight: 1.4 }}>+</Typography>
+                <Typography sx={{ flex: 1, fontSize: 13, color: '#333', lineHeight: 1.4 }}>{s}</Typography>
+              </Box>
+            ))}
+          </Box>
+          {msg.contents.profileAvailable === false && (
+            <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1, p: '7px 10px', borderRadius: '8px', bgcolor: '#fdf6e3', border: '1px solid #f0d080' }}>
+              <Typography sx={{ fontSize: 12, color: '#7a5f00', flex: 1 }}>
+                Profil non disponible — suggestions génériques uniquement.
+              </Typography>
+              {onRequestProfile && (
+                <Box
+                  component="button"
+                  onClick={onRequestProfile}
+                  sx={{ fontSize: 12, color: '#2BB0A8', fontWeight: 600, background: 'none', border: 'none', cursor: 'pointer', p: 0, fontFamily: 'inherit', '&:hover': { textDecoration: 'underline' } }}
+                >
+                  Lancer le profil
+                </Box>
+              )}
+            </Box>
+          )}
         </Box>
       )}
 

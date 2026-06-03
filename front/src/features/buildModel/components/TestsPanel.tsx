@@ -54,7 +54,7 @@ import {
   testExecStatus,
   getVerdictInfo,
 } from '../../../utils/verdict';
-import { TEAL, INK, BODY, MUTED, PLACEHOLDER, BORDER, SURFACE, TEAL_SUBTLE } from '../../../theme/tokens';
+import { TEAL, TEAL_ALT, INK, BODY, MUTED, PLACEHOLDER, BORDER, SURFACE, TEAL_SUBTLE, AMBER, AMBER_BG, GREEN, GREEN_BG } from '../../../theme/tokens';
 
 /* ─── tag colours ─────────────────────────────────────────────────── */
 const TAG_COLORS: Record<string, { bg: string; fg: string }> = {
@@ -70,157 +70,104 @@ function tagStyle(tag: string) {
 }
 
 /* ─── coverage ────────────────────────────────────────────────────── */
-const COVERAGE_BUCKETS = [
-  { key: 'happy', label: 'Cas nominal',     weight: 25 },
-  { key: 'null',  label: 'Valeurs NULL',    weight: 20 },
-  { key: 'empty', label: 'Données vides',   weight: 15 },
-  { key: 'dup',   label: 'Doublons',        weight: 15 },
-  { key: 'limit', label: 'Valeurs limites', weight: 15 },
-  { key: 'tie',   label: 'Tri / Ex æquo',  weight: 10 },
+const COVERAGE_AXES = [
+  { key: 'happy', label: 'Chemin nominal',   hint: 'le cas standard, requête correcte' },
+  { key: 'null',  label: 'Valeurs NULL',     hint: 'LAG / JOIN sur colonnes null' },
+  { key: 'empty', label: 'Plage vide',       hint: 'filtre qui ne retourne aucune ligne' },
+  { key: 'equal', label: 'Valeurs égales',   hint: 'colonnes identiques consécutives' },
+  { key: 'tie',   label: 'Ex æquo',          hint: 'résultats non-déterministes (LIMIT 1)' },
+  { key: 'types', label: 'Format de sortie', hint: 'FORMAT_DATE, CAST, patterns' },
 ];
 
-function axisCompleteness(n: number): number {
-  if (n === 0) return 0;
-  if (n === 1) return 40;
-  if (n === 2) return 65;
-  if (n === 3) return 85;
-  return 100;
-}
-
-function axisColor(comp: number): string {
-  return comp === 0 ? '#c8d2d4' : comp >= 85 ? '#2BB0A8' : '#d89323';
-}
-
-function computeCoverage(tests: any[]) {
-  const counts: Record<string, number> = {};
-  COVERAGE_BUCKETS.forEach((b) => { counts[b.key] = 0; });
-
+function detectCoveredAxes(tests: any[]): Set<string> {
+  const covered = new Set<string>();
   tests.forEach((t) => {
     const s = ((t.unit_test_description ?? '') + ' ' + (t.tags ?? []).join(' ')).toLowerCase();
-    if (/logique.m.tier|calcul|pourcentage|croissance|nominal|résultat|attendu|standard/.test(s)) counts.happy++;
-    if (/null.checks|null|manquant|absent/.test(s))                                              counts.null++;
-    if (/vide|aucune|inexistant|0.ligne|zéro|sans.données|ensemble.vide/.test(s))               counts.empty++;
-    if (/valeurs.dupliqu|doublon|dupliqué|répété/.test(s))                                       counts.dup++;
-    if (/cas.limites|limite|extrême|bord|boundary|borne|plage/.test(s))                          counts.limit++;
-    if (/ex.æquo|ex.aequo|\btie\b|classement|rang\b/.test(s))                                   counts.tie++;
+    if (/logique.m.tier|calcul|nominal|résultat.attendu|standard|croissance/.test(s))      covered.add('happy');
+    if (/null.checks|null|manquant|absent/.test(s))                                         covered.add('null');
+    if (/vide|aucune|inexistant|0.ligne|zéro|sans.données|ensemble.vide|plage.vide/.test(s)) covered.add('empty');
+    if (/égale|identique|consécutif|valeurs.égales/.test(s))                                covered.add('equal');
+    if (/ex.æquo|ex.aequo|\btie\b|classement|non.déterministe/.test(s))                    covered.add('tie');
+    if (/format_date|format.date|\bcast\b|format|type.de.sortie|patron/.test(s))            covered.add('types');
   });
-
-  let score = 0;
-  COVERAGE_BUCKETS.forEach((b) => {
-    score += (b.weight * axisCompleteness(counts[b.key])) / 100;
-  });
-
-  return { score: Math.round(score), counts };
+  return covered;
 }
 
-/* ─── CoverageBar ─────────────────────────────────────────────────── */
-function CoverageRing({ score, fg }: { score: number; fg: string }) {
-  const size = 52, stroke = 5, r = (size - stroke) / 2, c = 2 * Math.PI * r;
-  const off = c - (score / 100) * c;
-  return (
-    <svg width={size} height={size} style={{ flexShrink: 0 }}>
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#edf1f2" strokeWidth={stroke} />
-      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke={fg} strokeWidth={stroke}
-        strokeDasharray={c} strokeDashoffset={off} strokeLinecap="round"
-        transform={`rotate(-90 ${size / 2} ${size / 2})`}
-        style={{ transition: 'stroke-dashoffset .5s' }} />
-      <text x={size / 2} y={size / 2 + 4} textAnchor="middle" fontSize="12" fontWeight="700" fill="#1a1a1a">{score}</text>
-    </svg>
-  );
-}
-
-function CoverageBar({ tests }: { tests: any[] }) {
-  const { score, counts } = useMemo(() => computeCoverage(tests), [tests]);
-  const toneFg = score >= 80 ? '#23a26d' : score >= 50 ? '#d89323' : '#d0503f';
-
-  const bucketData = useMemo(
-    () => COVERAGE_BUCKETS.map((b) => {
-      const n = counts[b.key];
-      const comp = axisCompleteness(n);
-      return { ...b, n, comp, color: axisColor(comp) };
-    }),
-    [counts],
-  );
-
-  const uncovered = bucketData.filter((b) => b.n === 0);
-  const partial   = bucketData.filter((b) => b.n > 0 && b.comp < 85);
+/* ─── CoverageGrid ────────────────────────────────────────────────── */
+function CoverageGrid({ tests, onSuggestionClick }: { tests: any[]; onSuggestionClick?: (text: string) => void }) {
+  const covered = useMemo(() => detectCoveredAxes(tests), [tests]);
+  const n = covered.size;
+  const total = COVERAGE_AXES.length;
+  const pct = total > 0 ? Math.round((n / total) * 100) : 0;
+  const gaps = total - n;
 
   return (
-    <Box data-testid="coverage-bar" sx={{ bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderRadius: '12px', p: '14px 16px', mb: 1.5 }}>
-      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
-          <CoverageRing score={score} fg={toneFg} />
-          <Box>
-            <Typography sx={{ fontSize: 10, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.7 }}>Couverture</Typography>
-            <Typography sx={{ fontSize: 18, fontWeight: 700, color: INK, lineHeight: 1.1 }}>
-              {score}%
-              <Typography component="span" sx={{ fontSize: 11, color: MUTED, fontWeight: 500, ml: 1 }}>
-                — {tests.length} test{tests.length > 1 ? 's' : ''}
-              </Typography>
-            </Typography>
-          </Box>
-        </Box>
-
-        <Box sx={{ flex: 1, minWidth: 160 }}>
-          <Box sx={{ display: 'flex', gap: '3px', height: 8, borderRadius: '4px', overflow: 'hidden', bgcolor: '#edf1f2' }}>
-            {bucketData.map((b) => (
-              <Box
-                key={b.key}
-                title={`${b.label} : ${b.comp}% (${b.n} test${b.n !== 1 ? 's' : ''})`}
-                sx={{ flex: b.weight, position: 'relative', bgcolor: '#edf1f2', overflow: 'hidden' }}
-              >
-                <Box sx={{
-                  position: 'absolute', left: 0, top: 0, bottom: 0,
-                  width: `${b.comp}%`,
-                  bgcolor: b.color,
-                  transition: 'width .5s',
-                }} />
-              </Box>
-            ))}
-          </Box>
-
-          <Box sx={{ display: 'flex', gap: '8px', mt: 0.75, flexWrap: 'wrap' }}>
-            {bucketData.map((b) => (
-              <Box key={b.key} sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: 10.5 }}>
-                <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: b.color, flexShrink: 0 }} />
-                <Typography component="span" sx={{ fontSize: 10.5, color: b.n > 0 ? BODY : PLACEHOLDER }}>
-                  {b.label}
-                </Typography>
-                {b.n > 0 && (
-                  <Typography component="span" sx={{ fontSize: 9.5, color: b.color, fontWeight: 700 }}>
-                    {b.comp}%·{b.n}
-                  </Typography>
-                )}
-              </Box>
-            ))}
-          </Box>
+    <Box data-testid="coverage-bar" sx={{ border: `1px solid ${BORDER}`, borderRadius: '12px', bgcolor: SURFACE, p: '14px 15px', mb: 1.5 }}>
+      {/* Header */}
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: '11px' }}>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke={TEAL} strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>
+        </svg>
+        <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: INK }}>Couverture des cas limites</Typography>
+        <Box sx={{ ml: 'auto', fontSize: 12, fontWeight: 600, color: BODY, display: 'flex', gap: '3px' }}>
+          {n}/{total} axes
+          {gaps > 0 && <Box component="span" sx={{ color: AMBER, fontWeight: 500 }}> · {gaps} à couvrir</Box>}
         </Box>
       </Box>
 
-      {(uncovered.length > 0 || partial.length > 0) && (
-        <Box sx={{ mt: 1.25, pt: 1.25, borderTop: '1px dashed #e4eaec' }}>
-          {uncovered.length > 0 && (
-            <Box sx={{ fontSize: 12, color: BODY }}>
-              <Typography component="span" sx={{ color: MUTED, fontSize: 12 }}>Non couvert : </Typography>
-              {uncovered.map((b, i) => (
-                <Typography key={b.key} component="span" sx={{ fontWeight: 500, fontSize: 12 }}>
-                  {b.label}{i < uncovered.length - 1 ? ', ' : ''}
-                </Typography>
-              ))}
+      {/* Progress bar */}
+      <Box sx={{ height: 5, borderRadius: 999, bgcolor: BORDER, overflow: 'hidden', mb: '13px' }}>
+        <Box sx={{ height: '100%', width: `${pct}%`, bgcolor: TEAL_ALT, borderRadius: 999, transition: 'width .4s ease' }} />
+      </Box>
+
+      {/* 2-column grid of axes */}
+      <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '7px' }}>
+        {COVERAGE_AXES.map((ax) => {
+          const ok = covered.has(ax.key);
+          return (
+            <Box key={ax.key} sx={{
+              display: 'flex', alignItems: 'flex-start', gap: '8px', p: '8px 10px',
+              borderRadius: '9px',
+              border: `1px solid ${ok ? BORDER : '#f0d890'}`,
+              bgcolor: ok ? '#fff' : AMBER_BG,
+            }}>
+              <Box sx={{
+                width: 19, height: 19, borderRadius: '50%', display: 'grid', placeItems: 'center',
+                flexShrink: 0, mt: '1px',
+                bgcolor: ok ? GREEN_BG : '#f6e3bd',
+                color: ok ? GREEN : AMBER,
+              }}>
+                {ok
+                  ? <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+                  : <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/></svg>
+                }
+              </Box>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography sx={{ display: 'block', fontSize: 12.5, fontWeight: 600, color: INK, lineHeight: 1.3 }}>{ax.label}</Typography>
+                <Typography sx={{ display: 'block', fontSize: 11, color: MUTED, mt: '1px', lineHeight: 1.4 }}>{ax.hint}</Typography>
+              </Box>
+              {!ok && onSuggestionClick && (
+                <Box
+                  component="button"
+                  onClick={() => onSuggestionClick(`Ajoute un test pour le cas « ${ax.label} » — ${ax.hint}`)}
+                  sx={{
+                    alignSelf: 'center', display: 'inline-flex', alignItems: 'center', gap: '3px',
+                    fontSize: 11, fontWeight: 600, color: AMBER, bgcolor: 'transparent', border: 'none',
+                    cursor: 'pointer', fontFamily: 'inherit', whiteSpace: 'nowrap',
+                    p: '3px 5px', borderRadius: '6px',
+                    '&:hover': { bgcolor: '#fef3e0' },
+                  }}
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10"/><path d="M8 12h8"/><path d="M12 8v8"/>
+                  </svg>
+                  Tester
+                </Box>
+              )}
             </Box>
-          )}
-          {partial.length > 0 && (
-            <Box sx={{ fontSize: 12, color: BODY, mt: uncovered.length > 0 ? 0.5 : 0 }}>
-              <Typography component="span" sx={{ color: '#d89323', fontSize: 12 }}>Peu couvert : </Typography>
-              {partial.map((b, i) => (
-                <Typography key={b.key} component="span" sx={{ fontWeight: 500, fontSize: 12 }}>
-                  {b.label} ({b.n} test{b.n > 1 ? 's' : ''}){i < partial.length - 1 ? ', ' : ''}
-                </Typography>
-              ))}
-            </Box>
-          )}
-        </Box>
-      )}
+          );
+        })}
+      </Box>
     </Box>
   );
 }
@@ -1596,8 +1543,8 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
 
       {/* Scrollable content */}
       {testResults.length > 0 && (
-        <Box sx={{ flex: 1, overflowY: 'auto', px: 1.5, pt: 1.5, pb: 1 }}>
-          <CoverageBar tests={testResults} />
+        <Box data-testid="demo-zoom-tests" sx={{ flex: 1, overflowY: 'auto', px: 1.5, pt: 1.5, pb: 1 }}>
+          <CoverageGrid tests={testResults} onSuggestionClick={onSuggestionClick} />
 
           {/* Filter chips */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 1.25, flexWrap: 'wrap' }}>

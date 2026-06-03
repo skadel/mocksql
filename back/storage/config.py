@@ -69,7 +69,7 @@ def is_initialized() -> bool:
 def get_llm_model() -> str:
     cfg = load_config()
     return cfg.get("llm", {}).get("model") or os.getenv(
-        "DEFAULT_MODEL_NAME", "gemini-2.0-flash-lite"
+        "DEFAULT_MODEL_NAME", "gemini-2.5-flash"
     )
 
 
@@ -84,6 +84,26 @@ def get_llm_streaming() -> bool:
 def get_llm_location() -> str | None:
     cfg = load_config()
     return cfg.get("llm", {}).get("location") or os.getenv("LLM_LOCATION")
+
+
+def get_llm_thinking_level() -> str | None:
+    cfg = load_config()
+    return (
+        cfg.get("llm", {}).get("thinking_level")
+        or os.getenv("LLM_THINKING_LEVEL")
+        or None
+    )
+
+
+def get_llm_thinking_budget() -> int | None:
+    cfg = load_config()
+    val = cfg.get("llm", {}).get("thinking_budget") or os.getenv("LLM_THINKING_BUDGET")
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
 
 
 def get_preprocessor_fn() -> str | None:

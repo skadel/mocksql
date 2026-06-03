@@ -70,6 +70,7 @@ export interface MessageContents {
   suggestions?: string[];
   profileAvailable?: boolean;
   reasoning?: string;
+  evaluationText?: string;
   debugRunCte?: DebugRunCteResult;
   debugCountSteps?: DebugCountStepsResult;
   diagnostic?: DiagnosticBlock;

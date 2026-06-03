@@ -86,18 +86,35 @@ const ChatComponent: React.FC = () => {
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
   const [demoZoom, setDemoZoom] = useState<'chat' | 'tests' | null>(null);
+  const [demoTransform, setDemoTransform] = useState<{ chat: string; tests: string }>({ chat: 'scale(1)', tests: 'scale(1)' });
+
+  useEffect(() => {
+    if (!demoZoom) { setDemoTransform({ chat: 'scale(1)', tests: 'scale(1)' }); return; }
+    const testId = demoZoom === 'chat' ? 'demo-zoom-chat' : 'demo-zoom-tests';
+    const el = document.querySelector(`[data-testid="${testId}"]`) as HTMLElement | null;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const S = demoZoom === 'chat' ? 1.5 : 1.3;
+    const tx = Math.round(window.innerWidth / 2 - (rect.left + rect.width / 2));
+    const ty = Math.round(window.innerHeight / 2 - (rect.top + rect.height / 2));
+    setDemoTransform(prev => ({ ...prev, [demoZoom]: `translate(${tx}px, ${ty}px) scale(${S})` }));
+  }, [demoZoom]);
 
   useEffect(() => {
     if (import.meta.env.VITE_DEMO_MODE !== 'true') return;
+    (window as any).__demoZoom = (target: 'chat' | 'tests' | null) => setDemoZoom(target);
     const handleDemoKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement;
-      if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable) return;
+      const el = e.target as HTMLElement;
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable) return;
       if (e.key === 'c' || e.key === 'C') setDemoZoom(z => z === 'chat' ? null : 'chat');
       else if (e.key === 't' || e.key === 'T') setDemoZoom(z => z === 'tests' ? null : 'tests');
       else if (e.key === 'Escape') setDemoZoom(null);
     };
     window.addEventListener('keydown', handleDemoKey);
-    return () => window.removeEventListener('keydown', handleDemoKey);
+    return () => {
+      delete (window as any).__demoZoom;
+      window.removeEventListener('keydown', handleDemoKey);
+    };
   }, []);
 
   // Fetch SQL preview when a model is selected in the entry phase
@@ -1183,7 +1200,7 @@ const ChatComponent: React.FC = () => {
           <Box sx={{
             position: 'relative',
             zIndex: demoZoom === 'chat' ? 1300 : 'auto',
-            transform: demoZoom === 'chat' ? 'scale(1.35)' : 'scale(1)',
+            transform: demoZoom === 'chat' ? demoTransform.chat : 'scale(1)',
             transformOrigin: 'center center',
             transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
             flexShrink: 0,
@@ -1228,7 +1245,7 @@ const ChatComponent: React.FC = () => {
             flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0,
             position: 'relative',
             zIndex: demoZoom === 'tests' ? 1300 : 'auto',
-            transform: demoZoom === 'tests' ? 'scale(1.25)' : 'scale(1)',
+            transform: demoZoom === 'tests' ? demoTransform.tests : 'scale(1)',
             transformOrigin: 'center center',
             transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
           }}>
@@ -1253,7 +1270,7 @@ const ChatComponent: React.FC = () => {
                 onSelectForModification={handleSelectTestForModification}
                 onEditAssertions={handleEditAssertions}
                 onRerunTest={handleRerunTest}
-                onSuggestionClick={(text) => setUserInput(text)}
+                onSuggestionClick={(text) => { setUserInput(text); setAddTestTrigger(n => n + 1); }}
                 selectedTestIndex={selectedTestIndex}
                 retryBadDataTestIndex={retryBadDataTestIndex}
                 sqlProps={{
