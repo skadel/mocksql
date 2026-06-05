@@ -84,6 +84,7 @@ const ChatComponent: React.FC = () => {
   const [genMode, setGenMode] = useState<'unit' | 'integration'>('unit');
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
+  const [sqlCollapseSignal, setSqlCollapseSignal] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
   const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
   const skipValidationRef = useRef(false);
@@ -322,6 +323,9 @@ const ChatComponent: React.FC = () => {
     if (!awaitingGetMessagesRef.current) return;
     if (loading !== false) return;
     awaitingGetMessagesRef.current = false;
+    if (testResults && testResults.length > 0) {
+      setSqlCollapseSignal(n => n + 1);
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
@@ -1333,6 +1337,7 @@ const ChatComponent: React.FC = () => {
                   sqlHistory,
                   onHistorySelect: handleHistorySelect,
                   historyRestoreTrigger,
+                  collapseSignal: sqlCollapseSignal,
                   disabled: isSending,
                   loading: isSending,
                   hasError: lastMsgHasError,

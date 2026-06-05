@@ -261,6 +261,21 @@ class TestExtractConditions:
         assert len(conditions) == 1
         assert isinstance(conditions[0], exp.GT)
 
+    def test_duplicate_conditions_deduplicated(self):
+        expr = sqlglot.parse_one("a = 1 AND b = 2 AND a = 1", read="duckdb")
+        conditions = _extract_conditions(expr)
+        assert len(conditions) == 2
+        sqls = [c.sql() for c in conditions]
+        assert sqls.count("a = 1") == 1
+
+    def test_duplicate_order_preserved(self):
+        expr = sqlglot.parse_one("a = 1 AND b = 2 AND a = 1 AND c = 3", read="duckdb")
+        conditions = _extract_conditions(expr)
+        assert len(conditions) == 3
+        assert conditions[0].sql() == "a = 1"
+        assert conditions[1].sql() == "b = 2"
+        assert conditions[2].sql() == "c = 3"
+
 
 # ---------------------------------------------------------------------------
 # _build_countif_expressions

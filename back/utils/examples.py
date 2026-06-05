@@ -575,26 +575,32 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
 
         # === PARSE_DATETIME ===
         # sqlglot <30 : PARSE_DATETIME('%fmt', col)  — format first
-        # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first
+        # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first (ou littéral first)
         # DuckDB attend : TRY_STRPTIME(col, '%fmt')
+        #
+        # Stratégie : l'arg format est identifié par son préfixe '%'.
+        # Cela couvre les deux ordres sans dépendre de la version de sqlglot.
+
+        def _fix_parse_datetime(m):
+            a1, a2 = m.group(1).strip(), m.group(2).strip()
+            if a1.startswith("'%"):  # format en 1er (sqlglot <30)
+                return f"TRY_STRPTIME({a2}, {a1})"
+            elif a2.startswith("'%"):  # valeur en 1er (sqlglot 30+)
+                return f"TRY_STRPTIME({a1}, {a2})"
+            return m.group(0)  # indéterminable, laisser tel quel
 
         s = re.sub(
-            r"PARSE_DATETIME\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",
-            r"TRY_STRPTIME(\2, '\1')",
-            s,
-            flags=re.IGNORECASE,
-        )
-
-        s = re.sub(
-            r"PARSE_DATETIME\s*\(\s*([^',][^,]*?)\s*,\s*'([^']+)'\s*\)",
-            r"TRY_STRPTIME(\1, '\2')",
+            r"PARSE_DATETIME\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)",
+            _fix_parse_datetime,
             s,
             flags=re.IGNORECASE,
         )
 
         # === EXTRACT(DATE FROM ...) ===
+        # sqlglot 30 enveloppe le littéral timestamp dans un CAST(...AS TIMESTAMPTZ),
+        # ce qui ajoute des parens imbriquées. Le pattern gère un niveau d'imbrication.
         s = re.sub(
-            r"EXTRACT\s*\(\s*DATE\s+FROM\s+([^)]+)\)",
+            r"EXTRACT\s*\(\s*DATE\s+FROM\s+((?:[^()]+|\([^()]*\))+)\)",
             r"CAST(\1 AS DATE)",
             s,
             flags=re.IGNORECASE,

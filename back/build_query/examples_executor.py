@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -469,11 +470,22 @@ def _extract_conditions(expr: exp.Expression) -> List[exp.Expression]:
     """
     Extrait récursivement toutes les conditions d'une expression en décomposant
     les noeuds And. Si l'expression n'est pas un And, elle est retournée seule.
+    Les doublons (même SQL généré) sont supprimés en conservant l'ordre.
     """
-    if isinstance(expr, exp.And):
-        # Récupérer les conditions à gauche et à droite de l'opérateur AND
-        return _extract_conditions(expr.this) + _extract_conditions(expr.expression)
-    return [expr]
+
+    def _recurse(e: exp.Expression) -> List[exp.Expression]:
+        if isinstance(e, exp.And):
+            return _recurse(e.this) + _recurse(e.expression)
+        return [e]
+
+    seen: dict[str, bool] = {}
+    result = []
+    for cond in _recurse(expr):
+        key = cond.sql()
+        if key not in seen:
+            seen[key] = True
+            result.append(cond)
+    return result
 
 
 def _build_countif_expressions(where_expr: exp.Expression) -> List[exp.Expression]:
@@ -792,9 +804,14 @@ async def _run_single_test_case(
                 assertion_results = await _evaluate_assertions_with_retry(
                     [a.model_dump() for a in eval_result.assertions], **retry_kwargs
                 )
-                assertion_results = await _fix_logically_failing_assertions(
-                    assertion_results, **retry_kwargs
-                )
+                try:
+                    assertion_results = await _fix_logically_failing_assertions(
+                        assertion_results, **retry_kwargs
+                    )
+                except asyncio.CancelledError:
+                    logger.warning(
+                        "[executor] fixer interrompu (CancelledError) — résultats partiels conservés"
+                    )
         finally:
             con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
 
@@ -837,6 +854,16 @@ async def _run_single_test_case(
                         result["diagnostic"] = diag.model_dump()
         return result
 
+    except asyncio.CancelledError:
+        logger.warning(
+            "[executor] test annulé (CancelledError) — statut error pour history_saver"
+        )
+        return {
+            **base,
+            "status": "error",
+            "error": "cancelled",
+            "results_json": "[]",
+        }
     except Exception as e:
         if _is_duckdb_data_error(e):
             logger.warning(
@@ -1139,9 +1166,13 @@ Produis une analyse chirurgicale en remplissant TOUS les champs :
         logger.diag("[diagnostic] appel LLM ciblé bad_data")
         diag: DiagnosticBlock = await structured_llm.ainvoke(prompt)
         logger.diag(
-            "[diagnostic] root_cause=%r fix_summary=%r",
+            "[diagnostic] root_cause=%r\n  data_issue=%r\n  fix_recipe=%r\n  fix_summary=%r\n  affected_tables=%s\n  affected_ctes=%s",
             diag.root_cause,
+            diag.data_issue,
+            diag.fix_recipe,
             diag.fix_summary,
+            diag.affected_tables,
+            diag.affected_ctes,
         )
         return diag
     except Exception as e:

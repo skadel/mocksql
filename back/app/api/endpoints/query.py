@@ -619,7 +619,7 @@ async def stream_events_route(body: StreamEventsRequest):
             async for event in graph.astream_events(
                 graph_input,
                 version="v2",
-                config={"recursion_limit": 50},
+                config={"recursion_limit": 80},
                 exclude_types=list(_EXCLUDED_EVENT_TYPES),
             ):
                 ev_type = event.get("event", "")

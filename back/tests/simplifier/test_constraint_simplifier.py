@@ -636,3 +636,41 @@ class TestBuildConditionsHintParseDate:
         assert "conditions" in self.hint, (
             f"Clé 'conditions' absente du hint : {self.hint}"
         )
+
+
+# ─── FORMAT_DATE(PARSE_DATE(...)) — pas de doublon ────────────────────────────
+
+
+class TestFormatDateWrappingParseDate:
+    """FORMAT_DATE('%d/%m', PARSE_DATE('%d%b%Y', col)) ne doit générer qu'une seule
+    contrainte sur la colonne source : PARSE_DATE.  La contrainte FORMAT_DATE est
+    spurieuse car elle ne porte pas sur le format de la colonne brute."""
+
+    SQL = """
+    SELECT FORMAT_DATE('%d/%m/%Y', PARSE_DATE('%d%b%Y', coface.ddentr)) AS date_fr
+    FROM coface
+    """
+
+    def setup_method(self):
+        self.hint = build_conditions_hint(self.SQL, dialect="bigquery")
+
+    def test_parse_date_present(self):
+        fc = self.hint.get("format_constraints", [])
+        assert any("PARSE_DATE" in s for s in fc), (
+            f"PARSE_DATE('%d%b%Y') attendu dans format_constraints, obtenu : {fc}"
+        )
+
+    def test_no_spurious_format_date_constraint(self):
+        """FORMAT_DATE ne doit pas générer de contrainte sur la colonne source quand
+        son argument direct est lui-même une fonction de format (PARSE_DATE)."""
+        fc = self.hint.get("format_constraints", [])
+        assert not any("FORMAT_DATE" in s for s in fc), (
+            f"FORMAT_DATE spurieux dans format_constraints : {fc}"
+        )
+
+    def test_exactly_one_constraint_on_ddentr(self):
+        fc = self.hint.get("format_constraints", [])
+        ddentr_entries = [s for s in fc if "ddentr" in s]
+        assert len(ddentr_entries) == 1, (
+            f"Attendu 1 contrainte sur ddentr, obtenu {len(ddentr_entries)} : {ddentr_entries}"
+        )

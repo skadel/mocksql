@@ -506,6 +506,11 @@ class _LineageResolver:
                     try:
                         expr = n.expression
                         col_expr = expr.this if isinstance(expr, exp.Alias) else expr
+                        # Skip aggregate nodes — sqlglot sometimes links COUNT(*)/SUM
+                        # as descendants of GROUP BY keys, producing nonsensical
+                        # lineage like "SELECT COUNT(*) FROM rcomp AS rcomp".
+                        if isinstance(col_expr, exp.AggFunc):
+                            continue
                         lineage_sql = _build_column_sql(
                             col_expr, n.source, self._dialect
                         )
@@ -609,10 +614,23 @@ def _collect_format_constraints(
                     yield item
                 yield from _iter_format_nodes(item)
 
+    _FORMAT_FN_TYPES = (
+        exp.StrToDate,
+        exp.TimeToStr,
+        exp.StrToTime,
+        exp.TryCast,
+        exp.Cast,
+    )
     seen: set[tuple[str, str, str, str]] = set()
     for node in _iter_format_nodes(select):
         inner_col = _find_column_in(node)
         if inner_col is None:
+            continue
+        # Skip when a date-format/cast function sits between this node and the column
+        # (e.g. FORMAT_DATE(PARSE_DATE(col))) — the constraint belongs to the inner function.
+        if not isinstance(node.this, exp.Column) and any(
+            isinstance(n, _FORMAT_FN_TYPES) for n in node.this.walk()
+        ):
             continue
         ref = _col_ref(inner_col, alias_map)
         if ref is None:
@@ -1331,6 +1349,13 @@ def _collect_format_constraints_strings(
         (exp.StrToTime, "PARSE_TIMESTAMP"),
         (getattr(exp, "ParseDatetime", type(None)), "PARSE_DATETIME"),
     )
+    _FORMAT_FN_TYPES = (
+        exp.StrToDate,
+        exp.TimeToStr,
+        exp.StrToTime,
+        exp.TryCast,
+        exp.Cast,
+    )
     for fn_type, fn_name in _NAMED_DATE_FNS:
         if fn_type is type(None):
             continue
@@ -1339,6 +1364,14 @@ def _collect_format_constraints_strings(
             fmt_str = _literal_value(fmt_node) if fmt_node else None
             inner_col = _find_column_in(node.this)
             if inner_col is None:
+                continue
+            # Skip when a date-format/cast function sits between this node and the column
+            # (e.g. FORMAT_DATE('%d/%m', PARSE_DATE('%d%b%Y', col)) — sqlglot may insert
+            # intermediate wrappers like TsOrDsToDate; the constraint belongs to the inner
+            # function only, not to the outer FORMAT_DATE).
+            if not isinstance(node.this, exp.Column) and any(
+                isinstance(n, _FORMAT_FN_TYPES) for n in node.this.walk()
+            ):
                 continue
             tc = _resolved_tbl_col(inner_col)
             if tc is None:
@@ -1907,7 +1940,11 @@ def build_conditions_hint(
     lineages: list[str] = []
     seen_lineage: set[str] = set()
     for (_tbl, _col), resolved in resolver._cache.items():
-        if resolved.lineage and resolved.lineage not in seen_lineage:
+        if (
+            resolved.lineage
+            and "?" not in resolved.lineage
+            and resolved.lineage not in seen_lineage
+        ):
             seen_lineage.add(resolved.lineage)
             col_label = f"{resolved.real_table or resolved.table}.{resolved.column}"
             lineages.append(f"{col_label} : {resolved.lineage}")

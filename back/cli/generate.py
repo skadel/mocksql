@@ -109,7 +109,7 @@ def build_initial_state(
         "schemas": schemas,
         "used_columns": build_used_columns(schemas, sql, dialect),
         "used_columns_changed": True,
-        "gen_retries": 3,
+        "gen_retries": 10,
         "debug_retries": 3,
         "status": None,
         "input": "",

@@ -427,6 +427,8 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
     uid_retries = 0
 
     logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
+    if eval_context:
+        logger.diag("[conv_agent] EVAL_CONTEXT (bloc complet):\n%s", eval_context)
     logger.diag(
         "[conv_agent] messages_for_llm: %d msgs — dernier:\n%s",
         len(messages_for_llm),
@@ -438,9 +440,8 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
         tool_calls = getattr(result, "tool_calls", [])
         logger.diag(
             "[conv_agent] LLM → tool_calls=%s content=%r",
-            [f"{tc['name']}({list(tc.get('args', {}).keys())})" for tc in tool_calls]
-            or "(aucun)",
-            (result.content or "")[:200],
+            [f"{tc['name']}({tc.get('args', {})})" for tc in tool_calls] or "(aucun)",
+            (result.content or "")[:1000],
         )
 
         if not tool_calls:

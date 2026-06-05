@@ -692,7 +692,13 @@ async def generate_examples_(
     if prompt is None:
         return None, None
 
+    _retry_label = ""
+    if state.get("evaluation_feedback") == "bad_data":
+        _retry_label = f" RETRY (gen_retries={state.get('gen_retries')}, test_index={state.get('test_index')})"
     logger.diag("\n%s", "=" * 60)
+    logger.diag("[generator]%s", _retry_label or " (première génération)")
+    if eval_context:
+        logger.diag("[generator] EVAL_CONTEXT injecté:\n%s", eval_context)
     logger.diag(
         "[generator] constraints_hint:\n%s",
         constraints or "(vide — sous-requêtes corrélées non capturées ?)",

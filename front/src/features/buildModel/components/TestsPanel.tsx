@@ -585,15 +585,17 @@ export interface SqlStripProps {
   sqlHistory?: SqlHistoryEntry[];
   onHistorySelect?: (entry: SqlHistoryEntry) => void;
   historyRestoreTrigger?: number;
+  collapseSignal?: number;
   sqlFileName?: string;
 }
 
-function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, sqlFileName }: SqlStripProps) {
+function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName }: SqlStripProps) {
   const [open, setOpen] = useState(true);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
   const prevDisabled = useRef(disabled);
   const prevTrigger = useRef(historyRestoreTrigger);
+  const prevCollapseSignal = useRef(collapseSignal);
 
   useEffect(() => {
     if (prevDisabled.current && !disabled && !hasError) setOpen(false);
@@ -612,6 +614,14 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [historyRestoreTrigger]);
+
+  useEffect(() => {
+    if (collapseSignal !== undefined && collapseSignal !== prevCollapseSignal.current) {
+      prevCollapseSignal.current = collapseSignal;
+      setOpen(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collapseSignal]);
 
   const lines = sql.split('\n');
   const first = lines.find((l) => l.trim()) ?? '';
@@ -1619,8 +1629,6 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       {/* Scrollable content */}
       {testResults.length > 0 && (
         <Box data-testid="demo-zoom-tests" sx={{ flex: 1, overflowY: 'auto', px: 1.5, pt: 1.5, pb: 1 }}>
-          <CoverageGrid tests={testResults} onSuggestionClick={onSuggestionClick} />
-
           {/* Filter chips */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 1.25, flexWrap: 'wrap' }}>
             <FilterListIcon sx={{ fontSize: 14, color: PLACEHOLDER }} />

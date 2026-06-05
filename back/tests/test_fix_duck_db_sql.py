@@ -634,3 +634,197 @@ class TestGroupByCaseOriginalColumnBug:
 
         rows = con.execute(result_sql).fetchall()
         assert len(rows) == 1
+
+
+# ===========================================================================
+# Section 12 : Bug fix — EXTRACT(DATE FROM CAST(...)) parens imbriquées
+# ===========================================================================
+
+
+class TestExtractDateNestedParen:
+    """
+    Bug : le regex ([^)]+) s'arrêtait à la 1ère ')' de l'expression interne.
+    Pour EXTRACT(DATE FROM CAST('...' AS TIMESTAMPTZ)), sqlglot 30 enveloppe
+    le littéral dans un CAST, ce qui ajoute une paire de parens imbriquées.
+    Le regex produisait CAST(CAST('...' AS TIMESTAMPTZ AS DATE)) — malformé.
+
+    Fix attendu : ((?:[^()]+|\\([^()]*\\))+) gère un niveau d'imbrication.
+    """
+
+    def test_canary_sqlglot_wraps_timestamp_literal_in_cast(self):
+        """
+        CANARY — sqlglot 30 produit EXTRACT(DATE FROM CAST('...' AS TIMESTAMPTZ)).
+        Si ce test échoue, sqlglot a changé la forme de transpilation de
+        EXTRACT(DATE FROM TIMESTAMP '...') et la correction peut être revue.
+        """
+        raw = transpile("EXTRACT(DATE FROM TIMESTAMP '2024-01-15 12:00:00')")
+        assert "CAST" in raw and "TIMESTAMPTZ" in raw, (
+            f"CANARY : sqlglot ne produit plus CAST(... AS TIMESTAMPTZ). raw={raw!r}. "
+            "Vérifier si la correction EXTRACT est toujours nécessaire."
+        )
+
+    def test_extract_date_from_cast_produces_valid_sql(self):
+        """Après fix, fix_duck_db_sql produit CAST(CAST(... AS TIMESTAMPTZ) AS DATE)."""
+        raw = transpile("EXTRACT(DATE FROM TIMESTAMP '2024-01-15 12:00:00')")
+        fixed = fix_duck_db_sql(f"SELECT {raw}")
+        # Doit être du SQL valide (pas de SyntaxError)
+        result = duckdb.connect().execute(fixed).fetchone()[0]
+        import datetime
+
+        assert result == datetime.date(2024, 1, 15)
+
+    def test_extract_date_from_simple_column_still_works(self, con):
+        """Non-régression : EXTRACT(DATE FROM ts) sans CAST imbriqué fonctionne."""
+        fixed = fix_duck_db_sql("SELECT EXTRACT(DATE FROM ts) FROM events")
+        con.execute(fixed)
+
+
+# ===========================================================================
+# Section 13 : Bug fix — PARSE_DATETIME inversion d'arguments (sqlglot 30+)
+# ===========================================================================
+
+
+class TestParseDatetimeArgOrder:
+    """
+    Bug : sqlglot 30+ produit PARSE_DATETIME(value, '%fmt') — valeur en 1er.
+    L'ancien regex 1 matchait le 1er arg comme si c'était le format et produisait
+    TRY_STRPTIME('%fmt', value) — arguments inversés → DuckDB retourne NULL.
+
+    Fix attendu : utiliser la présence de '%' pour identifier l'arg format,
+    quel que soit l'ordre.
+    """
+
+    def test_canary_sqlglot_30_produces_value_first(self):
+        """
+        CANARY — sqlglot 30+ inverse les args : PARSE_DATETIME(value, '%fmt').
+        Si ce test échoue, sqlglot a re-changé l'ordre et le fix doit être adapté.
+        """
+        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
+        assert raw.startswith("PARSE_DATETIME(col"), (
+            f"CANARY : sqlglot ne produit plus value-first pour PARSE_DATETIME. raw={raw!r}. "
+            "Vérifier si la logique de détection '%' est toujours correcte."
+        )
+
+    def test_canary_sqlglot_does_not_translate_parse_datetime(self):
+        """
+        CANARY — sqlglot ne traduit pas PARSE_DATETIME → TRY_STRPTIME nativement.
+        Si ce test échoue, fix_duck_db_sql n'est plus utile pour ce cas.
+        """
+        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
+        assert "PARSE_DATETIME" in raw.upper(), (
+            f"CANARY : sqlglot traduit maintenant PARSE_DATETIME nativement. raw={raw!r}. "
+            "La correction fix_duck_db_sql est désormais redondante pour ce cas."
+        )
+
+    def test_literal_value_first_correctly_converted(self):
+        """
+        sqlglot 30+ : PARSE_DATETIME('2024-01-15', '%Y-%m-%d')
+        fix doit produire : TRY_STRPTIME('2024-01-15', '%Y-%m-%d')
+        résultat attendu  : timestamp non-NULL.
+        """
+        raw_scalar = "PARSE_DATETIME('2024-01-15', '%Y-%m-%d')"
+        fixed = fix_duck_db_sql(f"SELECT {raw_scalar}")
+        fixed_expr = fixed[len("SELECT ") :]
+        assert "TRY_STRPTIME" in fixed_expr, (
+            f"fix n'a pas produit TRY_STRPTIME : {fixed_expr!r}"
+        )
+        result = duckdb.connect().execute(fixed).fetchone()[0]
+        assert result is not None, (
+            "TRY_STRPTIME a retourné NULL — args probablement inversés"
+        )
+
+    def test_col_value_first_correctly_converted(self, con):
+        """
+        sqlglot 30+ : PARSE_DATETIME(col, '%Y-%m-%d %H:%M:%S')
+        fix doit produire : TRY_STRPTIME(col, '%Y-%m-%d %H:%M:%S').
+        """
+        raw = transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
+        assert "PARSE_DATETIME" in raw
+        fixed = fix_duck_db_sql(raw)
+        assert "TRY_STRPTIME" in fixed
+        assert "PARSE_DATETIME" not in fixed.upper()
+        con.execute(fixed)
+
+    def test_format_first_legacy_still_converted(self, con):
+        """
+        Non-régression : si fix reçoit encore PARSE_DATETIME('%fmt', col) (sqlglot <30),
+        la conversion doit rester correcte.
+        """
+        legacy_format_first = (
+            "SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events"
+        )
+        fixed = fix_duck_db_sql(legacy_format_first)
+        assert "TRY_STRPTIME(s, '%Y-%m-%d %H:%M:%S')" in fixed
+        con.execute(fixed)
+
+
+# ===========================================================================
+# Section 14 : Canaries sqlglot — détection des bumps de version
+# ===========================================================================
+
+
+class TestSqlglotVersionCanaries:
+    """
+    Ces tests échouent si sqlglot change de comportement sur un cas géré par
+    fix_duck_db_sql. Ils servent d'alarme lors d'un bump de version de sqlglot :
+      - si un canary "is broken" échoue → sqlglot corrige maintenant ce cas, le fix est redondant
+      - si un canary "is NOT broken" échoue → sqlglot a régressé, le fix redevient nécessaire
+
+    À inspecter après chaque bump : `poetry run pytest tests/test_fix_duck_db_sql.py -k canary -v`
+    """
+
+    # --- Cas où sqlglot NE corrige PAS (fix encore nécessaire) ---
+
+    def test_canary_parse_datetime_not_translated(self):
+        """sqlglot ne traduit pas PARSE_DATETIME → TRY_STRPTIME."""
+        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
+        assert "PARSE_DATETIME" in raw.upper(), (
+            "CANARY ROMPU : sqlglot traduit maintenant PARSE_DATETIME — "
+            "supprimer la correction dans fix_duck_db_sql."
+        )
+
+    def test_canary_extract_date_not_translated(self):
+        """sqlglot ne traduit pas EXTRACT(DATE FROM ...) → CAST(... AS DATE)."""
+        raw = transpile("EXTRACT(DATE FROM ts)")
+        assert "EXTRACT" in raw.upper(), (
+            "CANARY ROMPU : sqlglot traduit maintenant EXTRACT(DATE FROM ...) — "
+            "supprimer la correction dans fix_duck_db_sql."
+        )
+
+    def test_canary_st_geogpoint_not_translated(self):
+        """sqlglot ne traduit pas ST_GEOGPOINT → ST_POINT."""
+        raw = transpile("SELECT ST_GEOGPOINT(1.0, 2.0)")
+        assert "ST_GEOGPOINT" in raw, (
+            "CANARY ROMPU : sqlglot traduit maintenant ST_GEOGPOINT — "
+            "supprimer la correction dans fix_duck_db_sql."
+        )
+
+    def test_canary_substr_zero_not_fixed_by_sqlglot(self, con):
+        """sqlglot ne corrige pas SUBSTR(str, 0, n) — résultat DuckDB différent de BigQuery."""
+        raw = transpile("SELECT SUBSTR('ABCD', 0, 2)")
+        result = con.execute(raw).fetchone()[0]
+        assert result == "A", (
+            f"CANARY ROMPU : sqlglot corrige maintenant SUBSTR(str, 0, n). "
+            f"Résultat DuckDB = {result!r} (attendu 'A'). "
+            "Supprimer la correction dans fix_duck_db_sql."
+        )
+
+    # --- Cas où sqlglot corrige déjà (fix redondant — canary de non-régression) ---
+
+    def test_canary_format_date_already_translated(self, con):
+        """sqlglot traduit FORMAT_DATE → STRFTIME. Si ça casse, fix_duck_db_sql redevient utile."""
+        raw = transpile("SELECT FORMAT_DATE('%Y-%m', col) FROM events")
+        assert "FORMAT_DATE" not in raw, (
+            "CANARY ROMPU : sqlglot ne traduit plus FORMAT_DATE → STRFTIME. "
+            "Re-activer la correction dans fix_duck_db_sql."
+        )
+        con.execute(raw)
+
+    def test_canary_safe_cast_already_translated(self, con):
+        """sqlglot traduit SAFE_CAST → TRY_CAST. Si ça casse, fix_duck_db_sql redevient utile."""
+        raw = transpile("SELECT SAFE_CAST(user_id AS INT64) FROM events")
+        assert "SAFE_CAST" not in raw, (
+            "CANARY ROMPU : sqlglot ne traduit plus SAFE_CAST → TRY_CAST. "
+            "Re-activer la correction dans fix_duck_db_sql."
+        )
+        con.execute(raw)

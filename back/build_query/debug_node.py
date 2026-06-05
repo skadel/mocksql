@@ -1,14 +1,18 @@
 import json
+import logging
 import uuid
 from typing import Any, Dict
 
 from langchain_core.messages import AIMessage
 
+import utils.logger  # noqa: F401
 from build_query.debug_executor import execute_run_cte
 from build_query.examples_executor import filter_schemas_by_used_columns
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
 from utils.msg_types import MsgType
+
+logger = logging.getLogger(__name__)
 
 
 async def debug_test_node(state: QueryState) -> Dict[str, Any]:
@@ -65,6 +69,15 @@ async def debug_test_node(state: QueryState) -> Dict[str, Any]:
                 column=call_args.get("column") or None,
             )
             msg_type = MsgType.DEBUG_RUN_CTE
+            logger.diag(
+                "[run_cte] test=%s cte=%s → %s ligne(s):\n%s",
+                test_index,
+                cte_name,
+                result.get("row_count", "?"),
+                json.dumps(
+                    result.get("rows", [])[:15], ensure_ascii=False, default=str
+                ),
+            )
         else:
             continue
 

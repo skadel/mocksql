@@ -288,8 +288,11 @@ def find_literals_and_columns(parsed_query: exp.Expression):
 
 
 async def optimize_and_extract_info(parsed: E, tables, dialect, optimize=False):
+    from build_query.scalar_folder import fold_scalar_expressions
+
     # Optimize the SQL query
     optimized = optimize_query(parsed, tables, dialect=dialect, optimize=optimize)
+    optimized = fold_scalar_expressions(optimized, source_dialect=dialect)
 
     literals = find_literals_and_columns(optimized)
     used_columns = await get_source_columns(optimized, tables)
