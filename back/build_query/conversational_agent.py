@@ -123,6 +123,10 @@ async def conversational_agent(state: QueryState):
                 ),
                 None,
             )
+            # Référence le test par son uid partout (c'est l'identifiant que l'agent
+            # doit passer aux outils) — pas par test_index, pour éviter qu'il confonde
+            # les deux et invente un identifiant.
+            failing_uid = (failing_test or {}).get("test_uid", str(eval_test_idx))
             test_data_block = ""
             if failing_test:
                 input_data = failing_test.get("data", {})
@@ -130,7 +134,7 @@ async def conversational_agent(state: QueryState):
                 assertion_results = failing_test.get("assertion_results", [])
 
                 if input_data:
-                    test_data_block += f"\n\nDonnées d'entrée du test {eval_test_idx} :\n{_format_data_indexed(input_data)}"
+                    test_data_block += f"\n\nDonnées d'entrée du test [{failing_uid}] :\n{_format_data_indexed(input_data)}"
 
                 if results_json and results_json != "[]":
                     try:
@@ -163,7 +167,6 @@ async def conversational_agent(state: QueryState):
                             assertions_summary = str(failing_assertions)[:500]
                         test_data_block += f"\n\nAssertions en échec :\n```json\n{assertions_summary}\n```"
 
-            failing_uid = (failing_test or {}).get("test_uid", str(eval_test_idx))
             test_name = (failing_test or {}).get("unit_test_description", "")
             test_name_line = f"\nScénario : {test_name}" if test_name else ""
             eval_context = f"""
@@ -249,7 +252,7 @@ Réserve le texte libre aux réponses purement conversationnelles (sans outil).{
 
     @tool
     def delete_test(test_uid: str) -> str:
-        """Supprime le test identifié par test_uid (ex: 'a3f9c2').
+        """Supprime le test identifié par test_uid (ex: 'a3f9').
         Utilise l'identifiant court visible dans la liste des tests existants."""
         return test_uid
 
@@ -451,6 +454,7 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
         # Collect debug calls (batch), data patch calls (batch), and first other action
         pending_debug_calls = []
         pending_data_calls = []
+        invalid_data_uids: list[str] = []
         first_action_tc = None
 
         for tc in tool_calls:
@@ -468,10 +472,47 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
                 if uid and uid in uid_to_test:
                     args["test_index"] = uid_to_test[uid]["test_index"]
                 elif uid and uid not in uid_to_test:
-                    continue  # silently skip invalid uid in batch
+                    invalid_data_uids.append(uid)
+                    continue
                 pending_data_calls.append({"tool": tc["name"], "args": args})
             elif first_action_tc is None:
                 first_action_tc = tc
+
+        # A data-patch batch that references unknown uids would otherwise be
+        # silently dropped → the turn becomes a no-op (agent_tool_call=None →
+        # history_saver). Mirror the single-action path: feed the valid ids back
+        # to the LLM and retry instead of swallowing the request.
+        if (
+            invalid_data_uids
+            and not pending_debug_calls
+            and first_action_tc is None
+            and uid_retries < _UID_RETRY_MAX
+        ):
+            uid_retries += 1
+            logger.diag(
+                "[conv_agent] data_batch uid(s) inconnu(s)=%s — retry %d/%d",
+                invalid_data_uids,
+                uid_retries,
+                _UID_RETRY_MAX,
+            )
+            available = (
+                ", ".join(
+                    f"{t['test_uid']} ({t.get('test_name', '?')})"
+                    for t in existing_tests
+                    if t.get("test_uid")
+                )
+                or "aucun"
+            )
+            error_feedback = (
+                f"Les identifiants de test {invalid_data_uids} n'existent pas. "
+                f"IDs disponibles : {available}. "
+                f"Ré-applique tes modifications avec les bons identifiants."
+            )
+            messages_for_llm = messages_for_llm + [
+                result,
+                HumanMessage(content=error_feedback),
+            ]
+            continue
 
         # Priority: debug > data_batch > single action
         if pending_debug_calls:
