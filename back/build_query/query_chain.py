@@ -239,25 +239,30 @@ async def _handle_other(state: QueryState):
 
 def build_query_graph():
     from langgraph.graph import END, StateGraph, START
+    from utils.timing import timed_node
 
     builder = StateGraph(QueryState)
 
-    builder.add_node("pre_routing", pre_routing)
-    builder.add_node("routing", routing)
-    builder.add_node("conversational_agent", conversational_agent)
-    builder.add_node("data_patcher", data_patcher_node)
-    builder.add_node("debug_node", debug_test_node)
-    builder.add_node("delete_test_node", delete_test_node)
-    builder.add_node("update_test_node", update_test_node)
-    builder.add_node("generator", generate_examples)
-    builder.add_node("assertion_modifier", modify_assertions)
-    builder.add_node("executor", run_on_examples)
-    builder.add_node("assertion_corrector", correct_assertions)
-    builder.add_node("test_evaluator", evaluate_tests)
-    builder.add_node("bad_data_exhausted", _bad_data_exhausted)
-    builder.add_node("suggestions_generator", generate_suggestions)
-    builder.add_node("history_saver", history_saver)
-    builder.add_node("other", _handle_other)
+    def add_timed_node(name, fn):
+        """Enregistre un nœud en chronométrant son exécution (niveau DIAG)."""
+        builder.add_node(name, timed_node(name, fn))
+
+    add_timed_node("pre_routing", pre_routing)
+    add_timed_node("routing", routing)
+    add_timed_node("conversational_agent", conversational_agent)
+    add_timed_node("data_patcher", data_patcher_node)
+    add_timed_node("debug_node", debug_test_node)
+    add_timed_node("delete_test_node", delete_test_node)
+    add_timed_node("update_test_node", update_test_node)
+    add_timed_node("generator", generate_examples)
+    add_timed_node("assertion_modifier", modify_assertions)
+    add_timed_node("executor", run_on_examples)
+    add_timed_node("assertion_corrector", correct_assertions)
+    add_timed_node("test_evaluator", evaluate_tests)
+    add_timed_node("bad_data_exhausted", _bad_data_exhausted)
+    add_timed_node("suggestions_generator", generate_suggestions)
+    add_timed_node("history_saver", history_saver)
+    add_timed_node("other", _handle_other)
 
     def route_input(state: QueryState):
         if state.get("error"):

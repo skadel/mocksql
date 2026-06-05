@@ -7,6 +7,11 @@ from storage.config import (
     get_llm_thinking_budget,
     get_llm_thinking_level,
 )
+from utils.timing import LLMTimingCallback
+
+# Callback partagé : chronomètre chaque appel LLM (niveau DIAG). Sans état entre
+# appels (clé par run_id), donc réutilisable pour toutes les instances.
+_timing_callback = LLMTimingCallback()
 
 
 def make_llm(
@@ -22,6 +27,7 @@ def make_llm(
         vertexai=True,
         temperature=temperature,
         streaming=streaming if streaming is not None else get_llm_streaming(),
+        callbacks=[_timing_callback],
     )
     if resolved_location:
         kwargs["location"] = resolved_location

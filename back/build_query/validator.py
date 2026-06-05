@@ -17,6 +17,7 @@ from models.env_variables import DUCKDB_PATH, BQ_TEST_PROJECT
 from utils.errors import handle_compile_phase_exceptions, handle_post_compile_exceptions
 from utils.saver import get_message_type
 from utils.sql_code import get_all_columns_with_sources
+from utils.timing import atimed, timed
 
 _bq_client: bigquery.Client | None = None
 
@@ -79,15 +80,21 @@ async def validate_query(code, project, dialect, parent, state):
             exc=e, code=code, route=route, parent=parent, state=state
         )
     try:
-        tables = await get_tables_mapping(project_id=project)
+        async with atimed("validate: extraction sqlglot (optimize + split)"):
+            tables = await get_tables_mapping(project_id=project)
 
-        optimized_sql, optimized, used_columns, literals = await evaluate_and_fix_query(
-            code,
-            mapping=tables,
-            dialect=dialect,
-            optimize=state.get("optimize", False),
-        )
-        ctes = await split_query(optimized, tables, dialect)
+            (
+                optimized_sql,
+                optimized,
+                used_columns,
+                literals,
+            ) = await evaluate_and_fix_query(
+                code,
+                mapping=tables,
+                dialect=dialect,
+                optimize=state.get("optimize", False),
+            )
+            ctes = await split_query(optimized, tables, dialect)
     except Exception as e:
         # Centralise la gestion des ParseError/OptimizeError/500
         return handle_post_compile_exceptions(exc=e, code=code)
@@ -188,14 +195,16 @@ async def optimize_and_extract(query_ast: E, mapping, dialect, optimize=False):
 # utils/compile_query.py (ou là où se trouve ta fonction)
 async def compile_query(sql_code, project, dialect):
     if dialect == "bigquery":
-        return run_query(sql_code, dry=True).total_bytes_processed
+        with timed("validate: dry-run BigQuery"):
+            return run_query(sql_code, dry=True).total_bytes_processed
 
     elif dialect == "postgres":
         from utils.postgres_test_helper import query_on_test_dataset, PostgresTestHelper
 
         q = query_on_test_dataset(sql_code, project)
         pg_test = PostgresTestHelper()
-        return await pg_test.run_query(sql=q, dry=True)
+        async with atimed("validate: dry-run Postgres"):
+            return await pg_test.run_query(sql=q, dry=True)
 
     elif dialect == "duckdb":
         from utils.duckdb_test_helper import query_on_test_dataset, DuckDBTestHelper
@@ -205,14 +214,16 @@ async def compile_query(sql_code, project, dialect):
             db_path=DUCKDB_PATH
         )  # ou un fichier pour partager entre runs
         try:
-            return await dk.run_query(sql=q, dry=True)
+            async with atimed("validate: dry-run DuckDB"):
+                return await dk.run_query(sql=q, dry=True)
         finally:
             await dk.close()
 
     elif dialect == "snowflake":
         from utils.snowflake_connector import run_sf_query
 
-        await asyncio.to_thread(run_sf_query, sql_code, True)
+        async with atimed("validate: dry-run Snowflake"):
+            await asyncio.to_thread(run_sf_query, sql_code, True)
         return 0
 
     else:
