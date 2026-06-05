@@ -585,6 +585,11 @@ _MAX_CONSTRAINT_GROUPS = (
     32  # max groups emitted by extract_constraints (UNION ALL branches)
 )
 
+# CAST/SAFE_CAST to these types adds no generation constraint (any string works).
+_NOOP_CAST_TYPES: frozenset[str] = frozenset(
+    {"STRING", "TEXT", "VARCHAR", "NVARCHAR", "CHAR", "BPCHAR"}
+)
+
 
 def _collect_format_constraints(
     select: exp.Select,
@@ -647,6 +652,8 @@ def _collect_format_constraints(
         if isinstance(node, (exp.TryCast, exp.Cast)):
             to_type = node.args.get("to")
             val_str = to_type.sql(dialect=resolver._dialect).upper() if to_type else ""
+            if val_str in _NOOP_CAST_TYPES:
+                continue
         elif isinstance(node, exp.StrToDate):
             fmt = node.args.get("format")
             val_str = (
@@ -1335,6 +1342,8 @@ def _collect_format_constraints_strings(
         tbl, col_name = tc
         to_type = node.args.get("to")
         type_str = to_type.sql(dialect=dialect).upper() if to_type else ""
+        if type_str in _NOOP_CAST_TYPES:
+            continue
         fn = "SAFE_CAST" if isinstance(node, exp.TryCast) else "CAST"
         _add(f"{tbl}.{col_name} : {fn} AS {type_str}")
 
