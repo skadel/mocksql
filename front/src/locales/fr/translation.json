@@ -69,7 +69,13 @@
     "models_path": "~/models",
     "generate_tests": "Générer les tests",
     "generating": "Génération…",
-    "query_valid": "✓ Requête valide"
+    "query_valid": "✓ Requête valide",
+    "mode_unit_title": "Test unitaire",
+    "mode_unit_sub": "Une requête, un jeu de tests",
+    "mode_integration_title": "Test d'intégration",
+    "mode_integration_sub": "Chaîne de scripts SQL",
+    "mode_soon": "Bientôt",
+    "mode_integration_tooltip": "Bientôt disponible — on te prévient."
   },
   "chat": {
     "regenerate_test": "Régénère ce test",

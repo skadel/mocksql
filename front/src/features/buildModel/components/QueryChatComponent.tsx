@@ -79,6 +79,9 @@ const ChatComponent: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const sqlFiles = useSqlFileLoader();
   const [fileSearch, setFileSearch] = useState('');
+  // v15 mode toggle. Integration mode is a stub (design-v15-spec §8): the
+  // tab is visible with a "Bientôt" badge but does not change the flow.
+  const [genMode, setGenMode] = useState<'unit' | 'integration'>('unit');
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
@@ -964,25 +967,73 @@ const ChatComponent: React.FC = () => {
               </Box>
             </Box>
 
+            {/* Mode toggle (v15 §8) — integration is a visible stub, no flow */}
+            <Box sx={{ display: 'flex', gap: 0, bgcolor: '#f3f6f7', border: '1px solid #c9d3d6', borderRadius: '12px', p: '4px', mb: '20px' }}>
+              {([
+                { id: 'unit' as const, title: t('generate.mode_unit_title'), sub: t('generate.mode_unit_sub'), icon: <ScienceIcon sx={{ fontSize: 18 }} />, badge: null },
+                { id: 'integration' as const, title: t('generate.mode_integration_title'), sub: t('generate.mode_integration_sub'), icon: (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></svg>
+                ), badge: t('generate.mode_soon') },
+              ]).map((m) => {
+                const on = genMode === m.id;
+                return (
+                  <Tooltip key={m.id} title={m.id === 'integration' ? t('generate.mode_integration_tooltip') : ''} placement="top" arrow disableHoverListener={m.id !== 'integration'}>
+                    <Box
+                      onClick={() => { if (m.id === 'unit') setGenMode('unit'); }}
+                      role="button"
+                      sx={{
+                        flex: 1, display: 'flex', alignItems: 'center', gap: '10px', p: '11px 14px',
+                        borderRadius: '9px', cursor: 'pointer', textAlign: 'left',
+                        bgcolor: on ? '#fff' : 'transparent',
+                        boxShadow: on ? '0 1px 2px rgba(15,39,42,0.04)' : 'none',
+                        transition: 'all .15s',
+                        opacity: m.id === 'integration' ? 0.85 : 1,
+                      }}
+                    >
+                      <Box sx={{
+                        width: 32, height: 32, borderRadius: '8px', display: 'grid', placeItems: 'center', flexShrink: 0,
+                        bgcolor: on ? '#2BB0A8' : '#ecf7f6', color: on ? '#fff' : '#1f948d',
+                      }}>
+                        {m.icon}
+                      </Box>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                          <Typography sx={{ fontSize: 13.5, fontWeight: 600, color: '#0f272a' }}>{m.title}</Typography>
+                          {m.badge && (
+                            <Box component="span" sx={{ fontSize: 9.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: '#16746e', bgcolor: '#ecf7f6', borderRadius: 999, px: '7px', py: '1px' }}>
+                              {m.badge}
+                            </Box>
+                          )}
+                        </Box>
+                        <Typography sx={{ fontSize: 11.5, color: '#6b8287', mt: '1px' }}>{m.sub}</Typography>
+                      </Box>
+                    </Box>
+                  </Tooltip>
+                );
+              })}
+            </Box>
+
             {/* Step 1 — File list */}
             <Box sx={{ mb: '24px' }}>
               {/* Step label row */}
               <Box sx={{ display: 'flex', alignItems: 'center', gap: '10px', mb: '10px' }}>
                 <Box sx={{ width: 22, height: 22, borderRadius: '50%', bgcolor: '#2BB0A8', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>1</Box>
                 <Typography sx={{ fontSize: 14.5, fontWeight: 600, color: '#0f272a' }}>{t('generate.choose_sql_file')}</Typography>
-                <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
-                  <Box component="span" sx={{ fontSize: 11.5 }}>📁</Box>
-                  <Typography component="code" sx={{ fontSize: 11, color: '#6b8287', fontFamily: 'monospace' }}>
-                    {(() => {
-                      const f = sqlFiles[0];
-                      if (!f) return t('generate.models_path');
-                      const depth = f.name.split('/').length;
-                      let p = f.path.replace(/\\/g, '/');
-                      for (let i = 0; i < depth; i++) p = p.replace(/\/[^/]+$/, '');
-                      return p || t('generate.models_path');
-                    })()}
-                  </Typography>
-                </Box>
+                {import.meta.env.VITE_DEMO_MODE !== 'true' && (
+                  <Box sx={{ ml: 'auto', display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
+                    <Box component="span" sx={{ fontSize: 11.5 }}>📁</Box>
+                    <Typography component="code" sx={{ fontSize: 11, color: '#6b8287', fontFamily: 'monospace' }}>
+                      {(() => {
+                        const f = sqlFiles[0];
+                        if (!f) return t('generate.models_path');
+                        const depth = f.name.split('/').length;
+                        let p = f.path.replace(/\\/g, '/');
+                        for (let i = 0; i < depth; i++) p = p.replace(/\/[^/]+$/, '');
+                        return p || t('generate.models_path');
+                      })()}
+                    </Typography>
+                  </Box>
+                )}
               </Box>
 
               {/* File list panel */}
@@ -1060,9 +1111,11 @@ const ChatComponent: React.FC = () => {
                             <Typography sx={{ fontSize: 13, fontWeight: isActive ? 600 : 500, color: '#0f272a', lineHeight: 1.3 }} noWrap>
                               {f.name}
                             </Typography>
-                            <Typography sx={{ fontSize: 10.5, color: '#6b8287', mt: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {f.path ?? f.name}
-                            </Typography>
+                            {import.meta.env.VITE_DEMO_MODE !== 'true' && (
+                              <Typography sx={{ fontSize: 10.5, color: '#6b8287', mt: '1px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {f.path ?? f.name}
+                              </Typography>
+                            )}
                           </Box>
                           {/* Last modified */}
                           <Typography sx={{ fontSize: 11, color: '#6b8287', textAlign: 'right', minWidth: 90, flexShrink: 0 }}>
@@ -1202,7 +1255,7 @@ const ChatComponent: React.FC = () => {
             zIndex: demoZoom === 'chat' ? 1300 : 'auto',
             transform: demoZoom === 'chat' ? demoTransform.chat : 'scale(1)',
             transformOrigin: 'center center',
-            transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+            transition: 'transform 0.45s cubic-bezier(0.4,0,0.2,1)',
             flexShrink: 0,
           }}>
           <ChatColumn
@@ -1247,7 +1300,7 @@ const ChatComponent: React.FC = () => {
             zIndex: demoZoom === 'tests' ? 1300 : 'auto',
             transform: demoZoom === 'tests' ? demoTransform.tests : 'scale(1)',
             transformOrigin: 'center center',
-            transition: 'transform 0.35s cubic-bezier(0.34,1.56,0.64,1)',
+            transition: 'transform 0.45s cubic-bezier(0.4,0,0.2,1)',
           }}>
             <ArtefactHeader
               testCount={testResults?.length ?? 0}

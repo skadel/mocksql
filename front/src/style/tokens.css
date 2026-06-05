@@ -1,0 +1,120 @@
+/* ============================================================================
+   MockSQL — Design Tokens  (aligned to the v15 product design proposal)
+   Source of truth: mocksql-design-system/project/colors_and_type.css
+   Loaded once from index.tsx. Reference via var(--mq-*) tokens, or use the
+   .mq-* semantic helper classes at the bottom.
+   ============================================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  /* ----- Brand: teal (single hue) ----- */
+  --mq-brand-700: #16746e;   /* deep teal — strong text on tint, active labels */
+  --mq-brand-600: #1f948d;   /* hover / pressed primary */
+  --mq-brand-500: #2bb0a8;   /* PRIMARY teal — buttons, logo tile, focus, links */
+  --mq-brand-400: #46b3aa;   /* lighter accent — focus ring, scroll glow */
+  --mq-brand-300: #7cc8c1;   /* step circles, typing dots, soft accents */
+  --mq-brand-100: #d2efec;   /* soft fill */
+  --mq-brand-tint: #ecf7f6;  /* teal-50 — chip / hover wash */
+  --mq-sql-kw-teal: #0aa0a0; /* SQL keyword teal */
+
+  /* ----- Neutrals: cool blue-gray ----- */
+  --mq-ink-900: #0f272a;     /* primary text (ink) */
+  --mq-ink-800: #1f3a3e;     /* headings / strong labels */
+  --mq-ink-700: #3b5357;     /* secondary text (ink-2) */
+  --mq-ink-600: #4f676b;     /* body / connection text */
+  --mq-ink-500: #6b8287;     /* muted text / captions / eyebrows */
+  --mq-ink-400: #8da0a4;     /* placeholder, disabled-ish */
+  --mq-ink-300: #aab8bb;     /* disabled text */
+
+  --mq-line: #c9d3d6;        /* hairline borders */
+  --mq-line-strong: #b6c2c5; /* stronger control borders (ghost btn, composer) */
+  --mq-line-2: #dae2e4;      /* softer dividers */
+  --mq-surface: #f3f6f7;     /* cards / panels (soft off-white, NOT pure white) */
+  --mq-surface-2: #ffffff;   /* raised inputs / code wells */
+  --mq-sidebar: #eef3f3;     /* left rail */
+  --mq-canvas: #dde3e6;      /* app background */
+  --mq-canvas-deep: #e3e7ee; /* main column / generate-view background */
+  --mq-lilac-50: #eef1f7;    /* neutral lilac wash (user bubble / branch) */
+
+  /* ----- Semantic: success / warning / danger ----- */
+  --mq-success: #23a26d;     --mq-success-text: #1c855a;
+  --mq-success-bg: #e9f7f0;  --mq-success-border: #bce6d3;
+
+  --mq-warning: #d89323;     --mq-warning-text: #a86a00;
+  --mq-warning-bg: #fcf3e1;  --mq-warning-border: #f0d8a8;
+  --mq-warning-cream: #faf6e6;/* soft cream notice fill */
+
+  --mq-danger: #d0503f;      --mq-danger-text: #b23a32;
+  --mq-danger-bg: #fbeceb;   --mq-danger-border: #f3c3bd;
+
+  /* ----- DuckDB accent (local-execution / “fichier modifié” / cost-free) ----- */
+  --mq-duck: #f7c948;        --mq-duck-ink: #8a5a00;
+  --mq-duck-bg: #fff7e6;     --mq-duck-border: #f3d28a;
+
+  /* ----- Tag chips ----- */
+  --mq-tag-null-bg: #fbeceb;  --mq-tag-null-text: #b23a32;   /* Null / risk */
+  --mq-tag-logic-bg: #ecf7f6; --mq-tag-logic-text: #16746e;  /* Logique métier */
+  --mq-tag-integration-bg: #eef1f7; --mq-tag-integration-text: #4a5670; /* Intégration */
+  --mq-tag-neutral-bg: #e7eded;--mq-tag-neutral-text: #4a5a62;/* table tokens */
+  --mq-prod-badge: #d0503f;   /* [PROD] mono badge */
+
+  /* ----- Action / control ----- */
+  --mq-send-btn: #1b2a2c;       /* composer send button (near-ink) */
+  --mq-send-btn-hover: #16746e; /* teal on hover */
+  --mq-send-disabled: #cbd9da;
+  --mq-scrollbar: #d1dadd;
+
+  /* ----- SQL syntax highlight ----- */
+  --mq-sql-keyword: #0aa0a0;  /* WITH/SELECT/FROM … (bold) */
+  --mq-sql-string:  #b8560b;  /* '...' literals + numbers */
+  --mq-sql-number:  #b8560b;
+  --mq-sql-table:   #335555;  /* `table.refs` */
+  --mq-sql-comment: #7a8b8e;  /* -- comments (italic) */
+
+  /* ============================ TYPE ============================ */
+  --mq-font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mq-font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --mq-fw-regular: 400;
+  --mq-fw-medium: 500;
+  --mq-fw-semibold: 600;
+  --mq-fw-bold: 700;
+
+  /* Type scale (px) — UI app density */
+  --mq-fs-display: 26px;   --mq-lh-display: 1.22;  /* GenerateView H1 */
+  --mq-fs-h1: 17px;        --mq-lh-h1: 1.3;        /* logo wordmark / panel titles */
+  --mq-fs-h2: 15px;        --mq-lh-h2: 1.35;       /* section / test titles */
+  --mq-fs-body: 13.5px;    --mq-lh-body: 1.55;     /* default body */
+  --mq-fs-sm: 12.5px;      --mq-lh-sm: 1.5;        /* secondary */
+  --mq-fs-xs: 11.5px;      --mq-lh-xs: 1.4;        /* captions, table cells */
+  --mq-fs-eyebrow: 11px;   --mq-ls-eyebrow: 0.05em;/* ALL-CAPS micro-labels */
+  --mq-fs-code: 12.5px;    --mq-lh-code: 1.65;     /* SQL / mono */
+
+  /* ----- Radii ----- */
+  --mq-r-sm: 6px;
+  --mq-r-md: 8px;     /* inputs, buttons */
+  --mq-r-lg: 12px;    /* cards, code wells */
+  --mq-r-pill: 999px;
+
+  /* ----- Elevation (nearly flat) ----- */
+  --mq-shadow-xs: 0 1px 2px rgba(15, 39, 42, 0.04);
+  --mq-shadow-sm: 0 1px 3px rgba(15, 39, 42, 0.06), 0 1px 2px rgba(15, 39, 42, 0.04);
+  --mq-shadow-md: 0 6px 20px rgba(15, 39, 42, 0.10);
+
+  /* ----- Spacing scale ----- */
+  --mq-sp-1: 4px;  --mq-sp-2: 8px;  --mq-sp-3: 12px; --mq-sp-4: 16px;
+  --mq-sp-5: 20px; --mq-sp-6: 24px; --mq-sp-8: 32px; --mq-sp-10: 40px;
+
+  /* ----- Motion ----- */
+  --mq-ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --mq-dur: 170ms;
+}
+
+/* ============================ SEMANTIC ELEMENT STYLES ============================ */
+.mq-display { font: var(--mq-fw-bold) var(--mq-fs-display)/var(--mq-lh-display) var(--mq-font-sans); color: var(--mq-ink-900); letter-spacing: -0.015em; }
+.mq-h1 { font: var(--mq-fw-bold) var(--mq-fs-h1)/var(--mq-lh-h1) var(--mq-font-sans); color: var(--mq-ink-900); letter-spacing: -0.01em; }
+.mq-h2 { font: var(--mq-fw-semibold) var(--mq-fs-h2)/var(--mq-lh-h2) var(--mq-font-sans); color: var(--mq-ink-900); }
+.mq-body { font: var(--mq-fw-regular) var(--mq-fs-body)/var(--mq-lh-body) var(--mq-font-sans); color: var(--mq-ink-700); }
+.mq-muted { font: var(--mq-fw-regular) var(--mq-fs-sm)/var(--mq-lh-sm) var(--mq-font-sans); color: var(--mq-ink-500); }
+.mq-eyebrow { font: var(--mq-fw-semibold) var(--mq-fs-eyebrow)/1.2 var(--mq-font-sans); letter-spacing: var(--mq-ls-eyebrow); text-transform: uppercase; color: var(--mq-ink-500); }
+.mq-code { font: var(--mq-fw-regular) var(--mq-fs-code)/var(--mq-lh-code) var(--mq-font-mono); color: var(--mq-ink-900); }

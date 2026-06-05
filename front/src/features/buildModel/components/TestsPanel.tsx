@@ -70,25 +70,45 @@ function tagStyle(tag: string) {
 }
 
 /* ─── coverage ────────────────────────────────────────────────────── */
+// v15 coverage axes (cf. design-v15-spec §4 + data.js:coverageAxes).
+// Drops happy/equal/types ; adds bornes/doublons/volumetrie.
 const COVERAGE_AXES = [
-  { key: 'happy', label: 'Chemin nominal',   hint: 'le cas standard, requête correcte' },
-  { key: 'null',  label: 'Valeurs NULL',     hint: 'LAG / JOIN sur colonnes null' },
-  { key: 'empty', label: 'Plage vide',       hint: 'filtre qui ne retourne aucune ligne' },
-  { key: 'equal', label: 'Valeurs égales',   hint: 'colonnes identiques consécutives' },
-  { key: 'tie',   label: 'Ex æquo',          hint: 'résultats non-déterministes (LIMIT 1)' },
-  { key: 'types', label: 'Format de sortie', hint: 'FORMAT_DATE, CAST, patterns' },
+  { key: 'null',       label: 'Valeurs NULL',      hint: 'colonnes manquantes / vides' },
+  { key: 'vide',       label: 'Fenêtre vide',      hint: 'aucune ligne sur la période' },
+  { key: 'ex_aequo',   label: 'Ex æquo',           hint: 'égalités de tri / départage' },
+  { key: 'bornes',     label: 'Bornes & négatifs', hint: '0, valeurs négatives, hors plage' },
+  { key: 'doublons',   label: 'Doublons',          hint: 'lignes dupliquées en entrée' },
+  { key: 'volumetrie', label: 'Volumétrie',        hint: '1 ligne vs. N lignes' },
 ];
 
+const AXIS_KEYS = new Set(COVERAGE_AXES.map((a) => a.key));
+
+// Coverage prefers backend-declared axes (the v15 model: each test carries
+// `axes: string[]`). Until the backend tags them, we fall back to regex
+// heuristics over the test title + tags. See design-v15-spec §4.
 function detectCoveredAxes(tests: any[]): Set<string> {
   const covered = new Set<string>();
+
+  // 1. Trust explicit backend-declared axes when at least one test has them.
+  const declared = tests.some((t) => Array.isArray(t.axes) && t.axes.length > 0);
+  if (declared) {
+    tests.forEach((t) =>
+      (t.axes ?? []).forEach((a: string) => {
+        if (AXIS_KEYS.has(a)) covered.add(a);
+      }),
+    );
+    return covered;
+  }
+
+  // 2. Fallback heuristics on the test text.
   tests.forEach((t) => {
     const s = ((t.unit_test_description ?? '') + ' ' + (t.tags ?? []).join(' ')).toLowerCase();
-    if (/logique.m.tier|calcul|nominal|résultat.attendu|standard|croissance/.test(s))      covered.add('happy');
-    if (/null.checks|null|manquant|absent/.test(s))                                         covered.add('null');
-    if (/vide|aucune|inexistant|0.ligne|zéro|sans.données|ensemble.vide|plage.vide/.test(s)) covered.add('empty');
-    if (/égale|identique|consécutif|valeurs.égales/.test(s))                                covered.add('equal');
-    if (/ex.æquo|ex.aequo|\btie\b|classement|non.déterministe/.test(s))                    covered.add('tie');
-    if (/format_date|format.date|\bcast\b|format|type.de.sortie|patron/.test(s))            covered.add('types');
+    if (/null.checks|null|manquant|absent/.test(s))                                          covered.add('null');
+    if (/vide|aucune|inexistant|0.ligne|z[ée]ro|sans.donn[ée]es|ensemble.vide|fen[êe]tre.vide|plage.vide/.test(s)) covered.add('vide');
+    if (/ex.[æa]quo|\btie\b|classement|d[ée]partage|non.d[ée]terministe/.test(s))            covered.add('ex_aequo');
+    if (/borne|n[ée]gatif|hors.plage|hors.borne|d[ée]bordement|overflow|valeur.limite/.test(s)) covered.add('bornes');
+    if (/doublon|dupliqu|duplicate|m[êe]me.cl[ée]/.test(s))                                   covered.add('doublons');
+    if (/volum|cardinalit|une.seule.ligne|1.ligne|plusieurs.lignes|n.lignes|grand.volume/.test(s)) covered.add('volumetrie');
   });
   return covered;
 }
@@ -278,6 +298,7 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
   return (
     <Box
       id={`test-${idx + 1}`}
+      data-testid={`test-card-${idx + 1}`}
       onClick={onExpand}
       sx={{
         bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderLeft: `3px solid ${border}`,
@@ -743,6 +764,57 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
 }
 
 /* ─── TestCard ───────────────────────────────────────────────────── */
+/* ─── DecisionBlock ────────────────────────────────────────────────────
+ * v15 « décision métier figée » (design-v15-spec §5). Optional: only renders
+ * when the backend attaches a `decision` to the test. Masked otherwise.
+ * Fields: question, decision, decidedBy[{initials,color}], decidedAt, inProdShare.
+ */
+function DecisionBlock({ test }: { test: any }) {
+  const decidedBy: { initials: string; color?: string }[] = test.decidedBy ?? [];
+  return (
+    <Box sx={{ mt: 1, bgcolor: '#fff', border: `1px solid ${BORDER}`, borderRadius: '12px', p: '13px 15px' }}>
+      {test.question && (
+        <Typography sx={{ fontSize: 12.5, color: BODY, fontStyle: 'italic', mb: '9px', lineHeight: 1.5 }}>
+          {test.question}
+        </Typography>
+      )}
+      <Typography sx={{ fontSize: 10.5, fontWeight: 700, letterSpacing: '0.04em', textTransform: 'uppercase', color: MUTED, mb: '6px' }}>
+        Décision métier
+      </Typography>
+      <Typography sx={{ fontSize: 13, color: INK, lineHeight: 1.5 }}>{test.decision}</Typography>
+
+      {(decidedBy.length > 0 || test.decidedAt || test.inProdShare) && (
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: '11px', flexWrap: 'wrap' }}>
+          {decidedBy.length > 0 && (
+            <Box sx={{ display: 'flex' }}>
+              {decidedBy.map((p, i) => (
+                <Box
+                  key={i}
+                  sx={{
+                    width: 22, height: 22, borderRadius: 999, display: 'grid', placeItems: 'center',
+                    color: '#fff', fontSize: 9.5, fontWeight: 700, border: `2px solid ${SURFACE}`,
+                    bgcolor: p.color ?? TEAL, ml: i === 0 ? 0 : '-7px',
+                  }}
+                >
+                  {p.initials}
+                </Box>
+              ))}
+            </Box>
+          )}
+          {test.decidedAt && (
+            <Typography sx={{ fontSize: 11.5, color: MUTED }}>Validé · {test.decidedAt}</Typography>
+          )}
+          {test.inProdShare && (
+            <Box sx={{ ml: 'auto', fontSize: 11, fontWeight: 600, color: '#16746e', bgcolor: '#ecf7f6', borderRadius: 999, px: '10px', py: '3px' }}>
+              {test.inProdShare}
+            </Box>
+          )}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
 interface TestCardProps {
   test: any;
   idx: number;
@@ -872,6 +944,9 @@ function TestCard({
             )}
           </Box>
         )}
+
+        {/* Décision métier figée (v15 §5) — optional, masked when absent */}
+        {test.decision && <DecisionBlock test={test} />}
 
         {/* Verdict text */}
         {test.status && test.status !== 'pending' && isLoading && !test.evaluation && (

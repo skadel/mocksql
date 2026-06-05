@@ -259,10 +259,12 @@ const DrawerComponent: React.FC = () => {
             gap: '8px',
           }}
         >
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: '#23a26d', flexShrink: 0 }} />
-            <Typography sx={{ fontSize: 11.5, color: MUTED }}>Connecté · :8080</Typography>
-          </Box>
+          {import.meta.env.VITE_DEMO_MODE !== 'true' && (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: '#23a26d', flexShrink: 0 }} />
+              <Typography sx={{ fontSize: 11.5, color: MUTED }}>Connecté · :8080</Typography>
+            </Box>
+          )}
 
           <FormControl fullWidth variant="outlined" size="small">
             <InputLabel id="lang-label" sx={{ fontSize: 12 }}>Langue</InputLabel>
