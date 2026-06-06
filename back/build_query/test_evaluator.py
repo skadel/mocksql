@@ -311,6 +311,12 @@ async def evaluate_tests(state: QueryState):
             ],
             "evaluation_feedback": "bad_data",
             "status": "empty_results",
+            # Route straight to the generator for a holistic regeneration targeting
+            # the failing CTE (cte_trace travels in the RESULTS message). Bypasses the
+            # conversational_agent, whose single-field patches cannot fix a 0-row query.
+            # Decrement gen_retries here since we skip the agent (which normally does it).
+            "empty_results_regen": True,
+            "gen_retries": gen_retries - 1,
         }
         return state_update
 
@@ -384,6 +390,9 @@ async def evaluate_tests(state: QueryState):
         "messages": messages,
         "evaluation_feedback": evaluation_feedback,
         "status": new_status,
+        # Non-empty result judged bad_data → keep the conversational_agent path
+        # (targeted patches). Clear any stale flag from a prior empty-result cycle.
+        "empty_results_regen": False,
     }
 
     if triggers_assertion_retry:

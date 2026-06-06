@@ -17,6 +17,18 @@ def escape_unescaped_placeholders(text):
     return re.sub(r"(?<!\{)\{([^{}]*)\}(?!\})", r"{{\1}}", text)
 
 
+def _strip_fences(text: str) -> str:
+    """Strippe une clôture markdown de 3 backticks ou plus.
+
+    Certains modèles émettent 4 backticks (````json) au lieu de 3 ; `{3,}`
+    garantit qu'on retire toute la séquence d'ouverture/fermeture au lieu d'en
+    laisser un parasite qui casserait le parse JSON.
+    """
+    text = re.sub(r"^`{3,}[ \t]*(?:json)?\s*\n?", "", text.strip())
+    text = re.sub(r"\n?`{3,}\s*$", "", text.strip())
+    return text.strip()
+
+
 def _strip_code_fences(msg) -> AIMessage:
     content = msg.content if hasattr(msg, "content") else str(msg)
     if isinstance(content, list):
@@ -27,11 +39,10 @@ def _strip_code_fences(msg) -> AIMessage:
     else:
         text = content
     before = text[:80].replace("\n", "\\n")
-    text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
-    text = re.sub(r"\n?```\s*$", "", text.strip())
+    text = _strip_fences(text)
     after = text[:80].replace("\n", "\\n")
     logger.diag("[strip_code_fences] avant=%r → après=%r", before, after)
-    return AIMessage(content=text.strip())
+    return AIMessage(content=text)
 
 
 class _FenceStrippingParser:
@@ -46,13 +57,8 @@ class _FenceStrippingParser:
     def __init__(self, inner):
         self._inner = inner
 
-    def _strip(self, text: str) -> str:
-        text = re.sub(r"^```(?:json)?\s*\n?", "", text.strip())
-        text = re.sub(r"\n?```\s*$", "", text.strip())
-        return text.strip()
-
     def parse(self, text: str):
-        stripped = self._strip(text)
+        stripped = _strip_fences(text)
         logger.diag(
             "[FenceStrippingParser] parse, input[:60]=%r stripped[:60]=%r",
             text[:60],

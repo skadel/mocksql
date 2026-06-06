@@ -400,6 +400,14 @@ class _LineageResolver:
             else []
         )
         self._cte_names: set[str] = {cte.alias.lower() for cte in ctes if cte.alias}
+        # The WITH clause is identical for every column resolved by this resolver.
+        # Copying it once (lazily) and reusing it across lineage wrappers avoids a
+        # full deep-copy of all CTEs per column — the dominant cost on wide queries.
+        # sqlglot.lineage() deep-copies the statement internally before mutating it,
+        # so the shared copy is never altered between calls.
+        self._with_clause_node = with_clause
+        self._with_clause_copy: exp.Expression | None = None
+        self._with_copy_ready = False
 
     def _effective_cte_name(self, col: ColumnRef) -> str | None:
         """Return the CTE name this column resolves to, or None if it's a base table.
@@ -459,9 +467,13 @@ class _LineageResolver:
             f"SELECT {col.column} FROM {cte_name}",
             dialect=self._dialect,
         )
-        with_clause = self._statement.args.get("with_")
-        if with_clause:
-            wrapper.set("with_", with_clause.copy())
+        if not self._with_copy_ready:
+            self._with_clause_copy = (
+                self._with_clause_node.copy() if self._with_clause_node else None
+            )
+            self._with_copy_ready = True
+        if self._with_clause_copy is not None:
+            wrapper.set("with_", self._with_clause_copy)
         return wrapper
 
     def _resolve_all_via_lineage(self, col: ColumnRef) -> list[ColumnRef]:

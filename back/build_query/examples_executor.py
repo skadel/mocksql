@@ -736,24 +736,27 @@ async def _run_single_test_case(
         logger.diag(
             "[executor] overwrite=True (status précédent=%s)", state.get("status")
         )
-        duckdb_tables_schema = create_test_tables(
-            tables=schemas,
-            suffix=suffix,
-            overwrite=True,
-            con=con,
-            dialect=dialect,
-        )
-        insert_queries = insert_examples(
-            data_dict=test_data,
-            schemas=duckdb_tables_schema,
-            suffix=suffix,
-            used_columns=used_columns,
-        )
-        execute_queries(list(insert_queries), con)
-        # 2) On exécute la requête globale
-        final_res_df, final_duckdb_sql = await run_query_on_test_dataset(
-            query, suffix, state["project"], dialect, con
-        )
+        from utils.timing import atimed
+
+        async with atimed("exec:duckdb_setup+query"):
+            duckdb_tables_schema = create_test_tables(
+                tables=schemas,
+                suffix=suffix,
+                overwrite=True,
+                con=con,
+                dialect=dialect,
+            )
+            insert_queries = insert_examples(
+                data_dict=test_data,
+                schemas=duckdb_tables_schema,
+                suffix=suffix,
+                used_columns=used_columns,
+            )
+            execute_queries(list(insert_queries), con)
+            # 2) On exécute la requête globale
+            final_res_df, final_duckdb_sql = await run_query_on_test_dataset(
+                query, suffix, state["project"], dialect, con
+            )
         logger.diag("[executor] DuckDB SQL exécuté:\n%s", final_duckdb_sql[:2000])
         logger.diag("[executor] résultat: %s ligne(s)", len(final_res_df))
 
@@ -801,17 +804,20 @@ async def _run_single_test_case(
                     result_df=final_res_df,
                     test_description=test_case.get("unit_test_description", ""),
                 )
-                assertion_results = await _evaluate_assertions_with_retry(
-                    [a.model_dump() for a in eval_result.assertions], **retry_kwargs
-                )
-                try:
-                    assertion_results = await _fix_logically_failing_assertions(
-                        assertion_results, **retry_kwargs
+                from utils.timing import atimed
+
+                async with atimed("exec:assertion_eval+fix"):
+                    assertion_results = await _evaluate_assertions_with_retry(
+                        [a.model_dump() for a in eval_result.assertions], **retry_kwargs
                     )
-                except asyncio.CancelledError:
-                    logger.warning(
-                        "[executor] fixer interrompu (CancelledError) — résultats partiels conservés"
-                    )
+                    try:
+                        assertion_results = await _fix_logically_failing_assertions(
+                            assertion_results, **retry_kwargs
+                        )
+                    except asyncio.CancelledError:
+                        logger.warning(
+                            "[executor] fixer interrompu (CancelledError) — résultats partiels conservés"
+                        )
         finally:
             con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
 

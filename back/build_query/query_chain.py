@@ -354,6 +354,16 @@ def build_query_graph():
             return "history_saver"
         if feedback == "bad_data":
             if retries > 0:
+                # Empty DuckDB result → regenerate the whole dataset targeting the
+                # failing CTE (the cte_trace travels in the RESULTS message), instead
+                # of letting the conversational_agent patch one field at a time —
+                # single-field patches cannot fix a query that returns 0 rows.
+                if state.get("empty_results_regen"):
+                    logger.diag(
+                        "[route_evaluator] → generator (empty_results régen holistique, retries=%d)",
+                        retries,
+                    )
+                    return "generator"
                 logger.diag(
                     "[route_evaluator] → conversational_agent (bad_data retries=%d)",
                     retries,

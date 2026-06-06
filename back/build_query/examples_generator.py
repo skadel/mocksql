@@ -73,6 +73,8 @@ _OP_LABELS = {
 
 
 _simplify_cache: dict[tuple[str, str], object] = {}
+_hint_cache: dict[tuple[str, str], str] = {}
+_output_type_cache: dict[tuple[str, bool], object] = {}
 _SIMPLIFY_CACHE_MAXSIZE = 64
 
 
@@ -195,13 +197,25 @@ def _simplification_to_hint(
     preserves AND/OR structure without DNF expansion.
 
     Falls back to an empty string when SQL is unavailable or the hint is empty.
+
+    Result is cached by ``(sql, dialect)``: ``build_conditions_hint`` re-parses and
+    re-simplifies the SQL (several seconds on complex queries), but the output is
+    deterministic, so retries on the same SQL must not recompute it.
     """
     if sql:
+        cache_key = (sql, dialect)
+        cached = _hint_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
         from build_query.constraint_simplifier import build_conditions_hint
 
         hint = build_conditions_hint(sql, dialect=dialect, schema=schema)
-        if hint:
-            return json.dumps(hint, ensure_ascii=False, indent=2)
+        result_str = json.dumps(hint, ensure_ascii=False, indent=2) if hint else ""
+        if len(_hint_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
+            _hint_cache.pop(next(iter(_hint_cache)))
+        _hint_cache[cache_key] = result_str
+        return result_str
     return ""
 
 
@@ -548,14 +562,17 @@ async def generate_examples_(
 
     # Fail fast if the query has an unsatisfiable HAVING threshold
     from build_query.constraint_simplifier import check_having_cardinality
+    from utils.timing import timed
 
     check_having_cardinality(optimized_sql, dialect)
 
     # Single simplify() call — result reused for hint + mandatory set + unconstrained
-    sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
-    constraints = _simplification_to_hint(
-        sim_result, sql=optimized_sql, dialect=dialect, schema=schema
-    )
+    with timed("gen:simplify"):
+        sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
+    with timed("gen:hint"):
+        constraints = _simplification_to_hint(
+            sim_result, sql=optimized_sql, dialect=dialect, schema=schema
+        )
 
     logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
     if sim_result is not None:
@@ -672,23 +689,38 @@ async def generate_examples_(
             excluded_col_names,
         )
 
-    data_model = create_pydantic_models(llm_filtered_schema)
-    output_type = get_generation_output_type(data_model, existing_tests)
-    raw_parser = PydanticOutputParser(pydantic_object=output_type)
-    parser = create_output_fixing_parser(raw_parser)
+    with timed("gen:pydantic"):
+        # The dynamic Pydantic model depends only on the (constraint-annotated)
+        # schema and whether tests already exist — both stable across retries on
+        # the same SQL. Building it costs ~1s on wide schemas, so cache it.
+        model_key = (
+            json.dumps(llm_filtered_schema, sort_keys=True, default=str),
+            bool(existing_tests),
+        )
+        output_type = _output_type_cache.get(model_key)
+        if output_type is None:
+            data_model = create_pydantic_models(llm_filtered_schema)
+            output_type = get_generation_output_type(data_model, existing_tests)
+            if len(_output_type_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
+                _output_type_cache.pop(next(iter(_output_type_cache)))
+            _output_type_cache[model_key] = output_type
+        raw_parser = PydanticOutputParser(pydantic_object=output_type)
+        parser = create_output_fixing_parser(raw_parser)
+        format_instructions = raw_parser.get_format_instructions()
 
-    eval_context = _build_eval_context(state, existing_tests)
+    with timed("gen:prompt_build"):
+        eval_context = _build_eval_context(state, existing_tests)
 
-    prompt = await create_appropriate_prompt(
-        state,
-        existing_tests,
-        history,
-        used_columns,
-        raw_parser.get_format_instructions(),
-        constraints_hint=constraints,
-        excluded_columns=excluded_col_names,
-        eval_context=eval_context,
-    )
+        prompt = await create_appropriate_prompt(
+            state,
+            existing_tests,
+            history,
+            used_columns,
+            format_instructions,
+            constraints_hint=constraints,
+            excluded_columns=excluded_col_names,
+            eval_context=eval_context,
+        )
     if prompt is None:
         return None, None
 

@@ -474,7 +474,7 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
 ⚠️ **Toute casse incorrecte dans les noms de tables sera considérée comme une erreur.**
 ⚠️ **Les clés de `data` doivent être `{dataset}_{table}` (ex. `covid19_open_data_covid19_open_data`), jamais le nom court seul (ex. `covid19_open_data`).**
 
-Répondez uniquement avec l'objet JSON demandé, sans texte additionnel."""
+Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans clôture markdown** (pas de ```json ni de backticks autour de l'objet)."""
     )
 
     system_msg = SystemMessage(content=system_message_content)

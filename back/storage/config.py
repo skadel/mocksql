@@ -97,7 +97,11 @@ def get_llm_thinking_level() -> str | None:
 
 def get_llm_thinking_budget() -> int | None:
     cfg = load_config()
-    val = cfg.get("llm", {}).get("thinking_budget") or os.getenv("LLM_THINKING_BUDGET")
+    # Ne pas utiliser `or` : thinking_budget=0 (désactivation du thinking Gemini)
+    # est falsy et serait écrasé par le fallback env. Distinguer "absent" de 0.
+    val = cfg.get("llm", {}).get("thinking_budget")
+    if val is None:
+        val = os.getenv("LLM_THINKING_BUDGET")
     if val is None:
         return None
     try:

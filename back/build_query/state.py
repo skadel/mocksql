@@ -69,6 +69,11 @@ class QueryState(TypedDict):
     evaluation_feedback: Optional[
         str
     ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows"
+    empty_results_regen: Optional[
+        bool
+    ]  # set by test_evaluator: DuckDB returned 0 rows → route straight to generator
+    # for a holistic regeneration (targeting the failing CTE), bypassing the
+    # conversational_agent's single-field patching which cannot fix 0-row queries.
     reevaluation_context: Optional[
         str
     ]  # set by conversational_agent when it suspects the evaluation was wrong; triggers LLM re-eval in test_evaluator
