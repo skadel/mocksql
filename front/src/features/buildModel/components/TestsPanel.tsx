@@ -922,7 +922,7 @@ function TestCard({
           })}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 'auto' }}>
             <Tooltip title="Replier ce test">
-              <MutedIconButton size="small" onClick={onToggleCollapse}>
+              <MutedIconButton size="small" data-testid={`collapse-test-${idx + 1}`} onClick={onToggleCollapse}>
                 <ExpandLessIcon sx={{ fontSize: 15 }} />
               </MutedIconButton>
             </Tooltip>
