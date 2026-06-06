@@ -544,10 +544,14 @@ class ResetModelRequest(BaseModel):
 @router.post("/dev/reset-model")
 async def dev_reset_model_route(body: ResetModelRequest):
     """Supprime les tests et l'historique d'un modèle — usage démo/dev uniquement."""
-    from storage.test_repository import get_test, delete_test
+    from storage.test_repository import list_tests, delete_test
     from models.message_service import delete_all_messages
 
-    test = get_test(body.model_name, body.model_name) or {}
+    # Le fichier de test est indexé par model_name (test_id est un UUID interne).
+    # On le récupère donc directement par model_name, pas par session_id, sinon le
+    # lookup échoue silencieusement et le reset ne supprime rien (état accumulé).
+    tests = list_tests(body.model_name)
+    test = tests[0] if tests else {}
     session_id = test.get("test_id")
     if session_id:
         await delete_all_messages(session_id)
