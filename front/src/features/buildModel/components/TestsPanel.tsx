@@ -345,6 +345,7 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
 /* ─── ResultWithAssertions ───────────────────────────────────────── */
 interface AssertionItem {
   description: string;
+  expected_condition?: string;
   sql?: string;
   passed: boolean;
   failing_rows?: any[];
@@ -360,6 +361,7 @@ function AssertionRow({ a, expanded, onToggle, onDelete }: {
   const statusColor = a.passed ? '#23a26d' : '#d0503f';
   const statusBg    = a.passed ? '#eaf5f0' : '#fbeceb';
   const failCount   = a.failing_rows?.length ?? 0;
+  const [showSql, setShowSql] = useState(false);
   return (
     <Box sx={{ borderTop: '1px solid #eff3f4', '&:first-of-type': { borderTop: 'none' } }}>
       <Box onClick={onToggle} sx={{ p: '8px 12px', display: 'flex', alignItems: 'center', gap: 1.25, cursor: 'pointer', '&:hover': { bgcolor: '#fafcfc' } }}>
@@ -388,9 +390,30 @@ function AssertionRow({ a, expanded, onToggle, onDelete }: {
               {failCount} ligne{failCount > 1 ? 's' : ''} en échec
             </Typography>
           )}
+          {a.expected_condition && (
+            <Box sx={{ mb: 1 }}>
+              <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
+                Condition attendue (vraie pour chaque ligne)
+              </Typography>
+              <Box component="pre" sx={{ m: 0, p: '8px 10px', fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#eef2f3', borderRadius: '7px', overflowX: 'auto', color: '#2b3b3e', lineHeight: 1.5, border: '1px solid #dce4e6' }}>
+                {a.expected_condition}
+              </Box>
+            </Box>
+          )}
           {a.sql && (
-            <Box component="pre" sx={{ m: 0, mb: 1, p: '8px 10px', fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#eef2f3', borderRadius: '7px', overflowX: 'auto', color: '#2b3b3e', lineHeight: 1.5, border: '1px solid #dce4e6' }}>
-              {a.sql}
+            <Box sx={{ mb: 1 }}>
+              <Box component="button" onClick={(e) => { e.stopPropagation(); setShowSql((v) => !v); }}
+                sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', p: 0, mb: showSql ? 0.5 : 0, border: 'none', bgcolor: 'transparent', color: MUTED, cursor: 'pointer', fontFamily: 'inherit', fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.04em', '&:hover': { color: INK } }}>
+                <Box sx={{ transform: showSql ? 'rotate(0deg)' : 'rotate(-90deg)', transition: 'transform 0.15s', display: 'inline-flex' }}>
+                  <ExpandMoreIcon sx={{ fontSize: 13 }} />
+                </Box>
+                Requête de validation
+              </Box>
+              {showSql && (
+                <Box component="pre" sx={{ m: 0, p: '8px 10px', fontSize: 11, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#f4f6f7', borderRadius: '7px', overflowX: 'auto', color: MUTED, lineHeight: 1.5, border: '1px solid #e6ebec' }}>
+                  {a.sql}
+                </Box>
+              )}
             </Box>
           )}
           <Box component="button" onClick={onDelete}

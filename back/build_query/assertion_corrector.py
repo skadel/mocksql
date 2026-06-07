@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 class _Assertion(BaseModel):
     description: str
-    sql: str
+    expected_condition: str
 
 
 class _ImprovedAssertions(BaseModel):
@@ -126,17 +126,24 @@ Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
 - Quel comportement SQL cette requête doit-elle vraiment vérifier ?
 - Quelles invariants métier peuvent être testés sur ce résultat ?
 
-Génère 2 à 3 nouvelles assertions SQL qui VÉRIFIENT RÉELLEMENT la logique métier.
+Génère 2 à 3 nouvelles assertions qui VÉRIFIENT RÉELLEMENT la logique métier.
+
+Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
+être VRAIE pour chaque ligne quand le test réussit. **Tu n'écris PAS de SQL `SELECT`/`WHERE` et tu
+n'écris JAMAIS la négation** — MockSQL négocie ta condition lui-même pour produire la requête de
+validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue, à l'affirmative.
 
 Règles strictes :
-- Convention dbt-style : 0 ligne si OK, des lignes si KO
-- Évite les tautologies : "WHERE col = valeur_unique" passe toujours pour un résultat à 1 ligne
+- Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`, écris
+  `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`. "Vérifier ce qui
+  ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
+- N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
+- Évite les tautologies : une condition que toute ligne satisfait forcément ne teste rien.
 - Teste le COMPORTEMENT de la requête (MAX, MIN, agrégation, jointure, classement, filtrage)
-- INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Toutes tes assertions doivent uniquement lire `__result__`. Pas de sous-requête vers une table source, même pour vérifier un MAX. Exemple interdit : `SELECT ... FROM ma_table_source ...`
-- Pour vérifier un MAX : compare les colonnes de `__result__` entre elles via des sous-requêtes sur `__result__` uniquement, ex. : `SELECT * FROM __result__ WHERE val != (SELECT MAX(val) FROM __result__)`
+- INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Pas de sous-requête vers une table source.
+- Pour vérifier un MAX : compare les colonnes de `__result__` entre elles via une sous-requête sur
+  `__result__` uniquement, ex. : `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`
 - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse)
-- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
-  `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
 
 Puis évalue la qualité de ces nouvelles assertions :
 - `verdict` : "Excellent", "Bon", ou "Insuffisant"
@@ -228,6 +235,7 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
 
     # Evaluate new assertions against __result__ rebuilt from results_json
     from build_query.examples_executor import (
+        _assertion_to_executable,
         _evaluate_assertions_with_retry,
         _fix_logically_failing_assertions,
     )
@@ -250,7 +258,8 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
                 test_description=current_test.get("unit_test_description", ""),
             )
             assertion_results = await _evaluate_assertions_with_retry(
-                [a.model_dump() for a in improved.assertions], **retry_kwargs
+                [_assertion_to_executable(a) for a in improved.assertions],
+                **retry_kwargs,
             )
             assertion_results = await _fix_logically_failing_assertions(
                 assertion_results, **retry_kwargs

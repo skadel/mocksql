@@ -22,6 +22,7 @@ from build_query.examples_executor import (
     _determine_global_status,
     _decompose_cte_in_steps,
     _evaluate_assertions,
+    _assertion_sql_from_condition,
     _parse_unit_tests_from_state,
     _prepare_test_data,
     format_result,
@@ -441,6 +442,60 @@ class TestEvaluateAssertions:
         results = _evaluate_assertions(assertions, "v_result4", con)
         assert results[0]["passed"] is True
         assert results[1]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# _assertion_sql_from_condition — wrapper "condition positive" → dbt failing-rows
+# ---------------------------------------------------------------------------
+
+
+class TestAssertionSqlFromCondition:
+    """Le LLM exprime une condition positive (vérité métier attendue sur chaque
+    ligne) ; MockSQL la négocie mécaniquement en requête dbt-style (0 ligne = OK).
+    Le LLM n'écrit jamais de `!=`/`NOT` inversé — la négation est gérée ici."""
+
+    def test_wraps_positive_condition(self):
+        sql = _assertion_sql_from_condition("date = '2016-01-02'")
+        assert sql == "SELECT * FROM __result__ WHERE (date = '2016-01-02') IS NOT TRUE"
+
+    def test_strips_whitespace_and_trailing_semicolon(self):
+        sql = _assertion_sql_from_condition("  amount > 0 ;  ")
+        assert sql == "SELECT * FROM __result__ WHERE (amount > 0) IS NOT TRUE"
+
+    def test_condition_with_subquery_on_result(self):
+        cond = "z_score = (SELECT MAX(z_score) FROM __result__)"
+        sql = _assertion_sql_from_condition(cond)
+        assert sql == f"SELECT * FROM __result__ WHERE ({cond}) IS NOT TRUE"
+
+    def test_passes_when_all_rows_satisfy(self, con):
+        # amount est strictement positif sur toutes les lignes de la fixture
+        sql = _assertion_sql_from_condition("amount > 0")
+        results = _evaluate_assertions(
+            [{"description": "montant positif", "sql": sql}], "__result__", con
+        )
+        assert results[0]["passed"] is True
+        assert results[0]["failing_rows"] == []
+
+    def test_fails_when_some_rows_violate(self, con):
+        # value vaut 'b' sur 2 lignes → la condition positive value = 'a' est violée
+        sql = _assertion_sql_from_condition("value = 'a'")
+        results = _evaluate_assertions(
+            [{"description": "value vaut a", "sql": sql}], "__result__", con
+        )
+        assert results[0]["passed"] is False
+        assert len(results[0]["failing_rows"]) == 2
+
+    def test_null_counts_as_violation(self):
+        # IS NOT TRUE (et non NOT (...)) : un NULL là où on attend une valeur est une violation
+        c = duckdb.connect()
+        c.execute("CREATE TABLE __result__ (id INTEGER, value TEXT)")
+        c.execute("INSERT INTO __result__ VALUES (1, 'a'), (2, NULL)")
+        sql = _assertion_sql_from_condition("value = 'a'")
+        results = _evaluate_assertions(
+            [{"description": "value vaut a", "sql": sql}], "__result__", c
+        )
+        assert results[0]["passed"] is False
+        assert len(results[0]["failing_rows"]) == 1  # la ligne NULL
 
 
 # ---------------------------------------------------------------------------
