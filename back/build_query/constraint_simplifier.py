@@ -2750,3 +2750,64 @@ def extract_volume_hints(sql: str, dialect: str = "bigquery") -> list[VolumeHint
             )
 
     return hints
+
+
+# Aggregates whose value is silently inflated when an unintended many-to-many JOIN
+# multiplies rows (cartesian fan-out). COUNT is included, but a DISTINCT argument
+# makes any of these robust to duplication, so DISTINCT aggregates are excluded.
+_FANOUT_SENSITIVE_AGGS = frozenset(
+    {
+        "AVG",
+        "SUM",
+        "COUNT",
+        "STDDEV",
+        "STDDEV_POP",
+        "STDDEV_SAMP",
+        "VARIANCE",
+        "VAR_POP",
+        "VAR_SAMP",
+        "CORR",
+        "COVAR_POP",
+        "COVAR_SAMP",
+    }
+)
+
+
+def detect_fanout_risk(sql: str, dialect: str = "bigquery") -> list[str]:
+    """Return joined table/alias names when the query combines a JOIN with a
+    row-multiplication-sensitive aggregate (AVG/SUM/STDDEV/CORR/…).
+
+    An unintended many-to-many JOIN duplicates rows and silently inflates these
+    aggregates — the spurious-correlation / cartesian-product failure (bq143).
+    DISTINCT aggregates (e.g. ``COUNT(DISTINCT …)``) are robust to duplication and
+    are not flagged. Returns ``[]`` when there is no join, no sensitive aggregate,
+    or the SQL cannot be parsed.
+    """
+    if not sql:
+        return []
+    try:
+        tree = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return []
+    if tree is None:
+        return []
+
+    joins = list(tree.find_all(exp.Join))
+    if not joins:
+        return []
+
+    has_sensitive_agg = any(
+        agg.sql_name() in _FANOUT_SENSITIVE_AGGS and agg.find(exp.Distinct) is None
+        for agg in tree.find_all(exp.AggFunc)
+    )
+    if not has_sensitive_agg:
+        return []
+
+    names: list[str] = []
+    for j in joins:
+        name = j.this.alias_or_name if j.this is not None else ""
+        if name:
+            names.append(name)
+    return names

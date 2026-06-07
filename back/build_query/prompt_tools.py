@@ -345,6 +345,31 @@ def _build_volume_hints_block(sql: str, dialect: str = "bigquery") -> str:
     return "\n".join(lines) + "\n"
 
 
+def _build_fanout_hint_block(sql: str, dialect: str = "bigquery") -> str:
+    """Warn the generator about fan-out risk when a JOIN feeds a row-multiplication
+    sensitive aggregate (AVG/SUM/STDDEV/CORR…). Steers toward unique dimension-side
+    join keys so an accidental many-to-many doesn't inflate the aggregate (bq143)."""
+    if not sql:
+        return ""
+    try:
+        from build_query.constraint_simplifier import detect_fanout_risk
+
+        tables = detect_fanout_risk(sql, dialect)
+    except Exception:
+        return ""
+    if not tables:
+        return ""
+    tables_str = ", ".join(f"`{t}`" for t in tables)
+    return (
+        "\n⚠️ **Risque de fan-out (multiplication de lignes)** : cette requête agrège "
+        "(AVG/SUM/STDDEV/CORR…) au-dessus d'une ou plusieurs jointures "
+        f"({tables_str}). Si une clé de jointure n'est pas **unique** côté table jointe, "
+        "chaque ligne est dupliquée et l'agrégat est faussé (produit cartésien involontaire). "
+        "Génère des clés de jointure **uniques côté table de dimension** — au plus une ligne "
+        "par valeur de clé — sauf si le test vise explicitement une relation un-à-plusieurs.\n"
+    )
+
+
 def generate_data_prompt(
     history: list[BaseMessage],
     dialect: str,
@@ -414,6 +439,8 @@ def generate_data_prompt(
 
     volume_hints_block = _build_volume_hints_block(sql, dialect)
 
+    fanout_hint_block = _build_fanout_hint_block(sql, dialect)
+
     if user_instruction:
         consignes_1_2 = """\
 1. **Respectez l'instruction utilisateur** : le test doit implémenter exactement le scénario décrit
@@ -447,7 +474,7 @@ Vous êtes un data QA, testeur de requêtes SQL et expert en génération de don
 Analysez la requête SQL et le schéma des données sources fournis,
 puis générez un unique test unitaire en format JSON.
 
-{context_block}{trace_hint_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}
+{context_block}{trace_hint_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}{fanout_hint_block}
 
 **Consignes principales :**
 """
@@ -476,7 +503,8 @@ puis générez un unique test unitaire en format JSON.
 9. **Conditions OR / groupes de contraintes multiples** : quand le SQL contient plusieurs branches alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** par test et construire des données qui satisfont uniquement cette branche. Ne pas essayer de couvrir plusieurs alternatives à la fois. La description doit nommer explicitement la branche choisie (ex. "Pour un utilisateur premium …" plutôt que "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les autres branches alimentent les suggestions.
 10. **Heuristiques Métier Obligatoires** :
     - **Règle Agrégation** : Si le SQL contient COUNT()/AVG()/STDDEV()/CORR() ou d'autres agrégats GROUP BY, générez plusieurs lignes qui partagent la **même valeur de clé GROUP BY** pour que COUNT > 1 par groupe. Exemple : si GROUP BY date, insérez 3 lignes avec `date = '2024-01-01'` et 2 lignes avec `date = '2024-01-02'` — NE PAS générer une date différente pour chaque ligne, ce qui donnerait COUNT=1 partout et STDDEV=0. Si la requête utilise ORDER BY + OFFSET sur le résultat agrégé, assurez-vous que les COUNT sont tous différents pour que l'OFFSET retourne toujours la même ligne (ex: counts = 3, 2, 1 — pas 3, 1, 1, 1 qui créent un ex æquo).
-    - **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles.
+    - **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles. Si l'agrégat porte sur une jointure, gardez la clé **unique côté table de dimension** (au plus une ligne par valeur de clé) pour éviter qu'un many-to-many involontaire ne multiplie les lignes et ne fausse l'agrégat.
+    - **Règle Cohérence inter-tables** : les valeurs partagées entre tables — clés de jointure, mais aussi les littéraux des filtres (année, dates, statuts, devises) — doivent être **cohérentes dans toutes les tables**. Si la requête filtre sur 2017, ne mettez aucune donnée 2016 ; si une dimension référence un pays, ses mesures (population, montants) doivent être plausibles pour ce pays. Une valeur cohérente sur une table mais incohérente avec les autres rend le test invalide.
     - **Règle Cas Limites** : Ne testez qu'une seule branche OR ou CASE WHEN à la fois.
 
 **Ce que cet outil NE doit PAS tester** (laisser au moteur de warehouse) :
@@ -635,10 +663,11 @@ def update_data_prompt(
         existing_test_block = f"\nTest à modifier :\n```json\n{_format_unit_tests_for_generator([existing_test])}\n```\n"
 
     volume_hints_block = _build_volume_hints_block(sql, dialect)
+    fanout_hint_block = _build_fanout_hint_block(sql, dialect)
 
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{volume_hints_block}{existing_test_block}
+{sql_block}{volume_hints_block}{fanout_hint_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>

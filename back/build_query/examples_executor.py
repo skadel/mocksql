@@ -32,6 +32,23 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 logger = logging.getLogger(__name__)
 
 
+def _assertion_sql_from_condition(expected_condition: str) -> str:
+    """Wrappe une condition positive (vérité métier qui doit tenir sur chaque ligne)
+    en requête dbt-style retournant les lignes VIOLANTES (0 ligne = OK).
+
+    Le LLM exprime l'affirmation attendue (ex. ``date = '2016-01-02'``) ; la négation
+    est gérée ici, mécaniquement — le LLM n'écrit donc jamais d'assertion inversée
+    (``!=`` / ``NOT``), ce qui supprime les inversions par erreur et garde la
+    description lisible comme une affirmation.
+
+    On utilise ``IS NOT TRUE`` (et non ``NOT (...)``) pour que les NULL comptent comme
+    violations : ``NOT(NULL)`` vaut NULL et laisserait passer un NULL là où une valeur
+    est attendue, alors que ``(NULL) IS NOT TRUE`` est vrai → la ligne est remontée.
+    """
+    cond = expected_condition.strip().rstrip(";").strip()
+    return f"SELECT * FROM __result__ WHERE ({cond}) IS NOT TRUE"
+
+
 class _Assertion(BaseModel):
     description: str = Field(
         description=(
@@ -43,7 +60,23 @@ class _Assertion(BaseModel):
             "'COALESCE(amount, 0) != NULL dans la CTE finale'."
         )
     )
-    sql: str
+    expected_condition: str = Field(
+        description=(
+            "Condition booléenne SQL POSITIVE qui doit être VRAIE pour chaque ligne "
+            "de `__result__` quand le test réussit — l'affirmation métier attendue, "
+            "exprimée directement (jamais sa négation). MockSQL la négocie lui-même "
+            "pour produire la requête de validation. "
+            "✓ Bon : `date = '2016-01-02'`, `amount > 0`, "
+            "`z_score = (SELECT MAX(z_score) FROM __result__)`. "
+            "✗ INTERDIT : tout `!=`, `<>`, `NOT IN`, `NOT (...)` ou `IS NULL` "
+            "destiné à 'vérifier ce qui ne doit PAS être là' — exprime la vérité "
+            "positive à la place (au lieu de `date != '2016-01-02'`, écris "
+            "`date = '2016-01-02'`). "
+            "Utilise UNIQUEMENT les colonnes du schéma de `__result__` (casse exacte) "
+            "et, si besoin d'une valeur relative, une sous-requête sur `__result__` "
+            "uniquement. N'inclus pas `SELECT`/`WHERE` — seulement l'expression booléenne."
+        )
+    )
 
 
 class _AssertionFix(BaseModel):
@@ -86,6 +119,19 @@ class _AssertionsAndEvaluation(BaseModel):
                 affected_ctes=[],
             )
         return self
+
+
+def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
+    """Convertit une assertion générée (condition positive) en dict exécutable aval.
+
+    Conserve `description` et `expected_condition` (forme positive, pour l'UI/transparence)
+    et dérive `sql` — l'artefact dbt-style réellement exécuté par `_evaluate_assertions`.
+    """
+    return {
+        "description": a.description,
+        "expected_condition": a.expected_condition,
+        "sql": _assertion_sql_from_condition(a.expected_condition),
+    }
 
 
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
@@ -982,8 +1028,8 @@ Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
   `WHERE col IS NULL` (colonne jamais nulle), `WHERE 1=0`, ou un `NOT IN (...)` dont la liste englobe tous les
   cas possibles sauf un. Si toutes les assertions sont triviales et ne vérifient aucune valeur concrète ou invariant
   réel du résultat, c'est `bad_assertions`.
-  Une bonne assertion pince soit la valeur exacte retournée (`WHERE date != '2026-03-07'`), soit un invariant
-  structurel observable (`WHERE z_score = (SELECT MAX(z_score) FROM __result__)`).
+  Une bonne assertion pince soit la valeur exacte retournée (condition `date = '2026-03-07'`), soit un invariant
+  structurel observable (condition `z_score = (SELECT MAX(z_score) FROM __result__)`).
 - Si la requête utilise ORDER BY + LIMIT ou OFFSET : est-ce que plusieurs lignes ont exactement la même
   valeur de tri à la position retournée ? Si oui, le résultat est non-déterministe (ex : 3 groupes avec
   le même COUNT → même Z-score → OFFSET 1 retourne n'importe lequel) → `bad_data`. La correction est
@@ -991,20 +1037,26 @@ Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
 
 Puis produis :
 
-1. Entre 1 et plusieurs assertions SQL dbt-style sur `__result__` — autant que nécessaire pour valider ce scénario (1 suffit si le test est simple, plusieurs si la requête couvre plusieurs calculs ou cas).
-   - Convention : 0 ligne si OK, des lignes si KO.
+1. Entre 1 et plusieurs assertions sur `__result__` — autant que nécessaire pour valider ce scénario (1 suffit si le test est simple, plusieurs si la requête couvre plusieurs calculs ou cas).
+   Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
+   être VRAIE pour chaque ligne quand le test réussit. **Tu n'écris PAS de SQL `SELECT`/`WHERE` et tu
+   n'écris JAMAIS la négation** — MockSQL négocie lui-même ta condition pour produire la requête de
+   validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue, à l'affirmative.
+   - Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`,
+     écris `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`.
+     "Vérifier ce qui ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
    - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse).
-   - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Pour vérifier un MAX ou une valeur relative, utilise une sous-requête sur `__result__` uniquement : `SELECT * FROM __result__ WHERE val != (SELECT MAX(val) FROM __result__)`
-   - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête :
-     `SELECT * FROM (SELECT *, expr AS col FROM __result__) WHERE col ...`
-   - INTERDIT — assertions triviales (retournent toujours 0 ligne quelle que soit la valeur du résultat) :
-     ✗ `WHERE col IS NULL` si les exemples ci-dessus montrent des valeurs non-nulles pour cette colonne
-     ✗ `WHERE COUNT(*) = 0` ou `WHERE 1=0` (tautologies)
-     ✗ `WHERE col NOT IN (...)` si la liste couvre toutes les valeurs possibles sauf l'impossible
-     Une assertion triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
-   - OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une assertion qui vérifie
+   - N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
+     Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
+     `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`.
+   - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`.
+   - INTERDIT — conditions triviales (toujours vraies quelle que soit la valeur du résultat) :
+     ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
+     ✗ une condition basée sur `IS NOT NULL` d'une colonne déjà non-nulle dans les exemples
+     Une condition triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
+   - OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une condition qui pince
      la VALEUR CONCRÈTE retournée. Utilise les "Exemples de lignes" pour identifier le résultat attendu.
-     Exemple : si `__result__` contient `{{"date": "2026-01-02"}}`, l'assertion est `WHERE date != '2026-01-02'`.
+     Exemple : si `__result__` contient `{{"date": "2026-01-02"}}`, écris `expected_condition: "date = '2026-01-02'"`.
      Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
 
 2. Le verdict de qualité :
@@ -1070,10 +1122,10 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
         )
         for i, a in enumerate(result.assertions):
             logger.diag(
-                "[assertions_eval] [%d] %s | sql: %s",
+                "[assertions_eval] [%d] %s | condition: %s",
                 i,
                 a.description,
-                a.sql,
+                a.expected_condition,
             )
         return result
     except Exception as e:
@@ -1176,6 +1228,7 @@ def _evaluate_assertions(
             results.append(
                 {
                     "description": a.get("description", ""),
+                    "expected_condition": a.get("expected_condition", ""),
                     "sql": a.get("sql", ""),
                     "passed": passed,
                     "failing_rows": fail_df.to_dict(orient="records")
@@ -1187,6 +1240,7 @@ def _evaluate_assertions(
             results.append(
                 {
                     "description": a.get("description", ""),
+                    "expected_condition": a.get("expected_condition", ""),
                     "sql": a.get("sql", ""),
                     "passed": False,
                     "error": str(e),
