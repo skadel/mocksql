@@ -1096,6 +1096,82 @@ def _qualify_group_order_by_aliases(tree: exp.Expression) -> None:
                     ordered.set("this", alias_map[inner.name.lower()].copy())
 
 
+_COL_N_RE = re.compile(r"^_col_\d+$")
+
+
+def _sanitize_alias(name: str) -> str:
+    """Lowercase + collapse non-alphanumerics to single underscores."""
+    name = re.sub(r"[^0-9a-zA-Z]+", "_", name).strip("_").lower()
+    return name or "col"
+
+
+def _derive_projection_alias(expr: exp.Expression) -> Optional[str]:
+    """Readable alias for an unnamed/opaque final-SELECT projection, or None to
+    leave it as-is. Functions become `<fn>_<firstcol>` (e.g. AVG(corr) -> avg_corr);
+    bare columns and complex expressions are left untouched."""
+    inner = expr.this if isinstance(expr, exp.Alias) else expr
+    if isinstance(inner, (exp.Column, exp.Star)):
+        return None  # already carries a meaningful name
+    if isinstance(inner, exp.Func):
+        fname = (inner.sql_name() or "").lower()
+        if not fname:
+            return None
+        col = inner.find(exp.Column)
+        return _sanitize_alias(f"{fname}_{col.name}" if col is not None else fname)
+    return None  # arithmetic / CASE / etc. — don't guess, keep _col_N
+
+
+def _alias_unnamed_final_projections(tree: exp.Expression) -> None:
+    """Give the OUTERMOST select's unnamed or `_col_N`-aliased projections a
+    readable alias derived from the expression, so the result schema and the
+    assertions generated on it use business-legible names instead of `_col_1`.
+
+    Inner CTE/subquery projections are left alone (referenced elsewhere). ORDER BY
+    / GROUP BY / HAVING / QUALIFY references to a renamed `_col_N` alias in the same
+    select are updated to keep the query valid.
+    """
+    if not isinstance(tree, exp.Select):
+        return  # UNION / non-select roots: leave untouched
+
+    used: set[str] = set()
+    for proj in tree.expressions:
+        if isinstance(proj, exp.Alias) and not _COL_N_RE.match(proj.alias):
+            used.add(proj.alias.lower())
+        elif isinstance(proj, exp.Column):
+            used.add(proj.name.lower())
+
+    renames: dict[str, str] = {}  # old _col_N name -> new name
+    for proj in tree.expressions:
+        is_col_n = isinstance(proj, exp.Alias) and bool(_COL_N_RE.match(proj.alias))
+        is_unnamed = not isinstance(proj, (exp.Alias, exp.Column, exp.Star))
+        if not (is_col_n or is_unnamed):
+            continue
+        base = _derive_projection_alias(proj)
+        if not base:
+            continue
+        new = base
+        i = 2
+        while new.lower() in used:
+            new = f"{base}_{i}"
+            i += 1
+        used.add(new.lower())
+        if is_col_n:
+            renames[proj.alias] = new
+            proj.set("alias", exp.to_identifier(new))
+        else:
+            proj.replace(exp.alias_(proj.copy(), new))
+
+    # Keep references to renamed _col_N aliases in sync (same select only).
+    if renames:
+        for key in ("order", "group", "having", "qualify"):
+            clause = tree.args.get(key)
+            if clause is None:
+                continue
+            for col in clause.find_all(exp.Column):
+                if not col.table and col.name in renames:
+                    col.set("this", exp.to_identifier(renames[col.name]))
+
+
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
@@ -1103,6 +1179,7 @@ async def parse_test_query(query, suffix, dialect):
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     _qualify_group_order_by_aliases(tree)
     _fix_group_by_strict_mode(tree)
+    _alias_unnamed_final_projections(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
