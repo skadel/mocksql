@@ -110,7 +110,7 @@ Les requêtes ne sont **jamais** exécutées sur BigQuery ou Postgres — unique
 | Couche     | Technologie                                              |
 | ---------- | -------------------------------------------------------- |
 | Backend    | Python 3.12 · FastAPI · LangGraph · LangChain            |
-| LLM        | VertexAI (Google Cloud)                                  |
+| LLM        | VertexAI (Google Cloud) — **gemini-2.5-flash / pro** (thinking natif requis) |
 | SQL        | DuckDB (exécution locale) · BigQuery / Postgres (source) |
 | SQL parse  | `sqlglot`                                                |
 | Base       | PostgreSQL (Cloud SQL)                                   |
@@ -434,6 +434,7 @@ App
 - `failing_cte` : quand DuckDB retourne 0 lignes, un **CTE trace** identifie la première CTE vide — le générateur cible alors uniquement cette CTE pour la correction.
 - **Verdict vs statut d'exécution** : `verdict` (`good`/`warn`/`bad`) mesure la *qualité du test* (logique, assertions), `execStatus` (`pass`/`fail`) mesure si DuckDB a retourné le résultat attendu. Ne pas confondre — les deux coexistent sur le même test.
 - **`evaluation_feedback`** : quand le verdict est `Insuffisant`, `test_evaluator` classifie la cause en `"bad_data"` (données incorrectes → relance via `conversational_agent`) ou `"bad_assertions"` (assertions mal définies → pas de relance automatique). Ce champ est dans `QueryState` et est utilisé par `route_after_evaluate`.
+- **Modèle LLM & raisonnement (`is_native_thinking_active`)** : MockSQL est optimisé pour **gemini-2.5-flash / pro**, où le thinking natif Gemini est activé par défaut. `storage/config.py:is_native_thinking_active()` combine le réglage explicite (`thinking_budget`/`thinking_level`) et le défaut du modèle (flash/pro = ON, flash-lite = OFF). Quand le thinking est actif, le champ `unit_test_build_reasoning` n'est qu'une **justification brève (1 phrase)** — le vrai raisonnement se fait dans le canal thinking, hors du JSON de sortie → pas de risque de troncature. Quand il est inactif (flash-lite, ou `thinking_budget: 0`), le champ porte un **chain-of-thought complet (3 phrases max)** comme seul raisonnement, et le générateur logue un warning poussant vers flash/pro. La bascule pilote à la fois le schéma Pydantic (`get_generation_output_type`) et le prompt (`generate_data_prompt`, paramètre `native_thinking`).
 - **Profil statistique enrichi** : le profil stocké peut désormais contenir des `derived_expressions` (expressions SQL non-triviales profilées sur les données réelles, ex : `SAFE_CAST`, `REGEXP_EXTRACT`) injectées dans le prompt de génération via `_format_profile_block`. Les JOINs profilés peuvent inclure un `right_filter` et des `left_cte_sql`/`right_cte_sql` pour contextualiser les cardinalités.
 - **Auto-import per projet** : l'auto-import silencieux de tables manquantes peut être activé globalement (`localStorage.autoImport_always`) ou par projet (`localStorage.autoImport_project_{projectId}`). Les deux flags sont vérifiés dans `QueryChatComponent`.
 - **Coverage score** : calculé côté front à partir des titres/tags des tests ; le backend n'a pas à le connaître. Les 6 axes sont des heuristiques regex sur le texte des tests.

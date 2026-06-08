@@ -18,7 +18,7 @@ from utils.examples import (
 )
 from utils.faker_fill import generate_faker_rows
 from utils.llm_factory import make_llm
-from storage.config import get_llm_model
+from storage.config import get_llm_model, is_native_thinking_active
 from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
@@ -74,7 +74,7 @@ _OP_LABELS = {
 
 _simplify_cache: dict[tuple[str, str], object] = {}
 _hint_cache: dict[tuple[str, str], str] = {}
-_output_type_cache: dict[tuple[str, bool], object] = {}
+_output_type_cache: dict[tuple[str, bool, bool], object] = {}
 _SIMPLIFY_CACHE_MAXSIZE = 64
 
 
@@ -689,18 +689,35 @@ async def generate_examples_(
             excluded_col_names,
         )
 
+    # Modèle recommandé (flash/pro) : le thinking natif porte le raisonnement →
+    # le champ in-schema n'est qu'une justification brève. Sinon, fallback sur un
+    # CoT in-schema complet (fonctionnel mais plus lent + risque de troncature) :
+    # on prévient l'ingé pour qu'il bascule sur flash/pro.
+    native_thinking = is_native_thinking_active()
+    if not native_thinking:
+        logger.warning(
+            "[generator] thinking natif inactif (modèle=%s) — MockSQL est optimisé "
+            "pour gemini-2.5-flash/pro avec thinking activé. Le raisonnement est "
+            "généré dans le JSON (plus lent, risque de troncature sur requêtes "
+            "complexes). Bascule sur flash/pro pour de meilleures performances.",
+            get_llm_model(),
+        )
+
     with timed("gen:pydantic"):
         # The dynamic Pydantic model depends only on the (constraint-annotated)
-        # schema and whether tests already exist — both stable across retries on
-        # the same SQL. Building it costs ~1s on wide schemas, so cache it.
+        # schema, whether tests already exist, and the reasoning mode — all stable
+        # across retries on the same SQL. Building it costs ~1s on wide schemas, so cache it.
         model_key = (
             json.dumps(llm_filtered_schema, sort_keys=True, default=str),
             bool(existing_tests),
+            native_thinking,
         )
         output_type = _output_type_cache.get(model_key)
         if output_type is None:
             data_model = create_pydantic_models(llm_filtered_schema)
-            output_type = get_generation_output_type(data_model, existing_tests)
+            output_type = get_generation_output_type(
+                data_model, existing_tests, native_thinking=native_thinking
+            )
             if len(_output_type_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
                 _output_type_cache.pop(next(iter(_output_type_cache)))
             _output_type_cache[model_key] = output_type
@@ -720,6 +737,7 @@ async def generate_examples_(
             constraints_hint=constraints,
             excluded_columns=excluded_col_names,
             eval_context=eval_context,
+            native_thinking=native_thinking,
         )
     if prompt is None:
         return None, None
@@ -812,17 +830,32 @@ async def generate_examples_(
     return {**generated, "test_index": test_index, "test_uid": test_uid}, test_index
 
 
-def get_generation_output_type(data_model, existing_tests):
-    reasoning_desc = (
-        "**3 phrases maximum.** Simulez mentalement la traversée des données à travers chaque CTE et filtre "
-        "du SQL : citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
-        "indiquez combien de lignes doivent survivre à chaque étape, et précisez la modification apportée par "
-        "rapport aux données existantes."
-        if existing_tests
-        else "**3 phrases maximum.** Simulez mentalement la traversée des données à travers chaque CTE et filtre "
-        "du SQL : citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs) "
-        "et indiquez combien de lignes doivent survivre à chaque étape."
-    )
+def get_generation_output_type(
+    data_model, existing_tests, native_thinking: bool = False
+):
+    if native_thinking:
+        # Le raisonnement détaillé est fait nativement (canal thinking) en amont :
+        # ce champ ne porte qu'une justification courte, persistée et réutilisée
+        # en aval (few-shot, suggestions). 1 phrase → coût output négligeable,
+        # pas de risque de troncature du JSON.
+        reasoning_desc = (
+            "**1 phrase maximum.** Justification courte du scénario : quelle clause "
+            "structurelle du SQL est ciblée et pourquoi les données la satisfont."
+        )
+    else:
+        # Pas de thinking natif : ce champ est le SEUL chain-of-thought disponible.
+        # Capé à 3 phrases pour rester sous la limite de tokens output (sinon le
+        # JSON peut être tronqué après ce champ sur requêtes complexes).
+        reasoning_desc = (
+            "**3 phrases maximum.** Simulez mentalement la traversée des données à travers chaque CTE et filtre "
+            "du SQL : citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
+            "indiquez combien de lignes doivent survivre à chaque étape, et précisez la modification apportée par "
+            "rapport aux données existantes."
+            if existing_tests
+            else "**3 phrases maximum.** Simulez mentalement la traversée des données à travers chaque CTE et filtre "
+            "du SQL : citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs) "
+            "et indiquez combien de lignes doivent survivre à chaque étape."
+        )
 
     return create_model(
         "UnitTestData",
@@ -876,6 +909,7 @@ async def create_appropriate_prompt(
     constraints_hint: str = "",
     excluded_columns: list[str] | None = None,
     eval_context: str = "",
+    native_thinking: bool = False,
 ):
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
@@ -893,6 +927,7 @@ async def create_appropriate_prompt(
             profile=profile,
             model_context=model_context,
             eval_context=eval_context,
+            native_thinking=native_thinking,
         )
     elif state.get("input", "").strip():
         if state.get("test_index") is not None:
@@ -924,6 +959,7 @@ async def create_appropriate_prompt(
             profile=profile,
             model_context=model_context,
             eval_context=eval_context,
+            native_thinking=native_thinking,
         )
     elif state.get("status") == "empty_results":
         failing_cte, cte_trace = _get_failing_cte_from_results(
@@ -943,6 +979,7 @@ async def create_appropriate_prompt(
             profile=profile,
             model_context=model_context,
             eval_context=combined_eval,
+            native_thinking=native_thinking,
         )
     else:
         return None
