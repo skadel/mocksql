@@ -5,7 +5,7 @@ from datetime import datetime, date
 from typing import List, Optional
 
 from langchain_core.output_parsers import PydanticOutputParser
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from models.schemas import get_schemas
 from pydantic import Field, create_model
 
@@ -276,26 +276,25 @@ def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
     return result_map
 
 
-def _build_eval_context(state, existing_tests: list) -> str:
-    """Build a context block for the generator when called after a bad_data evaluation."""
+def _build_eval_messages(state, existing_tests: list) -> list:
+    """Build few-shot messages for the generator when called after a bad_data evaluation.
+
+    Returns alternating [AIMessage(past_attempt_json), HumanMessage(duckdb_feedback), ...]
+    pairs to be inserted after the initial generation request in the conversation. The LLM
+    sees exactly what it generated, what DuckDB returned, and why it failed — in the native
+    human/ai conversation format rather than as a text description in the system prompt.
+    """
     if state.get("evaluation_feedback") != "bad_data":
-        return ""
+        return []
 
     messages = state.get("messages", [])
 
-    # Reconstruct history of failures for the current test_index
-    # The current test_index is the one being evaluated/regenerated.
-    # We find the target test_index from the latest EVALUATION message.
     eval_msgs = [m for m in messages if get_message_type(m) == MsgType.EVALUATION]
     if not eval_msgs:
-        return ""
+        return []
 
     target_test_idx = eval_msgs[-1].additional_kwargs.get("test_index")
-
-    history_blocks = []
-    iteration = 1
-
-    # Iterate through messages to pair RESULTS with their corresponding EVALUATION
+    result_msgs_out = []
     results_map = {m.id: m for m in messages if get_message_type(m) == MsgType.RESULTS}
 
     for eval_msg in eval_msgs:
@@ -304,53 +303,85 @@ def _build_eval_context(state, existing_tests: list) -> str:
 
         parent_id = eval_msg.additional_kwargs.get("parent")
         result_msg = results_map.get(parent_id)
+        if not result_msg:
+            continue
 
-        if result_msg:
-            try:
-                results_data = json.loads(result_msg.content)
-                if not isinstance(results_data, list):
-                    results_data = [results_data]
+        try:
+            results_data = json.loads(result_msg.content)
+            if not isinstance(results_data, list):
+                results_data = [results_data]
 
-                # Find the test case in the results
-                test_case = next(
-                    (
-                        t
-                        for t in results_data
-                        if str(t.get("test_index")) == str(target_test_idx)
+            test_case = next(
+                (
+                    t
+                    for t in results_data
+                    if str(t.get("test_index")) == str(target_test_idx)
+                ),
+                None,
+            )
+            if not test_case:
+                continue
+
+            # AI message: reproduce the exact JSON the generator produced so the LLM
+            # sees its own previous output in its native output format (few-shot)
+            ai_content = json.dumps(
+                {
+                    "unit_test_build_reasoning": test_case.get(
+                        "unit_test_build_reasoning", ""
                     ),
-                    None,
+                    "test_name": test_case.get("test_name", ""),
+                    "unit_test_description": test_case.get(
+                        "unit_test_description", ""
+                    ),
+                    "tags": test_case.get("tags", []),
+                    "data": test_case.get("data", {}),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+            # Human feedback: actual DuckDB output (no truncation) + verdict
+            status = test_case.get("status", "")
+            if status == "empty_results":
+                failing_cte = test_case.get("failing_cte", "")
+                output_str = (
+                    f"0 lignes — CTE bloquante : `{failing_cte}`"
+                    if failing_cte
+                    else "0 lignes retournées"
                 )
-                if test_case:
-                    input_data = test_case.get("data", {})
-                    try:
-                        input_summary = json.dumps(input_data, ensure_ascii=False)
-                        if len(input_summary) > 200:
-                            input_summary = input_summary[:200] + "...}"
-                    except Exception:
-                        input_summary = str(input_data)[:200]
-
-                    verdict_text = eval_msg.content.replace(
-                        "**Insuffisant** — ", ""
-                    ).strip()
-                    history_blocks.append(
-                        f"- **Itération {iteration}** : Données `{input_summary}` → Échec : {verdict_text}"
+            else:
+                raw_output = test_case.get("results_json", "[]")
+                try:
+                    parsed = (
+                        json.loads(raw_output)
+                        if isinstance(raw_output, str)
+                        else raw_output
                     )
-                    iteration += 1
-            except Exception:
-                pass
+                    output_str = json.dumps(parsed, ensure_ascii=False, indent=2)
+                except Exception:
+                    output_str = str(raw_output)
 
-    lines = [
-        "\n### ⚠️ Historique des tentatives échouées",
-        "Voici ce que vous avez déjà essayé sans succès. **NE REPRODUISEZ PAS LA MÊME APPROCHE.**",
-    ]
+            raw_verdict = eval_msg.content
+            verdict_label = "Insuffisant"
+            for label in ("Excellent", "Bon", "Insuffisant"):
+                if raw_verdict.startswith(f"**{label}**"):
+                    verdict_label = label
+                    break
+            verdict_detail = raw_verdict.replace(f"**{verdict_label}** — ", "").strip()
 
-    if history_blocks:
-        lines.extend(history_blocks)
+            human_feedback = (
+                f"Résultat DuckDB :\n{output_str}\n\n"
+                f"Verdict : {verdict_label} — {verdict_detail}\n\n"
+                f"Génère une nouvelle version avec une approche structurellement différente."
+            )
 
-    lines.append(
-        "\n**Consigne** : Si le changement des valeurs marginales ne fonctionne pas, repensez la **structure** (ex: ajoutez plus de lignes, modifiez la distribution des données pour contourner un filtre).\n"
-    )
-    return "\n".join(lines)
+            result_msgs_out.append(AIMessage(content=ai_content))
+            result_msgs_out.append(HumanMessage(content=human_feedback))
+
+        except Exception:
+            pass
+
+    return result_msgs_out
 
 
 def _get_failing_cte_from_results(messages) -> tuple:
@@ -726,7 +757,7 @@ async def generate_examples_(
         format_instructions = raw_parser.get_format_instructions()
 
     with timed("gen:prompt_build"):
-        eval_context = _build_eval_context(state, existing_tests)
+        eval_history = _build_eval_messages(state, existing_tests)
 
         prompt = await create_appropriate_prompt(
             state,
@@ -736,7 +767,7 @@ async def generate_examples_(
             format_instructions,
             constraints_hint=constraints,
             excluded_columns=excluded_col_names,
-            eval_context=eval_context,
+            eval_history=eval_history,
             native_thinking=native_thinking,
         )
     if prompt is None:
@@ -747,8 +778,10 @@ async def generate_examples_(
         _retry_label = f" RETRY (gen_retries={state.get('gen_retries')}, test_index={state.get('test_index')})"
     logger.diag("\n%s", "=" * 60)
     logger.diag("[generator]%s", _retry_label or " (première génération)")
-    if eval_context:
-        logger.diag("[generator] EVAL_CONTEXT injecté:\n%s", eval_context)
+    if eval_history:
+        logger.diag(
+            "[generator] EVAL_HISTORY injecté : %d message(s) few-shot", len(eval_history)
+        )
     logger.diag(
         "[generator] constraints_hint:\n%s",
         constraints or "(vide — sous-requêtes corrélées non capturées ?)",
@@ -908,7 +941,7 @@ async def create_appropriate_prompt(
     format_instructions,
     constraints_hint: str = "",
     excluded_columns: list[str] | None = None,
-    eval_context: str = "",
+    eval_history: list | None = None,
     native_thinking: bool = False,
 ):
     sql = state.get("optimized_sql", "")
@@ -926,7 +959,7 @@ async def create_appropriate_prompt(
             sql=stripped_sql,
             profile=profile,
             model_context=model_context,
-            eval_context=eval_context,
+            eval_history=eval_history,
             native_thinking=native_thinking,
         )
     elif state.get("input", "").strip():
@@ -946,7 +979,7 @@ async def create_appropriate_prompt(
                 sql=sql,
                 existing_test=existing_test,
                 model_context=model_context,
-                eval_context=eval_context,
+                eval_history=eval_history,
             )
         return generate_data_prompt(
             history,
@@ -958,7 +991,7 @@ async def create_appropriate_prompt(
             user_instruction=state["input"],
             profile=profile,
             model_context=model_context,
-            eval_context=eval_context,
+            eval_history=eval_history,
             native_thinking=native_thinking,
         )
     elif state.get("status") == "empty_results":
@@ -968,7 +1001,6 @@ async def create_appropriate_prompt(
         trace_hint = (
             _format_cte_trace_hint(failing_cte, cte_trace) if failing_cte else ""
         )
-        combined_eval = "\n\n".join(part for part in [eval_context, trace_hint] if part)
         return generate_data_prompt(
             history,
             dialect,
@@ -978,7 +1010,8 @@ async def create_appropriate_prompt(
             sql=stripped_sql,
             profile=profile,
             model_context=model_context,
-            eval_context=combined_eval,
+            trace_hint=trace_hint,
+            eval_history=eval_history,
             native_thinking=native_thinking,
         )
     else:
