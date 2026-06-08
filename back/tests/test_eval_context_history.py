@@ -1,34 +1,42 @@
-"""Tests de la mémoire des tentatives injectée dans le prompt du générateur.
+"""Tests du few-shot d'historique injecté dans le prompt du générateur.
 
-Vérifie que, lors d'une boucle de retry `bad_data` (evaluate → conversational_agent
-→ generator), le LLM reçoit un historique few-shot complet : pour chaque itération,
-le raisonnement du générateur, les données injectées SANS troncature, le résultat
-DuckDB réel, et le diagnostic d'échec.
+Vérifie que, lors d'une boucle de retry `bad_data`, `_build_eval_messages` retourne
+des paires [AIMessage(tentative), HumanMessage(feedback)] — une paire par itération.
 
-C'est `_build_eval_context` qui porte cette logique : il relit `state["messages"]`
-(où s'accumulent les RESULTS/EVALUATION du tour courant) et apparie chaque message
-EVALUATION avec son RESULTS parent via `additional_kwargs["parent"]`.
+Le LLM reçoit ainsi l'historique en format natif human/ai :
+  - AIMessage  : le JSON exact qu'il a généré (unit_test_build_reasoning + data)
+  - HumanMessage : le résultat DuckDB réel + le verdict
 """
 
 import json
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 
-from build_query.examples_generator import _build_eval_context
+from build_query.examples_generator import _build_eval_messages
 from utils.msg_types import MsgType
 
 
 # ---------------------------------------------------------------------------
-# Helpers — reconstituent les messages tels que l'executor / l'evaluator les émettent
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _results_msg(test_index, data, msg_id, results_json=None, reasoning="", status="complete", failing_cte=None):
-    """Message RESULTS contenant la liste des tests (un seul ici), avec un id stable."""
+def _results_msg(
+    test_index,
+    data,
+    msg_id,
+    results_json=None,
+    reasoning="",
+    status="complete",
+    failing_cte=None,
+):
     test_case = {
         "test_index": test_index,
-        "data": data,
+        "test_name": "test",
+        "unit_test_description": "desc",
         "unit_test_build_reasoning": reasoning,
+        "tags": [],
+        "data": data,
         "status": status,
         "results_json": results_json if results_json is not None else "[]",
     }
@@ -42,7 +50,6 @@ def _results_msg(test_index, data, msg_id, results_json=None, reasoning="", stat
 
 
 def _eval_msg(test_index, verdict_text, parent_id, verdict="Insuffisant"):
-    """Message EVALUATION lié à son RESULTS parent."""
     return AIMessage(
         content=f"**{verdict}** — {verdict_text}",
         additional_kwargs={
@@ -61,33 +68,85 @@ _EXISTING = [{"test_index": 0}]
 
 
 # ---------------------------------------------------------------------------
-# Cas nominal : plusieurs itérations doivent toutes remonter
+# Format : retourne des paires [AIMessage, HumanMessage]
 # ---------------------------------------------------------------------------
 
 
-def test_accumulates_all_iterations_with_verdicts():
+def test_returns_list_of_messages():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
             _eval_msg(0, "le filtre amount>100 n'est pas satisfait", "r1"),
-            _results_msg(0, {"orders": [{"amount": 50}]}, "r2"),
-            _eval_msg(0, "toujours sous le seuil", "r2"),
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
 
-    assert "Itération 1" in ctx
-    assert "Itération 2" in ctx
-    assert '"amount": 10' in ctx
-    assert '"amount": 50' in ctx
-    assert "le filtre amount>100 n'est pas satisfait" in ctx
-    assert "toujours sous le seuil" in ctx
-    assert "NE REPRODUISEZ PAS" in ctx
-    assert "Historique des tentatives précédentes" in ctx
+    assert len(msgs) == 2
+    assert isinstance(msgs[0], AIMessage)
+    assert isinstance(msgs[1], HumanMessage)
 
 
-def test_iterations_are_ordered():
+def test_ai_message_contains_generated_data():
+    """L'AIMessage doit reproduire le JSON que le générateur a produit."""
+    data = {"orders": [{"amount": 10, "status": "open"}]}
+    reasoning = "J'ai choisi amount=10 car le filtre est amount>5."
+    state = _state(
+        [
+            _results_msg(0, data, "r1", reasoning=reasoning),
+            _eval_msg(0, "la colonne status est filtrée", "r1"),
+        ]
+    )
+
+    msgs = _build_eval_messages(state, _EXISTING)
+    ai_content = json.loads(msgs[0].content)
+
+    assert ai_content["data"] == data
+    assert ai_content["unit_test_build_reasoning"] == reasoning
+    assert "test_name" in ai_content
+    assert "tags" in ai_content
+
+
+def test_human_message_contains_duckdb_output():
+    """L'HumanMessage doit contenir le résultat DuckDB réel."""
+    output = [{"total": 42}]
+    state = _state(
+        [
+            _results_msg(
+                0,
+                {"orders": [{"amount": 200}]},
+                "r1",
+                results_json=json.dumps(output),
+            ),
+            _eval_msg(0, "le total devrait être 100", "r1"),
+        ]
+    )
+
+    msgs = _build_eval_messages(state, _EXISTING)
+    feedback = msgs[1].content
+
+    assert '"total": 42' in feedback
+    assert "Résultat DuckDB" in feedback
+
+
+def test_human_message_contains_verdict():
+    """L'HumanMessage doit contenir le verdict et le diagnostic."""
+    state = _state(
+        [
+            _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
+            _eval_msg(0, "le filtre amount>100 n'est pas satisfait", "r1"),
+        ]
+    )
+
+    msgs = _build_eval_messages(state, _EXISTING)
+    feedback = msgs[1].content
+
+    assert "Insuffisant" in feedback
+    assert "le filtre amount>100 n'est pas satisfait" in feedback
+    assert "Génère une nouvelle version" in feedback
+
+
+def test_multiple_iterations_produce_multiple_pairs():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
@@ -97,19 +156,28 @@ def test_iterations_are_ordered():
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
 
-    assert ctx.index("Itération 1") < ctx.index("Itération 2")
-    assert ctx.index("échec A") < ctx.index("échec B")
+    # 2 iterations → 4 messages : AI, Human, AI, Human
+    assert len(msgs) == 4
+    assert isinstance(msgs[0], AIMessage)
+    assert isinstance(msgs[1], HumanMessage)
+    assert isinstance(msgs[2], AIMessage)
+    assert isinstance(msgs[3], HumanMessage)
+
+    # Les données sont dans le bon ordre
+    assert '"amount": 10' in msgs[0].content
+    assert '"amount": 50' in msgs[2].content
+    assert "échec A" in msgs[1].content
+    assert "échec B" in msgs[3].content
 
 
 # ---------------------------------------------------------------------------
-# Few-shot : données complètes, résultat DuckDB, raisonnement du générateur
+# Données complètes — pas de troncature
 # ---------------------------------------------------------------------------
 
 
-def test_includes_full_input_without_truncation():
-    """Les données d'entrée doivent apparaître intégralement, sans troncature."""
+def test_full_input_data_without_truncation():
     big_rows = [{"amount": i, "label": "x" * 20} for i in range(50)]
     state = _state(
         [
@@ -118,60 +186,16 @@ def test_includes_full_input_without_truncation():
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
+    ai_content = json.loads(msgs[0].content)
 
-    assert "trop de lignes vides" in ctx
-    # Toutes les lignes doivent être présentes — pas de marqueur de troncature
-    assert "...}" not in ctx
-    # Le premier et le dernier enregistrement doivent apparaître
-    assert '"amount": 0' in ctx
-    assert '"amount": 49' in ctx
-
-
-def test_includes_actual_duckdb_output():
-    """Le résultat DuckDB réel doit apparaître dans le bloc de l'itération."""
-    output_rows = [{"total": 42, "category": "A"}]
-    state = _state(
-        [
-            _results_msg(
-                0,
-                {"orders": [{"amount": 200}]},
-                "r1",
-                results_json=json.dumps(output_rows),
-            ),
-            _eval_msg(0, "la colonne category est absente", "r1"),
-        ]
-    )
-
-    ctx = _build_eval_context(state, _EXISTING)
-
-    assert '"total": 42' in ctx
-    assert '"category": "A"' in ctx
-    assert "Résultat DuckDB" in ctx
-
-
-def test_includes_generator_reasoning():
-    """Le raisonnement du générateur doit être inclus dans le bloc de l'itération."""
-    state = _state(
-        [
-            _results_msg(
-                0,
-                {"orders": [{"amount": 10}]},
-                "r1",
-                reasoning="J'ai choisi amount=10 car le filtre est amount>5, mais le JOIN échoue.",
-            ),
-            _eval_msg(0, "le JOIN ne produit rien", "r1"),
-        ]
-    )
-
-    ctx = _build_eval_context(state, _EXISTING)
-
-    assert "J'ai choisi amount=10" in ctx
-    assert "Raisonnement du générateur" in ctx
+    # Toutes les 50 lignes présentes, aucune troncature
+    assert len(ai_content["data"]["orders"]) == 50
+    assert ai_content["data"]["orders"][0]["amount"] == 0
+    assert ai_content["data"]["orders"][49]["amount"] == 49
 
 
 def test_empty_results_shows_failing_cte():
-    """Pour un status empty_results, le bloc doit mentionner la CTE bloquante."""
     state = _state(
         [
             _results_msg(
@@ -185,36 +209,36 @@ def test_empty_results_shows_failing_cte():
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
+    feedback = msgs[1].content
 
-    assert "filtered_orders" in ctx
-    assert "CTE bloquante" in ctx
-    assert "0 lignes" in ctx
+    assert "filtered_orders" in feedback
+    assert "CTE bloquante" in feedback
+    assert "0 lignes" in feedback
 
 
-def test_verdict_label_bon_is_preserved():
-    """Un verdict Bon doit apparaître tel quel sans être remplacé par Insuffisant."""
+def test_verdict_bon_preserved():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
-            _eval_msg(0, "les données sont correctes", "r1", verdict="Bon"),
+            _eval_msg(0, "données correctes", "r1", verdict="Bon"),
             _results_msg(0, {"orders": [{"amount": 20}]}, "r2"),
-            _eval_msg(0, "toujours insuffisant", "r2", verdict="Insuffisant"),
+            _eval_msg(0, "insuffisant", "r2", verdict="Insuffisant"),
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
 
-    assert "Verdict : Bon" in ctx
-    assert "Verdict : Insuffisant" in ctx
+    assert "Bon" in msgs[1].content
+    assert "Insuffisant" in msgs[3].content
 
 
 # ---------------------------------------------------------------------------
-# Garde-fous : pas de bruit hors du cas bad_data
+# Garde-fous
 # ---------------------------------------------------------------------------
 
 
-def test_empty_when_feedback_is_not_bad_data():
+def test_returns_empty_when_not_bad_data():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
@@ -222,67 +246,55 @@ def test_empty_when_feedback_is_not_bad_data():
         ],
         feedback="bad_assertions",
     )
-    assert _build_eval_context(state, _EXISTING) == ""
+    assert _build_eval_messages(state, _EXISTING) == []
 
 
-def test_empty_when_no_evaluation_messages():
+def test_returns_empty_when_no_eval_messages():
     state = _state([_results_msg(0, {"orders": [{"amount": 10}]}, "r1")])
-    assert _build_eval_context(state, _EXISTING) == ""
+    assert _build_eval_messages(state, _EXISTING) == []
 
 
-# ---------------------------------------------------------------------------
-# Ciblage : seules les itérations du test en cours de régénération remontent
-# ---------------------------------------------------------------------------
-
-
-def test_filters_out_other_test_indices():
-    # target = test 1 (dernière EVALUATION). Les tentatives du test 0 ne doivent pas fuiter.
+def test_filters_other_test_indices():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r0"),
-            _eval_msg(0, "echec du test zero", "r0"),
+            _eval_msg(0, "echec test zero", "r0"),
             _results_msg(1, {"orders": [{"amount": 999}]}, "r1"),
-            _eval_msg(1, "echec du test un", "r1"),
+            _eval_msg(1, "echec test un", "r1"),
         ]
     )
 
-    ctx = _build_eval_context(state, [{"test_index": 0}, {"test_index": 1}])
+    msgs = _build_eval_messages(state, [{"test_index": 0}, {"test_index": 1}])
 
-    assert "echec du test un" in ctx
-    assert "echec du test zero" not in ctx
-    assert '"amount": 999' in ctx
-    assert '"amount": 10' not in ctx
-    assert "Itération 1" in ctx
-    assert "Itération 2" not in ctx
-
-
-# ---------------------------------------------------------------------------
-# Robustesse : lien parent cassé → l'itération est ignorée silencieusement
-# ---------------------------------------------------------------------------
+    # Seul le test_index 1 (dernière EVALUATION) est inclus → 1 paire
+    assert len(msgs) == 2
+    ai_content = json.loads(msgs[0].content)
+    assert ai_content["data"]["orders"][0]["amount"] == 999
+    assert "echec test un" in msgs[1].content
+    assert "echec test zero" not in msgs[1].content
 
 
-def test_orphan_evaluation_without_parent_results_is_skipped():
+def test_orphan_evaluation_is_skipped():
     state = _state(
         [
             _results_msg(0, {"orders": [{"amount": 10}]}, "r1"),
             _eval_msg(0, "échec relié", "r1"),
-            _eval_msg(0, "échec orphelin", "parent-inexistant"),
+            _eval_msg(0, "orphelin", "parent-inexistant"),
         ]
     )
 
-    ctx = _build_eval_context(state, _EXISTING)
+    msgs = _build_eval_messages(state, _EXISTING)
 
-    assert "échec relié" in ctx
-    assert "échec orphelin" not in ctx
+    # Seulement la paire pour l'évaluation reliée
+    assert len(msgs) == 2
+    assert "échec relié" in msgs[1].content
 
 
-def test_returns_empty_when_all_orphans():
-    """Si toutes les évaluations sont orphelines, retourner chaîne vide."""
+def test_all_orphans_returns_empty():
     state = _state(
         [
             _eval_msg(0, "orphelin A", "inexistant-1"),
             _eval_msg(0, "orphelin B", "inexistant-2"),
         ]
     )
-
-    assert _build_eval_context(state, _EXISTING) == ""
+    assert _build_eval_messages(state, _EXISTING) == []

@@ -355,7 +355,8 @@ def generate_data_prompt(
     user_instruction: str = "",
     profile: Optional[dict] = None,
     model_context: str = "",
-    eval_context: str = "",
+    trace_hint: str = "",
+    eval_history: list | None = None,
     native_thinking: bool = False,
 ) -> ChatPromptTemplate:
     """
@@ -390,7 +391,7 @@ def generate_data_prompt(
         else ""
     )
 
-    eval_context_block = f"\n{eval_context}\n" if eval_context else ""
+    trace_hint_block = f"\n{trace_hint}\n" if trace_hint else ""
 
     profile_block_str = _format_profile_block(profile, used_columns)
     profile_block = (
@@ -446,7 +447,7 @@ Vous êtes un data QA, testeur de requêtes SQL et expert en génération de don
 Analysez la requête SQL et le schéma des données sources fournis,
 puis générez un unique test unitaire en format JSON.
 
-{context_block}{eval_context_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}
+{context_block}{trace_hint_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}
 
 **Consignes principales :**
 """
@@ -555,6 +556,8 @@ Date et heure actuelles : {formatted_datetime}
     prompt_messages = [system_msg]
     prompt_messages.extend(history_with_results)
     prompt_messages.append(final_human_msg)
+    if eval_history:
+        prompt_messages.extend(eval_history)
 
     return ChatPromptTemplate.from_messages(prompt_messages, "mustache")
 
@@ -567,7 +570,7 @@ def update_data_prompt(
     sql: str = "",
     existing_test: Optional[dict] = None,
     model_context: str = "",
-    eval_context: str = "",
+    eval_history: list | None = None,
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
@@ -631,12 +634,11 @@ def update_data_prompt(
 
         existing_test_block = f"\nTest à modifier :\n```json\n{_format_unit_tests_for_generator([existing_test])}\n```\n"
 
-    eval_context_block = f"\n{eval_context}\n" if eval_context else ""
     volume_hints_block = _build_volume_hints_block(sql, dialect)
 
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{volume_hints_block}{existing_test_block}{eval_context_block}
+{sql_block}{volume_hints_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>
@@ -657,6 +659,8 @@ Date et heure actuelles : {formatted_datetime}
     prompt_messages = [system_msg]
     prompt_messages.extend(history_with_results)
     prompt_messages.append(final_human_msg)
+    if eval_history:
+        prompt_messages.extend(eval_history)
 
     # 6. Génération et retour du ChatPromptTemplate.
     return ChatPromptTemplate.from_messages(
