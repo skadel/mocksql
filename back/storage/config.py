@@ -110,6 +110,35 @@ def get_llm_thinking_budget() -> int | None:
         return None
 
 
+def is_native_thinking_active() -> bool:
+    """Indique si le modèle raisonne nativement (canal thinking séparé).
+
+    Ne pas confondre avec « thinking_budget est défini » : quand aucun budget
+    n'est passé, c'est le **défaut serveur du modèle** qui s'applique (et non
+    « désactivé »). Sur Gemini 2.5, le thinking est ON par défaut sauf sur
+    `flash-lite`. On combine donc le réglage explicite et le défaut du modèle.
+
+    Sert à décider si le champ `unit_test_build_reasoning` doit porter un vrai
+    chain-of-thought (thinking inactif → seul raisonnement disponible) ou juste
+    une justification courte (thinking actif → le raisonnement se fait en amont).
+    """
+    budget = get_llm_thinking_budget()
+    if budget is not None:
+        return budget > 0
+    if get_llm_thinking_level() is not None:
+        return True
+
+    model = get_llm_model().lower()
+    # `flash-lite` contient `flash` — le tester en premier.
+    if "lite" in model:
+        return False
+    if "gemini-2.5-flash" in model or "gemini-2.5-pro" in model or "gemini-3" in model:
+        return True
+    # Modèle inconnu : on suppose le thinking inactif → on garde le CoT in-schema
+    # (sûr : pas de perte de qualité, juste un champ un peu plus long).
+    return False
+
+
 def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 
