@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 
@@ -67,6 +68,14 @@ class _FenceStrippingParser:
         try:
             return self._inner.parse(stripped)
         except Exception as exc:
+            try:
+                json.loads(stripped)
+            except json.JSONDecodeError as json_err:
+                logger.diag(
+                    "[FenceStrippingParser] JSON decode error at pos %s: %s",
+                    json_err.pos,
+                    json_err.msg,
+                )
             logger.diag(
                 "[FenceStrippingParser] parse FAILED type=%s msg=%s",
                 type(exc).__name__,
