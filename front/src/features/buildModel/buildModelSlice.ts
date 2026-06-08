@@ -186,13 +186,13 @@ export const buildModelSlice = createSlice({
       // Generator now emits one test at a time → merge instead of replace.
       // sql_update context means all existing tests will be re-run → mark them all pending first.
       if (msg.contentType === 'examples' && Array.isArray(msg.contents.tables) && (msg.contents.tables as any[]).length > 0) {
-        const newTests = (msg.contents.tables as any[]).map((t: any) => ({ ...t, status: 'pending' }));
+        const newTests = (msg.contents.tables as any[]).map((t: any) => ({ ...t, status: 'pending', threadParentId: msg.parent }));
         const base = msg.context === 'sql_update'
           ? (state.testResults || []).map((t: any) => ({ ...t, status: 'pending' }))
           : [...(state.testResults || [])];
         newTests.forEach((newT: any) => {
           const idx = base.findIndex((r: any) => r.test_index === newT.test_index);
-          if (idx >= 0) base[idx] = newT;
+          if (idx >= 0) base[idx] = { ...newT, threadParentId: newT.threadParentId ?? base[idx].threadParentId };
           else base.push(newT);
         });
         state.testResults = base;
