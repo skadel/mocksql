@@ -814,19 +814,18 @@ async def generate_examples_(
 
 def get_generation_output_type(data_model, existing_tests):
     reasoning_desc = (
-        "Avant de générer le JSON final, simulez mentalement la traversée des données à travers chaque CTE et filtre "
-        "du SQL : listez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
-        "indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent. "
-        "Précisez ensuite la modification apportée par rapport aux données existantes."
+        "Expliquez en 100 mots maximum comment les données ci-dessus satisfont chaque CTE et filtre du SQL : "
+        "citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
+        "indiquez combien de lignes survivent à chaque étape, et précisez la modification apportée par rapport "
+        "aux données existantes."
         if existing_tests
-        else "Avant de générer le JSON final, simulez mentalement la traversée des données à travers chaque CTE et filtre "
-        "du SQL : listez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs), "
-        "indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent."
+        else "Expliquez en 100 mots maximum comment les données ci-dessus satisfont chaque CTE et filtre du SQL : "
+        "citez les clauses structurelles présentes (OFFSET, LIMIT, RANK, ROW_NUMBER, JOIN restrictifs) "
+        "et indiquez combien de lignes survivent à chaque étape."
     )
 
     return create_model(
         "UnitTestData",
-        unit_test_build_reasoning=(str, Field(description=reasoning_desc)),
         test_name=(
             str,
             Field(
@@ -864,6 +863,7 @@ def get_generation_output_type(data_model, existing_tests):
             ),
         ),
         data=(data_model, Field(description="Données du test unitaire.")),
+        unit_test_build_reasoning=(str, Field(description=reasoning_desc)),
     )
 
 
