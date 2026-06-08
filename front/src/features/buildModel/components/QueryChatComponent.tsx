@@ -891,8 +891,10 @@ const ChatComponent: React.FC = () => {
 
   const handleRerunTest = useCallback((idx: number) => {
     if (isSending) return;
+    const test = (testResults || []).find((t: any) => t.test_index === idx);
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
-    const lastMessageId = lastMessage ? lastMessage.id : '';
+    // threadParentId ensures the rerun lands as a sibling of the original, not a child
+    const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
     dispatch(chatQuery({
       userInput: '',
       sessionId: currentModelId || '',
@@ -901,13 +903,12 @@ const ChatComponent: React.FC = () => {
       query: sqlQuery,
       ChangedMessageId: '',
       t,
-      parentMessageId: lastMessageId,
+      parentMessageId,
       testIndex: idx,
       forceRoute: 'generator',
-      rerunOnly: true,
       silent: true,
     }));
-  }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t]);
+  }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t, testResults]);
 
 
   return (
