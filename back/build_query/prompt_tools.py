@@ -466,7 +466,7 @@ puis générez un unique test unitaire en format JSON.
 Privilégier des scénarios où **la logique métier** — les filtres, jointures, conditions temporelles, règles de déduplication — est réellement testée.
 
 **Format de sortie obligatoire** : un objet JSON unique.
-- `unit_test_build_reasoning`: Simulez mentalement la traversée des données à travers chaque CTE et filtre — listez les clauses éliminatoires (WHERE, JOIN strict), indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent. **Ce champ doit être rempli en premier.**
+- `unit_test_build_reasoning`: **Ce champ doit être rempli en premier, en 3 phrases maximum.** Simulez mentalement la traversée des données à travers chaque CTE et filtre — citez les clauses éliminatoires clés (WHERE, JOIN strict, RANK/ROW_NUMBER), indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent.
 - `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
