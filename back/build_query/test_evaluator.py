@@ -390,8 +390,6 @@ async def evaluate_tests(state: QueryState):
         "messages": messages,
         "evaluation_feedback": evaluation_feedback,
         "status": new_status,
-        # Non-empty result judged bad_data → keep the conversational_agent path
-        # (targeted patches). Clear any stale flag from a prior empty-result cycle.
         "empty_results_regen": False,
     }
 

@@ -11,6 +11,7 @@ from build_query.data_patcher import data_patcher_node
 from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
 from build_query.update_test_node import update_test_node
+from build_query.assertion_generator import generate_assertions
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
 from build_query.suggestions_node import generate_suggestions
@@ -92,6 +93,13 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
     except Exception as exc:
         print(f"[pre_routing] _lightweight_query_decomposed failed: {exc}")
         return "[]"
+
+
+async def _bad_data_regen(state: QueryState):
+    """Decrements gen_retries before routing back to generator on bad_data retry.
+    Replaces the decrement that conversational_agent used to do on this path."""
+    gen_retries = state.get("gen_retries")
+    return {"gen_retries": (gen_retries - 1) if gen_retries is not None else -1}
 
 
 async def _bad_data_exhausted(state: QueryState):
@@ -257,8 +265,10 @@ def build_query_graph():
     add_timed_node("generator", generate_examples)
     add_timed_node("assertion_modifier", modify_assertions)
     add_timed_node("executor", run_on_examples)
+    add_timed_node("assertion_generator", generate_assertions)
     add_timed_node("assertion_corrector", correct_assertions)
     add_timed_node("test_evaluator", evaluate_tests)
+    add_timed_node("bad_data_regen", _bad_data_regen)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
     add_timed_node("suggestions_generator", generate_suggestions)
     add_timed_node("history_saver", history_saver)
@@ -326,10 +336,17 @@ def build_query_graph():
                 state.get("status"),
             )
             return "history_saver"
-        logger.diag(
-            "[route_executor] → test_evaluator (status=%s)", state.get("status")
-        )
-        return "test_evaluator"
+        status = state.get("status")
+        # No results to evaluate — evaluator handles routing (retry or error)
+        if status in ("empty_results", "bad_data_error"):
+            logger.diag("[route_executor] → test_evaluator (status=%s)", status)
+            return "test_evaluator"
+        # rerun_all: verdicts already computed in executor (no LLM needed)
+        if state.get("rerun_all_tests"):
+            logger.diag("[route_executor] → test_evaluator (rerun_all)")
+            return "test_evaluator"
+        logger.diag("[route_executor] → assertion_generator (status=%s)", status)
+        return "assertion_generator"
 
     def route_evaluator(state: QueryState):
         feedback = state.get("evaluation_feedback")
@@ -354,21 +371,10 @@ def build_query_graph():
             return "history_saver"
         if feedback == "bad_data":
             if retries > 0:
-                # Empty DuckDB result → regenerate the whole dataset targeting the
-                # failing CTE (the cte_trace travels in the RESULTS message), instead
-                # of letting the conversational_agent patch one field at a time —
-                # single-field patches cannot fix a query that returns 0 rows.
-                if state.get("empty_results_regen"):
-                    logger.diag(
-                        "[route_evaluator] → generator (empty_results régen holistique, retries=%d)",
-                        retries,
-                    )
-                    return "generator"
                 logger.diag(
-                    "[route_evaluator] → conversational_agent (bad_data retries=%d)",
-                    retries,
+                    "[route_evaluator] → bad_data_regen (bad_data retries=%d)", retries
                 )
-                return "conversational_agent"
+                return "bad_data_regen"
             logger.diag(
                 "[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)"
             )
@@ -396,7 +402,9 @@ def build_query_graph():
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
+    builder.add_edge("assertion_generator", "test_evaluator")
     builder.add_conditional_edges("test_evaluator", route_evaluator)
+    builder.add_edge("bad_data_regen", "generator")
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("suggestions_generator", "history_saver")

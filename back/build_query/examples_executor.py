@@ -778,87 +778,50 @@ async def _run_single_test_case(
                 "assertion_results": [],
             }
 
-        view_name = f"__result__{suffix}"
-        con.register(view_name, final_res_df)
-        try:
-            existing_assertions = [
-                a for a in (test_case.get("assertion_results") or []) if a.get("sql")
-            ]
-            retry_kwargs = dict(
-                view_name=view_name,
-                con=con,
-                duckdb_sql=final_duckdb_sql,
-                test_data=test_data,
-                result_df=final_res_df,
-                test_description=test_case.get("unit_test_description", ""),
-            )
-            if rerun_all and existing_assertions:
-                assertion_results = await _evaluate_assertions_with_retry(
-                    existing_assertions, **retry_kwargs
-                )
-                eval_result = None
-            else:
-                eval_result = await _generate_assertions_and_evaluate(
+        existing_assertions = [
+            a for a in (test_case.get("assertion_results") or []) if a.get("sql")
+        ]
+
+        if rerun_all and existing_assertions:
+            # Re-run existing assertions without LLM (user-triggered rerun or SQL update)
+            view_name = f"__result__{suffix}"
+            con.register(view_name, final_res_df)
+            try:
+                retry_kwargs = dict(
+                    view_name=view_name,
+                    con=con,
                     duckdb_sql=final_duckdb_sql,
                     test_data=test_data,
                     result_df=final_res_df,
                     test_description=test_case.get("unit_test_description", ""),
                 )
-                from utils.timing import atimed
+                assertion_results = await _evaluate_assertions_with_retry(
+                    existing_assertions, **retry_kwargs
+                )
+            finally:
+                con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+            has_failing = any(not a.get("passed") for a in assertion_results)
+            return {
+                **base,
+                "status": "complete",
+                "results_json": await format_result(final_res_df),
+                "assertion_results": assertion_results,
+                "verdict": "Insuffisant" if has_failing else "Bon",
+                "reason_type": "bad_assertions" if has_failing else None,
+                "evaluation_explanation": (
+                    "Les assertions échouent sur les données re-exécutées."
+                    if has_failing
+                    else "Les assertions passent sur les données re-exécutées."
+                ),
+            }
 
-                async with atimed("exec:assertion_eval+fix"):
-                    assertion_results = await _evaluate_assertions_with_retry(
-                        [a.model_dump() for a in eval_result.assertions], **retry_kwargs
-                    )
-                    try:
-                        assertion_results = await _fix_logically_failing_assertions(
-                            assertion_results, **retry_kwargs
-                        )
-                    except asyncio.CancelledError:
-                        logger.warning(
-                            "[executor] fixer interrompu (CancelledError) — résultats partiels conservés"
-                        )
-        finally:
-            con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
-
-        result = {
+        # Assertions and LLM evaluation are handled by the assertion_generator node
+        return {
             **base,
             "status": "complete",
             "results_json": await format_result(final_res_df),
-            "assertion_results": assertion_results,
+            "assertion_results": [],
         }
-        if eval_result is not None:
-            has_failing = any(not a.get("passed") for a in assertion_results)
-            if has_failing:
-                result["verdict"] = "Insuffisant"
-                result["reason_type"] = "bad_assertions"
-                result["evaluation_explanation"] = (
-                    "Les assertions générées ne correspondent pas au résultat de la requête."
-                )
-                result.pop("assertion_fix", None)
-            else:
-                result["verdict"] = eval_result.verdict
-                result["reason_type"] = eval_result.reason_type
-                result["evaluation_explanation"] = eval_result.explanation
-                if eval_result.assertion_fix is not None:
-                    result["assertion_fix"] = eval_result.assertion_fix.model_dump()
-                if (
-                    eval_result.diagnostic is not None
-                    and eval_result.diagnostic.root_cause
-                    != "Données d'entrée insuffisantes ou incohérentes avec la logique SQL"
-                ):
-                    result["diagnostic"] = eval_result.diagnostic.model_dump()
-                elif result.get("reason_type") == "bad_data":
-                    diag = await _generate_diagnostic(
-                        duckdb_sql=final_duckdb_sql,
-                        test_data=test_data,
-                        result_df=final_res_df,
-                        test_description=test_case.get("unit_test_description", ""),
-                        eval_reasoning=eval_result.reasoning,
-                    )
-                    if diag:
-                        result["diagnostic"] = diag.model_dump()
-        return result
 
     except asyncio.CancelledError:
         logger.warning(
