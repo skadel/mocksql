@@ -608,7 +608,8 @@ def _build_count_steps_query(
 
     from_sql = from_expr.sql(dialect=dialect) if from_expr else ""
     joins_sql = ("\n" + "\n".join(left_join_sqls)) if left_join_sqls else ""
-    body = f"SELECT\n  {',\n  '.join(select_parts)}\n{from_sql}{joins_sql}"
+    select_cols = ",\n  ".join(select_parts)
+    body = f"SELECT\n  {select_cols}\n{from_sql}{joins_sql}"
 
     if preceding_ctes:
         with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding_ctes]
