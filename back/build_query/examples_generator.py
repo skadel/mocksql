@@ -277,15 +277,17 @@ def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
 
 
 def _build_eval_context(state, existing_tests: list) -> str:
-    """Build a context block for the generator when called after a bad_data evaluation."""
+    """Build a few-shot context block for the generator when called after a bad_data evaluation.
+
+    Each iteration is formatted as: generator reasoning → full input data → actual DuckDB
+    output → failure diagnostic. This gives the next generator call concrete examples of
+    what was tried and why it didn't work, without any data truncation.
+    """
     if state.get("evaluation_feedback") != "bad_data":
         return ""
 
     messages = state.get("messages", [])
 
-    # Reconstruct history of failures for the current test_index
-    # The current test_index is the one being evaluated/regenerated.
-    # We find the target test_index from the latest EVALUATION message.
     eval_msgs = [m for m in messages if get_message_type(m) == MsgType.EVALUATION]
     if not eval_msgs:
         return ""
@@ -295,7 +297,6 @@ def _build_eval_context(state, existing_tests: list) -> str:
     history_blocks = []
     iteration = 1
 
-    # Iterate through messages to pair RESULTS with their corresponding EVALUATION
     results_map = {m.id: m for m in messages if get_message_type(m) == MsgType.RESULTS}
 
     for eval_msg in eval_msgs:
@@ -305,50 +306,92 @@ def _build_eval_context(state, existing_tests: list) -> str:
         parent_id = eval_msg.additional_kwargs.get("parent")
         result_msg = results_map.get(parent_id)
 
-        if result_msg:
+        if not result_msg:
+            continue
+
+        try:
+            results_data = json.loads(result_msg.content)
+            if not isinstance(results_data, list):
+                results_data = [results_data]
+
+            test_case = next(
+                (
+                    t
+                    for t in results_data
+                    if str(t.get("test_index")) == str(target_test_idx)
+                ),
+                None,
+            )
+            if not test_case:
+                continue
+
+            # --- input (no truncation) ---
             try:
-                results_data = json.loads(result_msg.content)
-                if not isinstance(results_data, list):
-                    results_data = [results_data]
-
-                # Find the test case in the results
-                test_case = next(
-                    (
-                        t
-                        for t in results_data
-                        if str(t.get("test_index")) == str(target_test_idx)
-                    ),
-                    None,
+                input_str = json.dumps(
+                    test_case.get("data", {}), ensure_ascii=False, indent=2
                 )
-                if test_case:
-                    input_data = test_case.get("data", {})
-                    try:
-                        input_summary = json.dumps(input_data, ensure_ascii=False)
-                        if len(input_summary) > 200:
-                            input_summary = input_summary[:200] + "...}"
-                    except Exception:
-                        input_summary = str(input_data)[:200]
-
-                    verdict_text = eval_msg.content.replace(
-                        "**Insuffisant** — ", ""
-                    ).strip()
-                    history_blocks.append(
-                        f"- **Itération {iteration}** : Données `{input_summary}` → Échec : {verdict_text}"
-                    )
-                    iteration += 1
             except Exception:
-                pass
+                input_str = str(test_case.get("data", {}))
+
+            # --- actual DuckDB output ---
+            status = test_case.get("status", "")
+            if status == "empty_results":
+                failing_cte = test_case.get("failing_cte", "")
+                if failing_cte:
+                    output_str = f"0 lignes — CTE bloquante : `{failing_cte}`"
+                else:
+                    output_str = "0 lignes retournées"
+            else:
+                raw_output = test_case.get("results_json", "[]")
+                try:
+                    parsed = (
+                        json.loads(raw_output)
+                        if isinstance(raw_output, str)
+                        else raw_output
+                    )
+                    output_str = json.dumps(parsed, ensure_ascii=False, indent=2)
+                except Exception:
+                    output_str = str(raw_output)
+
+            # --- generator reasoning from this iteration ---
+            reasoning = test_case.get("unit_test_build_reasoning", "").strip()
+
+            # --- verdict label + detail ---
+            raw_verdict = eval_msg.content
+            verdict_label = "Insuffisant"
+            for label in ("Excellent", "Bon", "Insuffisant"):
+                if raw_verdict.startswith(f"**{label}**"):
+                    verdict_label = label
+                    break
+            verdict_detail = raw_verdict.replace(f"**{verdict_label}** — ", "").strip()
+
+            block_lines = [
+                f"\n---",
+                f"**Itération {iteration}** — Verdict : {verdict_label}",
+            ]
+            if reasoning:
+                block_lines.append(f"\n*Raisonnement du générateur :*\n{reasoning}")
+            block_lines.append(f"\n*Données injectées :*\n```json\n{input_str}\n```")
+            block_lines.append(
+                f"\n*Résultat DuckDB :*\n```\n{output_str}\n```"
+            )
+            block_lines.append(f"\n*Diagnostic :* {verdict_detail}")
+
+            history_blocks.append("\n".join(block_lines))
+            iteration += 1
+        except Exception:
+            pass
+
+    if not history_blocks:
+        return ""
 
     lines = [
-        "\n### ⚠️ Historique des tentatives échouées",
-        "Voici ce que vous avez déjà essayé sans succès. **NE REPRODUISEZ PAS LA MÊME APPROCHE.**",
+        "\n### Historique des tentatives précédentes",
+        "Voici l'historique complet (données injectées, résultat DuckDB réel, diagnostic). **NE REPRODUISEZ PAS LES MÊMES DONNÉES.**",
     ]
-
-    if history_blocks:
-        lines.extend(history_blocks)
-
+    lines.extend(history_blocks)
     lines.append(
-        "\n**Consigne** : Si le changement des valeurs marginales ne fonctionne pas, repensez la **structure** (ex: ajoutez plus de lignes, modifiez la distribution des données pour contourner un filtre).\n"
+        "\n---\n**Consigne** : Analysez le résultat DuckDB et le diagnostic pour comprendre pourquoi les données ont échoué, puis proposez une approche structurellement différente.\n"
     )
     return "\n".join(lines)
 
