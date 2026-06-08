@@ -356,10 +356,15 @@ def generate_data_prompt(
     profile: Optional[dict] = None,
     model_context: str = "",
     eval_context: str = "",
+    native_thinking: bool = False,
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
     en incluant un historique de messages (system/human/ai, etc.).
+
+    ``native_thinking`` : quand le modèle raisonne nativement (flash/pro), le
+    champ ``unit_test_build_reasoning`` n'est qu'une justification brève ; sinon
+    il porte un chain-of-thought complet (cf. get_generation_output_type).
     """
     if constraints_hint:
         if user_instruction:
@@ -420,6 +425,21 @@ def generate_data_prompt(
    de la requête est non vide et non nul (pas de valeurs NULL ou vides).
 2. **Exclusion des cas exceptionnels** : pas de scénarios d'erreurs ou de jointures défaillantes."""
 
+    if native_thinking:
+        # Le modèle raisonne nativement en amont : le champ ne porte qu'une
+        # justification brève (1 phrase) → JSON court, pas de troncature.
+        reasoning_bullet = (
+            "- `unit_test_build_reasoning`: **1 phrase maximum.** Justification courte : "
+            "quelle clause structurelle du SQL est ciblée et pourquoi les données la satisfont."
+        )
+    else:
+        reasoning_bullet = (
+            "- `unit_test_build_reasoning`: **Ce champ doit être rempli en premier, en 3 phrases maximum.** "
+            "Simulez mentalement la traversée des données à travers chaque CTE et filtre — citez les clauses "
+            "éliminatoires clés (WHERE, JOIN strict, RANK/ROW_NUMBER), indiquez combien de lignes doivent "
+            "survivre à chaque étape, et expliquez comment vos données le garantissent."
+        )
+
     system_message_content = (
         f"""
 Vous êtes un data QA, testeur de requêtes SQL et expert en génération de données de test JSON.
@@ -466,7 +486,9 @@ puis générez un unique test unitaire en format JSON.
 Privilégier des scénarios où **la logique métier** — les filtres, jointures, conditions temporelles, règles de déduplication — est réellement testée.
 
 **Format de sortie obligatoire** : un objet JSON unique.
-- `unit_test_build_reasoning`: Simulez mentalement la traversée des données à travers chaque CTE et filtre — listez les clauses éliminatoires (WHERE, JOIN strict), indiquez combien de lignes doivent survivre à chaque étape, et expliquez comment vos données le garantissent. **Ce champ doit être rempli en premier.**
+"""
+        + reasoning_bullet
+        + """
 - `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
