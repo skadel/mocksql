@@ -81,20 +81,23 @@ async def validate_query(code, project, dialect, parent, state):
         )
     try:
         async with atimed("validate: extraction sqlglot (optimize + split)"):
-            tables = await get_tables_mapping(project_id=project)
+            async with atimed("validate:   get_tables_mapping"):
+                tables = await get_tables_mapping(project_id=project)
 
-            (
-                optimized_sql,
-                optimized,
-                used_columns,
-                literals,
-            ) = await evaluate_and_fix_query(
-                code,
-                mapping=tables,
-                dialect=dialect,
-                optimize=state.get("optimize", False),
-            )
-            ctes = await split_query(optimized, tables, dialect)
+            async with atimed("validate:   evaluate_and_fix_query"):
+                (
+                    optimized_sql,
+                    optimized,
+                    used_columns,
+                    literals,
+                ) = await evaluate_and_fix_query(
+                    code,
+                    mapping=tables,
+                    dialect=dialect,
+                    optimize=state.get("optimize", False),
+                )
+            async with atimed("validate:   split_query"):
+                ctes = await split_query(optimized, tables, dialect)
     except Exception as e:
         # Centralise la gestion des ParseError/OptimizeError/500
         return handle_post_compile_exceptions(exc=e, code=code)
@@ -302,12 +305,17 @@ async def optimize_and_extract_info(parsed: E, tables, dialect, optimize=False):
     from build_query.scalar_folder import fold_scalar_expressions
 
     # Optimize the SQL query
-    optimized = optimize_query(parsed, tables, dialect=dialect, optimize=optimize)
-    optimized = fold_scalar_expressions(optimized, source_dialect=dialect)
+    with timed("validate:     optimize_query"):
+        optimized = optimize_query(parsed, tables, dialect=dialect, optimize=optimize)
+    with timed("validate:     fold_scalar_expressions"):
+        optimized = fold_scalar_expressions(optimized, source_dialect=dialect)
 
-    literals = find_literals_and_columns(optimized)
-    used_columns = await get_source_columns(optimized, tables)
-    sql = optimized.sql(dialect=dialect, pretty=True)
+    with timed("validate:     find_literals_and_columns"):
+        literals = find_literals_and_columns(optimized)
+    async with atimed("validate:     get_source_columns"):
+        used_columns = await get_source_columns(optimized, tables)
+    with timed("validate:     render optimized.sql(pretty)"):
+        sql = optimized.sql(dialect=dialect, pretty=True)
 
     return {
         "used_columns": used_columns,
@@ -424,11 +432,13 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     from sqlglot.optimizer.qualify_columns import qualify_columns
     from sqlglot.optimizer.qualify_tables import qualify_tables
 
-    schema = MappingSchema()
-    for table_name, columns in tables.items():
-        schema.add_table(table_name, columns, dialect=dialect)
+    with timed("validate:       build MappingSchema"):
+        schema = MappingSchema()
+        for table_name, columns in tables.items():
+            schema.add_table(table_name, columns, dialect=dialect)
 
-    parsed = normalize_identifiers(parsed, dialect=dialect)
+    with timed("validate:       normalize_identifiers"):
+        parsed = normalize_identifiers(parsed, dialect=dialect)
 
     if optimize:
         try:
@@ -445,10 +455,14 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
 
     from utils.examples import _fix_unnest_alias_conflicts, _fix_unnest_scope_leak
 
-    expr = qualify_tables(parsed)
-    expr = qualify_columns(expr, schema, infer_schema=True)
-    expr = _fix_unnest_alias_conflicts(expr)
-    return _fix_unnest_scope_leak(expr)
+    with timed("validate:       qualify_tables"):
+        expr = qualify_tables(parsed)
+    with timed("validate:       qualify_columns(infer_schema)"):
+        expr = qualify_columns(expr, schema, infer_schema=True)
+    with timed("validate:       _fix_unnest_alias_conflicts"):
+        expr = _fix_unnest_alias_conflicts(expr)
+    with timed("validate:       _fix_unnest_scope_leak"):
+        return _fix_unnest_scope_leak(expr)
 
 
 def find_columns_used(data):

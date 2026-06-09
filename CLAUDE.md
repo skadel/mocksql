@@ -136,7 +136,7 @@ back/
     profiler.py            # moteur de profiling : requêtes SQL, régularité temporelle, exprs dérivées
     test_evaluator.py      # verdict structuré (Excellent/Bon/Insuffisant + bad_data/bad_assertions)
     suggestions_node.py    # suggestions contextualisées avec données réelles + verdicts
-    conversational_agent.py # correction de données incorrectes (bad_data retry)
+    conversational_agent.py # agent chat utilisateur : correction guidée via outils (patch/add/remove row, run_cte)
     constraint_simplifier.py  # extraction contraintes SQL + detect_select_derived_expressions
   tests/               # pytest
 front/
@@ -207,9 +207,15 @@ npx prettier --write src/
 ## Architecture du graph LangGraph
 
 ```
-START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → evaluate_tests → [route_after_evaluate] → suggestions_generator → history_saver → END
-                                              ↘ executor  (used_columns vides)                                                    ↘ conversational_agent (bad_data + retries)
-                                              ↘ other     (question hors-sujet)                                                   ↘ history_saver (assertion_only)
+START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → evaluate_tests → [route_evaluator] → suggestions_generator → final_response → history_saver → END
+                                  ↘ conversational_agent  (input chat utilisateur sur tests existants)
+                                  ↘ other                 (question hors-sujet)
+
+Sur verdict Insuffisant (route_evaluator) :
+  bad_data (inclut empty_results) + retries>0  → bad_data_regen (décrémente gen_retries) → generator → executor   (régénération complète)
+  bad_data + retries==0                         → bad_data_exhausted → history_saver
+  bad_assertions                                → assertion_corrector / history_saver
+  assertion_only / rerun_only / too_many_rows   → history_saver
 ```
 
 Voir le détail complet dans [docs/workflow-query-generation.md](docs/workflow-query-generation.md).
@@ -225,14 +231,15 @@ Voir le détail complet dans [docs/workflow-query-generation.md](docs/workflow-q
 | `profile_checker`      | `profile_checker.py`         | Valide et fusionne le profil statistique (colonnes + joins + exprs dérivées) |
 | `evaluate_tests`       | `test_evaluator.py`          | Verdict structuré : Excellent / Bon / Insuffisant + cause (bad_data / bad_assertions) |
 | `suggestions_generator`| `suggestions_node.py`        | 3 suggestions contextualisées avec données réelles + verdicts       |
-| `conversational_agent` | `conversational_agent.py`    | Corrige les données incorrectes quand `evaluation_feedback == "bad_data"` |
+| `conversational_agent` | `conversational_agent.py`    | Agent chat **utilisateur** : corrige/génère via outils (`patch_test_field`, `add_test_row`, `remove_test_row`, `run_cte`). **Hors** boucle de retry auto |
+| `bad_data_regen`       | `query_chain.py`             | Décrémente `gen_retries` puis re-route vers le `generator` (régénération complète sur `bad_data`) |
 | `history_saver`        | `query_chain.py`             | Persiste l'historique en base                                       |
 
 ### Boucles de retry
 
-**Boucle executor → generator** : si `status == "empty_results"` et `gen_retries > 0` → `generator` re-tourne (max 2 fois).
+**Boucle evaluate → generator (régénération complète)** : si `evaluation_feedback == "bad_data"` (ce qui inclut `empty_results`) et `gen_retries > 0` → `bad_data_regen` décrémente `gen_retries` puis re-route vers le `generator`, qui **régénère intégralement** les données en ciblant la CTE en échec (le `cte_trace` voyage dans le message RESULTS, et le diagnostic niveau-étape est réinjecté dans le feedback via `_build_eval_messages`). Retries épuisés → `bad_data_exhausted` → `history_saver`.
 
-**Boucle evaluate → conversational_agent** : si `evaluation_feedback == "bad_data"` et `gen_retries > 0` → `conversational_agent` corrige les données → `generator` → `executor` (même compteur `gen_retries`).
+> ⚠️ Le `conversational_agent` n'est **pas** dans cette boucle automatique. C'était le cas historiquement (d'où le commentaire de `bad_data_regen`), mais le routage a été simplifié vers une régénération complète : le générateur étant **sans état**, il peut reproduire des sorties quasi identiques d'un retry à l'autre. L'agent reste réservé aux corrections **guidées par l'utilisateur** (input chat), où ses outils (`patch_test_field`, `add_test_row`, `run_cte`) permettent une correction **incrémentale**.
 
 ---
 
@@ -433,7 +440,7 @@ App
 - La route `__fix_error__` est déclenchée automatiquement si `alwaysFix` est activé côté client (localStorage).
 - `failing_cte` : quand DuckDB retourne 0 lignes, un **CTE trace** identifie la première CTE vide — le générateur cible alors uniquement cette CTE pour la correction.
 - **Verdict vs statut d'exécution** : `verdict` (`good`/`warn`/`bad`) mesure la *qualité du test* (logique, assertions), `execStatus` (`pass`/`fail`) mesure si DuckDB a retourné le résultat attendu. Ne pas confondre — les deux coexistent sur le même test.
-- **`evaluation_feedback`** : quand le verdict est `Insuffisant`, `test_evaluator` classifie la cause en `"bad_data"` (données incorrectes → relance via `conversational_agent`) ou `"bad_assertions"` (assertions mal définies → pas de relance automatique). Ce champ est dans `QueryState` et est utilisé par `route_after_evaluate`.
+- **`evaluation_feedback`** : quand le verdict est `Insuffisant`, `test_evaluator` classifie la cause en `"bad_data"` (données incorrectes → régénération complète via le `generator`, nœud `bad_data_regen`) ou `"bad_assertions"` (assertions mal définies → pas de relance automatique). Ce champ est dans `QueryState` et est utilisé par `route_evaluator`.
 - **Modèle LLM & raisonnement (`is_native_thinking_active`)** : MockSQL est optimisé pour **gemini-2.5-flash / pro**, où le thinking natif Gemini est activé par défaut. `storage/config.py:is_native_thinking_active()` combine le réglage explicite (`thinking_budget`/`thinking_level`) et le défaut du modèle (flash/pro = ON, flash-lite = OFF). Quand le thinking est actif, le champ `unit_test_build_reasoning` n'est qu'une **justification brève (1 phrase)** — le vrai raisonnement se fait dans le canal thinking, hors du JSON de sortie → pas de risque de troncature. Quand il est inactif (flash-lite, ou `thinking_budget: 0`), le champ porte un **chain-of-thought complet (3 phrases max)** comme seul raisonnement, et le générateur logue un warning poussant vers flash/pro. La bascule pilote à la fois le schéma Pydantic (`get_generation_output_type`) et le prompt (`generate_data_prompt`, paramètre `native_thinking`).
 - **Profil statistique enrichi** : le profil stocké peut désormais contenir des `derived_expressions` (expressions SQL non-triviales profilées sur les données réelles, ex : `SAFE_CAST`, `REGEXP_EXTRACT`) injectées dans le prompt de génération via `_format_profile_block`. Les JOINs profilés peuvent inclure un `right_filter` et des `left_cte_sql`/`right_cte_sql` pour contextualiser les cardinalités.
 - **Auto-import per projet** : l'auto-import silencieux de tables manquantes peut être activé globalement (`localStorage.autoImport_always`) ou par projet (`localStorage.autoImport_project_{projectId}`). Les deux flags sont vérifiés dans `QueryChatComponent`.
