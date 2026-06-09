@@ -1,5 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { Alert, Box, Collapse, IconButton, LinearProgress, Tooltip, Typography } from '@mui/material';
+import { useTranslation } from 'react-i18next';
+import { Alert, Box, Chip, Collapse, IconButton, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
+import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import CloseIcon from '@mui/icons-material/Close';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
@@ -8,7 +10,7 @@ import DroppableTextField from '../../../shared/DroppableTextField';
 
 import MessageDisplay from './MessageDisplay';
 import HistoryDrawer from './HistoryDrawer';
-import { Message, SqlHistoryEntry } from '../../../utils/types';
+import { AnyRenderable, Message, MessageGroup, RequestGroup, SqlHistoryEntry } from '../../../utils/types';
 
 function DbIcon() {
   return (
@@ -23,14 +25,25 @@ function DbIcon() {
 
 const HISTORY_RESET_THRESHOLD = 100;
 
-function estimateTokens(messages: Message[]): number {
+function estimateTokens(messages: AnyRenderable[]): number {
   let chars = 0;
-  for (const msg of messages) {
-    chars += (msg.contents.text || '').length;
-    chars += (msg.contents.sql || '').length;
-    chars += (msg.contents.optimizedSql || '').length;
-    chars += (msg.contents.error || '').length;
-  }
+  const visit = (items: AnyRenderable[]) => {
+    for (const item of items) {
+      if ((item as any).type === 'request_group') {
+        visit((item as RequestGroup).items);
+      } else if ((item as any).type === 'group') {
+        (item as MessageGroup).branches.forEach(visit);
+      } else {
+        const c = (item as Message).contents;
+        if (!c) continue;
+        chars += (c.text || '').length;
+        chars += (c.sql || '').length;
+        chars += (c.optimizedSql || '').length;
+        chars += (c.error || '').length;
+      }
+    }
+  };
+  visit(messages);
   return Math.round(chars / 4);
 }
 
@@ -44,13 +57,15 @@ interface ChatColumnProps {
   selectedTestIndex: number | null;
   assertionOnly: boolean;
   onClearAnchor: () => void;
-  renderMessages: Message[];
+  renderMessages: AnyRenderable[];
   userInput: string;
   setUserInput: React.Dispatch<React.SetStateAction<string>>;
   onSend: () => void;
   isSending: boolean;
   loading: boolean | null;
   loading_message?: string | null;
+  understandingDraft?: Array<{ database?: string; table: string; columns: string[] }> | null;
+  validationMs?: number | null;
   error: string | null;
   alwaysFix: boolean;
   onAlwaysFixChange: (v: boolean) => void;
@@ -81,6 +96,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   isSending,
   loading,
   loading_message,
+  understandingDraft,
+  validationMs,
   error,
   alwaysFix,
   onAlwaysFixChange,
@@ -97,6 +114,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   onRequestProfile,
   focusTrigger,
 }) => {
+  const { t } = useTranslation();
   const showHistoryBanner = renderMessages.length > HISTORY_RESET_THRESHOLD;
   const estimatedTokens = showHistoryBanner ? estimateTokens(renderMessages) : 0;
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -382,8 +400,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           onRequestProfile={onRequestProfile}
         />
 
-        {isLoading && (
-          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+        {isLoading && (() => {
+          const dots = (
             <Box sx={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
               {[0, 1, 2].map((i) => (
                 <Box
@@ -403,13 +421,62 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
                 />
               ))}
             </Box>
-            {loading_message && (
-              <Typography variant="caption" sx={{ color: '#6b8287' }}>
-                {loading_message}
-              </Typography>
-            )}
-          </Box>
-        )}
+          );
+
+          // Checklist vivante : montre les tables/colonnes déjà extraites par `validate`,
+          // puis l'étape backend en cours. Fallback aux dots si rien n'est encore extrait.
+          if (understandingDraft && understandingDraft.length > 0) {
+            const totalColumns = understandingDraft.reduce((acc, tb) => acc + (tb.columns?.length ?? 0), 0);
+            const seconds = validationMs != null ? Math.max(0.1, validationMs / 1000).toFixed(1) : null;
+            return (
+              <Box sx={{ py: 1 }}>
+                <Stack gap={0.75}>
+                  {seconds && (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                      <CheckCircleOutlineIcon sx={{ fontSize: 16, color: '#2BB0A8' }} />
+                      <Typography variant="caption" sx={{ color: '#37474f', fontWeight: 600 }}>
+                        {t('loading.query_validated_in', { seconds })}
+                      </Typography>
+                    </Box>
+                  )}
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                    <CheckCircleOutlineIcon sx={{ fontSize: 16, color: '#2BB0A8' }} />
+                    <Typography variant="caption" sx={{ color: '#37474f', fontWeight: 600 }}>
+                      {understandingDraft.length} {t('loading.step_tables')} · {totalColumns} {t('loading.step_columns')}
+                    </Typography>
+                    <Stack direction="row" flexWrap="wrap" gap={0.5} sx={{ ml: 0.5 }}>
+                      {understandingDraft.map((tb) => (
+                        <Chip
+                          key={`${tb.database ?? ''}.${tb.table}`}
+                          label={tb.table}
+                          size="small"
+                          sx={{ bgcolor: '#e8f5f5', color: '#1ca8a4', fontFamily: 'monospace', fontSize: 10, height: 18, border: '1px solid #b2e0de' }}
+                        />
+                      ))}
+                    </Stack>
+                  </Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
+                    {dots}
+                    <Typography variant="caption" sx={{ color: '#6b8287' }}>
+                      {loading_message || t('loading.step_constraints')}
+                    </Typography>
+                  </Box>
+                </Stack>
+              </Box>
+            );
+          }
+
+          return (
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, py: 1 }}>
+              {dots}
+              {loading_message && (
+                <Typography variant="caption" sx={{ color: '#6b8287' }}>
+                  {loading_message}
+                </Typography>
+              )}
+            </Box>
+          );
+        })()}
 
         {!isLoading && lastReasoning && (
           <Box sx={{ mt: 0.75, mb: 0.5 }}>

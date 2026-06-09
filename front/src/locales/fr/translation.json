@@ -36,7 +36,29 @@
     "reasoning": "Raisonnement",
     "validating_query": "Validation de la requête",
     "profiling": "Profiling en cours…",
-    "profiling_short": "Profiling…"
+    "profiling_short": "Profiling…",
+    "query_validated_in": "Requête validée en {{seconds}} s",
+    "step_tables": "tables",
+    "step_columns": "colonnes",
+    "step_constraints": "Extraction des conditions et des colonnes utilisées…",
+    "step_generation": "Génération des tests"
+  },
+  "understanding": {
+    "title": "Ce que MockSQL a compris",
+    "summary": "{{tables}} tables · {{columns}} colonnes",
+    "tables": "Tables",
+    "relations": "Relations",
+    "filters": "Filtres",
+    "computed": "Colonnes calculées",
+    "show_columns": "Voir les colonnes",
+    "hide_columns": "Masquer les colonnes"
+  },
+  "submission": {
+    "validating_detail": [
+      "Compilation et dry-run de la requête…",
+      "Optimisation et découpage du SQL…",
+      "Extraction des colonnes et des conditions utilisées…"
+    ]
   },
   "action": {
     "download": "Télécharger",

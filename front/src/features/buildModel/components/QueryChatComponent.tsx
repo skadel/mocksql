@@ -16,6 +16,7 @@ import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import ChatColumn from './ChatColumn';
+import SubmissionProgress from './SubmissionProgress';
 import ArtefactHeader from './ArtefactHeader';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
@@ -72,6 +73,12 @@ const ChatComponent: React.FC = () => {
   } | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [_validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
+  // Tables/colonnes extraites par `validate`, affichées dans la checklist vivante pendant l'attente.
+  const [understandingDraft, setUnderstandingDraft] = useState<
+    Array<{ database?: string; table: string; columns: string[] }> | null
+  >(null);
+  // Durée du dry-run de validation (ms), affichée « Requête validée en X s » dans la checklist.
+  const [validationMs, setValidationMs] = useState<number | null>(null);
   const [submissionStep, setSubmissionStep] = useState<string | null>(null);
   const [alwaysFix, setAlwaysFix] = useLocalStorageState('alwaysFix', false);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(null);
@@ -331,7 +338,7 @@ const ChatComponent: React.FC = () => {
 
   // -------- Reset validation state when user edits SQL
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { setValidationStatus('idle'); setSubmitError(null); setMissingTables(null); setTablesToImport(null); }, [sqlQuery]);
+  useEffect(() => { setValidationStatus('idle'); setSubmitError(null); setMissingTables(null); setTablesToImport(null); setUnderstandingDraft(null); setValidationMs(null); }, [sqlQuery]);
 
   // -------- Draft localStorage (follow-up messages only)
   const draftKeyRef = useRef<string>('');
@@ -409,6 +416,7 @@ const ChatComponent: React.FC = () => {
   // -------- Shared validate → profile → generate flow
   const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
     setSubmissionStep(t('loading.validating_sql'));
+    const validateStart = performance.now();
     let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
     try {
       validateResult = await validateQueryApi({ sql, project: '', dialect: DIALECT, session: sessionId, parent_message_id: '' });
@@ -439,8 +447,18 @@ const ChatComponent: React.FC = () => {
     setOptimizedSql(validateResult.optimized_sql ?? '');
     dispatch(pushSqlHistory({ id: uuidv4(), sql, optimizedSql: validateResult.optimized_sql ?? '', parentMessageId: '' }));
 
+    setValidationMs(performance.now() - validateStart);
     setSubmissionStep(t('loading.checking_profiling'));
     const usedColumns = validateResult.used_columns ?? [];
+    setUnderstandingDraft(
+      usedColumns
+        .map((c: any) => {
+          const obj = typeof c === 'string' ? (() => { try { return JSON.parse(c); } catch { return null; } })() : c;
+          if (!obj || !obj.table) return null;
+          return { database: obj.database, table: obj.table, columns: obj.used_columns ?? [] };
+        })
+        .filter(Boolean) as Array<{ database?: string; table: string; columns: string[] }>
+    );
     try {
       const profileResult = await checkProfileApi({ sql, project: '', dialect: DIALECT, session: sessionId, used_columns: usedColumns });
       if (!profileResult.profile_complete && profileResult.auto_profile_available && profileResult.missing_columns?.length) {
@@ -1210,10 +1228,7 @@ const ChatComponent: React.FC = () => {
 
             {/* Feedback zone — loading bar, errors, import (below the button) */}
             {(isSending && submissionStep) && (
-              <Box sx={{ mt: 3 }}>
-                <LinearProgress variant="indeterminate" sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }} />
-                <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>{submissionStep}</Typography>
-              </Box>
+              <SubmissionProgress label={submissionStep} />
             )}
             {submitError && (
               <Alert severity="error" sx={{ borderRadius: '12px', mt: 2 }} onClose={() => setSubmitError(null)}>
@@ -1280,6 +1295,8 @@ const ChatComponent: React.FC = () => {
             isSending={isSending}
             loading={loading}
             loading_message={loading_message}
+            understandingDraft={understandingDraft}
+            validationMs={validationMs}
             error={error}
             alwaysFix={alwaysFix}
             onAlwaysFixChange={handleAlwaysFixChange}
@@ -1371,7 +1388,7 @@ const ChatComponent: React.FC = () => {
                     : undefined
                 }
                 onUpload={(uploadedData) => {
-                  const lastMsg = renderMessages[renderMessages.length - 1] as any;
+                  const lastMsg = getLastMessage(renderMessages, selectedChildIndices) as any;
                   sendMessage('', sqlQuery, lastMsg?.id, lastMsg?.id, uploadedData, false);
                 }}
                 onOpenChat={() => { setSelectedTestIndex(null); }}

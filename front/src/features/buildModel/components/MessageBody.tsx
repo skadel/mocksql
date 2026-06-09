@@ -6,6 +6,7 @@ import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
 import DisplayTable from './DisplayTable';
+import QueryUnderstandingCard from './QueryUnderstandingCard';
 import { StyledButton } from '../../../style/StyledComponents';
 import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
 
@@ -215,6 +216,11 @@ const MessageBody: React.FC<MessageBodyProps> = ({
 
   return (
     <>
+      {/* Carte "Compréhension de la requête" */}
+      {msg.contents.understanding && (
+        <QueryUnderstandingCard understanding={msg.contents.understanding} />
+      )}
+
       {/* Label de contexte pour les demandes de modification de tests */}
       {msg.contentType === 'examples_update' && (
         <Typography

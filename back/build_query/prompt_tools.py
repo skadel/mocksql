@@ -169,6 +169,51 @@ Réponds uniquement avec le JSON demandé sans autres explications.
     )
 
 
+def _format_schema_block(used_columns: list) -> str:
+    """Readable 'source tables to populate' block — one line per table with its
+    columns and the exact `data` key to use.
+
+    Replaces the raw Python-list ``repr`` that previously trailed at the bottom of
+    the human message: the role promises "le schéma fourni" but no schema block
+    existed.
+    """
+    lines: List[str] = []
+    for u in used_columns:
+        if isinstance(u, str):
+            try:
+                u = json.loads(u)
+            except (ValueError, TypeError):
+                continue
+        db = u.get("database", "")
+        tbl = u.get("table", "")
+        key = f"{db}_{tbl}" if db else tbl
+        if not key:
+            continue
+        cols = u.get("used_columns", []) or []
+        cols_str = ", ".join(cols) if cols else "(toutes colonnes)"
+        lines.append(f"- `{key}` : {cols_str}")
+    return "\n".join(lines)
+
+
+def _dedup_and_parts(expr: str) -> str:
+    """Deduplicate ` AND `-joined key predicates while preserving order.
+
+    The profiler concatenates composite join keys with ` AND ` but may emit
+    duplicates (e.g. ``a.x AND a.x AND a.x``). Collapse them so the join hint
+    stays readable.
+    """
+    if not expr or " AND " not in expr:
+        return expr
+    seen: set[str] = set()
+    uniq: List[str] = []
+    for part in expr.split(" AND "):
+        p = part.strip()
+        if p and p not in seen:
+            seen.add(p)
+            uniq.append(p)
+    return " AND ".join(uniq)
+
+
 def _format_profile_block(
     profile: Optional[dict],
     used_columns: list,
@@ -271,12 +316,20 @@ def _format_profile_block(
 
     joins = profile.get("joins", [])
     join_lines: List[str] = []
+    # CTE bodies are dumped once globally — the profiler attaches the same CTE SQL to
+    # every join the CTE participates in, and that SQL is already present in the main
+    # query block. Re-dumping it per-join is pure noise (cf. coface répété 3×).
+    seen_cte_sql: set[str] = set()
     for j in joins:
         lt, rt = j.get("left_table", ""), j.get("right_table", "")
         lk, rk = j.get("left_expr", ""), j.get("right_expr", "")
         if not (lt and rt and lk and rk):
             continue
-        line = f"  - {lt}.{lk} ↔ {rt}.{rk}"
+        # left_expr/right_expr concatènent les prédicats de clé avec " AND ", mais le
+        # profiler y laisse des doublons (`a.x AND a.x AND a.x`). On déduplique en
+        # préservant l'ordre. Les clés portent déjà `alias.colonne` → pas besoin du
+        # préfixe table (lt/rt) qui ne fait que rallonger.
+        line = f"  - {_dedup_and_parts(lk)} ↔ {_dedup_and_parts(rk)}"
         stats_parts: List[str] = []
         match_rate = j.get("left_match_rate")
         if match_rate is not None:
@@ -296,15 +349,16 @@ def _format_profile_block(
         if j.get("right_filter"):
             line += f" [filtre: {j['right_filter']}]"
         join_lines.append(line)
-        # CTE SQL stored at profile-build time (phase 1) — display if present
-        for side_cte_key, label in (
-            ("left_cte_sql", "gauche"),
-            ("right_cte_sql", "droite"),
+        # CTE SQL stored at profile-build time (phase 1) — display once per unique body.
+        for side_cte_key, label, side_tbl in (
+            ("left_cte_sql", "gauche", lt),
+            ("right_cte_sql", "droite", rt),
         ):
             cte_sql = j.get(side_cte_key)
-            if cte_sql:
-                short = (lt if label == "gauche" else rt).split(".")[-1]
-                indented = "\n".join(f"      {line}" for line in cte_sql.splitlines())
+            if cte_sql and cte_sql not in seen_cte_sql:
+                seen_cte_sql.add(cte_sql)
+                short = side_tbl.split(".")[-1]
+                indented = "\n".join(f"      {ln}" for ln in cte_sql.splitlines())
                 join_lines.append(f"    [CTE côté {label} — `{short}`]\n{indented}")
 
     if not lines and not join_lines:
@@ -400,23 +454,14 @@ def generate_data_prompt(
             )
         else:
             constraints_block = (
-                f"\nRespecte STRICTEMENT ces contraintes extraites du SQL "
-                f"(en particulier les `anti_joins` : génère des données qui NE correspondent PAS à la table jointe) :\n"
-                f"\n Focus dans la génération des tests sur la liste de conditions suivante pour que mes tests sur la requete SQL ci-dessous ne donnent pas un résultat vide :"
+                "\n**Contraintes extraites du SQL — à respecter pour un résultat non vide :**\n"
+                "Les filtres et jointures positifs ci-dessous doivent être VRAIS. "
+                "⚠️ Les `anti_joins`, eux, doivent être FAUX : génère des données qui NE "
+                "correspondent PAS à la table anti-jointe (sinon la ligne est supprimée).\n"
                 f"```json\n{constraints_hint}\n```\n"
             )
     else:
         constraints_block = ""
-
-    sql_block = f"\nRequête SQL :\n```sql\n{sql}\n```\n" if sql else ""
-
-    context_block = (
-        f"\n**Contexte métier du projet (fourni par l'ingénieur data) :**\n{model_context}\n"
-        if model_context
-        else ""
-    )
-
-    trace_hint_block = f"\n{trace_hint}\n" if trace_hint else ""
 
     profile_block_str = _format_profile_block(profile, used_columns)
     profile_block = (
@@ -469,12 +514,17 @@ def generate_data_prompt(
         )
 
     system_message_content = (
-        f"""
+        """
 Vous êtes un data QA, testeur de requêtes SQL et expert en génération de données de test JSON.
-Analysez la requête SQL et le schéma des données sources fournis,
-puis générez un unique test unitaire en format JSON.
+À partir du schéma des tables sources et de la requête SQL fournis, générez un unique test unitaire au format JSON.
 
-{context_block}{trace_hint_block}{sql_block}{constraints_block}{profile_block}{unnest_block}{volume_hints_block}{fanout_hint_block}
+Le message suivant contient ces sections, délimitées par des balises :
+- `<schema>` : les tables sources à peupler, leurs colonnes, et le profil statistique éventuel.
+- `<business_context>` : contexte métier du projet (optionnel).
+- `<query>` : la requête SQL à tester.
+- `<constraints>` : contraintes extraites du SQL — `conditions` (à rendre VRAIES), `anti_joins` (à rendre FAUSSES : générer des données qui NE matchent PAS la table anti-jointe), `format_constraints`, `lineages`.
+- `<diagnostic>` : diagnostic de la tentative précédente, s'il y a lieu (optionnel).
+- `<task>` : ce que vous devez produire.
 
 **Consignes principales :**
 """
@@ -552,32 +602,61 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
         else "- Respecte strictement l'instruction utilisateur pour ce scénario — un résultat vide est acceptable si l'instruction le demande.\n"
     )
 
-    constraints_reminder = (
-        f"\n⚠️ **Rappel des contraintes SQL à respecter (anti-joins, filtres, jointures) :**\n"
-        f"```json\n{constraints_hint}\n```\n"
-        if constraints_hint
+    # ── Sections balisées du message human : du vocabulaire vers l'ask (recency) ──
+    schema_block_str = _format_schema_block(used_columns)
+    schema_section = (
+        "<schema>\n"
+        "**Tables sources à peupler** — utilise EXACTEMENT ces clés dans `data` "
+        "(format `{dataset}_{table}`, casse stricte) :\n"
+        f"{schema_block_str}\n"
+        f"{profile_block}"
+        "</schema>\n"
+    )
+
+    business_section = (
+        f"<business_context>\n{model_context}\n</business_context>\n"
+        if model_context
         else ""
     )
 
-    final_human_message_content = f"""
-Génère un test unitaire conforme aux consignes ci-dessus, avec :
+    query_section = f"<query>\n```sql\n{sql}\n```\n</query>\n" if sql else ""
+
+    constraints_inner = (
+        f"{constraints_block}{unnest_block}{volume_hints_block}{fanout_hint_block}"
+    )
+    constraints_section = (
+        f"<constraints>\n{constraints_inner}</constraints>\n"
+        if constraints_inner.strip()
+        else ""
+    )
+
+    # Diagnostic = feedback d'état du tour (volatil, par retry) — près de l'ask, après
+    # la requête qu'il commente (et non plus dans le system, préfixe stable).
+    diagnostic_section = (
+        f"<diagnostic>\n{trace_hint}\n</diagnostic>\n" if trace_hint else ""
+    )
+
+    task_section = f"""<task>
+Génère un test unitaire conforme aux consignes du message système, avec :
 - Un seul test
 - Résultat JSON uniquement (champs dans l'ordre : unit_test_description, unit_test_build_reasoning, tags, data)
 - `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
 - Pas de requête SQL source dans la sortie
 - Données complètes, sans colonnes nulles ni vides (sauf si l'instruction le demande explicitement)
-- Attention stricte à la **casse exacte** des noms de tables dans le JSON
+- Attention stricte à la **casse exacte** des noms de tables dans le JSON (clés `data` = celles de <schema>)
+- ⚠️ Respecte les `conditions` de <constraints> (à rendre VRAIES) et les `anti_joins` (à rendre FAUSSES : ne génère PAS de données qui matchent la table anti-jointe)
 - Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
 - Si le SQL a des conditions OR, plusieurs branches CASE, ou plusieurs branches UNION ALL, choisir **une seule branche** et nommer explicitement la branche dans la description — les tables spécifiques aux autres branches peuvent être laissées à null, mais les tables partagées entre branches doivent être remplies avec des valeurs cohérentes avec la branche choisie
-{non_empty_constraint}
-Voici les colonnes qui doivent être générées (les clés `data` doivent utiliser exactement le format `{{dataset}}_{{table}}` ci-dessous) :
-{[{"table_key": f"{u.get('database', '')}_{u.get('table', '')}" if u.get("database") else u.get("table", ""), "columns": u.get("used_columns", [])} for u in used_columns]}
-{instruction_block}{sql_block}{constraints_reminder}{profile_block}
+{non_empty_constraint}{instruction_block}
 {format_instructions}
+</task>"""
 
-Date et heure actuelles : {formatted_datetime}
-"""
+    final_human_message_content = (
+        f"{schema_section}{business_section}{query_section}"
+        f"{constraints_section}{diagnostic_section}{task_section}\n\n"
+        f"Date et heure actuelles : {formatted_datetime}\n"
+    )
 
     final_human_msg = ("human", final_human_message_content)
 

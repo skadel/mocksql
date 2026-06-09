@@ -24,10 +24,11 @@ import { fetchPage } from '../../../api/query';
 import { fetchUniqueColumns } from '../../../api/table';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { StyledButton } from '../../../style/StyledComponents';
-import { AnyRenderable, Message, MessageGroup, MsgType, SqlHistoryEntry } from '../../../utils/types';
+import { AnyRenderable, Message, MessageGroup, MsgType, RequestGroup, SqlHistoryEntry, isRequestGroup } from '../../../utils/types';
 import { setSelectedChildIndex } from '../buildModelSlice';
 import MessageBody from './MessageBody';
 import MessageGroupComponent from './MessageGroupComponent';
+import RequestGroupBubble from './RequestGroupBubble';
 
 interface MessageDisplayProps {
   sendMessage: (
@@ -92,6 +93,9 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
             const id = findLastInItems(branch);
             if (id) return id;
           }
+        } else if ('type' in item && (item as any).type === 'request_group') {
+          const rg = item as RequestGroup;
+          if (rg.items.length > 0) return rg.items[rg.items.length - 1].id;
         } else {
           return (item as Message).id;
         }
@@ -171,6 +175,31 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
       dispatch(fetchPage({ project, sql, msgId, dialect, page, limit }));
     },
     [currentProject?.dialect, dispatch]
+  );
+
+  /** --- Rendu du corps d'un message (sans le chrome de carte) --- */
+  const renderMessageBody = (msg: Message) => (
+    <MessageBody
+      msg={msg}
+      currentModelId={currentModelId}
+      currentProjectId={currentProjectId}
+      currentModelName={currentModel?.name || 'data'}
+      onUpload={handleUpload}
+      onProfileUpload={handleProfileUpload}
+      onPageChange={handlePageChange}
+      onExecute={undefined}
+      onCreateClick={handleCreateClick}
+      onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
+      onRequestProfile={onRequestProfile}
+      debugMessages={
+        ((msg as any).children || [])
+          .map((id: string) => queryComponentGraph[id])
+          .filter((m: any) => m && (
+            m.contentType === MsgType.DEBUG_RUN_CTE ||
+            m.contentType === MsgType.DEBUG_COUNT_STEPS
+          )) as Message[]
+      }
+    />
   );
 
   /** --- Rendu d'un message simple --- */
@@ -329,27 +358,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
                   </Box>
                 </>
               ) : (
-                <MessageBody
-                  msg={msg}
-                  currentModelId={currentModelId}
-                  currentProjectId={currentProjectId}
-                  currentModelName={currentModel?.name || 'data'}
-                  onUpload={handleUpload}
-                  onProfileUpload={handleProfileUpload}
-                  onPageChange={handlePageChange}
-                  onExecute={undefined}
-                  onCreateClick={handleCreateClick}
-                  onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
-                  onRequestProfile={onRequestProfile}
-                  debugMessages={
-                    ((msg as any).children || [])
-                      .map((id: string) => queryComponentGraph[id])
-                      .filter((m: any) => m && (
-                        m.contentType === MsgType.DEBUG_RUN_CTE ||
-                        m.contentType === MsgType.DEBUG_COUNT_STEPS
-                      )) as Message[]
-                  }
-                />
+                renderMessageBody(msg)
               )}
             </CardContent>
           </Card>
@@ -361,6 +370,21 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
   return (
     <Box sx={{ maxWidth: '100%', overflowX: 'hidden', p: 0, mx: 0 }}>
       {renderMessages.map((item, index) => {
+        // Bulle de requête : étapes repliées + réponse finale visible
+        if (isRequestGroup(item)) {
+          const rg = item as RequestGroup;
+          const itemIds = new Set(rg.items.map((m) => m.id));
+          const sqlAfterGroup = sqlHistory?.find(
+            (e) => e.parentMessageId !== '' && itemIds.has(e.parentMessageId)
+          );
+          return (
+            <React.Fragment key={`req-${rg.requestId || index}`}>
+              <RequestGroupBubble group={rg} renderBody={renderMessageBody} />
+              {sqlAfterGroup && <SqlChangeDivider entry={sqlAfterGroup} onRestore={onSqlRestore} />}
+            </React.Fragment>
+          );
+        }
+
         // Groupes (branches)
         if ('type' in item && (item as any).type === 'group') {
           const group = item as MessageGroup;
@@ -371,6 +395,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
               <MessageGroupComponent
                 group={group}
                 renderSingleMessage={renderSingleMessage}
+                renderBody={renderMessageBody}
               />
               {sqlAfterGroup && (
                 <SqlChangeDivider entry={sqlAfterGroup} onRestore={onSqlRestore} />

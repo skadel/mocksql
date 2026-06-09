@@ -68,108 +68,103 @@ def _format_data_indexed(data: dict) -> str:
     return "\n".join(lines) if lines else "(aucune donnée)"
 
 
-async def conversational_agent(state: QueryState):
-    """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
-    logger.diag(
-        "[conv_agent] entrée — evaluation_feedback=%s gen_retries=%s input=%r",
-        state.get("evaluation_feedback"),
-        state.get("gen_retries"),
-        (state.get("input") or "")[:60],
-    )
-    existing_tests = await retrieve_existing_tests(state["session"], state)
-    tests_summary = (
-        "\n".join(
-            f"[{t.get('test_uid', '?')}] {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
-            for t in existing_tests
+def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
+    """Construit le bloc de contexte injecté dans le prompt système du conversational_agent
+    après un verdict ``bad_data``.
+
+    Rassemble, pour la tentative échouée en cours (la dernière EVALUATION) :
+    - le diagnostic structuré (cause racine, pattern SQL, problème dans les données,
+      recette de correction, tables/CTEs concernées) s'il est présent, sinon le verdict brut ;
+    - les données d'entrée injectées (indexées par ligne) ;
+    - la sortie DuckDB obtenue (ou « vide ») ;
+    - les assertions en échec.
+
+    Retourne ``(eval_context, eval_test_idx)``. Si le feedback n'est pas ``bad_data`` ou
+    qu'aucun message EVALUATION n'est présent, retourne ``("", None)``.
+    """
+    if state.get("evaluation_feedback") != "bad_data":
+        return "", None
+
+    eval_msgs = [
+        m
+        for m in state.get("messages", [])
+        if get_message_type(m) == MsgType.EVALUATION
+    ]
+    if not eval_msgs:
+        return "", None
+
+    latest_eval = eval_msgs[-1]
+    eval_test_idx = latest_eval.additional_kwargs.get("test_index")
+    diag_struct = latest_eval.additional_kwargs.get("diagnostic")
+    if diag_struct:
+        eval_verdict_text = (
+            f"**Cause racine :** {diag_struct['root_cause']}\n"
+            f"**Pattern SQL :** {diag_struct['sql_pattern']}\n"
+            f"**Problème dans les données :** {diag_struct['data_issue']}\n"
+            f"**Correction attendue :** {diag_struct['fix_recipe']}\n"
+            f"**Tables concernées :** {', '.join(diag_struct['affected_tables'])}\n"
+            f"**CTEs concernées :** {', '.join(diag_struct['affected_ctes'])}"
         )
-        or "Aucun test pour l'instant."
+    else:
+        eval_verdict_text = (
+            latest_eval.additional_kwargs.get("diag") or latest_eval.content
+        )
+    retries_left = state.get("gen_retries", 0)
+
+    # Find the failing test case to expose its data to the agent
+    failing_test = next(
+        (t for t in existing_tests if str(t.get("test_index")) == str(eval_test_idx)),
+        None,
     )
+    # Référence le test par son uid partout (c'est l'identifiant que l'agent
+    # doit passer aux outils) — pas par test_index, pour éviter qu'il confonde
+    # les deux et invente un identifiant.
+    failing_uid = (failing_test or {}).get("test_uid", str(eval_test_idx))
+    test_data_block = ""
+    if failing_test:
+        input_data = failing_test.get("data", {})
+        results_json = failing_test.get("results_json", "[]")
+        assertion_results = failing_test.get("assertion_results", [])
 
-    # Contexte injecté quand l'agent est appelé après un verdict "bad_data" de l'évaluateur
-    evaluation_feedback = state.get("evaluation_feedback")
-    eval_context = ""
-    eval_test_idx = None
-    if evaluation_feedback == "bad_data":
-        eval_msgs = [
-            m
-            for m in state.get("messages", [])
-            if get_message_type(m) == MsgType.EVALUATION
-        ]
-        if eval_msgs:
-            latest_eval = eval_msgs[-1]
-            eval_test_idx = latest_eval.additional_kwargs.get("test_index")
-            diag_struct = latest_eval.additional_kwargs.get("diagnostic")
-            if diag_struct:
-                eval_verdict_text = (
-                    f"**Cause racine :** {diag_struct['root_cause']}\n"
-                    f"**Pattern SQL :** {diag_struct['sql_pattern']}\n"
-                    f"**Problème dans les données :** {diag_struct['data_issue']}\n"
-                    f"**Correction attendue :** {diag_struct['fix_recipe']}\n"
-                    f"**Tables concernées :** {', '.join(diag_struct['affected_tables'])}\n"
-                    f"**CTEs concernées :** {', '.join(diag_struct['affected_ctes'])}"
-                )
-            else:
-                eval_verdict_text = (
-                    latest_eval.additional_kwargs.get("diag") or latest_eval.content
-                )
-            retries_left = state.get("gen_retries", 0)
+        if input_data:
+            test_data_block += f"\n\nDonnées d'entrée du test [{failing_uid}] :\n{_format_data_indexed(input_data)}"
 
-            # Find the failing test case to expose its data to the agent
-            failing_test = next(
-                (
-                    t
-                    for t in existing_tests
-                    if str(t.get("test_index")) == str(eval_test_idx)
-                ),
-                None,
+        if results_json and results_json != "[]":
+            try:
+                parsed_results = (
+                    json.loads(results_json)
+                    if isinstance(results_json, str)
+                    else results_json
+                )
+                results_summary = json.dumps(
+                    parsed_results[:10], ensure_ascii=False, indent=2
+                )
+            except Exception:
+                results_summary = str(results_json)[:500]
+            test_data_block += (
+                f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
             )
-            # Référence le test par son uid partout (c'est l'identifiant que l'agent
-            # doit passer aux outils) — pas par test_index, pour éviter qu'il confonde
-            # les deux et invente un identifiant.
-            failing_uid = (failing_test or {}).get("test_uid", str(eval_test_idx))
-            test_data_block = ""
-            if failing_test:
-                input_data = failing_test.get("data", {})
-                results_json = failing_test.get("results_json", "[]")
-                assertion_results = failing_test.get("assertion_results", [])
+        else:
+            test_data_block += "\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
 
-                if input_data:
-                    test_data_block += f"\n\nDonnées d'entrée du test [{failing_uid}] :\n{_format_data_indexed(input_data)}"
-
-                if results_json and results_json != "[]":
-                    try:
-                        parsed_results = (
-                            json.loads(results_json)
-                            if isinstance(results_json, str)
-                            else results_json
-                        )
-                        results_summary = json.dumps(
-                            parsed_results[:10], ensure_ascii=False, indent=2
-                        )
-                    except Exception:
-                        results_summary = str(results_json)[:500]
-                    test_data_block += (
-                        f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
+        if assertion_results:
+            failing_assertions = [
+                a for a in assertion_results if a.get("status") != "pass"
+            ]
+            if failing_assertions:
+                try:
+                    assertions_summary = json.dumps(
+                        failing_assertions, ensure_ascii=False, indent=2
                     )
-                else:
-                    test_data_block += "\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
+                except Exception:
+                    assertions_summary = str(failing_assertions)[:500]
+                test_data_block += (
+                    f"\n\nAssertions en échec :\n```json\n{assertions_summary}\n```"
+                )
 
-                if assertion_results:
-                    failing_assertions = [
-                        a for a in assertion_results if a.get("status") != "pass"
-                    ]
-                    if failing_assertions:
-                        try:
-                            assertions_summary = json.dumps(
-                                failing_assertions, ensure_ascii=False, indent=2
-                            )
-                        except Exception:
-                            assertions_summary = str(failing_assertions)[:500]
-                        test_data_block += f"\n\nAssertions en échec :\n```json\n{assertions_summary}\n```"
-
-            test_name = (failing_test or {}).get("unit_test_description", "")
-            test_name_line = f"\nScénario : {test_name}" if test_name else ""
-            eval_context = f"""
+    test_name = (failing_test or {}).get("unit_test_description", "")
+    test_name_line = f"\nScénario : {test_name}" if test_name else ""
+    eval_context = f"""
 
 ⚠️ CONTEXTE AUTOMATIQUE — Correction du test [{failing_uid}]{test_name_line}
 
@@ -195,6 +190,30 @@ Tentatives de correction restantes : {retries_left}
 - `request_reevaluation` — si le comportement observé est intentionnel
 
 ⚠️ Règle impérative : préfère les corrections chirurgicales groupées à la régénération complète. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Ne demande pas de confirmation."""
+
+    return eval_context, eval_test_idx
+
+
+async def conversational_agent(state: QueryState):
+    """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
+    logger.diag(
+        "[conv_agent] entrée — evaluation_feedback=%s gen_retries=%s input=%r",
+        state.get("evaluation_feedback"),
+        state.get("gen_retries"),
+        (state.get("input") or "")[:60],
+    )
+    existing_tests = await retrieve_existing_tests(state["session"], state)
+    tests_summary = (
+        "\n".join(
+            f"[{t.get('test_uid', '?')}] {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
+            for t in existing_tests
+        )
+        or "Aucun test pour l'instant."
+    )
+
+    # Contexte injecté quand l'agent est appelé après un verdict "bad_data" de l'évaluateur
+    evaluation_feedback = state.get("evaluation_feedback")
+    eval_context, eval_test_idx = _build_agent_eval_context(state, existing_tests)
 
     ctes = json.loads(state.get("query_decomposed") or "[]")
     cte_names = [c["name"] for c in ctes]

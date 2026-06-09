@@ -67,6 +67,7 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
     test_description = current_test.get("unit_test_description", "")
 
     from build_query.examples_executor import (
+        _assertion_to_executable,
         _evaluate_assertions_with_retry,
         _fix_logically_failing_assertions,
         _generate_assertions_and_evaluate,
@@ -96,8 +97,12 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
             )
 
             async with atimed("assertion_gen:eval+fix"):
+                # _Assertion n'expose que description/expected_condition ; le SQL dbt-style
+                # exécutable est dérivé ici via _assertion_to_executable. Passer model_dump()
+                # brut laisserait `sql` vide → con.execute("") → None → crash .fetchdf().
                 assertion_results = await _evaluate_assertions_with_retry(
-                    [a.model_dump() for a in eval_result.assertions], **retry_kwargs
+                    [_assertion_to_executable(a) for a in eval_result.assertions],
+                    **retry_kwargs,
                 )
                 try:
                     assertion_results = await _fix_logically_failing_assertions(

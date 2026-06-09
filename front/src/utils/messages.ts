@@ -15,7 +15,13 @@ export function getLastMessage(messages, selectedChildIndices) {
     return getLastMessage(selectedBranch, selectedChildIndices);
   }
 
-  // 2) Message simple : renvoyer tel quel
+  // 2) Bulle de requête : renvoyer le dernier message qu'elle contient
+  if (lastItem && lastItem.type === 'request_group') {
+    const items = lastItem.items || [];
+    return items.length > 0 ? items[items.length - 1] : null;
+  }
+
+  // 3) Message simple : renvoyer tel quel
   return lastItem || null;
 }
 
@@ -138,6 +144,19 @@ export function formatMessage(message: any): Message {
       newMessage.contents.text = message.content;
       newMessage.contents.action = message.additional_kwargs?.action ?? 'update';
       break;
+
+    case 'final_response':
+      newMessage.contents.text = message.content;
+      break;
+
+    case MsgType.QUERY_UNDERSTANDING: {
+      try {
+        newMessage.contents.understanding = JSON.parse(message.content);
+      } catch {
+        // unparseable → render nothing (card silently omitted)
+      }
+      break;
+    }
 
     case 'retry_prompt': {
       if (message.additional_kwargs?.test_index !== undefined) {

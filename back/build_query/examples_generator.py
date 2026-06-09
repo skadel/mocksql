@@ -219,6 +219,48 @@ def _simplification_to_hint(
     return ""
 
 
+def _run_simplify_and_hint(
+    sql: str, schema: list[dict] | None = None, dialect: str = "bigquery"
+):
+    """Return ``(SimplificationResult|None, hint_str)`` sharing one parse + qualify pass.
+
+    Equivalent to calling ``_run_simplify`` then ``_simplification_to_hint`` but
+    ``simplify_with_hint`` reuses a single qualified scope map across both, halving the
+    (expensive) qualify cost on wide queries. Populates ``_simplify_cache`` and
+    ``_hint_cache`` so retries on the same SQL stay free, just like the split path.
+    """
+    if not sql:
+        return None, ""
+    cache_key = (sql, dialect)
+    sim_cached = _simplify_cache.get(cache_key)
+    hint_cached = _hint_cache.get(cache_key)
+    if sim_cached is not None and hint_cached is not None:
+        return sim_cached, hint_cached
+
+    try:
+        from build_query.constraint_simplifier import simplify_with_hint
+
+        sim_result, hint = simplify_with_hint(sql, dialect=dialect, schema=schema)
+    except Exception as exc:
+        logger.warning(
+            "constraint_simplifier failed (sql_hash=%s dialect=%s): %s",
+            hash(sql),
+            dialect,
+            exc,
+            exc_info=True,
+        )
+        sim_result, hint = None, {}
+
+    hint_str = json.dumps(hint, ensure_ascii=False, indent=2) if hint else ""
+    if len(_simplify_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
+        _simplify_cache.pop(next(iter(_simplify_cache)))
+    _simplify_cache[cache_key] = sim_result
+    if len(_hint_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
+        _hint_cache.pop(next(iter(_hint_cache)))
+    _hint_cache[cache_key] = hint_str
+    return sim_result, hint_str
+
+
 def _strip_unconstrained_from_sql(
     sql: str, excluded_col_names: list[str], dialect: str = "bigquery"
 ) -> str:
@@ -330,9 +372,7 @@ def _build_eval_messages(state, existing_tests: list) -> list:
                         "unit_test_build_reasoning", ""
                     ),
                     "test_name": test_case.get("test_name", ""),
-                    "unit_test_description": test_case.get(
-                        "unit_test_description", ""
-                    ),
+                    "unit_test_description": test_case.get("unit_test_description", ""),
                     "tags": test_case.get("tags", []),
                     "data": test_case.get("data", {}),
                 },
@@ -344,10 +384,22 @@ def _build_eval_messages(state, existing_tests: list) -> list:
             status = test_case.get("status", "")
             if status == "empty_results":
                 failing_cte = test_case.get("failing_cte", "")
-                output_str = (
-                    f"0 lignes — CTE bloquante : `{failing_cte}`"
-                    if failing_cte
-                    else "0 lignes retournées"
+                cte_trace = test_case.get("cte_trace", {})
+                if failing_cte and cte_trace:
+                    # Trace niveau-étape : pointe la clause EXACTE qui bloque. Sans elle,
+                    # le LLM ignore lequel des joins/filtres de la CTE est coupable, devine
+                    # (souvent à tort) et reboucle à l'identique.
+                    output_str = _format_cte_trace_hint(failing_cte, cte_trace)
+                elif failing_cte:
+                    output_str = f"0 lignes — CTE bloquante : `{failing_cte}`"
+                else:
+                    output_str = "0 lignes retournées"
+                # Fix ciblé sur l'étape bloquante, pas un thrashing « tout refaire ».
+                next_step = (
+                    "Corrige précisément l'étape bloquante identifiée ci-dessus (pas "
+                    "l'ensemble du test) : ajuste les données des tables qui l'alimentent. "
+                    "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), "
+                    "génère des données qui NE matchent PAS la table anti-jointe."
                 )
             else:
                 raw_output = test_case.get("results_json", "[]")
@@ -360,6 +412,7 @@ def _build_eval_messages(state, existing_tests: list) -> list:
                     output_str = json.dumps(parsed, ensure_ascii=False, indent=2)
                 except Exception:
                     output_str = str(raw_output)
+                next_step = "Génère une nouvelle version avec une approche structurellement différente."
 
             raw_verdict = eval_msg.content
             verdict_label = "Insuffisant"
@@ -372,7 +425,7 @@ def _build_eval_messages(state, existing_tests: list) -> list:
             human_feedback = (
                 f"Résultat DuckDB :\n{output_str}\n\n"
                 f"Verdict : {verdict_label} — {verdict_detail}\n\n"
-                f"Génère une nouvelle version avec une approche structurellement différente."
+                f"{next_step}"
             )
 
             result_msgs_out.append(AIMessage(content=ai_content))
@@ -413,14 +466,35 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
         lines.append(f"- `{cte_name}` : {row_count} ligne(s){marker}")
         steps = info.get("steps")
         if steps and row_count == 0:
-            for step in steps:
-                label = step.get("label", "?")
-                cnt = step.get("count", -1)
-                zero_marker = " ← filtre actif ici" if cnt == 0 else ""
-                lines.append(f"  - {label} → {cnt} ligne(s){zero_marker}")
+            # Ne montrer que la transition bloquante : dernière étape > 0 → première à 0.
+            # Le reste (longues séries de "→ N ligne(s)" inchangées) est du bruit qui
+            # noie le seul signal utile.
+            blocker_idx = next(
+                (i for i, s in enumerate(steps) if s.get("count", -1) == 0), None
+            )
+            if blocker_idx is not None:
+                prev = steps[blocker_idx - 1] if blocker_idx > 0 else None
+                if prev:
+                    lines.append(
+                        f"  - {prev.get('label', '?')} → {prev.get('count')} ligne(s)"
+                    )
+                blk = steps[blocker_idx]
+                lines.append(
+                    f"  - {blk.get('label', '?')} → 0 ligne(s) ← **étape bloquante**"
+                )
+            else:
+                # Pas de transition à 0 identifiée : retomber sur la liste complète.
+                for step in steps:
+                    cnt = step.get("count", -1)
+                    zero_marker = " ← filtre actif ici" if cnt == 0 else ""
+                    lines.append(
+                        f"  - {step.get('label', '?')} → {cnt} ligne(s){zero_marker}"
+                    )
     lines.append(
-        f"\nLa CTE `{failing_cte}` produit 0 ligne. "
-        "Génère des données qui satisfont toutes les conditions de filtre identifiées ci-dessus."
+        f"\nLa CTE `{failing_cte}` produit 0 ligne, bloquée à l'étape ci-dessus. "
+        "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), génère "
+        "des données qui NE matchent PAS la table anti-jointe ; sinon, ajuste les données "
+        "pour satisfaire ce filtre précis."
     )
     return "\n".join(lines)
 
@@ -466,6 +540,62 @@ def _ensure_test_uids(cases: list) -> bool:
             tc["test_uid"] = uuid.uuid4().hex[:4]
             changed = True
     return changed
+
+
+def _build_understanding_payload(state, used_columns: list) -> Optional[dict]:
+    """Build the "query understanding" card payload (tables, columns, constraints,
+    derived expressions).
+
+    Best-effort — returns ``None`` on any failure so the card is simply omitted and
+    never blocks generation. ``_run_simplify`` is cached by ``(sql, dialect)`` so the
+    call here reuses the result already computed in ``generate_examples_``.
+    """
+    try:
+        dialect = state.get("dialect", "bigquery")
+        optimized_sql = state.get("optimized_sql", "") or state.get("query", "")
+
+        tables = [
+            {
+                "database": entry.get("database", ""),
+                "table": entry.get("table", ""),
+                "columns": list(entry.get("used_columns", []) or []),
+            }
+            for entry in used_columns
+            if entry.get("table")
+        ]
+
+        constraints: dict = {}
+        sim_result = _run_simplify(optimized_sql, dialect=dialect)
+        if sim_result is not None:
+            constraints = _branch_to_dict(sim_result)
+
+        derived: list = []
+        try:
+            from build_query.constraint_simplifier import (
+                detect_select_derived_expressions,
+            )
+
+            for e in detect_select_derived_expressions(optimized_sql, dialect)[:8]:
+                derived.append(
+                    {
+                        "expr": e.get("expr_sql", ""),
+                        "source_tables": e.get("source_tables", []),
+                    }
+                )
+        except Exception:
+            pass  # derived expressions are a bonus — never fail the card on them
+
+        if not tables and not constraints and not derived:
+            return None
+        return {
+            "tables": tables,
+            "constraints": constraints,
+            "derived_expressions": derived,
+            "optimized_sql": optimized_sql,
+        }
+    except Exception:
+        logger.debug("[generator] understanding payload build failed", exc_info=True)
+        return None
 
 
 async def generate_examples(state: QueryState):
@@ -548,7 +678,7 @@ async def generate_examples(state: QueryState):
         "is_analysis": state.get("is_analysis"),
         "generated_test_index": generated_test_index,
     }
-    return {
+    result: dict = {
         "examples": [
             AIMessage(
                 content=json.dumps(generated_test),
@@ -557,6 +687,26 @@ async def generate_examples(state: QueryState):
             )
         ]
     }
+
+    # Emit the "query understanding" card on fresh generation only (skip retries,
+    # which re-enter this node with status == "empty_results"). Best-effort: the
+    # card is a bonus and must never break generation.
+    if state.get("status") != "empty_results":
+        understanding = _build_understanding_payload(state, used_columns)
+        if understanding is not None:
+            result["messages"] = [
+                AIMessage(
+                    content=json.dumps(understanding),
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.QUERY_UNDERSTANDING,
+                        "parent": parent,
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            ]
+
+    return result
 
 
 def _resolve_target_key(state, existing_list: list) -> Optional[str]:
@@ -597,12 +747,11 @@ async def generate_examples_(
 
     check_having_cardinality(optimized_sql, dialect)
 
-    # Single simplify() call — result reused for hint + mandatory set + unconstrained
-    with timed("gen:simplify"):
-        sim_result = _run_simplify(optimized_sql, schema=schema, dialect=dialect)
-    with timed("gen:hint"):
-        constraints = _simplification_to_hint(
-            sim_result, sql=optimized_sql, dialect=dialect, schema=schema
+    # Single shared parse + qualify for both the SimplificationResult (reused for the
+    # mandatory set + unconstrained columns) and the conditions hint.
+    with timed("gen:simplify+hint"):
+        sim_result, constraints = _run_simplify_and_hint(
+            optimized_sql, schema=schema, dialect=dialect
         )
 
     logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
@@ -780,7 +929,8 @@ async def generate_examples_(
     logger.diag("[generator]%s", _retry_label or " (première génération)")
     if eval_history:
         logger.diag(
-            "[generator] EVAL_HISTORY injecté : %d message(s) few-shot", len(eval_history)
+            "[generator] EVAL_HISTORY injecté : %d message(s) few-shot",
+            len(eval_history),
         )
     logger.diag(
         "[generator] constraints_hint:\n%s",
