@@ -32,7 +32,29 @@
     "reasoning": "Reasoning",
     "validating_query": "Validating query",
     "profiling": "Profiling in progress…",
-    "profiling_short": "Profiling…"
+    "profiling_short": "Profiling…",
+    "query_validated_in": "Query validated in {{seconds}} s",
+    "step_tables": "tables",
+    "step_columns": "columns",
+    "step_constraints": "Extracting conditions and used columns…",
+    "step_generation": "Generating tests"
+  },
+  "understanding": {
+    "title": "What MockSQL understood",
+    "summary": "{{tables}} tables · {{columns}} columns",
+    "tables": "Tables",
+    "relations": "Relations",
+    "filters": "Filters",
+    "computed": "Computed columns",
+    "show_columns": "Show columns",
+    "hide_columns": "Hide columns"
+  },
+  "submission": {
+    "validating_detail": [
+      "Compiling and dry-running the query…",
+      "Optimizing and splitting the SQL…",
+      "Extracting used columns and conditions…"
+    ]
   },
   "action": {
     "download": "Download from bigquery",

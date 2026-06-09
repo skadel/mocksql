@@ -12,6 +12,7 @@ from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
 from build_query.update_test_node import update_test_node
 from build_query.assertion_generator import generate_assertions
+from build_query.final_response_node import final_response
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
 from build_query.suggestions_node import generate_suggestions
@@ -271,6 +272,7 @@ def build_query_graph():
     add_timed_node("bad_data_regen", _bad_data_regen)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
     add_timed_node("suggestions_generator", generate_suggestions)
+    add_timed_node("final_response", final_response)
     add_timed_node("history_saver", history_saver)
     add_timed_node("other", _handle_other)
 
@@ -407,7 +409,8 @@ def build_query_graph():
     builder.add_edge("bad_data_regen", "generator")
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
-    builder.add_edge("suggestions_generator", "history_saver")
+    builder.add_edge("suggestions_generator", "final_response")
+    builder.add_edge("final_response", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)
 

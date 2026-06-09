@@ -14,6 +14,7 @@ export const MsgType = {
   DEBUG_RUN_CTE: 'debug_run_cte',
   DEBUG_COUNT_STEPS: 'debug_count_steps',
   BAD_DATA_DIAGNOSTIC: 'bad_data_diagnostic',
+  QUERY_UNDERSTANDING: 'query_understanding',
 } as const;
 
 export interface DiagnosticBlock {
@@ -57,6 +58,18 @@ export interface ProfileRequest {
   profileErrors?: Array<{ query_index: number; error: string }>;
 }
 
+export interface QueryUnderstanding {
+  tables: Array<{ database?: string; table: string; columns: string[] }>;
+  constraints: {
+    joins?: string[];
+    anti_joins?: string[];
+    filters?: string[];
+    referenced?: string[];
+  };
+  derived_expressions: Array<{ expr: string; source_tables: string[] }>;
+  optimized_sql?: string;
+}
+
 export interface MessageContents {
   text?: string;
   sql?: string;
@@ -75,6 +88,7 @@ export interface MessageContents {
   debugCountSteps?: DebugCountStepsResult;
   diagnostic?: DiagnosticBlock;
   action?: string;
+  understanding?: QueryUnderstanding;
 }
 
 export interface Message {
@@ -91,7 +105,7 @@ export interface Message {
   context?: 'sql_update';
 }
 
-export type AnyRenderable = Message | MessageGroup;
+export type AnyRenderable = Message | MessageGroup | RequestGroup;
 
 export interface MessageGroup {
   type: 'group';
@@ -99,11 +113,25 @@ export interface MessageGroup {
   branches: AnyRenderable[][];
 }
 
+/**
+ * Regroupe tous les messages bot émis pendant une même requête (même request_id) :
+ * régénération, agents multiples, évaluation, suggestions. Rendu comme une bulle
+ * unique avec les étapes intermédiaires repliées et la réponse finale visible.
+ */
+export interface RequestGroup {
+  type: 'request_group';
+  requestId: string;
+  items: Message[];
+}
+
 export const isMessage = (x: AnyRenderable): x is Message =>
-  !!x && (x as any).id !== undefined && (x as any).type !== 'group';
+  !!x && (x as any).id !== undefined && (x as any).type !== 'group' && (x as any).type !== 'request_group';
 
 export const isMessageGroup = (x: AnyRenderable): x is MessageGroup =>
   (x as any)?.type === 'group';
+
+export const isRequestGroup = (x: AnyRenderable): x is RequestGroup =>
+  (x as any)?.type === 'request_group';
 
 
 export interface ColumnData {

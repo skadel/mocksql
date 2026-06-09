@@ -1,10 +1,40 @@
 import { createSelector } from '@reduxjs/toolkit';
 import { RootState } from '../app/store';
-import { Message, MessageGroup, MsgType } from '../utils/types';
+import { AnyRenderable, Message, MessageGroup, MsgType, RequestGroup } from '../utils/types';
 
 const DEBUG_TYPES = new Set<string>([MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS]);
 
-const isMessage = (item: any): item is Message => !!item && item.id !== undefined;
+const isMessage = (item: any): item is Message => !!item && item.id !== undefined && item.type !== 'group' && item.type !== 'request_group';
+
+/**
+ * Types d'étapes intermédiaires : repliés dans la bulle de requête.
+ * Tout le reste (réponse finale, suggestions, texte libre, erreur) reste visible.
+ */
+const STEP_CONTENT_TYPES = new Set<string>([
+  'generate_test_scenario',
+  'examples',
+  'results',
+  'evaluation',
+  'bad_data_diagnostic',
+  'update_test',
+  'delete_test',
+  MsgType.DEBUG_RUN_CTE,
+  MsgType.DEBUG_COUNT_STEPS,
+]);
+
+/** Un message est une « étape » (repliée) s'il représente un travail intermédiaire. */
+export const isStepMessage = (m: Message): boolean => {
+  const ct = ((m as any).contentType as string | undefined) ?? '';
+  if (STEP_CONTENT_TYPES.has(ct)) return true;
+  const c = m.contents || {};
+  return (
+    (Array.isArray(c.tables) && c.tables.length > 0) ||
+    (Array.isArray(c.res) && c.res.length > 0) ||
+    !!c.diagnostic ||
+    !!c.debugRunCte ||
+    !!c.debugCountSteps
+  );
+};
 
 const MERGEABLE_CT = new Set<string>(['stream_part', 'tool_progress', 'partial', 'intermediate']);
 
@@ -95,10 +125,60 @@ const coalesceBotMessages = (msg1: Message, msg2: Message): Message => ({
   id: msg2.id,
 });
 
+/**
+ * Post-passe : regroupe les suites de messages bot d'une même requête (request_id)
+ * en une bulle unique RequestGroup, à condition qu'au moins une étape intermédiaire
+ * existe (sinon on laisse le rendu linéaire). Récursif dans les branches de groupes.
+ */
+const bundleRequests = (items: AnyRenderable[]): AnyRenderable[] => {
+  const out: AnyRenderable[] = [];
+  let run: Message[] = [];
+
+  const flushRun = () => {
+    if (run.length === 0) return;
+    const hasStep = run.some(isStepMessage);
+    if (run.length >= 2 && hasStep) {
+      out.push({ type: 'request_group', requestId: run[0].request || '', items: run });
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  };
+
+  for (const item of items) {
+    if ('type' in item && (item as any).type === 'group') {
+      flushRun();
+      const group = item as MessageGroup;
+      out.push({
+        ...group,
+        branches: group.branches.map(bundleRequests),
+      });
+      continue;
+    }
+    const msg = item as Message;
+    const reqId = msg.request;
+    // Les erreurs restent des bulles autonomes : leur carte « Corriger » est rendue
+    // au niveau de MessageDisplay, pas dans le corps groupé.
+    const canGroup = msg.type === 'bot' && !!reqId && !msg.contents?.error;
+    if (canGroup && (run.length === 0 || run[run.length - 1].request === reqId)) {
+      run.push(msg);
+    } else {
+      flushRun();
+      if (canGroup) {
+        run.push(msg);
+      } else {
+        out.push(msg);
+      }
+    }
+  }
+  flushRun();
+  return out;
+};
+
 /** ========= selector principal ========= */
 export const getRenderMessages = createSelector(
   [(state: RootState) => state.buildModel.queryComponentGraph],
-  (messages): (Message | MessageGroup)[] => {
+  (messages): AnyRenderable[] => {
     const processed: (Message | MessageGroup)[] = [];
     const processedIds = new Set<string>();
     const parentToChildren: Record<string, Message[]> = {};
@@ -235,6 +315,6 @@ export const getRenderMessages = createSelector(
       roots.forEach(r => processRec(r, processed));
     }
 
-    return processed;
+    return bundleRequests(processed);
   }
 );

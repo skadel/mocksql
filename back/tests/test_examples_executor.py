@@ -23,6 +23,8 @@ from build_query.examples_executor import (
     _decompose_cte_in_steps,
     _evaluate_assertions,
     _assertion_sql_from_condition,
+    _assertion_to_executable,
+    _Assertion,
     _parse_unit_tests_from_state,
     _prepare_test_data,
     format_result,
@@ -426,6 +428,42 @@ class TestEvaluateAssertions:
     def test_empty_assertions(self, con):
         results = _evaluate_assertions([], "v_result", con)
         assert results == []
+
+    def test_missing_sql_returns_error_without_crash(self, con):
+        # Régression : un dict d'assertion sans clé `sql` (ex. _Assertion.model_dump()
+        # qui n'a que description/expected_condition) produisait con.execute("") → None
+        # → "'NoneType' object has no attribute 'fetchdf'". On doit obtenir une erreur
+        # explicite, pas un crash opaque.
+        con.execute("CREATE VIEW v_result_nosql AS SELECT * FROM __result__")
+        results = _evaluate_assertions(
+            [{"description": "sans sql", "expected_condition": "amount > 0"}],
+            "v_result_nosql",
+            con,
+        )
+        assert results[0]["passed"] is False
+        assert "vide" in results[0]["error"]
+        assert "NoneType" not in results[0]["error"]
+
+    def test_blank_sql_returns_error_without_crash(self, con):
+        con.execute("CREATE VIEW v_result_blank AS SELECT * FROM __result__")
+        results = _evaluate_assertions(
+            [{"description": "sql vide", "sql": "   "}],
+            "v_result_blank",
+            con,
+        )
+        assert results[0]["passed"] is False
+        assert "vide" in results[0]["error"]
+
+    def test_assertion_to_executable_derives_sql(self, con):
+        # Le chemin assertion_generator convertit _Assertion → dict exécutable via
+        # _assertion_to_executable, qui DOIT remplir `sql` à partir de expected_condition.
+        a = _Assertion(description="montant positif", expected_condition="amount > 0")
+        executable = _assertion_to_executable(a)
+        assert executable["sql"].strip()  # non vide
+        con.execute("CREATE VIEW v_result_conv AS SELECT * FROM __result__")
+        results = _evaluate_assertions([executable], "v_result_conv", con)
+        assert "error" not in results[0]
+        assert results[0]["passed"] is True
 
     def test_multiple_assertions(self, con):
         con.execute("CREATE VIEW v_result4 AS SELECT * FROM __result__")

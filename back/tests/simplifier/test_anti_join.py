@@ -172,6 +172,57 @@ class TestBuildConditionsHintAntiJoin:
         )
 
 
+# ─── anti_joins surfacing ─────────────────────────────────────────────────────
+
+
+class TestBuildConditionsHintAntiJoinSurfacing:
+    """build_conditions_hint() must surface anti-joins in a dedicated `anti_joins`
+    key, described in NEGATIVE terms (what to make FALSE), so the generator knows
+    the excluded set exists and stops falling into it.
+
+    The excluded criteria must NOT leak into `conditions` (still tested elsewhere),
+    but MUST appear in `anti_joins`.
+    """
+
+    SQL = """
+    WITH excluded AS (
+        SELECT id FROM source_tbl WHERE status = 'active'
+    )
+    SELECT t.id, t.value
+    FROM main_tbl t
+    LEFT JOIN excluded e ON t.id = e.id
+    WHERE t.id IS NOT NULL
+      AND e.id IS NULL
+    """
+
+    def test_anti_joins_key_present(self):
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        assert hint.get("anti_joins"), (
+            f"anti_joins key must be present and non-empty: {hint!r}"
+        )
+
+    def test_anti_joins_names_excluded_set(self):
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        blob = " ".join(hint.get("anti_joins", [])).lower()
+        assert "excluded" in blob, (
+            f"anti_joins must name the excluded set `excluded`: {hint.get('anti_joins')!r}"
+        )
+
+    def test_anti_joins_carries_excluded_criteria(self):
+        """The excluded set's own criteria (status = 'active') must appear in
+        anti_joins so the model knows what to make FALSE."""
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        blob = " ".join(hint.get("anti_joins", [])).lower()
+        assert "active" in blob, (
+            f"anti_joins must carry the excluded criteria 'status = active': {hint.get('anti_joins')!r}"
+        )
+
+    def test_excluded_criteria_still_absent_from_conditions(self):
+        """Regression guard: criteria must stay OUT of `conditions`."""
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        assert "active" not in hint.get("conditions", "").lower()
+
+
 # ─── Bug 5 ── NOT IN (SELECT ...) ─────────────────────────────────────────────
 
 

@@ -370,6 +370,46 @@ def _build_column_sql(
 # ─── CTE lineage resolver ─────────────────────────────────────────────────────
 
 
+def _build_qualified_scope_map(
+    statement: exp.Expression,
+    schema: dict | None,
+    dialect: str,
+) -> "tuple[exp.Expression | None, dict[str, Any] | None]":
+    """Qualify *statement* once and return ``(qualified_stmt, {cte_name: scope})``.
+
+    The result can be shared across several ``_LineageResolver`` instances over the
+    same SQL so the (expensive) qualify pass runs a single time. Returns
+    ``(None, None)`` when qualification or scope building fails, so callers fall back
+    to the per-column wrapper lineage path.
+    """
+    try:
+        from sqlglot.optimizer.qualify import qualify as _qualify
+        from sqlglot.optimizer.scope import build_scope as _build_scope
+
+        qualified = _qualify(
+            statement.copy(),
+            dialect=dialect,
+            schema=schema,
+            validate_qualify_columns=False,
+            identify=False,
+        )
+        root = _build_scope(qualified)
+        if root is None:
+            return None, None
+        mapping: dict[str, Any] = {}
+        for scope in root.cte_scopes:
+            cte = scope.expression.parent
+            alias = getattr(cte, "alias", None)
+            if alias:
+                mapping[alias.lower()] = scope
+        return qualified, mapping
+    except Exception as exc:
+        logger.debug(
+            "scope-tree build failed, falling back to per-column qualify: %s", exc
+        )
+        return None, None
+
+
 class _LineageResolver:
     """
     Resolves CTE column references to their base-table source using sqlglot's
@@ -384,6 +424,7 @@ class _LineageResolver:
         statement: exp.Expression,
         schema: dict | None,
         dialect: str,
+        scope_tree: "tuple[exp.Expression | None, dict[str, Any] | None] | None" = None,
     ) -> None:
         from sqlglot.lineage import lineage as _sg_lineage
 
@@ -408,6 +449,20 @@ class _LineageResolver:
         self._with_clause_node = with_clause
         self._with_clause_copy: exp.Expression | None = None
         self._with_copy_ready = False
+        # Qualify-once scope tree: sqlglot.lineage() re-qualifies the entire CTE chain
+        # on every call (the dominant cost on wide queries). Instead we qualify the whole
+        # statement a single time, build its scope tree, map each CTE name → its scope,
+        # and pass that pre-built scope to lineage() — which then skips qualify entirely.
+        # Built lazily on first lineage call; None means "fall back to per-column wrapper".
+        # A scope_tree may be injected so several resolvers over the same SQL share a
+        # single qualify pass while keeping independent lineage caches (identical output).
+        if scope_tree is not None:
+            self._qualified, self._scope_by_cte = scope_tree
+            self._scope_ready = True
+        else:
+            self._scope_ready = False
+            self._qualified = None
+            self._scope_by_cte = None
 
     def _effective_cte_name(self, col: ColumnRef) -> str | None:
         """Return the CTE name this column resolves to, or None if it's a base table.
@@ -476,15 +531,61 @@ class _LineageResolver:
             wrapper.set("with_", self._with_clause_copy)
         return wrapper
 
+    def _build_scope_tree(self) -> None:
+        """Qualify the whole statement once and map each CTE name → its sqlglot scope.
+
+        On success, lineage() calls can pass the pre-built scope and skip their own
+        (expensive) qualify pass. On any failure, leaves ``_scope_by_cte`` None so
+        callers transparently fall back to the per-column wrapper approach.
+        """
+        self._scope_ready = True
+        if not self._cte_names:
+            return
+        self._qualified, self._scope_by_cte = _build_qualified_scope_map(
+            self._statement, self._schema, self._dialect
+        )
+
+    def _run_lineage(self, col: ColumnRef) -> Any:
+        """Return a sqlglot lineage Node for *col*, reusing the shared qualified scope.
+
+        Tries the qualify-once scope first; on any failure (or when no scope tree
+        is available) falls back to the per-column ``WITH … SELECT col FROM cte`` wrapper,
+        preserving the original behaviour exactly.
+        """
+        if not self._scope_ready:
+            self._build_scope_tree()
+        if self._scope_by_cte is not None and self._qualified is not None:
+            cte_name = self._effective_cte_name(col) or col.table
+            cte_scope = self._scope_by_cte.get(cte_name)
+            if cte_scope is not None:
+                try:
+                    return self._sg_lineage(
+                        col.column,
+                        self._qualified,
+                        schema=self._schema,
+                        dialect=self._dialect,
+                        scope=cte_scope,
+                        copy=False,
+                        trim_selects=False,
+                    )
+                except Exception as exc:
+                    logger.debug(
+                        "scoped lineage failed for %s.%s, falling back: %s",
+                        col.table,
+                        col.column,
+                        exc,
+                    )
+        return self._sg_lineage(
+            col.column,
+            self._make_lineage_stmt(col),
+            schema=self._schema,
+            dialect=self._dialect,
+            trim_selects=False,
+        )
+
     def _resolve_all_via_lineage(self, col: ColumnRef) -> list[ColumnRef]:
         try:
-            node = self._sg_lineage(
-                col.column,
-                self._make_lineage_stmt(col),
-                schema=self._schema,
-                dialect=self._dialect,
-                trim_selects=False,
-            )
+            node = self._run_lineage(col)
             sources: list[ColumnRef] = []
             for n in node.walk():
                 if isinstance(n.expression, exp.Table):
@@ -500,13 +601,7 @@ class _LineageResolver:
 
     def _resolve_via_lineage(self, col: ColumnRef) -> ColumnRef:
         try:
-            node = self._sg_lineage(
-                col.column,
-                self._make_lineage_stmt(col),
-                schema=self._schema,
-                dialect=self._dialect,
-                trim_selects=False,
-            )
+            node = self._run_lineage(col)
             base_table = col.table
             base_col = col.column
             lineage_sql = ""
@@ -1228,6 +1323,91 @@ def _detect_anti_join_aliases(sel: exp.Select) -> set[str]:
     return anti_join_aliases
 
 
+def _collect_anti_joins(
+    statement: exp.Expression,
+    alias_map: dict[str, str],
+    dialect: str,
+) -> list[str]:
+    """Describe anti-join patterns (``LEFT JOIN x ON … WHERE x.col IS NULL``) in
+    NEGATIVE terms for the generator.
+
+    The anti-join ``IS NULL`` predicate and the anti-joined CTE body are (correctly)
+    stripped from ``conditions`` — they describe the EXCLUDED set, not the included
+    one. But stripped *silently*, the generator has no idea the excluded set exists
+    and keeps producing data that falls into it (→ 0 rows). This surfaces, per
+    anti-join:
+
+      * the join key whose value must NOT exist in the excluded set,
+      * the excluded set's own selection criteria (rendered as-is),
+
+    so the model knows precisely what to make FALSE.
+    """
+    with_clause_node = statement.args.get("with_")
+    cte_by_name: dict[str, exp.CTE] = {}
+    if with_clause_node:
+        for cte in with_clause_node.expressions or []:
+            if cte.alias:
+                cte_by_name[cte.alias.lower()] = cte
+
+    descriptions: list[str] = []
+    seen: set[str] = set()
+    for sel in statement.find_all(exp.Select):
+        anti_aliases = _detect_anti_join_aliases(sel)
+        if not anti_aliases:
+            continue
+        for join in sel.args.get("joins") or []:
+            src = join.this
+            if isinstance(src, exp.Table):
+                alias = (src.alias or src.name).lower()
+            elif isinstance(src, exp.Subquery):
+                alias = (src.alias or "").lower()
+            else:
+                continue
+            if alias not in anti_aliases:
+                continue
+            real_tbl = alias_map.get(alias, alias)
+
+            # Outer join key — the column whose value must NOT exist in the excluded set.
+            key_sql = ""
+            on = join.args.get("on")
+            if on is not None:
+                for eq in on.find_all(exp.EQ):
+                    for side in (eq.this, eq.expression):
+                        if _is_column(side) and (side.table or "").lower() != alias:
+                            key_sql = side.sql(dialect=dialect)
+                            break
+                    if key_sql:
+                        break
+
+            # Selection criteria of the excluded set — the anti-joined CTE's own WHERE.
+            # Rendered as-is (in terms of the CTE's own columns) rather than resolved
+            # through lineage: more readable and avoids expanding window expressions.
+            crit_sql = ""
+            cte = cte_by_name.get(real_tbl)
+            if cte is not None and cte.this is not None:
+                inner = (
+                    cte.this
+                    if isinstance(cte.this, exp.Select)
+                    else next(iter(cte.this.find_all(exp.Select)), None)
+                )
+                if inner is not None and inner.args.get("where"):
+                    crit_sql = inner.args["where"].this.sql(dialect=dialect)
+
+            if key_sql:
+                desc = f"`{key_sql}` NE DOIT PAS exister dans `{real_tbl}`"
+            else:
+                desc = f"aucune ligne ne doit matcher `{real_tbl}`"
+            if crit_sql:
+                desc += (
+                    f" — `{real_tbl}` sélectionne les lignes où : {crit_sql}. "
+                    "Génère des données telles que ce critère soit FAUX (sinon la ligne est exclue)."
+                )
+            if desc not in seen:
+                seen.add(desc)
+                descriptions.append(desc)
+    return descriptions
+
+
 def _serialize_cond(
     node: exp.Expression,
     alias_map: dict[str, str],
@@ -1743,6 +1923,9 @@ def build_conditions_hint(
     sql: str,
     dialect: str = "bigquery",
     schema: list[dict] | None = None,
+    *,
+    _statement: exp.Expression | None = None,
+    _resolver: "_LineageResolver | None" = None,
 ) -> dict:
     """Build a concise LLM hint dict from *sql*.
 
@@ -1760,18 +1943,24 @@ def build_conditions_hint(
     * ``format_constraints`` lists SAFE_CAST, CAST, PARSE_DATE, FORMAT_DATE entries.
 
     Returns an empty dict on unparseable input.
+
+    ``_statement`` / ``_resolver`` are private hooks letting :func:`simplify_with_hint`
+    reuse a single parse + qualify pass; external callers should leave them unset.
     """
     if not sql:
         return {}
-    try:
-        statement = sqlglot.parse_one(
-            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
-        )
-    except Exception:
-        return {}
+    if _statement is not None:
+        statement = _statement
+    else:
+        try:
+            statement = sqlglot.parse_one(
+                sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+            )
+        except Exception:
+            return {}
 
     sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
-    resolver = _LineageResolver(statement, sqlglot_schema, dialect)
+    resolver = _resolver or _LineageResolver(statement, sqlglot_schema, dialect)
 
     # Build a global alias map from all Table nodes + per-SELECT _collect_aliases.
     # CTE names land in resolver._cte_names; base-table aliases land in alias_map.
@@ -1970,9 +2159,13 @@ def build_conditions_hint(
             col_label = f"{resolved.real_table or resolved.table}.{resolved.column}"
             lineages.append(f"{col_label} : {resolved.lineage}")
 
+    anti_joins = _collect_anti_joins(statement, alias_map, dialect)
+
     result: dict = {}
     if conditions:
         result["conditions"] = conditions
+    if anti_joins:
+        result["anti_joins"] = anti_joins
     if format_constraints:
         result["format_constraints"] = format_constraints
     if lineages:
@@ -1987,6 +2180,9 @@ def extract_constraints(
     sql: str,
     dialect: str = "bigquery",
     schema: list[dict] | None = None,
+    *,
+    _statement: exp.Expression | None = None,
+    _resolver: "_LineageResolver | None" = None,
 ) -> list[ConstraintGroup]:
     """Parse *sql* and return one ConstraintGroup per independent satisfying path.
 
@@ -2002,11 +2198,17 @@ def extract_constraints(
     Args:
         schema: project schema from get_schemas(), used by sqlglot lineage for
                 accurate CTE resolution and type-aware column tracking.
+        _statement / _resolver: private hooks for :func:`simplify_with_hint` to reuse a
+            single parse + qualify pass; external callers should leave them unset.
     """
     _t0 = time.monotonic()
-    statement = sqlglot.parse_one(sql, dialect=dialect)
+    statement = (
+        _statement
+        if _statement is not None
+        else sqlglot.parse_one(sql, dialect=dialect)
+    )
     sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
-    resolver = _LineageResolver(statement, sqlglot_schema, dialect)
+    resolver = _resolver or _LineageResolver(statement, sqlglot_schema, dialect)
 
     # Process CTEs in definition order so later CTEs can reference earlier ones
     cte_groups_map: dict[str, list[ConstraintGroup]] = {}
@@ -2326,7 +2528,12 @@ def _process_constraint_group(group: ConstraintGroup) -> SimplificationResult:
 
 
 def simplify(
-    sql: str, dialect: str = "bigquery", schema: list[dict] | None = None
+    sql: str,
+    dialect: str = "bigquery",
+    schema: list[dict] | None = None,
+    *,
+    _statement: exp.Expression | None = None,
+    _resolver: "_LineageResolver | None" = None,
 ) -> SimplificationResult:
     """Analyse *sql* and return a SimplificationResult.
 
@@ -2337,9 +2544,14 @@ def simplify(
     When more than one group is found, result.constraint_groups is populated with
     one processed SimplificationResult per group, and the flat fields (filters,
     source_columns, …) reflect the union of all groups.
+
+    ``_statement`` / ``_resolver`` are private hooks for :func:`simplify_with_hint`;
+    external callers should leave them unset.
     """
     _t0 = time.monotonic()
-    groups = extract_constraints(sql, dialect, schema)
+    groups = extract_constraints(
+        sql, dialect, schema, _statement=_statement, _resolver=_resolver
+    )
 
     if not groups:
         return SimplificationResult()
@@ -2384,6 +2596,50 @@ def simplify(
         result.constraint_groups_truncated,
     )
     return result
+
+
+def simplify_with_hint(
+    sql: str,
+    dialect: str = "bigquery",
+    schema: list[dict] | None = None,
+) -> "tuple[SimplificationResult, dict]":
+    """Run :func:`simplify` and :func:`build_conditions_hint` over *sql* in one shot.
+
+    Both functions independently parse the SQL and qualify the whole CTE chain (the
+    dominant cost on wide queries). Here we parse once and build the qualified scope
+    map a single time, sharing it across two ``_LineageResolver`` instances (one per
+    function) that keep separate lineage caches — so the output of each is byte-for-byte
+    identical to calling them standalone, but qualify runs once instead of twice.
+
+    Returns ``(SimplificationResult, hint_dict)``.
+    """
+    if not sql:
+        return SimplificationResult(), {}
+    try:
+        statement = sqlglot.parse_one(sql, dialect=dialect)
+    except Exception:
+        # Fall back to independent calls (each does its own error handling).
+        return simplify(sql, dialect, schema), build_conditions_hint(
+            sql, dialect, schema
+        )
+
+    sqlglot_schema = _schemas_to_sqlglot(schema) if schema else None
+    scope_tree = _build_qualified_scope_map(statement, sqlglot_schema, dialect)
+
+    sim_resolver = _LineageResolver(
+        statement, sqlglot_schema, dialect, scope_tree=scope_tree
+    )
+    hint_resolver = _LineageResolver(
+        statement, sqlglot_schema, dialect, scope_tree=scope_tree
+    )
+
+    result = simplify(
+        sql, dialect, schema, _statement=statement, _resolver=sim_resolver
+    )
+    hint = build_conditions_hint(
+        sql, dialect, schema, _statement=statement, _resolver=hint_resolver
+    )
+    return result, hint
 
 
 # ─── Derived-expression detection (for profiler) ─────────────────────────────

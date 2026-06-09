@@ -6,7 +6,7 @@ import uuid
 from typing import List, Dict, Any, Literal, Optional
 
 import sqlglot
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pandas import DataFrame
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
@@ -992,27 +992,20 @@ async def _generate_assertions_and_evaluate(
     sample = result_df.head(5).to_dict(orient="records")
     row_count = len(result_df)
 
-    prompt = f"""Tu es un expert en tests SQL dbt-style avec DuckDB.
+    # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
+    system_content = """Tu es un expert en tests SQL dbt-style avec DuckDB. À partir d'un \
+résultat de requête déjà exécuté, tu génères des assertions de validation ET tu évalues la \
+qualité du test en un seul appel.
 
-Description du test : {test_description}
+Le message suivant contient ces sections, délimitées par des balises :
+- `<test_context>` : la description métier du scénario testé.
+- `<result_schema>` : le schéma exact de la table `__result__` (colonnes + types).
+- `<query>` : la requête SQL testée.
+- `<input_data>` : les données d'entrée injectées dans DuckDB.
+- `<result_sample>` : le résultat après exécution (nombre de lignes + exemples).
+- `<task>` : ce que tu dois produire.
 
-Données d'entrée :
-{test_data}
-
-Requête SQL testée :
-```sql
-{duckdb_sql}
-```
-
-Résultat après exécution sur DuckDB — {row_count} ligne(s).
-
-Schéma exact de `__result__` :
-{schema_str}
-
-Exemples de lignes :
-{json.dumps(sample, ensure_ascii=False, default=str)}
-
-Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
+**Méthode — commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :**
 - Quelle est l'intention de ce test ? Quel comportement SQL veut-il vérifier ?
 - Les données d'entrée sont-elles cohérentes avec cette intention (types, cardinalité, cas limites) ?
 - Si la requête contient GROUP BY + agrégat (COUNT, STDDEV, AVG, SUM, MAX…) : est-ce que
@@ -1021,98 +1014,131 @@ Commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :
   différentes (ex : 3, 2, 1, 1, 1) → STDDEV calculable → test valide, ne pas signaler bad_data.
   La correction est de dupliquer des lignes sur la même clé GROUP BY, pas d'ajouter de nouvelles valeurs.
 - Le résultat DuckDB est-il conforme à ce qu'on attendrait ?
-- Les assertions à générer valident-elles réellement la logique métier ? Regarde les "Exemples de lignes" ci-dessus
-  pour juger : si la colonne vérifiée par `IS NULL` contient déjà des valeurs non-nulles dans les exemples, l'assertion
-  est triviale (retourne toujours 0 ligne). Plus généralement, une assertion est triviale si elle passe quel que soit
-  le contenu réel du résultat — elle ne discrimine pas une bonne réponse d'une mauvaise. Exemples typiques :
-  `WHERE col IS NULL` (colonne jamais nulle), `WHERE 1=0`, ou un `NOT IN (...)` dont la liste englobe tous les
-  cas possibles sauf un. Si toutes les assertions sont triviales et ne vérifient aucune valeur concrète ou invariant
-  réel du résultat, c'est `bad_assertions`.
-  Une bonne assertion pince soit la valeur exacte retournée (condition `date = '2026-03-07'`), soit un invariant
-  structurel observable (condition `z_score = (SELECT MAX(z_score) FROM __result__)`).
+- Les assertions à générer valident-elles réellement la logique métier ? Regarde les exemples de
+  `<result_sample>` pour juger : si la colonne vérifiée par `IS NULL` contient déjà des valeurs
+  non-nulles dans les exemples, l'assertion est triviale (retourne toujours 0 ligne). Plus
+  généralement, une assertion est triviale si elle passe quel que soit le contenu réel du résultat —
+  elle ne discrimine pas une bonne réponse d'une mauvaise. Exemples typiques : `WHERE col IS NULL`
+  (colonne jamais nulle), `WHERE 1=0`, ou un `NOT IN (...)` dont la liste englobe tous les cas
+  possibles sauf un. Si toutes les assertions sont triviales et ne vérifient aucune valeur concrète
+  ou invariant réel du résultat, c'est `bad_assertions`.
+  Une bonne assertion pince soit la valeur exacte retournée (condition `date = '2026-03-07'`), soit
+  un invariant structurel observable (condition `z_score = (SELECT MAX(z_score) FROM __result__)`).
 - Si la requête utilise ORDER BY + LIMIT ou OFFSET : est-ce que plusieurs lignes ont exactement la même
   valeur de tri à la position retournée ? Si oui, le résultat est non-déterministe (ex : 3 groupes avec
   le même COUNT → même Z-score → OFFSET 1 retourne n'importe lequel) → `bad_data`. La correction est
   d'assigner des cardinalités distinctes à chaque groupe de façon à avoir un ordre unique.
 
-Puis produis :
+**Règles des assertions (`expected_condition`) — entre 1 et plusieurs, selon le scénario :**
+Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
+être VRAIE pour chaque ligne de `__result__` quand le test réussit. **Tu n'écris PAS de SQL
+`SELECT`/`WHERE` et tu n'écris JAMAIS la négation** — MockSQL négocie lui-même ta condition pour
+produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue,
+à l'affirmative.
+- Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`,
+  écris `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`.
+  "Vérifier ce qui ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
+- Utilise UNIQUEMENT les colonnes de `<result_schema>` (noms exacts, sensibles à la casse).
+- N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
+  Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
+  `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`.
+- INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`.
+- INTERDIT — conditions triviales (toujours vraies quelle que soit la valeur du résultat) :
+  ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
+  ✗ une condition basée sur `IS NOT NULL` d'une colonne déjà non-nulle dans les exemples
+  Une condition triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
+- OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une condition qui pince
+  la VALEUR CONCRÈTE retournée. Utilise `<result_sample>` pour identifier le résultat attendu.
+  Exemple : si `__result__` contient `{"date": "2026-01-02"}`, écris `expected_condition: "date = '2026-01-02'"`.
+  Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
 
-1. Entre 1 et plusieurs assertions sur `__result__` — autant que nécessaire pour valider ce scénario (1 suffit si le test est simple, plusieurs si la requête couvre plusieurs calculs ou cas).
-   Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
-   être VRAIE pour chaque ligne quand le test réussit. **Tu n'écris PAS de SQL `SELECT`/`WHERE` et tu
-   n'écris JAMAIS la négation** — MockSQL négocie lui-même ta condition pour produire la requête de
-   validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue, à l'affirmative.
-   - Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`,
-     écris `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`.
-     "Vérifier ce qui ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
-   - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse).
-   - N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
-     Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
-     `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`.
-   - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`.
-   - INTERDIT — conditions triviales (toujours vraies quelle que soit la valeur du résultat) :
-     ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
-     ✗ une condition basée sur `IS NOT NULL` d'une colonne déjà non-nulle dans les exemples
-     Une condition triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
-   - OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une condition qui pince
-     la VALEUR CONCRÈTE retournée. Utilise les "Exemples de lignes" pour identifier le résultat attendu.
-     Exemple : si `__result__` contient `{{"date": "2026-01-02"}}`, écris `expected_condition: "date = '2026-01-02'"`.
-     Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
+**Verdict de qualité :**
+- `verdict` : "Excellent", "Bon", ou "Insuffisant"
+- `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
+  mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
+  (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
+  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat)
+- `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
+  sans noms de colonnes, de CTEs ni de mots-clés SQL.
+  ✓ 'Les données couvrent correctement le scénario nominal.'
+  ✓ 'Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite.'
+  ✗ 'La CTE orders_filtered retourne 0 lignes car user_id IS NULL.'
+- `assertion_fix` (uniquement si `reason_type == "bad_assertions"`) : objet décrivant
+  la correction à apporter au test pour permettre une meilleure génération d'assertions :
+  - `test_name` : nom court corrigé (3–6 mots)
+  - `unit_test_description` : description précise et correcte, sans ambiguïté
+  - `unit_test_build_reasoning` : explication de la correction
+  - `tags` : liste parmi Logique métier, Null checks, Cas limites, Intégration,
+    Valeurs dupliquées, Performance
+  - `suggestions` : 2–3 vérifications correctives précises ("Vérifie que …")
+  Si `reason_type != "bad_assertions"`, `assertion_fix` doit être `null`.
+- `diagnostic` : OBLIGATOIRE si `reason_type == "bad_data"`, sinon `null`.
+  Quand `reason_type == "bad_data"`, tu DOIS remplir ce bloc — ne laisse pas null :
+  - `root_cause` : phrase courte identifiant la cause (ex: "STDDEV=0 — chaque date n'apparaît qu'une fois")
+  - `sql_pattern` : clause SQL en cause (ex: "COUNT(descript) GROUP BY date → variance nulle")
+  - `data_issue` : ce qui manque dans les données générées (ex: "6 dates distinctes avec 1 ligne chacune, COUNT=1 partout")
+  - `fix_summary` : phrase courte (max 15 mots) lisible par l'utilisateur dans l'UI —
+    décrit le mécanisme sans les valeurs concrètes ni les détails techniques.
+    ✓ Bon : "Dupliquer des lignes sur la même date pour varier le COUNT par groupe."
+    ✓ Bon : "Ajouter une ligne de JOIN manquante pour que la jointure produise un résultat."
+    ✗ Interdit : noms de colonnes, de CTEs, valeurs spécifiques, termes SQL.
+  - `fix_recipe` : instruction opérationnelle complète passée au correcteur — 4 éléments requis :
+    (1) table exacte et champ(s) à modifier (nom exact tel qu'affiché dans `<input_data>`),
+    (2) mécanisme précis : pour les bugs GROUP BY/agrégat, écrire impérativement
+        "dupliquer N lignes avec [col_group_by]='[valeur]'" — JAMAIS "ajouter des valeurs variables"
+        ni aucune formulation abstraite,
+    (3) valeurs concrètes tirées des données d'entrée, avec le compte par groupe
+        (ex: "'2016-01-02' × 3 lignes, '2016-01-03' × 2 lignes"),
+    (4) effet attendu sur le calcul SQL (ex: "→ COUNT ∈ {2, 3} → STDDEV > 0").
+    ✗ Interdit : "ajouter des données variables", "modifier les valeurs", tout terme générique.
+    ✓ Bon : "Dans [table], dupliquer la ligne [col]='2016-01-02' pour en avoir 3 copies
+             et [col]='2016-01-03' pour en avoir 2 → COUNT varie → STDDEV > 0."
+  - `affected_tables` : liste des noms de tables dont les données doivent être corrigées
+  - `affected_ctes` : liste des CTEs impactées par le problème
 
-2. Le verdict de qualité :
-   - `verdict` : "Excellent", "Bon", ou "Insuffisant"
-   - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
-     mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
-     (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
-     sont triviales : toujours vraies indépendamment de la valeur réelle du résultat)
-   - `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
-     sans noms de colonnes, de CTEs ni de mots-clés SQL.
-     ✓ 'Les données couvrent correctement le scénario nominal.'
-     ✓ 'Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite.'
-     ✗ 'La CTE orders_filtered retourne 0 lignes car user_id IS NULL.'
-   - `assertion_fix` (uniquement si `reason_type == "bad_assertions"`) : objet décrivant
-     la correction à apporter au test pour permettre une meilleure génération d'assertions :
-     - `test_name` : nom court corrigé (3–6 mots)
-     - `unit_test_description` : description précise et correcte, sans ambiguïté
-     - `unit_test_build_reasoning` : explication de la correction
-     - `tags` : liste parmi Logique métier, Null checks, Cas limites, Intégration,
-       Valeurs dupliquées, Performance
-     - `suggestions` : 2–3 vérifications correctives précises ("Vérifie que …")
-     Si `reason_type != "bad_assertions"`, `assertion_fix` doit être `null`.
-   - `diagnostic` : OBLIGATOIRE si `reason_type == "bad_data"`, sinon `null`.
-     Quand `reason_type == "bad_data"`, tu DOIS remplir ce bloc — ne laisse pas null :
-     - `root_cause` : phrase courte identifiant la cause (ex: "STDDEV=0 — chaque date n'apparaît qu'une fois")
-     - `sql_pattern` : clause SQL en cause (ex: "COUNT(descript) GROUP BY date → variance nulle")
-     - `data_issue` : ce qui manque dans les données générées (ex: "6 dates distinctes avec 1 ligne chacune, COUNT=1 partout")
-     - `fix_summary` : phrase courte (max 15 mots) lisible par l'utilisateur dans l'UI —
-       décrit le mécanisme sans les valeurs concrètes ni les détails techniques.
-       ✓ Bon : "Dupliquer des lignes sur la même date pour varier le COUNT par groupe."
-       ✓ Bon : "Ajouter une ligne de JOIN manquante pour que la jointure produise un résultat."
-       ✗ Interdit : noms de colonnes, de CTEs, valeurs spécifiques, termes SQL.
-     - `fix_recipe` : instruction opérationnelle complète passée au correcteur — 4 éléments requis :
-       (1) table exacte et champ(s) à modifier (nom exact tel qu'affiché dans "Données d'entrée"),
-       (2) mécanisme précis : pour les bugs GROUP BY/agrégat, écrire impérativement
-           "dupliquer N lignes avec [col_group_by]='[valeur]'" — JAMAIS "ajouter des valeurs variables"
-           ni aucune formulation abstraite,
-       (3) valeurs concrètes tirées des données d'entrée ci-dessus, avec le compte par groupe
-           (ex: "'2016-01-02' × 3 lignes, '2016-01-03' × 2 lignes"),
-       (4) effet attendu sur le calcul SQL (ex: "→ COUNT ∈ {2, 3} → STDDEV > 0").
-       ✗ Interdit : "ajouter des données variables", "modifier les valeurs", tout terme générique.
-       ✓ Bon : "Dans [table], dupliquer la ligne [col]='2016-01-02' pour en avoir 3 copies
-                et [col]='2016-01-03' pour en avoir 2 → COUNT varie → STDDEV > 0."
-     - `affected_tables` : liste des noms de tables dont les données doivent être corrigées
-     - `affected_ctes` : liste des CTEs impactées par le problème
-
-Cas particulier — résultat vide intentionnel : si la description mentionne explicitement
+**Cas particulier — résultat vide intentionnel :** si `<test_context>` mentionne explicitement
 "plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
 Évalue si les données d'entrée sont bien construites pour produire ce vide (Bon/Excellent),
 ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data)."""
 
+    # ── Human : sections balisées dans l'ordre contexte → tables → SQL → input → output → ask ──
+    human_content = f"""<test_context>
+{test_description}
+</test_context>
+
+<result_schema>
+{schema_str}
+</result_schema>
+
+<query>
+```sql
+{duckdb_sql}
+```
+</query>
+
+<input_data>
+{test_data}
+</input_data>
+
+<result_sample>
+{row_count} ligne(s) :
+{json.dumps(sample, ensure_ascii=False, default=str)}
+</result_sample>
+
+<task>
+Produis, conformément aux règles du message système :
+1. Entre 1 et plusieurs `assertions` (chacune une `expected_condition` positive sur `__result__`).
+2. Le `verdict` de qualité (+ `reason_type`, `explanation`, et `assertion_fix`/`diagnostic` selon le cas).
+Réponds uniquement avec l'objet structuré demandé.
+</task>"""
+
     llm = make_llm()
     structured_llm = llm.with_structured_output(_AssertionsAndEvaluation)
     try:
-        logger.diag("[assertions_eval] prompt (extrait):\n%s", prompt[:3000])
-        result: _AssertionsAndEvaluation = await structured_llm.ainvoke(prompt)
+        logger.diag("[assertions_eval] human (extrait):\n%s", human_content[:3000])
+        result: _AssertionsAndEvaluation = await structured_llm.ainvoke(
+            [SystemMessage(content=system_content), HumanMessage(content=human_content)]
+        )
         logger.diag("[assertions_eval] reasoning:\n%s", result.reasoning)
         logger.diag(
             "[assertions_eval] verdict=%s reason_type=%s assertions=%s",
@@ -1221,7 +1247,22 @@ def _evaluate_assertions(
     """
     results = []
     for a in assertions:
-        sql = (a.get("sql") or "").replace("__result__", view_name)
+        raw_sql = (a.get("sql") or "").strip()
+        if not raw_sql:
+            # SQL vide → con.execute("") renvoie None → ".fetchdf()" planterait avec un
+            # message opaque ("'NoneType' object has no attribute 'fetchdf'"). On émet une
+            # erreur explicite à la place (assertion malformée, ex. dérivation `sql` oubliée).
+            results.append(
+                {
+                    "description": a.get("description", ""),
+                    "expected_condition": a.get("expected_condition", ""),
+                    "sql": a.get("sql", ""),
+                    "passed": False,
+                    "error": "assertion SQL vide (aucune requête à exécuter)",
+                }
+            )
+            continue
+        sql = raw_sql.replace("__result__", view_name)
         try:
             fail_df = con.execute(sql).fetchdf()
             passed = len(fail_df) == 0

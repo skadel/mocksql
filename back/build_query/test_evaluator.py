@@ -230,22 +230,11 @@ async def evaluate_tests(state: QueryState):
         cte_trace = current_test.get("cte_trace", {})
         failing_cte = current_test.get("failing_cte", "")
         if cte_trace:
-            trace_lines = []
-            for name, info in cte_trace.items():
-                row_count = info.get("row_count", 0)
-                marker = " ← filtre bloquant" if row_count == 0 else ""
-                trace_lines.append(f"- `{name}` : {row_count} ligne(s){marker}")
-                steps = info.get("steps")
-                if steps and row_count == 0:
-                    for step in steps:
-                        cnt = step.get("count", -1)
-                        zero_marker = " ← filtre actif ici" if cnt == 0 else ""
-                        trace_lines.append(
-                            f"  - {step['label']} → {cnt} ligne(s){zero_marker}"
-                        )
-            diag = "Diagnostic DuckDB :\n" + "\n".join(trace_lines)
-            if failing_cte:
-                diag += f"\nModifiez les données pour satisfaire les conditions de la CTE `{failing_cte}`."
+            # Source unique de format de trace (compressée, centrée sur l'étape
+            # bloquante) — partagée avec le feedback du générateur via _build_eval_messages.
+            from build_query.examples_generator import _format_cte_trace_hint
+
+            diag = _format_cte_trace_hint(failing_cte, cte_trace)
             display_reason = (
                 f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
                 if failing_cte

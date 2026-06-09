@@ -219,6 +219,35 @@ describe('formatMessage', () => {
     });
   });
 
+  describe('contentType: query_understanding', () => {
+    it('parses understanding payload from content', () => {
+      const payload = {
+        tables: [{ database: '', table: 'orders', columns: ['id', 'amount'] }],
+        constraints: { joins: ['orders.customer_id = customers.id'], filters: ['orders.amount > 0'] },
+        derived_expressions: [{ expr: 'SAFE_CAST(o.amount AS INT64)', source_tables: ['orders'] }],
+        optimized_sql: 'SELECT id FROM orders',
+      };
+      const msg = formatMessage({
+        type: 'ai', id: '1',
+        content: JSON.stringify(payload),
+        additional_kwargs: { type: MsgType.QUERY_UNDERSTANDING },
+      });
+      expect(msg.contentType).toBe('query_understanding');
+      expect(msg.contents.understanding?.tables[0].table).toBe('orders');
+      expect(msg.contents.understanding?.constraints.joins).toHaveLength(1);
+      expect(msg.contents.understanding?.optimized_sql).toBe('SELECT id FROM orders');
+    });
+
+    it('leaves understanding undefined on unparseable content', () => {
+      const msg = formatMessage({
+        type: 'ai', id: '1',
+        content: 'not json',
+        additional_kwargs: { type: MsgType.QUERY_UNDERSTANDING },
+      });
+      expect(msg.contents.understanding).toBeUndefined();
+    });
+  });
+
   describe('default (unknown contentType)', () => {
     it('sets contents.text to raw content', () => {
       const msg = formatMessage({

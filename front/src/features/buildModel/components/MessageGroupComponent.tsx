@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setSelectedChildIndex } from '../buildModelSlice';
-import { AnyRenderable, Message, MessageGroup } from '../../../utils/types';
+import { AnyRenderable, Message, MessageGroup, RequestGroup, isRequestGroup } from '../../../utils/types';
+import RequestGroupBubble from './RequestGroupBubble';
 import { styled } from '@mui/material/styles';
 import IconButton from '@mui/material/IconButton';
 import ArrowBackIosNewIcon from '@mui/icons-material/ArrowBackIosNew';
@@ -37,11 +38,13 @@ const StyledIconButton = styled(IconButton)(({ theme }) => ({
 interface MessageGroupComponentProps {
   group: MessageGroup;
   renderSingleMessage: (msg: Message, index: number) => JSX.Element;
+  renderBody: (msg: Message) => JSX.Element;
 }
 
 const MessageGroupComponent: React.FC<MessageGroupComponentProps> = ({
   group,
   renderSingleMessage,
+  renderBody,
 }) => {
   const dispatch = useAppDispatch();
   const { selectedChildIndices } = useAppSelector((state) => state.buildModel);
@@ -95,6 +98,18 @@ const MessageGroupComponent: React.FC<MessageGroupComponentProps> = ({
                 key={`group-${(item as MessageGroup).parentId}`}
                 group={item as MessageGroup}
                 renderSingleMessage={renderSingleMessage}
+                renderBody={renderBody}
+              />
+            );
+          }
+
+          if (isRequestGroup(item)) {
+            const rg = item as RequestGroup;
+            return (
+              <RequestGroupBubble
+                key={`req-${rg.requestId || index}`}
+                group={rg}
+                renderBody={renderBody}
               />
             );
           }
