@@ -140,7 +140,7 @@ async def data_patcher_node(state: QueryState):
         updated_test = {**test_case, "data": data}
         parent = state.get("agent_message_id") or state.get("user_message_id")
         msg = AIMessage(
-            content=json.dumps(updated_test),
+            content=json.dumps(updated_test, default=str),
             id=str(uuid.uuid4()),
             additional_kwargs={
                 "type": MsgType.EXAMPLES,
@@ -199,7 +199,7 @@ async def data_patcher_node(state: QueryState):
     updated_test = {**test_case, "data": data}
     parent = state.get("agent_message_id") or state.get("user_message_id")
     msg = AIMessage(
-        content=json.dumps(updated_test),
+        content=json.dumps(updated_test, default=str),
         id=str(uuid.uuid4()),
         additional_kwargs={
             "type": MsgType.EXAMPLES,

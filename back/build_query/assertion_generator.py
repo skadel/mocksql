@@ -170,7 +170,9 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
     return {
         "messages": [
             AIMessage(
-                content=json.dumps(updated_all_tests, ensure_ascii=False, indent=2),
+                content=json.dumps(
+                    updated_all_tests, ensure_ascii=False, indent=2, default=str
+                ),
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     **last_results.additional_kwargs,
