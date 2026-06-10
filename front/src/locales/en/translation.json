@@ -37,7 +37,12 @@
     "step_tables": "tables",
     "step_columns": "columns",
     "step_constraints": "Extracting conditions and used columns…",
-    "step_generation": "Generating tests"
+    "step_generation": "Generating tests",
+    "evaluating_tests": "Evaluating verdicts…",
+    "correcting_data": "Correcting test data…",
+    "generating_assertions": "Generating assertions…",
+    "correcting_assertions": "Adjusting assertions…",
+    "generating_suggestions": "Looking for uncovered cases…"
   },
   "understanding": {
     "title": "What MockSQL understood",

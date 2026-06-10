@@ -71,7 +71,18 @@ export const chatQuery = createAsyncThunk(
     }
 
     let step = '';
-    const capturedSteps = ['parser', 'generator', 'executor'];
+    const capturedSteps = [
+      'parser',
+      'generator',
+      'executor',
+      'test_evaluator',
+      'conversational_agent',
+      'data_patcher',
+      'assertion_generator',
+      'assertion_corrector',
+      'assertion_modifier',
+      'suggestions_generator',
+    ];
     let convStreamId: string | null = null;
     // Accumulates the raw streaming text emitted by conversational_agent before the final
     // message arrives — stored as `contents.reasoning` on the scenario message.
@@ -147,9 +158,16 @@ export const chatQuery = createAsyncThunk(
           if (pd.event === 'on_chain_start' && capturedSteps.includes(pd.name)) {
             step = pd.name;
             const loadingMap: Record<string, string> = {
-              parser:    t('loading.validate_query'),
-              generator: t('loading.generating_examples'),
-              executor:  t('loading.executing_query'),
+              parser:                t('loading.validate_query'),
+              generator:             t('loading.generating_examples'),
+              executor:              t('loading.executing_query'),
+              test_evaluator:        t('loading.evaluating_tests'),
+              conversational_agent:  t('loading.correcting_data'),
+              data_patcher:          t('loading.correcting_data'),
+              assertion_generator:   t('loading.generating_assertions'),
+              assertion_corrector:   t('loading.correcting_assertions'),
+              assertion_modifier:    t('loading.correcting_assertions'),
+              suggestions_generator: t('loading.generating_suggestions'),
             };
             dispatch(setLoadingMessage(loadingMap[step] || ''));
           }
