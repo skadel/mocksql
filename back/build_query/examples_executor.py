@@ -11,7 +11,7 @@ from pandas import DataFrame
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
 
-from utils.llm_errors import normalize_llm_content
+from utils.llm_errors import normalize_llm_content, loads_lenient_json
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from build_query.state import QueryState
@@ -1464,7 +1464,7 @@ Réécris l'assertion (description + sql valide DuckDB) en respectant les règle
         logger.diag("[regen_assertion] réponse brute:\n%s", content[:500])
         json_match = re.search(r"\{[\s\S]*\}", content)
         if json_match:
-            parsed = json.loads(json_match.group())
+            parsed = loads_lenient_json(json_match.group())
             if isinstance(parsed, dict) and parsed.get("sql"):
                 return parsed
     except Exception as e:
@@ -1663,7 +1663,7 @@ et réponds selon le format du message système (un objet `decisions` listant un
         json_match = re.search(r"\{[\s\S]*\}", content)
         if not json_match:
             return results
-        parsed = json.loads(json_match.group())
+        parsed = loads_lenient_json(json_match.group())
         decisions = parsed.get("decisions") if isinstance(parsed, dict) else None
         if not isinstance(decisions, list):
             return results
