@@ -335,6 +335,7 @@ export interface ChatQueryParams {
   forceRoute?: string;
   silent?: boolean;
   suggestionIntent?: boolean;
+  regenerateSuggestions?: boolean;
 }
 
 

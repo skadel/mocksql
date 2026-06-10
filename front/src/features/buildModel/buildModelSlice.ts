@@ -148,8 +148,11 @@ export const buildModelSlice = createSlice({
       const msg = action.payload;
       const silent = (msg as any).silent === true;
 
+      // Suggestions = panneau dédié, jamais dans le fil : on alimente state.suggestions
+      // (canal live SSE) et on n'insère pas le message dans queryComponentGraph.
       if (msg.contentType === 'suggestions') {
         if (Array.isArray(msg.contents.suggestions)) state.suggestions = msg.contents.suggestions;
+        return;
       }
 
       if (msg.contentType === 'retry_prompt') {
@@ -302,6 +305,11 @@ export const buildModelSlice = createSlice({
     setTestResults(state, action: PayloadAction<any[]>) {
       state.testResults = action.payload;
     },
+    // Consommation optimiste d'une suggestion : on la retire du panneau dès le clic
+    // (le backend la retire aussi du modèle, cf. history_saver/suggestion_intent).
+    dismissSuggestion(state, action: PayloadAction<string>) {
+      state.suggestions = state.suggestions.filter((s) => s !== action.payload);
+    },
     pushSqlHistory(state, action: PayloadAction<SqlHistoryEntry>) {
       const last = state.sqlHistory[state.sqlHistory.length - 1];
       if (!last || last.sql !== action.payload.sql) {
@@ -340,13 +348,15 @@ export const buildModelSlice = createSlice({
       state.testResults = [];
       state.suggestions = [];
     })
-      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
-        const { messages, sql, optimized_sql, test_results, restored_message_id, last_error, sql_history } = action.payload;
+      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; suggestions?: string[]; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
+        const { messages, sql, optimized_sql, test_results, suggestions, restored_message_id, last_error, sql_history } = action.payload;
         state.error = '';
         state.loading = false;
         if (sql) state.query = sql;
         if (optimized_sql) state.optimizedQuery = optimized_sql;
         if (test_results?.length) state.testResults = test_results;
+        // Suggestions = état du modèle (panneau dédié), chargé comme test_results.
+        if (suggestions?.length) state.suggestions = suggestions;
         if (restored_message_id) state.restoredMessageId = restored_message_id;
         state.lastError = last_error || undefined;
         if (sql_history?.length) state.sqlHistory = sql_history;
@@ -365,14 +375,16 @@ export const buildModelSlice = createSlice({
           }
         });
 
-        // Fold evaluation and suggestions into their target message so history renders as one bubble.
+        // Fold evaluation into its target message so history renders as one bubble.
         // Target: nearest generate_test_scenario or examples ancestor in the parent chain.
+        // (Suggestions ne sont plus dans l'historique : elles vivent dans le panneau dédié,
+        // chargées depuis le champ modèle `suggestions`.)
         {
           const toDelete = new Set<string>();
           messages.forEach((raw: any) => {
             const msg = state.queryComponentGraph[raw.id];
             if (!msg) return;
-            if (msg.contentType !== 'evaluation' && msg.contentType !== 'suggestions') return;
+            if (msg.contentType !== 'evaluation') return;
 
             let targetId: string | null = null;
             let curId = msg.parent;
@@ -390,17 +402,10 @@ export const buildModelSlice = createSlice({
             if (!targetId) return;
             const target = state.queryComponentGraph[targetId];
 
-            if (msg.contentType === 'evaluation') {
-              // Only embed evaluation text for conversational flow (generate_test_scenario target).
-              // For initial generation the verdict is already in testResults / TestsPanel.
-              if (target.contentType === 'generate_test_scenario') {
-                target.contents.evaluationText = msg.contents.text;
-              }
-            } else {
-              target.contents.suggestions = msg.contents.suggestions;
-              if (msg.contents.profileAvailable !== undefined) {
-                target.contents.profileAvailable = msg.contents.profileAvailable;
-              }
+            // Only embed evaluation text for conversational flow (generate_test_scenario target).
+            // For initial generation the verdict is already in testResults / TestsPanel.
+            if (target.contentType === 'generate_test_scenario') {
+              target.contents.evaluationText = msg.contents.text;
             }
 
             const parentMsg = msg.parent ? state.queryComponentGraph[msg.parent] : null;
@@ -445,17 +450,8 @@ export const buildModelSlice = createSlice({
           });
         }
 
-        // Restore suggestions from the last suggestions message in history
-        for (let i = messages.length - 1; i >= 0; i--) {
-          const raw = messages[i];
-          if (raw?.additional_kwargs?.type === 'suggestions') {
-            try {
-              const parsed = JSON.parse(raw.content);
-              if (Array.isArray(parsed)) state.suggestions = parsed;
-            } catch { /* ignore */ }
-            break;
-          }
-        }
+        // (Les suggestions sont chargées depuis le champ modèle `suggestions` plus haut,
+        // plus besoin de les reconstruire depuis l'historique de conversation.)
 
         // 4. Déterminer le dernier message et mettre à jour selectedChildIndices
         const latestMessage = messages[messages.length - 1];
@@ -635,7 +631,7 @@ export const { setError, resetMessages, setLoadingMessage, appendComponentToLast
   appendQueryComponentMessage, setTransformationName, setQueryComponentGraph,
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
   setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
-  setTestResults, pushSqlHistory, setRestoredMessageId,
+  setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId,
   appendStreamingReasoning, clearStreamingReasoning, setWorkspaceMode, patchMessageContents } = buildModelSlice.actions;
 
 export default buildModelSlice.reducer;

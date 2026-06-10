@@ -28,6 +28,12 @@ async def routing(state: QueryState):
         logger.diag("[routing] → profile_checker (profile_result présent)")
         return {"route": "profile_checker"}
 
+    # Régénération explicite des suggestions (bouton du panneau) : court-circuite l'agent
+    # conversationnel pour aller directement régénérer, sans appel LLM de routage.
+    if state.get("regenerate_suggestions"):
+        logger.diag("[routing] → suggestions (regenerate_suggestions présent)")
+        return {"route": "suggestions"}
+
     user_tables = state.get("user_tables")
     if user_tables:
         logger.diag("[routing] → executor (user_tables présent)")

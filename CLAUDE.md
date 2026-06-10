@@ -207,15 +207,24 @@ npx prettier --write src/
 ## Architecture du graph LangGraph
 
 ```
-START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → evaluate_tests → [route_evaluator] → suggestions_generator → final_response → history_saver → END
+START → pre_routing → routing → [route_input] → generator → executor → [route_executor] → evaluate_tests → [route_evaluator] → suggestions_generator → [route_after_suggestions] → final_response → history_saver → END
                                   ↘ conversational_agent  (input chat utilisateur sur tests existants)
+                                  ↘ suggestions           (regenerate_suggestions : bouton « Régénérer » du panneau)
                                   ↘ other                 (question hors-sujet)
+
+Sur verdict suffisant (route_evaluator) :
+  has_existing_tests == False (1ʳᵉ génération)  → suggestions_generator (suggestions auto, une seule fois)
+  has_existing_tests == True (édition/ajout)    → final_response (PAS de suggestions auto — cf. bouton « Régénérer »)
 
 Sur verdict Insuffisant (route_evaluator) :
   bad_data (inclut empty_results) + retries>0  → bad_data_to_agent (pose auto_correct) → conversational_agent → [patch/add_row → data_patcher | update_test_data → generator | run_cte → debug_node | no-op → generator (fallback)] → executor
   bad_data + retries==0                         → bad_data_exhausted → history_saver
   bad_assertions                                → assertion_corrector / history_saver
   assertion_only / rerun_only / too_many_rows   → history_saver
+
+Après suggestions_generator (route_after_suggestions) :
+  regenerate_suggestions == True                → history_saver (pas de message de clôture)
+  sinon (1ʳᵉ génération)                        → final_response
 ```
 
 Voir le détail complet dans [docs/workflow-query-generation.md](docs/workflow-query-generation.md).
@@ -230,7 +239,7 @@ Voir le détail complet dans [docs/workflow-query-generation.md](docs/workflow-q
 | `executor`             | `examples_executor.py`       | Exécute la requête sur DuckDB, trace les CTEs                       |
 | `profile_checker`      | `profile_checker.py`         | Valide et fusionne le profil statistique (colonnes + joins + exprs dérivées) |
 | `evaluate_tests`       | `test_evaluator.py`          | Verdict structuré : Excellent / Bon / Insuffisant + cause (bad_data / bad_assertions) |
-| `suggestions_generator`| `suggestions_node.py`        | 3 suggestions contextualisées avec données réelles + verdicts       |
+| `suggestions_generator`| `suggestions_node.py`        | 3 suggestions contextualisées (données réelles + verdicts). **Auto uniquement à la 1ʳᵉ génération** (`has_existing_tests` falsy) ou à la demande (`regenerate_suggestions`). Persiste les suggestions sur le **modèle** (champ `suggestions`) — pas dans l'historique de conversation |
 | `conversational_agent` | `conversational_agent.py`    | Corrige/génère via outils (`patch_test_field`, `add_test_row`, `remove_test_row`, `run_cte`). Appelé **et** sur input chat utilisateur **et** dans la boucle de retry auto `bad_data` (correction incrémentale). Décrémente lui-même `gen_retries` sur `bad_data` |
 | `bad_data_to_agent`    | `query_chain.py`             | Entrée de la boucle de correction auto : pose `auto_correct=True` puis route vers `conversational_agent` (ne décrémente PAS — l'agent le fait) |
 | `history_saver`        | `query_chain.py`             | Persiste l'historique en base                                       |
@@ -447,6 +456,7 @@ App
 - **Profil statistique enrichi** : le profil stocké peut désormais contenir des `derived_expressions` (expressions SQL non-triviales profilées sur les données réelles, ex : `SAFE_CAST`, `REGEXP_EXTRACT`) injectées dans le prompt de génération via `_format_profile_block`. Les JOINs profilés peuvent inclure un `right_filter` et des `left_cte_sql`/`right_cte_sql` pour contextualiser les cardinalités.
 - **Auto-import per projet** : l'auto-import silencieux de tables manquantes peut être activé globalement (`localStorage.autoImport_always`) ou par projet (`localStorage.autoImport_project_{projectId}`). Les deux flags sont vérifiés dans `QueryChatComponent`.
 - **Coverage score** : calculé côté front à partir des titres/tags des tests ; le backend n'a pas à le connaître. Les 6 axes sont des heuristiques regex sur le texte des tests.
+- **Suggestions = état du modèle, panneau dédié** : les suggestions de couverture sont stockées sur le **fichier modèle** (champ `suggestions` de `.mocksql/tests/{model}.json`), **pas** dans l'historique de conversation, et rendues dans un **panneau dédié** (`TestsPanel`, composant `SuggestionsSection`), jamais en bulles empilées dans le fil. Elles sont auto-générées **une seule fois** (1ʳᵉ génération), régénérables à la demande (bouton « Régénérer » → flag `regenerate_suggestions`), et **consommées** quand on en fait un test (`suggestion_intent` → `history_saver` retire l'entrée du modèle ; le front fait un retrait optimiste via `dismissSuggestion`). Chargées au démarrage par `GET /getMessages` (champ `suggestions`, comme `test_results`). Le message SSE `MsgType.SUGGESTIONS` ne sert qu'au rafraîchissement live du panneau (`state.suggestions`) et n'entre pas dans `queryComponentGraph`.
 - **DuckDB positionné comme économie de coût** : toute mention de l'exécution dans l'UI doit souligner "0 € facturé sur BigQuery" — c'est un argument commercial, pas juste un détail technique.
 - **Import de tables manquantes** : l'`ImportView` est une étape intermédiaire entre `GenerateView` et `TestsView` — elle s'affiche uniquement si des tables référencées dans le SQL ne sont pas disponibles localement. Chaque table a son propre état (`pending` / `importing` / `done`).
 - **Dérive (drift)** : quand un modèle est lié à un fichier Git/dbt, stocker le `source_sha` à la création. Si le SHA change, afficher un bandeau d'alerte dans la TestsView et passer les tests en état `stale`.

@@ -298,6 +298,73 @@ def route_agent_output(state: QueryState):
     return "history_saver"
 
 
+def route_evaluator(state: QueryState):
+    """Route la sortie de ``test_evaluator``. Défini au niveau module (comme
+    ``route_agent_output``) pour rester testable : ne dépend que de ``state``.
+
+    Les suggestions ne sont auto-générées qu'à la 1ʳᵉ génération (``has_existing_tests``
+    falsy) ; sur éditions/ajouts suivants on va directement à ``final_response`` (cf. bouton
+    « Régénérer » côté panneau)."""
+    feedback = state.get("evaluation_feedback")
+    retries = state.get("gen_retries", 0)
+    logger.diag(
+        "[route_evaluator] evaluation_feedback=%s gen_retries=%s assertion_only=%s",
+        feedback,
+        retries,
+        state.get("assertion_only"),
+    )
+    # Skip retries and suggestions for assertion-only edits or simple reruns
+    if state.get("assertion_only") or state.get("rerun_only"):
+        logger.diag(
+            "[route_evaluator] → history_saver (assertion_only=%s rerun_only=%s)",
+            state.get("assertion_only"),
+            state.get("rerun_only"),
+        )
+        return "history_saver"
+    # SQL structurally requires too many rows — no retry can fix this
+    if feedback == "too_many_rows":
+        logger.diag("[route_evaluator] → history_saver (too_many_rows)")
+        return "history_saver"
+    if feedback == "bad_data":
+        if retries > 0:
+            logger.diag(
+                "[route_evaluator] → bad_data_to_agent (bad_data retries=%d)",
+                retries,
+            )
+            return "bad_data_to_agent"
+        logger.diag("[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)")
+        return "bad_data_exhausted"
+    if feedback == "bad_assertions":
+        if retries > 0:
+            logger.diag(
+                "[route_evaluator] → assertion_corrector (bad_assertions retries=%d)",
+                retries,
+            )
+            return "assertion_corrector"
+    # Suggestions auto-générées une seule fois : à la 1ʳᵉ génération (0 → N tests).
+    if not state.get("has_existing_tests"):
+        logger.diag(
+            "[route_evaluator] → suggestions_generator (1ʳᵉ génération, feedback=%s)",
+            feedback,
+        )
+        return "suggestions_generator"
+    logger.diag(
+        "[route_evaluator] → final_response (tests existants, pas de suggestions auto)"
+    )
+    return "final_response"
+
+
+def route_after_suggestions(state: QueryState):
+    """Sortie de ``suggestions_generator``. Régénération à la demande → ``history_saver``
+    (pas de message de clôture « j'ai généré des tests », qui serait faux) ; flux normal de
+    1ʳᵉ génération → ``final_response``. Module-level pour rester testable."""
+    if state.get("regenerate_suggestions"):
+        logger.diag("[route_after_suggestions] → history_saver (régénération)")
+        return "history_saver"
+    logger.diag("[route_after_suggestions] → final_response")
+    return "final_response"
+
+
 def build_query_graph():
     from langgraph.graph import END, StateGraph, START
     from utils.timing import timed_node
@@ -345,6 +412,11 @@ def build_query_graph():
         if route == "other":
             logger.diag("[route_input] → other")
             return "other"
+        if route == "suggestions":
+            logger.diag(
+                "[route_input] → suggestions_generator (régénération à la demande)"
+            )
+            return "suggestions_generator"
         if len(state.get("used_columns", [])) == 0:
             logger.diag("[route_input] → executor (used_columns vides)")
             return "executor"
@@ -374,48 +446,6 @@ def build_query_graph():
         logger.diag("[route_executor] → assertion_generator (status=%s)", status)
         return "assertion_generator"
 
-    def route_evaluator(state: QueryState):
-        feedback = state.get("evaluation_feedback")
-        retries = state.get("gen_retries", 0)
-        logger.diag(
-            "[route_evaluator] evaluation_feedback=%s gen_retries=%s assertion_only=%s",
-            feedback,
-            retries,
-            state.get("assertion_only"),
-        )
-        # Skip retries and suggestions for assertion-only edits or simple reruns
-        if state.get("assertion_only") or state.get("rerun_only"):
-            logger.diag(
-                "[route_evaluator] → history_saver (assertion_only=%s rerun_only=%s)",
-                state.get("assertion_only"),
-                state.get("rerun_only"),
-            )
-            return "history_saver"
-        # SQL structurally requires too many rows — no retry can fix this
-        if feedback == "too_many_rows":
-            logger.diag("[route_evaluator] → history_saver (too_many_rows)")
-            return "history_saver"
-        if feedback == "bad_data":
-            if retries > 0:
-                logger.diag(
-                    "[route_evaluator] → bad_data_to_agent (bad_data retries=%d)",
-                    retries,
-                )
-                return "bad_data_to_agent"
-            logger.diag(
-                "[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)"
-            )
-            return "bad_data_exhausted"
-        if feedback == "bad_assertions":
-            if retries > 0:
-                logger.diag(
-                    "[route_evaluator] → assertion_corrector (bad_assertions retries=%d)",
-                    retries,
-                )
-                return "assertion_corrector"
-        logger.diag("[route_evaluator] → suggestions_generator (feedback=%s)", feedback)
-        return "suggestions_generator"
-
     builder.add_edge(START, "pre_routing")
     builder.add_edge("pre_routing", "routing")
     builder.add_conditional_edges("routing", route_input)
@@ -434,7 +464,7 @@ def build_query_graph():
     builder.add_edge("bad_data_to_agent", "conversational_agent")
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
-    builder.add_edge("suggestions_generator", "final_response")
+    builder.add_conditional_edges("suggestions_generator", route_after_suggestions)
     builder.add_edge("final_response", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

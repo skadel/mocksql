@@ -9,22 +9,17 @@ interface RequestGroupBubbleProps {
   renderBody: (msg: Message) => JSX.Element;
 }
 
-const isSuggestionMsg = (m: Message): boolean =>
-  m.contentType === 'suggestions' ||
-  (Array.isArray(m.contents?.suggestions) && (m.contents!.suggestions as any[]).length > 0);
-
 /**
  * Bulle unique regroupant tous les messages d'une requête.
- * - Réponse finale (texte) + suggestions : visibles.
+ * - Réponse finale (texte) : visible.
  * - Étapes intermédiaires (scénario, données, exécution, évaluation, diagnostic) : repliées.
+ * (Les suggestions ne sont plus dans le fil : panneau dédié, cf. TestsPanel.)
  */
 const RequestGroupBubble: React.FC<RequestGroupBubbleProps> = ({ group, renderBody }) => {
   const [stepsOpen, setStepsOpen] = useState(false);
 
   const steps = group.items.filter(isStepMessage);
-  const visible = group.items.filter((m) => !isStepMessage(m));
-  const suggestionItems = visible.filter(isSuggestionMsg);
-  const finishItems = visible.filter((m) => !isSuggestionMsg(m));
+  const finishItems = group.items.filter((m) => !isStepMessage(m));
 
   return (
     <Box sx={{ display: 'flex', justifyContent: 'flex-start', my: 0.5 }}>
@@ -75,11 +70,6 @@ const RequestGroupBubble: React.FC<RequestGroupBubbleProps> = ({ group, renderBo
               </Collapse>
             </Box>
           )}
-
-          {/* Suggestions (visibles, sous la réponse) */}
-          {suggestionItems.map((m) => (
-            <React.Fragment key={m.id}>{renderBody(m)}</React.Fragment>
-          ))}
         </CardContent>
       </Card>
     </Box>

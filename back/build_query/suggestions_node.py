@@ -10,6 +10,7 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.prompt_tools import _format_profile_block
 from build_query.state import QueryState
+from storage.test_repository import update_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
@@ -260,6 +261,13 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
 
     if not suggestions:
         return {}
+
+    # --- 3b. Persistance sur le modèle ---
+    # Les suggestions sont un état du modèle (panneau dédié), pas un tour de chat :
+    # on les stocke sur le fichier test. Le message SUGGESTIONS émis plus bas ne sert
+    # qu'au rafraîchissement live du panneau via SSE et n'est PAS persisté dans
+    # l'historique de conversation (cf. history_saver).
+    update_test(state["session"], {"suggestions": suggestions})
 
     # --- 4. Détermination du parent_id ---
     messages = state.get("messages", [])
