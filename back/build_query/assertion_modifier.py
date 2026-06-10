@@ -105,7 +105,7 @@ async def modify_assertions(state: QueryState):
     return {
         "examples": [
             AIMessage(
-                content=json.dumps(updated_test),
+                content=json.dumps(updated_test, default=str),
                 id=str(uuid.uuid4()),
                 additional_kwargs={
                     "type": MsgType.EXAMPLES,

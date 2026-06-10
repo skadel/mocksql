@@ -213,129 +213,162 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
         logger.diag("[assertion_corrector] results_json vide, abandon")
         return {}
 
-    sql = (state.get("optimized_sql") or state.get("query", "")).strip()
-    assertion_fix = current_test.get("assertion_fix")
-    evaluation_explanation = current_test.get(
-        "evaluation_explanation", "assertions insuffisantes"
-    )
-    correction_attempts: List[Dict] = current_test.get("correction_attempts") or []
-
-    improved = await _generate_improved_assertions(
-        duckdb_sql=sql,
-        test_data=current_test.get("data", {}),
-        result_df=result_df,
-        test_description=current_test.get("unit_test_description", ""),
-        evaluation_explanation=evaluation_explanation,
-        assertion_fix=assertion_fix,
-        correction_attempts=correction_attempts,
-    )
-
-    if not improved.assertions:
-        return {}
-
-    # Evaluate new assertions against __result__ rebuilt from results_json
-    from build_query.examples_executor import (
-        _assertion_to_executable,
-        _evaluate_assertions_with_retry,
-        _fix_logically_failing_assertions,
-    )
-
-    session_id = state["session"].replace("-", "_")
-    test_index = current_test.get("test_index", "1")
-    suffix = f"{session_id}{test_index}"
-    view_name = f"__result__{suffix}"
-
-    assertion_results = []
-    with initialize_duckdb(DB_PATH) as con:
-        con.register(view_name, result_df)
-        try:
-            retry_kwargs = dict(
-                view_name=view_name,
-                con=con,
-                duckdb_sql=sql,
-                test_data=current_test.get("data", {}),
-                result_df=result_df,
-                test_description=current_test.get("unit_test_description", ""),
-            )
-            assertion_results = await _evaluate_assertions_with_retry(
-                [_assertion_to_executable(a) for a in improved.assertions],
-                **retry_kwargs,
-            )
-            assertion_results = await _fix_logically_failing_assertions(
-                assertion_results, **retry_kwargs
-            )
-        finally:
-            try:
-                con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
-            except Exception:
-                pass
-
-    # In dbt-style testing, passed=False with no error means the assertion runs correctly
-    # and finds a data violation — that's bad_data, not bad_assertions.
-    # Only SQL syntax errors (error field set) indicate a bad assertion.
-    has_sql_error = any(a.get("error") for a in assertion_results)
-    has_data_violation = any(
-        not a.get("passed") and not a.get("error") for a in assertion_results
-    )
-
-    if has_sql_error:
-        verdict_final = "Insuffisant"
-        reason_final = "bad_assertions"
-        explanation_final = (
-            "Les assertions générées ne correspondent pas au résultat de la requête."
-        )
-    elif has_data_violation:
-        # Assertions are logically correct but the test data violates the business rule
-        verdict_final = "Insuffisant"
-        reason_final = "bad_data"
-        explanation_final = improved.explanation
-    else:
-        verdict_final = improved.verdict
-        reason_final = improved.reason_type
-        explanation_final = improved.explanation
-
-    updated_attempts = correction_attempts + [
-        _build_attempt_record(assertion_results, explanation_final)
-    ]
-    logger.diag(
-        "[assertion_corrector] correction_attempts: %d → %d",
-        len(correction_attempts),
-        len(updated_attempts),
-    )
-
-    updated_test = {
-        **current_test,
-        "assertion_results": assertion_results,
-        "verdict": verdict_final,
-        "reason_type": reason_final,
-        "evaluation_explanation": explanation_final,
-        "assertion_fix": None,
-        "correction_attempts": updated_attempts,
-    }
-    updated_all_tests = [
-        updated_test if t.get("test_index") == current_test.get("test_index") else t
-        for t in all_tests
-    ]
-
     parent = last_results.additional_kwargs.get("parent") or state.get(
         "parent_message_id"
     )
-    sql_kw = state.get("query", "").strip()
-    optimized_kw = state.get("optimized_sql", "").strip()
 
-    return {
-        "messages": [
-            AIMessage(
-                content=json.dumps(updated_all_tests, ensure_ascii=False),
-                id=str(uuid.uuid4()),
-                additional_kwargs={
-                    "type": MsgType.RESULTS,
-                    "parent": parent,
-                    "request_id": state.get("request_id"),
-                    **({"sql": sql_kw} if sql_kw else {}),
-                    **({"optimized_sql": optimized_kw} if optimized_kw else {}),
-                },
-            )
-        ],
-        "gen_retries": max(0, state.get("gen_retries", 0) - 1),
-    }
+    # Tout ce qui suit (LLM, exécution DuckDB, sérialisation) peut lever : un souci sur
+    # une assertion (ex. Timestamp non sérialisable, SQL invalide) doit être remonté en
+    # erreur visible plutôt que de crasher le stream silencieusement — même si la limite
+    # de corrections est atteinte. On pose `error` + `gen_retries=0` pour arrêter la boucle.
+    try:
+        sql = (state.get("optimized_sql") or state.get("query", "")).strip()
+        assertion_fix = current_test.get("assertion_fix")
+        evaluation_explanation = current_test.get(
+            "evaluation_explanation", "assertions insuffisantes"
+        )
+        correction_attempts: List[Dict] = current_test.get("correction_attempts") or []
+
+        improved = await _generate_improved_assertions(
+            duckdb_sql=sql,
+            test_data=current_test.get("data", {}),
+            result_df=result_df,
+            test_description=current_test.get("unit_test_description", ""),
+            evaluation_explanation=evaluation_explanation,
+            assertion_fix=assertion_fix,
+            correction_attempts=correction_attempts,
+        )
+
+        if not improved.assertions:
+            return {}
+
+        # Evaluate new assertions against __result__ rebuilt from results_json
+        from build_query.examples_executor import (
+            _assertion_to_executable,
+            _evaluate_assertions_with_retry,
+            _fix_logically_failing_assertions,
+        )
+
+        session_id = state["session"].replace("-", "_")
+        test_index = current_test.get("test_index", "1")
+        suffix = f"{session_id}{test_index}"
+        view_name = f"__result__{suffix}"
+
+        assertion_results = []
+        with initialize_duckdb(DB_PATH) as con:
+            con.register(view_name, result_df)
+            try:
+                retry_kwargs = dict(
+                    view_name=view_name,
+                    con=con,
+                    duckdb_sql=sql,
+                    test_data=current_test.get("data", {}),
+                    result_df=result_df,
+                    test_description=current_test.get("unit_test_description", ""),
+                )
+                assertion_results = await _evaluate_assertions_with_retry(
+                    [_assertion_to_executable(a) for a in improved.assertions],
+                    **retry_kwargs,
+                )
+                assertion_results = await _fix_logically_failing_assertions(
+                    assertion_results, **retry_kwargs
+                )
+            finally:
+                try:
+                    con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+                except Exception:
+                    pass
+
+        # In dbt-style testing, passed=False with no error means the assertion runs
+        # correctly and finds a data violation — that's bad_data, not bad_assertions.
+        # Only SQL syntax errors (error field set) indicate a bad assertion.
+        has_sql_error = any(a.get("error") for a in assertion_results)
+        has_data_violation = any(
+            not a.get("passed") and not a.get("error") for a in assertion_results
+        )
+
+        if has_sql_error:
+            verdict_final = "Insuffisant"
+            reason_final = "bad_assertions"
+            explanation_final = "Les assertions générées ne correspondent pas au résultat de la requête."
+        elif has_data_violation:
+            # Assertions are logically correct but the test data violates the rule
+            verdict_final = "Insuffisant"
+            reason_final = "bad_data"
+            explanation_final = improved.explanation
+        else:
+            verdict_final = improved.verdict
+            reason_final = improved.reason_type
+            explanation_final = improved.explanation
+
+        updated_attempts = correction_attempts + [
+            _build_attempt_record(assertion_results, explanation_final)
+        ]
+        logger.diag(
+            "[assertion_corrector] correction_attempts: %d → %d",
+            len(correction_attempts),
+            len(updated_attempts),
+        )
+
+        updated_test = {
+            **current_test,
+            "assertion_results": assertion_results,
+            "verdict": verdict_final,
+            "reason_type": reason_final,
+            "evaluation_explanation": explanation_final,
+            "assertion_fix": None,
+            "correction_attempts": updated_attempts,
+        }
+        updated_all_tests = [
+            updated_test if t.get("test_index") == current_test.get("test_index") else t
+            for t in all_tests
+        ]
+
+        sql_kw = state.get("query", "").strip()
+        optimized_kw = state.get("optimized_sql", "").strip()
+
+        return {
+            "messages": [
+                AIMessage(
+                    content=json.dumps(
+                        updated_all_tests, ensure_ascii=False, default=str
+                    ),
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.RESULTS,
+                        "parent": parent,
+                        "request_id": state.get("request_id"),
+                        **({"sql": sql_kw} if sql_kw else {}),
+                        **({"optimized_sql": optimized_kw} if optimized_kw else {}),
+                    },
+                )
+            ],
+            "gen_retries": max(0, state.get("gen_retries", 0) - 1),
+        }
+    except Exception as exc:
+        logger.warning(
+            "[assertion_corrector] échec de la correction des assertions "
+            "(test_index=%s) : %s",
+            current_test.get("test_index"),
+            exc,
+            exc_info=True,
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=(
+                        "La correction automatique des assertions a échoué "
+                        f"({type(exc).__name__} : {exc}). Le test est conservé en l'état "
+                        "— vérifie ou édite ses assertions manuellement."
+                    ),
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.ERROR,
+                        "parent": parent,
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            ],
+            "error": "assertion_correction_failed",
+            "gen_retries": 0,
+        }

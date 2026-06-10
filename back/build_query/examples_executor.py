@@ -214,7 +214,7 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
             all_tests_results.append(test_result)
 
     global_status = _determine_global_status(all_tests_results)
-    content_msg = json.dumps(all_tests_results, indent=2)
+    content_msg = json.dumps(all_tests_results, indent=2, default=str)
     gen_retries = (
         state.get("gen_retries") if state.get("gen_retries") is not None else 1
     )
