@@ -716,18 +716,48 @@ async def generate_examples(state: QueryState):
     return result
 
 
+def _next_test_index(existing_tests: list) -> str:
+    """Return the next test_index slot, collision-free.
+
+    Uses ``max(existing)+1`` rather than ``len+1``: delete_test_node does NOT
+    renumber, so ``len+1`` can land on an index that is still taken (e.g. after
+    deleting "1" from ["1","2"], ``len+1`` == "2" → would overwrite the survivor
+    at merge time). max+1 keeps test_index a UNIQUE, stable order/display slot.
+    """
+    existing_indices = [
+        int(ti)
+        for t in existing_tests
+        if str(ti := t.get("test_index", "")).lstrip("-").isdigit()
+    ]
+    return str((max(existing_indices) if existing_indices else 0) + 1)
+
+
 def _resolve_target_key(state, existing_list: list) -> Optional[str]:
     """
     Return the test_index to overwrite, or None to create a new test.
-    Only overwrite if the frontend explicitly passed test_index, or during a retry.
+    Only overwrite if the frontend/agent explicitly passed a test_index that
+    matches an existing test, or during a retry.
+
+    Targeting is keyed on ``test_uid`` (stable random hash, the identity the
+    frontend and agent speak). ``test_index`` (a slot/order number) is only used
+    as a legacy fallback: it is matched BY VALUE against each test's stored
+    ``test_index``, never as a positional offset into ``existing_list`` (the two
+    conventions disagree — labels are 1-based, list positions 0-based — and
+    conflating them mis-targeted tests off-by-one or out of range).
     """
+    test_uid = state.get("test_uid")
+    if test_uid:
+        match = next((t for t in existing_list if t.get("test_uid") == test_uid), None)
+        if match is not None:
+            return match["test_index"]
     test_index = state.get("test_index")
-    try:
-        test_index_int = int(test_index) if test_index is not None else None
-    except (TypeError, ValueError):
-        test_index_int = None
-    if test_index_int is not None and 0 <= test_index_int < len(existing_list):
-        return existing_list[test_index_int]["test_index"]
+    if test_index is not None:
+        match = next(
+            (t for t in existing_list if str(t.get("test_index")) == str(test_index)),
+            None,
+        )
+        if match is not None:
+            return match["test_index"]
     if state.get("status") == "empty_results" and existing_list:
         return existing_list[0]["test_index"]  # always retry the first (standard) test
     return None
@@ -1014,7 +1044,7 @@ async def generate_examples_(
         )
         test_uid = (existing_tc or {}).get("test_uid") or uuid.uuid4().hex[:4]
     else:
-        test_index = str(len(existing_tests) + 1)
+        test_index = _next_test_index(existing_tests)
         test_uid = uuid.uuid4().hex[:4]
 
     return {**generated, "test_index": test_index, "test_uid": test_uid}, test_index
@@ -1120,13 +1150,26 @@ async def create_appropriate_prompt(
             native_thinking=native_thinking,
         )
     elif state.get("input", "").strip():
-        if state.get("test_index") is not None:
-            try:
-                idx = int(state["test_index"])
-            except (TypeError, ValueError):
-                idx = -1
-            existing_test = (
-                existing_tests[idx] if 0 <= idx < len(existing_tests) else None
+        if state.get("test_uid") or state.get("test_index") is not None:
+            # Sélection du test montré au LLM par la MÊME clé que _resolve_target_key :
+            # test_uid en priorité (identité stable), test_index par valeur en repli.
+            target_uid = state.get("test_uid")
+            target_idx = (
+                str(state["test_index"])
+                if state.get("test_index") is not None
+                else None
+            )
+            existing_test = next(
+                (
+                    t
+                    for t in existing_tests
+                    if (target_uid and t.get("test_uid") == target_uid)
+                    or (
+                        target_idx is not None
+                        and str(t.get("test_index")) == target_idx
+                    )
+                ),
+                None,
             )
             return update_data_prompt(
                 history,

@@ -189,3 +189,95 @@ async def test_persistently_invalid_uid_does_not_loop(monkeypatch):
     # _UID_RETRY_MAX == 2 → at most 3 invocations (initial + 2 retries), then give up.
     assert len(fake.calls) <= 3
     assert update["agent_tool_call"] is None
+
+
+def _update_data_call(test_uid, instruction="ajoute une raison sociale"):
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "update_test_data",
+                "args": {"test_uid": test_uid, "instruction": instruction},
+                "id": "call_u1",
+            }
+        ],
+    )
+
+
+def _generate_data_call(scenario="cas plage vide"):
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "generate_test_data",
+                "args": {"scenario": scenario},
+                "id": "call_g1",
+            }
+        ],
+    )
+
+
+@pytest.mark.asyncio
+async def test_update_test_data_propagates_test_index(monkeypatch):
+    """update_test_data doit propager le test_uid ciblé dans le state, sinon le
+    generator ne sait pas quel test corriger et crée un doublon."""
+    fake = FakeLLM([_update_data_call("a3f9")])
+    monkeypatch.setattr("build_query.conversational_agent.make_llm", lambda: fake)
+
+    update = await conversational_agent(_state_with_one_test())
+
+    assert update["agent_tool_call"] == "update_test_data"
+    # L'identité stable (test_uid) doit être propagée, pas le rang.
+    assert update["test_uid"] == "a3f9"
+
+
+@pytest.mark.asyncio
+async def test_generate_test_data_clears_stale_target(monkeypatch):
+    """generate_test_data crée un NOUVEAU test → tout ciblage périmé (test_uid /
+    test_index) doit être effacé, sinon _resolve_target_key écraserait un test."""
+    fake = FakeLLM([_generate_data_call()])
+    monkeypatch.setattr("build_query.conversational_agent.make_llm", lambda: fake)
+
+    state = _state_with_one_test()
+    state["test_uid"] = "a3f9"  # ciblage périmé qui traîne dans le state
+    state["test_index"] = "1"
+    update = await conversational_agent(state)
+
+    assert update["agent_tool_call"] == "generate_test_data"
+    assert update["test_uid"] is None
+    assert update["test_index"] is None
+
+
+@pytest.mark.asyncio
+async def test_resume_after_clarification_allows_text_answer(monkeypatch):
+    """Reprise après clarification : la consigne ne doit PLUS forcer « génère ou
+    corrige le test ». Une question explicative doit pouvoir recevoir une réponse
+    texte (aucun outil)."""
+    clarif_msg = AIMessage(
+        content="Dans quel contexte raison_sociale est null ?",
+        id="c1",
+        additional_kwargs={
+            "type": MsgType.OTHER,
+            "pending_intent": "Dans quel contexte raison_sociale est null ?",
+        },
+    )
+    # L'agent répond en texte libre, sans appeler d'outil.
+    fake = FakeLLM(
+        [
+            AIMessage(
+                content="raison_sociale est null car le LEFT JOIN coface ne matche pas."
+            )
+        ]
+    )
+    monkeypatch.setattr("build_query.conversational_agent.make_llm", lambda: fake)
+
+    state = _state_with_one_test()
+    state["history"] = [clarif_msg]  # la reprise s'appuie sur state["history"]
+    state["input"] = "oui dans le resultat des tests"
+    update = await conversational_agent(state)
+
+    # La reprise ne force plus une action de test.
+    system_msg = fake.calls[0][0]
+    assert "génère ou corrige le test approprié" not in system_msg.content
+    # Réponse texte conservée, aucun outil déclenché.
+    assert update["agent_tool_call"] is None

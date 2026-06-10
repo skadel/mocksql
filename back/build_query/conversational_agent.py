@@ -258,6 +258,10 @@ et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
 Réponds en français, de manière concise et naturelle.
 
+Si l'utilisateur pose une simple question (explication d'un résultat, analyse de
+couverture/redondance) sans demander de modification, réponds en texte — n'appelle
+aucun outil de génération ou de correction.
+
 Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
 (ex : l'utilisateur attend un tri par volume mais la requête utilise MAX() alphabétique,
 ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétique),
@@ -412,7 +416,9 @@ Réserve le texte libre aux réponses purement conversationnelles (sans outil).{
 ⚠️ REPRISE APRÈS CLARIFICATION
 Tu avais demandé : "{pending_intent}"
 L'utilisateur vient de répondre : "{user_input}"
-Agis maintenant en conséquence (génère ou corrige le test approprié). Ne repose pas la même question."""
+Traite maintenant la demande initiale à la lumière de cette réponse, sans reposer la même question.
+- Si elle appelle une action sur un test (créer, corriger, supprimer), utilise l'outil approprié.
+- Si c'est une simple question (explication, analyse de couverture/redondance), réponds en texte, sans appeler d'outil."""
                 break
             # L'agent a déjà agi après avoir demandé (test généré/exécuté) → pas de reprise
             if mtype in (MsgType.RESULTS, MsgType.EXAMPLES):
@@ -655,6 +661,15 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
         update["reevaluation_context"] = agent_tool_args.get("reason", "")
         if "test_index" in agent_tool_args:
             update["test_index"] = agent_tool_args["test_index"]
+    # update_test_data corrige un test EXISTANT via le generator : propager le
+    # test_uid (identité stable) pour que _resolve_target_key cible le bon test.
+    # generate_test_data crée un NOUVEAU test → effacer tout ciblage périmé qui
+    # traînerait dans le state (sinon il écraserait un test existant).
+    elif agent_tool_call == "update_test_data" and agent_tool_args.get("test_uid"):
+        update["test_uid"] = agent_tool_args["test_uid"]
+    elif agent_tool_call == "generate_test_data":
+        update["test_uid"] = None
+        update["test_index"] = None
 
     msgs_to_add = []
     last_msg_id = parent

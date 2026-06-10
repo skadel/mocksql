@@ -328,6 +328,7 @@ export interface ChatQueryParams {
   parentMessageId?: string;
   userTables?: Record<string, Record<string, any>[]>;
   profileResult?: string;
+  testUid?: string;       // stable test identity to target (preferred over testIndex)
   testIndex?: number;
   context?: 'sql_update';
   assertionOnly?: boolean;
