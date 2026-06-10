@@ -27,7 +27,7 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages } from '../buildModelSlice';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages } from '../buildModelSlice';
 import { getMessages, patchModelSql, clearHistoryApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
@@ -906,6 +906,9 @@ const ChatComponent: React.FC = () => {
     if (!currentModelId) return;
     setIsSending(true);
     setSelectedTestIndex(null);
+    // Consommation optimiste : la suggestion disparaît du panneau dès le clic
+    // (le backend la retire aussi du modèle via suggestion_intent).
+    dispatch(dismissSuggestion(text));
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
     const lastMessageId = lastMessage ? lastMessage.id : '';
     try {
@@ -920,6 +923,35 @@ const ChatComponent: React.FC = () => {
         t,
         parentMessageId: lastMessageId,
         suggestionIntent: true,
+      })).unwrap?.();
+    } catch {
+      /* erreur déjà gérée par le thunk */
+    } finally {
+      setIsSending(false);
+    }
+  }, [isSending, currentModelId, renderMessages, selectedChildIndices, sqlQuery, dispatch, t]);
+
+  // Régénération à la demande : court-circuite l'agent (regenerate_suggestions) →
+  // suggestions_generator direct, pas de message de clôture dans le fil.
+  const handleRegenerateSuggestions = useCallback(async () => {
+    if (isSending) return;
+    if (!currentModelId) return;
+    setIsSending(true);
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const lastMessageId = lastMessage ? lastMessage.id : '';
+    try {
+      isGeneratingRef.current = true;
+      await dispatch(chatQuery({
+        userInput: '',
+        sessionId: currentModelId,
+        project: '',
+        dialect: DIALECT,
+        query: sqlQuery,
+        ChangedMessageId: '',
+        t,
+        parentMessageId: lastMessageId,
+        regenerateSuggestions: true,
+        silent: true,
       })).unwrap?.();
     } catch {
       /* erreur déjà gérée par le thunk */
@@ -1377,6 +1409,7 @@ const ChatComponent: React.FC = () => {
                 onEditAssertions={handleEditAssertions}
                 onRerunTest={handleRerunTest}
                 onSuggestionClick={handleSuggestionClick}
+                onRegenerateSuggestions={handleRegenerateSuggestions}
                 selectedTestIndex={selectedTestIndex}
                 retryBadDataTestIndex={retryBadDataTestIndex}
                 sqlProps={{

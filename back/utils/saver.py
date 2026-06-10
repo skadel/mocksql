@@ -9,7 +9,7 @@ from common_vars import COMMON_HISTORY_TABLE_NAME
 from models.database import execute, query
 from models.env_variables import DB_MODE
 from models.message_service import get_messages_history, get_messages_after_data_id
-from storage.test_repository import update_test, merge_test_cases
+from storage.test_repository import update_test, merge_test_cases, get_test
 from utils.msg_types import MsgType
 from utils.sql_code import process_sql
 
@@ -51,6 +51,10 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
             continue
         if get_message_type(msg) == MsgType.EXAMPLES:
             continue
+        # Les suggestions vivent dans le panneau dédié (champ `suggestions` du modèle),
+        # pas dans l'historique de conversation : on ne les y persiste pas.
+        if get_message_type(msg) == MsgType.SUGGESTIONS:
+            continue
         if get_message_type(msg) == MsgType.RESULTS and i != last_results_idx:
             if msg.id not in eval_parent_ids:
                 continue
@@ -88,6 +92,18 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
 
     if file_updates:
         update_test(session, file_updates)
+
+    # Consommation d'une suggestion : quand l'utilisateur clique une suggestion pour en faire
+    # un test (`suggestion_intent`), le texte cliqué EST `input` → on retire cette entrée de
+    # la liste stockée sur le modèle pour qu'elle ne réapparaisse pas au rechargement.
+    if state.get("suggestion_intent"):
+        consumed = (state.get("input") or "").strip()
+        if consumed:
+            stored = get_test(session)
+            existing_suggestions = (stored or {}).get("suggestions") or []
+            remaining = [s for s in existing_suggestions if s.strip() != consumed]
+            if len(remaining) != len(existing_suggestions):
+                update_test(session, {"suggestions": remaining})
 
     # Persister les résultats (merge par test_index)
     results_msgs = [

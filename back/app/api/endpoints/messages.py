@@ -1,6 +1,8 @@
+import io
 import logging
 from typing import List, Any, Optional
 
+import pandas as pd
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -25,6 +27,12 @@ class ClearHistoryRequest(BaseModel):
 class PatchTestsRequest(BaseModel):
     sessionId: str
     tests: List[Any]
+
+
+class ApplyAssertionsRequest(BaseModel):
+    sessionId: str
+    testIndex: Any  # str | int — comparé via str()
+    assertions: List[dict]  # [{description, expected_condition}]
 
 
 class PatchSqlRequest(BaseModel):
@@ -54,6 +62,7 @@ async def get_messages(body: MessageRequest):
         optimized_sql = test.get("optimized_sql") if test else None
         last_error = test.get("last_error") if test else ""
         test_results = test.get("test_cases", []) if test else []
+        suggestions = test.get("suggestions", []) if test else []
         restored_message_id = test.get("restored_message_id") if test else None
 
         # Fallback: extract from last results message in history
@@ -73,6 +82,7 @@ async def get_messages(body: MessageRequest):
             "sql": sql,
             "optimized_sql": optimized_sql,
             "test_results": test_results,
+            "suggestions": suggestions,
             "restored_message_id": restored_message_id,
             "last_error": last_error or "",
             "sql_history": [],
@@ -114,6 +124,105 @@ async def patch_model_tests(body: PatchTestsRequest):
     try:
         update_test(body.sessionId, {"test_cases": body.tests})
         return {"ok": True}
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.post("/tests/apply_assertions")
+async def apply_assertions(body: ApplyAssertionsRequest):
+    """Ré-exécute une liste d'assertions fournie par l'utilisateur sur les données
+    inchangées du test (modif / suppression / ajout assertion par assertion), recalcule
+    un verdict déterministe, persiste et renvoie les résultats.
+
+    Aucun appel LLM : on réutilise l'exécuteur d'assertions dbt-style existant.
+    """
+    from build_query.examples_executor import (
+        _assertion_sql_from_condition,
+        _evaluate_assertions,
+    )
+    from utils.examples import DB_PATH, initialize_duckdb
+
+    try:
+        test = get_test(body.sessionId)
+        test_cases: List[dict] = (test or {}).get("test_cases", [])
+        current = next(
+            (t for t in test_cases if str(t.get("test_index")) == str(body.testIndex)),
+            None,
+        )
+        if current is None:
+            raise HTTPException(status_code=404, detail="Test introuvable")
+
+        try:
+            result_df = pd.read_json(
+                io.StringIO(current.get("results_json", "[]")), orient="records"
+            )
+        except Exception:
+            result_df = pd.DataFrame()
+
+        session_id = body.sessionId.replace("-", "_")
+        view_name = f"__result__{session_id}{current.get('test_index', '1')}"
+
+        execs = [
+            {
+                "description": a.get("description", ""),
+                "expected_condition": a.get("expected_condition", ""),
+                "sql": _assertion_sql_from_condition(a.get("expected_condition", "")),
+            }
+            for a in body.assertions
+        ]
+
+        with initialize_duckdb(DB_PATH) as con:
+            con.register(view_name, result_df)
+            try:
+                assertion_results = _evaluate_assertions(execs, view_name, con)
+            finally:
+                try:
+                    con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+                except Exception:
+                    pass
+
+        has_error = any(a.get("error") for a in assertion_results)
+        violations = sum(
+            1 for a in assertion_results if not a.get("passed") and not a.get("error")
+        )
+
+        if has_error:
+            verdict = "Insuffisant"
+            first_err = next(
+                (a.get("error") for a in assertion_results if a.get("error")), ""
+            )
+            evaluation = (
+                f"Insuffisant — une assertion contient une erreur SQL : {first_err}"
+            )
+        elif violations:
+            verdict = "Insuffisant"
+            evaluation = f"Insuffisant — {violations} ligne(s) violent une assertion."
+        else:
+            verdict = "Bon"
+            evaluation = "Bon — Toutes les assertions passent sur ce résultat."
+
+        updated = {
+            **current,
+            "assertion_results": assertion_results,
+            "verdict": verdict,
+            "evaluation": evaluation,
+            "evaluation_explanation": evaluation,
+        }
+        new_cases = [
+            updated if str(t.get("test_index")) == str(body.testIndex) else t
+            for t in test_cases
+        ]
+        update_test(body.sessionId, {"test_cases": new_cases})
+
+        return {
+            "ok": True,
+            "test_index": current.get("test_index"),
+            "assertion_results": assertion_results,
+            "evaluation": evaluation,
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")

@@ -39,7 +39,7 @@ import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import SqlEditor from '../../../shared/SqlEditor';
-import { patchModelTests } from '../../../api/messages';
+import { patchModelTests, applyAssertions } from '../../../api/messages';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { relativeDate } from '../../../utils/dates';
 import ExcelDownloader from '../../../shared/ExcelDownloader';
@@ -352,16 +352,35 @@ interface AssertionItem {
   error?: string;
 }
 
-function AssertionRow({ a, expanded, onToggle, onDelete }: {
+function AssertionRow({ a, expanded, onToggle, onDelete, onEdit, editable, disabled }: {
   a: AssertionItem;
   expanded: boolean;
   onToggle: () => void;
   onDelete: () => void;
+  onEdit?: (patch: { description: string; expected_condition: string }) => void;
+  editable?: boolean;
+  disabled?: boolean;
 }) {
   const statusColor = a.passed ? '#23a26d' : '#d0503f';
   const statusBg    = a.passed ? '#eaf5f0' : '#fbeceb';
   const failCount   = a.failing_rows?.length ?? 0;
   const [showSql, setShowSql] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [draftDesc, setDraftDesc] = useState(a.description ?? '');
+  const [draftCond, setDraftCond] = useState(a.expected_condition ?? '');
+
+  function startEdit(e: React.MouseEvent) {
+    e.stopPropagation();
+    setDraftDesc(a.description ?? '');
+    setDraftCond(a.expected_condition ?? '');
+    setEditing(true);
+  }
+  function saveEdit() {
+    const cond = draftCond.trim();
+    if (!cond) return;
+    onEdit?.({ description: draftDesc.trim(), expected_condition: cond });
+    setEditing(false);
+  }
   return (
     <Box sx={{ borderTop: '1px solid #eff3f4', '&:first-of-type': { borderTop: 'none' } }}>
       <Box onClick={onToggle} sx={{ p: '8px 12px', display: 'flex', alignItems: 'center', gap: 1.25, cursor: 'pointer', '&:hover': { bgcolor: '#fafcfc' } }}>
@@ -390,7 +409,42 @@ function AssertionRow({ a, expanded, onToggle, onDelete }: {
               {failCount} ligne{failCount > 1 ? 's' : ''} en échec
             </Typography>
           )}
-          {a.expected_condition && (
+          {editing ? (
+            <Box sx={{ mb: 1 }}>
+              <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
+                Description (lisible)
+              </Typography>
+              <TextField
+                value={draftDesc}
+                onChange={(e) => setDraftDesc(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                fullWidth size="small" multiline minRows={1}
+                sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 12.5 } }}
+              />
+              <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
+                Condition attendue (vraie pour chaque ligne)
+              </Typography>
+              <TextField
+                value={draftCond}
+                onChange={(e) => setDraftCond(e.target.value)}
+                onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveEdit(); } }}
+                placeholder="ex : amount > 0"
+                fullWidth size="small" multiline minRows={1}
+                sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace" } }}
+              />
+              <Box sx={{ display: 'flex', gap: 1 }}>
+                <Box component="button" onClick={(e) => { e.stopPropagation(); saveEdit(); }} disabled={disabled || !draftCond.trim()}
+                  sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '10px', py: '4px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: '7px', bgcolor: draftCond.trim() ? '#2BB0A8' : '#c8d2d4', color: '#fff', cursor: draftCond.trim() ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
+                  Enregistrer
+                </Box>
+                <Box component="button" onClick={(e) => { e.stopPropagation(); setEditing(false); }}
+                  sx={{ px: '10px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit' }}>
+                  Annuler
+                </Box>
+              </Box>
+            </Box>
+          ) : a.expected_condition && (
             <Box sx={{ mb: 1 }}>
               <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
                 Condition attendue (vraie pour chaque ligne)
@@ -416,21 +470,32 @@ function AssertionRow({ a, expanded, onToggle, onDelete }: {
               )}
             </Box>
           )}
-          <Box component="button" onClick={onDelete}
-            sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '9px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: '#d0503f', cursor: 'pointer', fontFamily: 'inherit', '&:hover': { bgcolor: '#fbeceb', borderColor: '#d0503f' } }}>
-            <DeleteIcon sx={{ fontSize: 12 }} /> Supprimer
-          </Box>
+          {!editing && (
+            <Box sx={{ display: 'flex', gap: 1 }}>
+              {editable && onEdit && (
+                <Box component="button" onClick={startEdit} disabled={disabled}
+                  sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '9px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: '#6941c6', cursor: 'pointer', fontFamily: 'inherit', '&:hover': { bgcolor: '#f4f0fb', borderColor: '#6941c6' } }}>
+                  <EditIcon sx={{ fontSize: 12 }} /> Modifier
+                </Box>
+              )}
+              <Box component="button" onClick={(e) => { e.stopPropagation(); onDelete(); }} disabled={disabled}
+                sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '9px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: '#d0503f', cursor: 'pointer', fontFamily: 'inherit', '&:hover': { bgcolor: '#fbeceb', borderColor: '#d0503f' } }}>
+                <DeleteIcon sx={{ fontSize: 12 }} /> Supprimer
+              </Box>
+            </Box>
+          )}
         </Box>
       )}
     </Box>
   );
 }
 
-function ResultWithAssertions({ inputData, outputData, assertionResults, onEditAssertions }: {
+function ResultWithAssertions({ inputData, outputData, assertionResults, onEditAssertions, onApplyAssertions }: {
   inputData: Record<string, any[]>;
   outputData: any[];
   assertionResults: AssertionItem[];
   onEditAssertions?: () => void;
+  onApplyAssertions?: (assertions: { description: string; expected_condition: string }[]) => Promise<void> | void;
 }) {
   const [expandedSet, setExpandedSet] = useState<Set<number>>(() => {
     const s = new Set<number>();
@@ -438,6 +503,10 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
     return s;
   });
   const [localAssertions, setLocalAssertions] = useState<AssertionItem[]>(assertionResults);
+  const [applying, setApplying] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [newDesc, setNewDesc] = useState('');
+  const [newCond, setNewCond] = useState('');
 
   useEffect(() => {
     setLocalAssertions(assertionResults);
@@ -452,8 +521,36 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
     setExpandedSet(prev => { const n = new Set(prev); if (n.has(i)) n.delete(i); else n.add(i); return n; });
   }
 
+  // Toute mutation (edit/delete/add) recompose la liste complète puis ré-exécute côté backend.
+  async function applyList(next: AssertionItem[]) {
+    if (!onApplyAssertions) {
+      setLocalAssertions(next); // fallback local-only (pas de persistance)
+      return;
+    }
+    setLocalAssertions(next); // optimiste ; réconcilié par le useEffect au retour serveur
+    setApplying(true);
+    try {
+      await onApplyAssertions(
+        next.map(a => ({ description: a.description ?? '', expected_condition: a.expected_condition ?? '' })),
+      );
+    } finally {
+      setApplying(false);
+    }
+  }
+
   function deleteAssertion(i: number) {
-    setLocalAssertions(prev => prev.filter((_, j) => j !== i));
+    applyList(localAssertions.filter((_, j) => j !== i));
+  }
+
+  function editAssertion(i: number, patch: { description: string; expected_condition: string }) {
+    applyList(localAssertions.map((a, j) => (j === i ? { ...a, ...patch } : a)));
+  }
+
+  function addAssertion() {
+    const cond = newCond.trim();
+    if (!cond) return;
+    applyList([...localAssertions, { description: newDesc.trim(), expected_condition: cond, passed: true }]);
+    setNewDesc(''); setNewCond(''); setAdding(false);
   }
 
   const passCount = localAssertions.filter(a => a.passed).length;
@@ -462,7 +559,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
   const hasOutput = outputData.length > 0;
   const hasAssertions = localAssertions.length > 0;
 
-  if (!hasInput && !hasOutput && !hasAssertions) return null;
+  if (!hasInput && !hasOutput && !hasAssertions && !onApplyAssertions) return null;
 
   return (
     <Box sx={{ borderTop: '1px solid #eff3f4' }}>
@@ -525,25 +622,79 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
       )}
 
       {/* 3. Assertions */}
-      {hasAssertions && (
+      {(hasAssertions || !!onApplyAssertions) && (
         <Box sx={{ px: 2, pb: 1.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
               3 · Assertions sur ce résultat
             </Typography>
+            {applying && <CircularProgress size={12} thickness={5} sx={{ color: TEAL, ml: 0.25 }} />}
             {onEditAssertions && (
-              <Tooltip title="Modifier l'assertion (sans régénérer les données)">
+              <Tooltip title="Régénérer toutes les assertions via MockSQL">
                 <MutedIconButton size="small" onClick={onEditAssertions} sx={{ color: '#6941c6', ml: 0.25 }}>
                   <AutoAwesomeIcon sx={{ fontSize: 13 }} />
                 </MutedIconButton>
               </Tooltip>
             )}
           </Box>
-          <Box sx={{ border: `1px solid ${BORDER}`, borderRadius: '8px', overflow: 'hidden' }}>
-            {localAssertions.map((a, i) => (
-              <AssertionRow key={i} a={a} expanded={expandedSet.has(i)} onToggle={() => toggle(i)} onDelete={() => deleteAssertion(i)} />
-            ))}
-          </Box>
+          {hasAssertions && (
+            <Box sx={{ border: `1px solid ${BORDER}`, borderRadius: '8px', overflow: 'hidden' }}>
+              {localAssertions.map((a, i) => (
+                <AssertionRow
+                  key={i}
+                  a={a}
+                  expanded={expandedSet.has(i)}
+                  onToggle={() => toggle(i)}
+                  onDelete={() => deleteAssertion(i)}
+                  onEdit={(patch) => editAssertion(i, patch)}
+                  editable={!!onApplyAssertions}
+                  disabled={applying}
+                />
+              ))}
+            </Box>
+          )}
+
+          {/* Ajouter une assertion */}
+          {onApplyAssertions && (
+            adding ? (
+              <Box sx={{ mt: 1, p: '10px 12px', border: `1px solid ${BORDER}`, borderRadius: '8px', bgcolor: '#fafbfc' }}>
+                <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
+                  Description (lisible)
+                </Typography>
+                <TextField
+                  value={newDesc} onChange={(e) => setNewDesc(e.target.value)}
+                  placeholder="ex : Le montant total est toujours positif"
+                  fullWidth size="small" multiline minRows={1}
+                  sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 12.5 } }}
+                />
+                <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
+                  Condition attendue (vraie pour chaque ligne)
+                </Typography>
+                <TextField
+                  value={newCond} onChange={(e) => setNewCond(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addAssertion(); } }}
+                  placeholder="ex : amount > 0"
+                  fullWidth size="small" multiline minRows={1}
+                  sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace" } }}
+                />
+                <Box sx={{ display: 'flex', gap: 1 }}>
+                  <Box component="button" onClick={addAssertion} disabled={applying || !newCond.trim()}
+                    sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '10px', py: '4px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: '7px', bgcolor: newCond.trim() ? '#2BB0A8' : '#c8d2d4', color: '#fff', cursor: newCond.trim() ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
+                    Ajouter
+                  </Box>
+                  <Box component="button" onClick={() => { setAdding(false); setNewDesc(''); setNewCond(''); }}
+                    sx={{ px: '10px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit' }}>
+                    Annuler
+                  </Box>
+                </Box>
+              </Box>
+            ) : (
+              <Box component="button" onClick={() => setAdding(true)} disabled={applying}
+                sx={{ mt: 1, display: 'inline-flex', alignItems: 'center', gap: '5px', px: '10px', py: '5px', fontSize: 11.5, fontWeight: 600, border: `1px dashed ${BORDER}`, borderRadius: '8px', bgcolor: '#fff', color: TEAL, cursor: 'pointer', fontFamily: 'inherit', '&:hover': { borderColor: TEAL, bgcolor: '#f0fafa' } }}>
+                <AddIcon sx={{ fontSize: 13 }} /> Ajouter une assertion
+              </Box>
+            )
+          )}
         </Box>
       )}
     </Box>
@@ -569,6 +720,59 @@ function SuggestionRow({ text, tag, onAdd, onFill }: { text: string; tag?: strin
         }}
       >
         <AddIcon sx={{ fontSize: 12 }} /> Ajouter
+      </Box>
+    </Box>
+  );
+}
+
+/* ─── SuggestionsSection ─────────────────────────────────────────── */
+/* Panneau dédié des suggestions de couverture (hors fil de conversation).
+ * Source : state.buildModel.suggestions (champ modèle, chargé via getMessages).
+ * « Ajouter » consomme la suggestion (→ test) ; « Régénérer » en demande de nouvelles. */
+function SuggestionsSection({ suggestions, onAdd, onRegenerate, regenerating }: {
+  suggestions: string[];
+  onAdd?: (text: string) => void;
+  onRegenerate?: () => void;
+  regenerating?: boolean;
+}) {
+  if (suggestions.length === 0) return null;
+  return (
+    <Box sx={{ mt: 1.5, border: `1px solid ${BORDER}`, borderRadius: '12px', bgcolor: SURFACE, p: '12px 13px' }}>
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
+        <AutoAwesomeIcon sx={{ fontSize: 15, color: TEAL }} />
+        <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: INK }}>
+          Cas suggérés
+        </Typography>
+        <Box sx={{ ml: 'auto' }}>
+          <Tooltip title="Régénérer des suggestions">
+            <span>
+              <Box
+                component="button"
+                onClick={onRegenerate}
+                disabled={regenerating || !onRegenerate}
+                sx={{
+                  display: 'inline-flex', alignItems: 'center', gap: '5px',
+                  px: '9px', py: '4px', fontSize: 11.5, fontWeight: 600,
+                  border: `1.2px solid ${BORDER}`, borderRadius: 999,
+                  bgcolor: '#fff', color: BODY, fontFamily: 'inherit',
+                  cursor: regenerating ? 'default' : 'pointer',
+                  opacity: regenerating ? 0.6 : 1,
+                  '&:hover': { borderColor: TEAL, color: TEAL, bgcolor: '#f0fafa' },
+                }}
+              >
+                {regenerating
+                  ? <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} />
+                  : <ReplayIcon sx={{ fontSize: 13 }} />}
+                Régénérer
+              </Box>
+            </span>
+          </Tooltip>
+        </Box>
+      </Box>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+        {suggestions.map((s, i) => (
+          <SuggestionRow key={i} text={s} onAdd={() => onAdd?.(s)} />
+        ))}
       </Box>
     </Box>
   );
@@ -869,6 +1073,7 @@ interface TestCardProps {
   onDeleteComment: (id: string) => void;
   onSelectForModification: () => void;
   onEditAssertions?: () => void;
+  onApplyAssertions?: (assertions: { description: string; expected_condition: string }[]) => Promise<void> | void;
   onRerunTest?: () => void;
   onUpload?: (data: Record<string, any[]>) => void;
 }
@@ -881,7 +1086,7 @@ function TestCard({
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
-  onSelectForModification, onEditAssertions, onRerunTest, onUpload,
+  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onUpload,
 }: TestCardProps) {
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   const tags: string[] = test.tags ?? [];
@@ -1118,6 +1323,7 @@ function TestCard({
               outputData={outputData}
               assertionResults={test.assertion_results ?? []}
               onEditAssertions={onEditAssertions}
+              onApplyAssertions={onApplyAssertions}
             />
             {test.status !== 'pending' && Object.keys(inputData).length > 0 && (
               <Box sx={{ px: 2, pb: 1.5, display: 'flex', gap: 1 }}>
@@ -1430,6 +1636,7 @@ interface TestsPanelProps {
   onRerunTest?: (idx: number) => void;
   onOpenChat?: () => void;
   onSuggestionClick?: (text: string) => void;
+  onRegenerateSuggestions?: () => void;
   modelId?: string;
   retryBadDataTestIndex?: number | null;
   sqlProps?: SqlStripProps;
@@ -1439,13 +1646,14 @@ interface TestsPanelProps {
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onRerunTest, onOpenChat, onSuggestionClick, modelId,
+  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onRegenerateSuggestions, modelId,
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
+  const suggestions: string[] = useAppSelector((state) => state.buildModel.suggestions ?? []);
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
   const loadingTestIndex = useAppSelector((state) => state.buildModel.loadingTestIndex);
 
@@ -1477,6 +1685,25 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const handleDelete = (idx: number) => {
     persist(testResults.filter((_, i) => i !== idx));
     setExpanded(prev => { const next = new Set(prev); next.delete(idx); return next; });
+  };
+
+  const handleApplyAssertions = async (
+    testIndex: any,
+    assertions: { description: string; expected_condition: string }[],
+  ) => {
+    if (!currentModelId) return;
+    const res = await dispatch(
+      applyAssertions({ sessionId: currentModelId, testIndex, assertions }),
+    ).unwrap();
+    dispatch(
+      setTestResults(
+        testResults.map((t: any) =>
+          String(t.test_index) === String(res.test_index)
+            ? { ...t, assertion_results: res.assertion_results, evaluation: res.evaluation }
+            : t,
+        ),
+      ),
+    );
   };
 
   const handleSaveEdit = (idx: number) => {
@@ -1703,6 +1930,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onDeleteComment={(id) => deleteComment(testKey, id)}
                   onSelectForModification={() => onSelectForModification(idx)}
                   onEditAssertions={onEditAssertions ? () => onEditAssertions(idx) : undefined}
+                  onApplyAssertions={(a) => handleApplyAssertions(test.test_index, a)}
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
                   onUpload={onUpload}
                   showRetryPrompt={retryBadDataTestIndex != null && retryBadDataTestIndex === test.test_index}
@@ -1716,6 +1944,14 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
               </Box>
             )}
           </Box>
+
+          {/* Panneau dédié des suggestions (hors fil de conversation) */}
+          <SuggestionsSection
+            suggestions={suggestions}
+            onAdd={onSuggestionClick}
+            onRegenerate={onRegenerateSuggestions}
+            regenerating={isLoading}
+          />
 
         </Box>
       )}

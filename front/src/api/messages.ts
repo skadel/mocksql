@@ -60,6 +60,40 @@ export const patchModelTests = createAsyncThunk(
 );
 
 
+export interface AssertionInput {
+  description: string;
+  expected_condition: string;
+}
+
+export interface ApplyAssertionsResult {
+  test_index: any;
+  assertion_results: any[];
+  evaluation: string;
+}
+
+// Ré-exécute une liste d'assertions fournie sur les données inchangées du test
+// (modif / suppression / ajout assertion par assertion) et renvoie les résultats
+// recalculés + verdict. Le backend persiste déjà test_cases.
+export const applyAssertions = createAsyncThunk(
+  'messages/applyAssertions',
+  async (
+    { sessionId, testIndex, assertions }:
+      { sessionId: string; testIndex: any; assertions: AssertionInput[] },
+    { rejectWithValue, dispatch }
+  ) => {
+    const res = await apiRequest<ApplyAssertionsResult>({
+      url: `${import.meta.env.VITE_BACKEND_URL}/api/tests/apply_assertions`,
+      method: 'POST',
+      body: { sessionId, testIndex, assertions },
+      defaultFailureMessage: 'Failed to apply assertions',
+      dispatch,
+      rejectWithValue,
+    });
+    return res;
+  }
+);
+
+
 export const getMessages = createAsyncThunk(
   'models/getMessages',
   async (

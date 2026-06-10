@@ -61,6 +61,10 @@ class QueryState(TypedDict):
     has_existing_tests: Optional[
         bool
     ]  # set by pre_routing: True if test_cases already exist
+    regenerate_suggestions: Optional[
+        bool
+    ]  # True when the user explicitly asks for fresh coverage suggestions (panel button):
+    # routing → suggestions_generator directly, and skip final_response (no "tests generated" msg)
     agent_tool_call: Optional[
         str
     ]  # tool called by conversational_agent: "generate_test" | "delete_test" | None
