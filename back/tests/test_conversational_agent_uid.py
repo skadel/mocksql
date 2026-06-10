@@ -104,6 +104,80 @@ async def test_invalid_uid_then_valid_retries_into_data_batch(monkeypatch):
     assert calls[0]["args"]["test_index"] == "1"
 
 
+def _state_auto_correct():
+    """État de retry bad_data automatique : flag `auto_correct` posé, un `input`
+    PÉRIMÉ qui traîne, un test en échec + un verdict EVALUATION."""
+    test = {
+        "test_uid": "a3f9",
+        "test_index": "1",
+        "test_name": "Référentiel banques",
+        "unit_test_description": "partition_date à jour",
+        "data": {"MARKETING_Referentiels_banques": [{"partition_date": "2025-01-01"}]},
+        "status": "empty_results",
+        "failing_cte": "tmp_final_bp",
+        "cte_trace": {
+            "tmp_final_bp": {
+                "row_count": 0,
+                "steps": [
+                    {"label": "rcomp", "count": 1},
+                    {"label": "+ WHERE onus.no_siret IS NULL", "count": 0},
+                ],
+            }
+        },
+        "results_json": "[]",
+        "assertion_results": [],
+    }
+    results_msg = AIMessage(
+        content=json.dumps([test]),
+        id="r1",
+        additional_kwargs={"type": MsgType.RESULTS},
+    )
+    eval_msg = AIMessage(
+        content="**Insuffisant** — La CTE `tmp_final_bp` est vide",
+        additional_kwargs={
+            "type": MsgType.EVALUATION,
+            "test_index": "1",
+            "parent": "r1",
+        },
+    )
+    return {
+        "session": "sess1",
+        "messages": [results_msg, eval_msg],
+        "dialect": "duckdb",
+        "query": "SELECT 1",
+        "optimized_sql": "",
+        "query_decomposed": "[]",
+        "input": "STALE_INPUT: génère un test pour le réseau BP",  # périmé → doit être ignoré
+        "evaluation_feedback": "bad_data",
+        "auto_correct": True,
+        "gen_retries": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_auto_correct_branch_ignores_stale_input(monkeypatch):
+    """Sur retry bad_data (auto_correct), l'agent envoie son trigger de correction
+    CIBLÉE — pas l'input périmé — et consomme le flag.
+
+    Pin du rebranch `bad_data → conversational_agent` : si l'agent prenait la branche
+    `if user_input`, il traiterait la requête de génération initiale comme une consigne
+    chat au lieu de corriger le test en échec."""
+    fake = FakeLLM([_patch_call("a3f9")])
+    monkeypatch.setattr("build_query.conversational_agent.make_llm", lambda: fake)
+
+    update = await conversational_agent(_state_auto_correct())
+
+    last_human = fake.calls[0][-1]
+    assert isinstance(last_human, HumanMessage)
+    # Le trigger de correction ciblée est envoyé, PAS l'input périmé
+    assert "STALE_INPUT" not in last_human.content
+    assert "patch_test_field" in last_human.content or "CIBLÉE" in last_human.content
+    # Le flag est consommé pour ne pas fuiter au tour suivant
+    assert update["auto_correct"] is False
+    # L'agent a agi (patch incrémental) → data_batch, pas un no-op qui tuerait le retry
+    assert update["agent_tool_call"] == "data_batch"
+
+
 @pytest.mark.asyncio
 async def test_persistently_invalid_uid_does_not_loop(monkeypatch):
     """If the LLM never supplies a valid uid, retries are bounded and we don't hang."""

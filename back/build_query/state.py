@@ -53,6 +53,11 @@ class QueryState(TypedDict):
     assertion_only: Optional[
         bool
     ]  # True when user edits assertion metadata only (no input data regeneration)
+    suggestion_intent: Optional[
+        bool
+    ]  # True when input comes from clicking a coverage suggestion: the agent must
+    # produce a test action (add new, or extend an existing near-duplicate) and never
+    # answer in free text. route_agent_output falls back to generator if it produces none.
     has_existing_tests: Optional[
         bool
     ]  # set by pre_routing: True if test_cases already exist
@@ -74,6 +79,11 @@ class QueryState(TypedDict):
     ]  # set by test_evaluator: DuckDB returned 0 rows → route straight to generator
     # for a holistic regeneration (targeting the failing CTE), bypassing the
     # conversational_agent's single-field patching which cannot fix 0-row queries.
+    auto_correct: Optional[
+        bool
+    ]  # set by bad_data_to_agent: signals the conversational_agent it was triggered
+    # automatically (bad_data retry, no fresh user input) → take the auto-correction
+    # branch regardless of a stale `input`. Reset by the agent after reading.
     reevaluation_context: Optional[
         str
     ]  # set by conversational_agent when it suspects the evaluation was wrong; triggers LLM re-eval in test_evaluator

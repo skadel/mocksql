@@ -51,9 +51,16 @@
   },
   "submission": {
     "validating_detail": [
-      "Compiling and dry-running the query…",
-      "Optimizing and splitting the SQL…",
-      "Extracting used columns and conditions…"
+      "Validating SQL query…",
+      "Dry-run on the source engine…",
+      "Parsing the syntax tree…",
+      "Qualifying tables…",
+      "Qualifying columns…",
+      "Resolving CTE lineage…",
+      "Predicate pushdown…",
+      "Extracting constraints…",
+      "Simplifying constraints…",
+      "Detecting derived expressions…"
     ]
   },
   "action": {

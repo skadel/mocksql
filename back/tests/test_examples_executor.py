@@ -19,6 +19,9 @@ from build_query.examples_executor import (
     _extract_conditions,
     _build_countif_expressions,
     _build_cte_sql_with_suffix,
+    _build_count_steps_query,
+    _extract_right_key_from_join,
+    _select_failing_cte,
     _determine_global_status,
     _decompose_cte_in_steps,
     _evaluate_assertions,
@@ -29,6 +32,7 @@ from build_query.examples_executor import (
     _prepare_test_data,
     format_result,
 )
+from build_query.examples_generator import _format_cte_trace_hint
 from utils.msg_types import MsgType
 
 
@@ -664,3 +668,159 @@ class TestPrepareTestData:
     def test_empty_data(self):
         result = _prepare_test_data({"data": {}}, [])
         assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# _extract_right_key_from_join — doit retourner la colonne de la table JOINTE,
+# pas l'opérande syntaxiquement à droite du `=`.
+# ---------------------------------------------------------------------------
+
+
+class TestExtractRightKeyFromJoin:
+    @staticmethod
+    def _join(sql: str) -> exp.Expression:
+        return sqlglot.parse_one(sql, read="bigquery").args["joins"][0]
+
+    def test_joined_col_on_right_operand(self):
+        j = self._join("SELECT 1 FROM a LEFT JOIN b ON a.x = b.y")
+        col = _extract_right_key_from_join(j)
+        assert col.table == "b" and col.name == "y"
+
+    def test_joined_col_on_left_operand(self):
+        # Régression : l'ancien code retournait `a.x` (côté base) car c'est
+        # l'opérande de droite. Doit retourner `b.y` (la table nouvellement jointe).
+        j = self._join("SELECT 1 FROM a LEFT JOIN b ON b.y = a.x")
+        col = _extract_right_key_from_join(j)
+        assert col.table == "b" and col.name == "y"
+
+    def test_aliased_join_anti_join_key(self):
+        j = self._join(
+            "SELECT 1 FROM rcomp "
+            "LEFT JOIN siret_onus AS onus ON onus.no_siret = rcomp.no_siret"
+        )
+        col = _extract_right_key_from_join(j)
+        assert col.table == "onus" and col.name == "no_siret"
+
+
+# ---------------------------------------------------------------------------
+# _build_count_steps_query — un LEFT JOIN non-matché ne doit PAS être étiqueté
+# bloquant ; le vrai bloqueur (anti-join WHERE … IS NULL) doit remonter.
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCountStepsQuery:
+    @staticmethod
+    def _run(con, cte_code):
+        sql, labels = _build_count_steps_query(cte_code, [], "duckdb")
+        df = con.execute(sql).fetchdf()
+        row = df.iloc[0].to_dict()
+        cols = list(row.keys())
+        return [(labels[i], int(row[cols[i]])) for i in range(len(labels))]
+
+    def test_left_join_non_match_not_blocking_anti_join_surfaces(self):
+        c = duckdb.connect()
+        c.execute("CREATE TABLE rcomp (no_siret TEXT)")
+        c.execute("INSERT INTO rcomp VALUES ('999')")
+        c.execute("CREATE TABLE coface (cosirt TEXT, coapna TEXT)")
+        c.execute("INSERT INTO coface VALUES ('111', 'X')")  # ne matche pas rcomp
+        c.execute("CREATE TABLE naf (niv5 TEXT)")  # vide → naf.niv5 NULL via LEFT JOIN
+        c.execute("CREATE TABLE onus (no_siret TEXT)")
+        c.execute("INSERT INTO onus VALUES ('999')")  # matche → anti-join bloque
+
+        cte = """
+            SELECT rcomp.no_siret AS s
+            FROM rcomp AS rcomp
+            LEFT JOIN coface AS coface ON coface.cosirt = rcomp.no_siret
+            LEFT JOIN naf AS naf ON coface.coapna = naf.niv5
+            LEFT JOIN onus AS onus ON onus.no_siret = rcomp.no_siret
+            WHERE onus.no_siret IS NULL
+        """
+        steps = self._run(c, cte)
+
+        # Aucune étape de JOIN ne doit tomber à 0 : ce sont tous des LEFT JOIN,
+        # la ligne de base survit même sans correspondance (naf vide inclus).
+        join_steps = [(lbl, cnt) for lbl, cnt in steps if "JOIN" in lbl]
+        assert join_steps, steps
+        assert all(cnt > 0 for _, cnt in join_steps), join_steps
+
+        # Le vrai bloqueur est l'anti-join WHERE onus.no_siret IS NULL.
+        where_zero = [lbl for lbl, cnt in steps if "WHERE" in lbl and cnt == 0]
+        assert where_zero and "onus" in where_zero[0], steps
+
+    def test_inner_join_non_match_still_blocking(self):
+        # Un INNER JOIN non-matché DOIT rester bloquant (pas de régression).
+        c = duckdb.connect()
+        c.execute("CREATE TABLE a (x TEXT)")
+        c.execute("INSERT INTO a VALUES ('1')")
+        c.execute("CREATE TABLE b (y TEXT)")
+        c.execute("INSERT INTO b VALUES ('2')")  # ne matche pas
+
+        cte = "SELECT a.x AS x FROM a AS a JOIN b AS b ON b.y = a.x"
+        steps = self._run(c, cte)
+        join_zero = [lbl for lbl, cnt in steps if "JOIN" in lbl and cnt == 0]
+        assert join_zero and "b.y" in join_zero[0], steps
+
+
+# ---------------------------------------------------------------------------
+# _format_cte_trace_hint — ne flaguer « filtre bloquant » que les CTEs
+# réellement bloquantes (annotation `blocking`), pas toute CTE vide.
+# ---------------------------------------------------------------------------
+
+
+class TestFormatCteTraceHintBlocking:
+    def test_non_blocking_empty_cte_not_flagged(self):
+        trace = {
+            "opt_dim": {"row_count": 0, "blocking": False},
+            "main": {
+                "row_count": 0,
+                "blocking": True,
+                "steps": [
+                    {"label": "base", "count": 1},
+                    {"label": "+ WHERE x.id IS NULL", "count": 0},
+                ],
+            },
+        }
+        out = _format_cte_trace_hint("main", trace)
+        # opt_dim est vide mais NON bloquante → pas de marqueur alarmant.
+        assert "`opt_dim` : 0 ligne(s)" in out
+        assert "opt_dim` : 0 ligne(s) ←" not in out
+        # main est bloquante → marqueur + étape bloquante.
+        assert "`main` : 0 ligne(s) ← **0 ligne — filtre bloquant**" in out
+        assert "étape bloquante" in out
+
+    def test_backward_compat_without_blocking_key(self):
+        # Sans clé `blocking` → repli sur l'ancien comportement (row_count == 0).
+        trace = {"c": {"row_count": 0}}
+        out = _format_cte_trace_hint("c", trace)
+        assert "filtre bloquant" in out
+
+
+# ---------------------------------------------------------------------------
+# _select_failing_cte — choisit la CTE réellement bloquante et annote la trace.
+# ---------------------------------------------------------------------------
+
+
+class TestSelectFailingCte:
+    def test_picks_blocking_over_optional_empty_cte(self):
+        # `opt_dim` est vide mais seulement LEFT-jointe (optionnelle) → non bloquante.
+        # `main` (final) est vide et requise → c'est elle qu'il faut cibler.
+        query_decomposed = [
+            {"name": "opt_dim", "code": "SELECT 1 AS id WHERE 1 = 0"},
+            {
+                "name": "main",
+                "code": (
+                    "SELECT base.id AS id FROM base AS base "
+                    "LEFT JOIN opt_dim AS opt_dim ON opt_dim.id = base.id "
+                    "WHERE base.id IS NULL"
+                ),
+            },
+            {"name": "final_query", "code": "SELECT main.id FROM main AS main"},
+        ]
+        trace = {
+            "opt_dim": {"row_count": 0},
+            "main": {"row_count": 0},
+        }
+        failing = _select_failing_cte(query_decomposed, trace, "duckdb")
+        assert failing == "main"
+        assert trace["main"].get("blocking") is True
+        assert trace["opt_dim"].get("blocking") is False

@@ -518,7 +518,7 @@ def generate_data_prompt(
 Vous êtes un data QA, testeur de requêtes SQL et expert en génération de données de test JSON.
 À partir du schéma des tables sources et de la requête SQL fournis, générez un unique test unitaire au format JSON.
 
-Le message suivant contient ces sections, délimitées par des balises :
+La conversation contient ces sections, délimitées par des balises. Le schéma, la requête et les contraintes sont fournis **en premier** (ils s'appliquent à tout l'échange, y compris aux exemples) ; la tâche à produire arrive **en dernier message** :
 - `<schema>` : les tables sources à peupler, leurs colonnes, et le profil statistique éventuel.
 - `<business_context>` : contexte métier du projet (optionnel).
 - `<query>` : la requête SQL à tester.
@@ -652,19 +652,27 @@ Génère un test unitaire conforme aux consignes du message système, avec :
 {format_instructions}
 </task>"""
 
-    final_human_message_content = (
-        f"{schema_section}{business_section}{query_section}"
-        f"{constraints_section}{diagnostic_section}{task_section}\n\n"
+    # Référence partagée (schéma/SQL/contraintes) : invariante pour ce modèle, elle
+    # s'applique à tout l'échange. Placée AVANT le few-shot pour l'ancrer — sinon le
+    # LLM lit l'exemple (réponse) sans son énoncé (schéma/SQL absents jusqu'ici).
+    reference_message_content = (
+        f"{schema_section}{business_section}{query_section}{constraints_section}"
+    )
+    reference_human_msg = ("human", reference_message_content)
+
+    # Ask (diagnostic volatil + tâche + date) : gardé en DERNIER pour la recency.
+    ask_message_content = (
+        f"{diagnostic_section}{task_section}\n\n"
         f"Date et heure actuelles : {formatted_datetime}\n"
     )
+    ask_human_msg = ("human", ask_message_content)
 
-    final_human_msg = ("human", final_human_message_content)
-
-    prompt_messages = [system_msg]
+    # Ordre : system → référence → few-shot history → eval retry → ask.
+    prompt_messages = [system_msg, reference_human_msg]
     prompt_messages.extend(history_with_results)
-    prompt_messages.append(final_human_msg)
     if eval_history:
         prompt_messages.extend(eval_history)
+    prompt_messages.append(ask_human_msg)
 
     return ChatPromptTemplate.from_messages(prompt_messages, "mustache")
 

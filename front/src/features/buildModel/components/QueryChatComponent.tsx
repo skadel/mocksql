@@ -897,6 +897,37 @@ const ChatComponent: React.FC = () => {
     setAddTestTrigger(n => n + 1);
   }, []);
 
+  // Clic sur une suggestion : on passe par l'agent (suggestionIntent) pour qu'il puisse
+  // détecter qu'elle recoupe un test existant et l'étendre plutôt que créer un doublon.
+  // Le backend impose une action de test (jamais de "c'est déjà vérifié") et retombe sur
+  // le generator si l'agent ne produit rien → un test sort toujours.
+  const handleSuggestionClick = useCallback(async (text: string) => {
+    if (isSending) return;
+    if (!currentModelId) return;
+    setIsSending(true);
+    setSelectedTestIndex(null);
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const lastMessageId = lastMessage ? lastMessage.id : '';
+    try {
+      isGeneratingRef.current = true;
+      await dispatch(chatQuery({
+        userInput: text,
+        sessionId: currentModelId,
+        project: '',
+        dialect: DIALECT,
+        query: sqlQuery,
+        ChangedMessageId: '',
+        t,
+        parentMessageId: lastMessageId,
+        suggestionIntent: true,
+      })).unwrap?.();
+    } catch {
+      /* erreur déjà gérée par le thunk */
+    } finally {
+      setIsSending(false);
+    }
+  }, [isSending, currentModelId, renderMessages, selectedChildIndices, sqlQuery, dispatch, t]);
+
   const handleSelectTestForModification = useCallback((idx: number) => {
     setAssertionOnly(false);
     setSelectedTestIndex(idx);
@@ -1345,7 +1376,7 @@ const ChatComponent: React.FC = () => {
                 onSelectForModification={handleSelectTestForModification}
                 onEditAssertions={handleEditAssertions}
                 onRerunTest={handleRerunTest}
-                onSuggestionClick={(text) => { setUserInput(text); setAddTestTrigger(n => n + 1); }}
+                onSuggestionClick={handleSuggestionClick}
                 selectedTestIndex={selectedTestIndex}
                 retryBadDataTestIndex={retryBadDataTestIndex}
                 sqlProps={{

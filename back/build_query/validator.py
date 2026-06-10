@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from collections import defaultdict
 
@@ -18,6 +19,8 @@ from utils.errors import handle_compile_phase_exceptions, handle_post_compile_ex
 from utils.saver import get_message_type
 from utils.sql_code import get_all_columns_with_sources
 from utils.timing import atimed, timed
+
+logger = logging.getLogger(__name__)
 
 _bq_client: bigquery.Client | None = None
 
@@ -450,19 +453,56 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
                 pre_optimize, schema=schema, dialect=dialect
             )
         except Exception as e:
-            print(f"Optimisation complète échouée ({e}), fallback sur qualify.")
+            logger.warning(
+                "Optimisation complète échouée (%s), fallback sur qualify.", e
+            )
             parsed = pre_optimize
 
     from utils.examples import _fix_unnest_alias_conflicts, _fix_unnest_scope_leak
+    from sqlglot.optimizer.pushdown_projections import pushdown_projections
+    from sqlglot.optimizer.simplify import simplify
 
+    # Minimum requis : qualifier tables + colonnes. Sans ça, pas d'extraction
+    # fiable des colonnes — une exception ici remonte (gérée en amont).
     with timed("validate:       qualify_tables"):
         expr = qualify_tables(parsed)
     with timed("validate:       qualify_columns(infer_schema)"):
         expr = qualify_columns(expr, schema, infer_schema=True)
-    with timed("validate:       _fix_unnest_alias_conflicts"):
-        expr = _fix_unnest_alias_conflicts(expr)
-    with timed("validate:       _fix_unnest_scope_leak"):
-        return _fix_unnest_scope_leak(expr)
+
+    # Passes d'optimisation appliquées **une par une, chacune isolée dans son
+    # propre try/except** : on prend le maximum d'optimisations possibles, et si
+    # une passe casse on l'ignore et on garde l'expression de l'étape précédente
+    # (fallback progressif vers le minimum = qualify). Toutes préservent les CTEs.
+    #
+    # Volontairement EXCLUES (l'optimiseur complet de sqlglot les ferait) :
+    #  - merge_subqueries / eliminate_ctes / eliminate_subqueries / eliminate_joins
+    #    → fusionnent ou suppriment des CTEs, or split_query décompose les tests
+    #      par CTE et en dépend ;
+    #  - normalize / pushdown_predicates → réécrivent les prédicats en CNF/DNF, à
+    #    blow-up exponentiel sur les WHERE complexes (contraire à l'objectif latence).
+    #
+    # Effets recherchés :
+    #  - pushdown_projections élague les colonnes jamais consommées en aval (crucial
+    #    sur les `SELECT *` de tables larges qui gonflent used_columns + profiling) ;
+    #  - simplify replie les constantes nativement (1*5 → 5, booléens), allégeant
+    #    d'autant fold_scalar_expressions en aval.
+    passes = [
+        ("_fix_unnest_alias_conflicts", _fix_unnest_alias_conflicts),
+        ("_fix_unnest_scope_leak", _fix_unnest_scope_leak),
+        (
+            "pushdown_projections",
+            lambda e: pushdown_projections(e, schema, dialect=dialect),
+        ),
+        ("simplify", lambda e: simplify(e, dialect=dialect)),
+    ]
+    for name, fn in passes:
+        with timed(f"validate:       {name}"):
+            try:
+                expr = fn(expr)
+            except Exception:
+                logger.warning("optimize_query: passe '%s' ignorée (best-effort)", name)
+
+    return expr
 
 
 def find_columns_used(data):
