@@ -49,6 +49,14 @@ _SUBQUERY_TYPES = (exp.Subquery,)
 # interne jamais repliée).
 _STRUCTURAL_TYPES = (exp.Select, exp.From, exp.Join, exp.With, exp.Table)
 
+# Un `Identifier` est un *nom* (colonne, alias, table, CTE), jamais une expression
+# scalaire évaluable. Sans ça, en descendant dans une `Column` (disqualifiante) on
+# atteint son `Identifier` enfant — pur et non-littéral → vu comme foldable. Chaque
+# nom de la requête était alors transpilé vers DuckDB (~4 ms) puis exécuté
+# (`SELECT col_x` → échec → laissé intact) : inoffensif mais O(noms) transpilations
+# gâchées, dominant le temps de fold sur les vraies requêtes.
+_IDENTIFIER_TYPES = (exp.Identifier,)
+
 # Un seul tuple de types disqualifiants → une seule passe de détection.
 _DISQUALIFYING_TYPES = (
     _COLUMN_TYPES
@@ -57,6 +65,7 @@ _DISQUALIFYING_TYPES = (
     + _WINDOW_TYPES
     + _SUBQUERY_TYPES
     + _STRUCTURAL_TYPES
+    + _IDENTIFIER_TYPES
 )
 
 # Littéraux déjà atomiques — inutile de les envoyer à DuckDB
@@ -146,14 +155,45 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
     """
     from utils.examples import fix_duck_db_sql
 
-    # --- Passe 1 : collecte des sous-arbres scalaires maximaux (top-down, disjoints).
+    # --- Passe 1a : pureté scalaire bottom-up, en UNE seule passe O(n).
+    # `pure[id(node)]` = aucun type disqualifiant (colonne, agrégat, fenêtre,
+    # sous-requête, nœud structurel, fonction non-déterministe) dans tout le
+    # sous-arbre. L'ancienne version rappelait `_is_foldable` (= un `walk()`
+    # complet) à chaque nœud considéré ; sur un AST majoritairement non-foldable
+    # cela re-parcourait des sous-arbres qui se recouvrent → O(n²). Ici chaque
+    # nœud est visité une fois et combine la pureté de ses enfants.
+    pure: dict[int, bool] = {}
+
+    def _compute_pure(node: exp.Expression) -> bool:
+        node_pure = not isinstance(node, _DISQUALIFYING_TYPES)
+        for value in node.args.values():
+            if isinstance(value, exp.Expression):
+                # NB : pas de court-circuit — on doit calculer la pureté de TOUS
+                # les descendants pour pouvoir descendre dedans en passe 1b.
+                child_pure = _compute_pure(value)
+                node_pure = node_pure and child_pure
+            elif isinstance(value, list):
+                for v in value:
+                    if isinstance(v, exp.Expression):
+                        child_pure = _compute_pure(v)
+                        node_pure = node_pure and child_pure
+        pure[id(node)] = node_pure
+        return node_pure
+
+    _compute_pure(ast)
+
+    def _foldable(node: exp.Expression) -> bool:
+        # Foldable = sous-arbre scalaire pur, mais pas un littéral déjà atomique.
+        return pure[id(node)] and not isinstance(node, _ALREADY_LITERAL)
+
+    # --- Passe 1b : collecte des sous-arbres scalaires maximaux (top-down, disjoints).
     foldable: list[exp.Expression] = []
 
     def _consider(node: exp.Expression) -> None:
         # Alias : on ne replie jamais le wrapper `AS name`, seulement ses enfants.
         if isinstance(node, _SKIP_IN_TRANSFORM):
             _descend(node)
-        elif _is_foldable(node):
+        elif _foldable(node):
             foldable.append(node)  # maximal → on ne descend pas dedans
         else:
             _descend(node)
@@ -167,7 +207,7 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
                     if isinstance(v, exp.Expression):
                         _consider(v)
 
-    if isinstance(ast, _SKIP_IN_TRANSFORM) or not _is_foldable(ast):
+    if isinstance(ast, _SKIP_IN_TRANSFORM) or not _foldable(ast):
         _descend(ast)
     else:
         foldable.append(ast)  # AST entièrement scalaire (cas dégénéré)
@@ -176,13 +216,17 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
         return ast
 
     # --- Évaluation par expression, mémoïsée et sur connexion DuckDB partagée.
-    # `node.sql(dialect="duckdb")` transpile BigQuery→DuckDB ; c'est l'opération
-    # coûteuse (re-parse de templates PARSE_DATE/FORMAT_DATE). Le cache élimine
-    # les répétitions (mêmes PARSE_DATE(...) répétés des dizaines de fois) et la
-    # connexion partagée évite le coût d'ouverture par nœud.
+    # L'opération coûteuse est `node.sql(dialect="duckdb")` : le générateur DuckDB
+    # de sqlglot **re-parse des templates** de fonction (PARSE_DATE/FORMAT_DATE/
+    # CAST…) à chaque appel → ~4 ms par nœud, soit ~180× le coût d'un rendu dans
+    # le dialecte source (~0,02 ms). Le cache est donc clé par le **rendu source**
+    # (bon marché), calculé AVANT toute transpilation : les expressions répétées
+    # (mêmes PARSE_DATE(...) des dizaines de fois) ne paient la transpilation
+    # DuckDB **qu'une seule fois**. La connexion partagée évite en plus le coût
+    # d'ouverture par nœud.
     conn = duckdb.connect(":memory:")
-    # Cache par SQL d'expression. _FAILED distingue « non foldable » d'une vraie
-    # valeur NULL, et permet de cacher aussi les échecs (pas de re-tentative).
+    # _FAILED distingue « non foldable » d'une vraie valeur NULL, et permet de
+    # cacher aussi les échecs (pas de re-tentative).
     cache: dict[str, Any] = {}
     _MISS = object()
     _FAILED = object()
@@ -192,13 +236,14 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
         for node in foldable:
             t0 = time.perf_counter()
             try:
-                expr_duckdb = node.sql(dialect="duckdb")
+                key = node.sql(dialect=source_dialect)  # rendu source bon marché
             except Exception:
-                continue  # non transpilable → laissé intact
-            value = cache.get(expr_duckdb, _MISS)
+                continue  # non rendable → laissé intact
+            value = cache.get(key, _MISS)
             if value is _MISS:
                 n_eval += 1
                 try:
+                    expr_duckdb = node.sql(dialect="duckdb")  # coûteux → une fois/expr
                     fixed = fix_duck_db_sql(f"SELECT {expr_duckdb}", source_dialect)
                     transpile_ms += (time.perf_counter() - t0) * 1000
                     t1 = time.perf_counter()
@@ -206,8 +251,8 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
                     value = row[0] if row else None
                     exec_ms += (time.perf_counter() - t1) * 1000
                 except Exception:
-                    value = _FAILED  # DuckDB refuse → laissé intact
-                cache[expr_duckdb] = value
+                    value = _FAILED  # non transpilable / DuckDB refuse → laissé intact
+                cache[key] = value
             if value is not _FAILED:
                 node.replace(_to_literal(value))
     finally:
