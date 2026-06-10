@@ -462,10 +462,15 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
         if row_count == -1:
             lines.append(f"- `{cte_name}` : erreur d'exécution")
             continue
-        marker = " ← **0 ligne — filtre bloquant**" if row_count == 0 else ""
+        # Une CTE vide n'est « bloquante » que si elle est atteignable depuis le
+        # résultat final par des arêtes requises (cf. _select_failing_cte /
+        # classify_blocking_ctes). Sans annotation `blocking` (anciennes traces,
+        # tests), on retombe sur l'heuristique row_count == 0.
+        is_blocking = info.get("blocking", row_count == 0)
+        marker = " ← **0 ligne — filtre bloquant**" if is_blocking else ""
         lines.append(f"- `{cte_name}` : {row_count} ligne(s){marker}")
         steps = info.get("steps")
-        if steps and row_count == 0:
+        if steps and is_blocking:
             # Ne montrer que la transition bloquante : dernière étape > 0 → première à 0.
             # Le reste (longues séries de "→ N ligne(s)" inchangées) est du bruit qui
             # noie le seul signal utile.
@@ -688,10 +693,12 @@ async def generate_examples(state: QueryState):
         ]
     }
 
-    # Emit the "query understanding" card on fresh generation only (skip retries,
-    # which re-enter this node with status == "empty_results"). Best-effort: the
-    # card is a bonus and must never break generation.
-    if state.get("status") != "empty_results":
+    # Emit the "query understanding" card on the very first generation only.
+    # Skip retries (which re-enter this node with status == "empty_results") AND
+    # subsequent add-a-test runs (suggestion clicks, chat edits) — those already
+    # have existing tests, so re-emitting the card would duplicate it in the
+    # thread. Best-effort: the card is a bonus and must never break generation.
+    if state.get("status") != "empty_results" and not existing_tests:
         understanding = _build_understanding_payload(state, used_columns)
         if understanding is not None:
             result["messages"] = [

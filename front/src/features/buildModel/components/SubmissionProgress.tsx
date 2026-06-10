@@ -37,13 +37,21 @@ const SubmissionProgress: React.FC<{ label: string }> = ({ label }) => {
     return () => clearInterval(id);
   }, [label]);
 
-  // Rotate the sub-step detail line (validate phase only).
+  // Unroll the validator sub-steps one by one (~2s each), then hold on the last
+  // one until validation actually completes.
   useEffect(() => {
     if (details.length <= 1) return;
-    const id = setInterval(() => setDetailIdx((i) => (i + 1) % details.length), 3500);
+    const id = setInterval(
+      () => setDetailIdx((i) => Math.min(i + 1, details.length - 1)),
+      5000
+    );
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [label, details.length]);
+
+  // During validation the rolling pipeline is the primary line; elsewhere the
+  // phase label is.
+  const primary = details.length > 0 ? details[detailIdx] : label;
 
   return (
     <Box sx={{ mt: 3 }}>
@@ -52,17 +60,9 @@ const SubmissionProgress: React.FC<{ label: string }> = ({ label }) => {
         sx={{ height: 6, borderRadius: 3, backgroundColor: '#e0f7f5', '& .MuiLinearProgress-bar': { backgroundColor: '#1ca8a4' } }}
       />
       <Typography variant="body2" sx={{ mt: 0.75, color: '#555', textAlign: 'center' }}>
-        {label}
+        {primary}
         {elapsed > 0 ? ` · ${elapsed} s` : ''}
       </Typography>
-      {details.length > 0 && (
-        <Typography
-          variant="caption"
-          sx={{ mt: 0.25, color: '#90a4ae', textAlign: 'center', display: 'block', fontStyle: 'italic' }}
-        >
-          {details[detailIdx]}
-        </Typography>
-      )}
     </Box>
   );
 };

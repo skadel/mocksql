@@ -153,8 +153,9 @@ class TestFormatHistoryGenerator:
         assert _run_format([]) == []
 
     def test_results_first_injects_synthetic_human(self):
+        # [synthetic human, AI(data), human(résultat flushé)]
         msgs = _run_format([_results_msg()])
-        assert len(msgs) == 2
+        assert len(msgs) == 3
         assert isinstance(msgs[0], HumanMessage)
         assert msgs[0].content == _SYNTHETIC_NOMINAL_HUMAN
 
@@ -165,10 +166,12 @@ class TestFormatHistoryGenerator:
         assert msgs[0].content == _SYNTHETIC_NOMINAL_HUMAN
 
     def test_instruction_then_results_produces_human_ai(self):
+        # [human(instruction), AI(data), human(résultat flushé)]
         msgs = _run_format([_instruction_msg(), _results_msg()])
-        assert len(msgs) == 2
+        assert len(msgs) == 3
         assert isinstance(msgs[0], HumanMessage)
         assert isinstance(msgs[1], AIMessage)
+        assert isinstance(msgs[2], HumanMessage)
 
     def test_query_instruction_not_wrapped_in_tag(self):
         msgs = _run_format([_query_msg("Ma question"), _results_msg()])
@@ -186,6 +189,7 @@ class TestFormatHistoryGenerator:
         assert set(ai_content.keys()) == _EXPECTED_KEYS
 
     def test_two_turns_produces_four_messages(self):
+        # 2 tours = 4 messages instruction/AI + le résultat final flushé = 5
         history = [
             _instruction_msg("Instruction 1"),
             _results_msg(),
@@ -193,7 +197,9 @@ class TestFormatHistoryGenerator:
             _results_msg(),
         ]
         msgs = _run_format(history)
-        assert len(msgs) == 4
+        assert len(msgs) == 5
+        assert isinstance(msgs[-1], HumanMessage)
+        assert "Voici ce que j'ai obtenu" in msgs[-1].content
 
     def test_results_prepended_to_next_human_message(self):
         history = [
@@ -215,10 +221,32 @@ class TestFormatHistoryGenerator:
         assert "Voici ce que j'ai obtenu" not in msgs[0].content
 
     def test_examples_then_results_no_duplicate_ai(self):
-        """EXAMPLES → AIMessage ; RESULTS only stores pending_results, no second AIMessage."""
+        """EXAMPLES → AIMessage ; RESULTS only stores pending_results, no second AIMessage.
+
+        Le résultat traînant est flushé en HumanMessage final (cf.
+        test_trailing_results_flushed_as_final_human), d'où le 3e message — mais
+        un seul AIMessage est émis."""
         msgs = _run_format([_instruction_msg(), _examples_msg(), _results_msg()])
         types = [type(m).__name__ for m in msgs]
-        assert types == ["HumanMessage", "AIMessage"]
+        assert types == ["HumanMessage", "AIMessage", "HumanMessage"]
+        assert sum(t == "AIMessage" for t in types) == 1
+
+    def test_trailing_results_flushed_as_final_human(self):
+        """Le résultat du dernier exemple — sans message d'instruction après lui —
+        doit être émis dans un HumanMessage final, et non perdu dans
+        pending_results_text."""
+        history = [
+            _instruction_msg("Tour 1"),
+            _examples_msg(),
+            _results_msg(
+                [{**_SAMPLE_TEST, "unit_test_description": "Résultat final."}]
+            ),
+        ]
+        msgs = _run_format(history)
+        last = msgs[-1]
+        assert isinstance(last, HumanMessage)
+        assert "Voici ce que j'ai obtenu" in last.content
+        assert "Résultat final." in last.content
 
     def test_examples_then_results_pending_forwarded(self):
         history = [

@@ -226,6 +226,23 @@ async def conversational_agent(state: QueryState):
         else ""
     )
 
+    # Clic sur une suggestion de couverture : l'utilisateur veut un test concret, pas une
+    # réponse conversationnelle. On laisse à l'agent la latitude de dédupliquer (étendre un test
+    # proche au lieu d'en créer un quasi-identique), mais on lui interdit la non-action.
+    suggestion_note = ""
+    if state.get("suggestion_intent"):
+        suggestion_note = (
+            "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
+            "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
+            "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
+            "- S'il recoupe largement un test existant → étends/ajuste ce test "
+            "(`add_test_row` ou `update_test_data`) plutôt que de créer un doublon, et explique-le.\n"
+            "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
+            "`ask_clarification`.\n"
+            "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
+            "renforce le test existant via `add_test_row`."
+        )
+
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
@@ -247,7 +264,7 @@ ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétiq
 utilise `ask_clarification` pour signaler l'incohérence et demander confirmation avant d'agir.
 
 Ne produis pas de texte de réflexion quand tu appelles un outil — l'outil parle pour toi.
-Réserve le texte libre aux réponses purement conversationnelles (sans outil).{debug_budget_note}{eval_context}"""
+Réserve le texte libre aux réponses purement conversationnelles (sans outil).{debug_budget_note}{suggestion_note}{eval_context}"""
 
     # Build uid→test lookup (test_uid is assigned by retrieve_existing_tests above)
     uid_to_test: dict = {t["test_uid"]: t for t in existing_tests if t.get("test_uid")}
@@ -405,10 +422,14 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
     messages_for_llm = [
         SystemMessage(content=system_content + resume_context)
     ] + formatted_history
-    if user_input:
-        messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
-    elif evaluation_feedback == "bad_data":
-        # Déclenchement automatique : aucune saisie utilisateur, l'agent vient de l'évaluateur
+    # Déclenchement automatique (retry bad_data) : prioritaire sur un `input` périmé
+    # qui pourrait traîner dans le state. `auto_correct` est posé par le nœud
+    # bad_data_to_agent ; le repli `not user_input and feedback == bad_data` couvre
+    # les entrées sans flag (ex. CLI generate).
+    is_auto_correct = bool(state.get("auto_correct")) or (
+        not user_input and evaluation_feedback == "bad_data"
+    )
+    if is_auto_correct:
         failing_uid_trigger = next(
             (
                 t.get("test_uid", str(eval_test_idx))
@@ -424,19 +445,29 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
         if has_debug_results:
             trigger = (
                 f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
-                f"Analyse : si les données d'entrée sont incorrectes, appelle `update_test_data` sur [{failing_uid_trigger}]. "
-                f"Si au contraire le comportement observé (ex : 0 ligne) est le comportement attendu pour ce scénario, "
-                f"appelle `request_reevaluation` sur [{failing_uid_trigger}] avec la justification."
+                f"Corrige de façon CIBLÉE le test [{failing_uid_trigger}] : utilise "
+                f"`patch_test_field` / `add_test_row` / `remove_test_row` pour ajuster "
+                f"précisément les données qui alimentent l'étape bloquante. N'emploie "
+                f"`update_test_data` (régénération complète) que si une correction ciblée "
+                f"est impossible. Si le comportement observé (ex : 0 ligne) est en réalité "
+                f"attendu pour ce scénario, appelle `request_reevaluation` avec la justification."
             )
         else:
             trigger = (
-                f"Le test [{failing_uid_trigger}] a été jugé Insuffisant à cause des données d'entrée. "
-                f"Le diagnostic CTE est disponible dans le contexte ci-dessus. "
-                f"Si la cause est évidente, appelle directement `update_test_data`. "
-                f"Si le comportement observé est en réalité attendu pour ce scénario, appelle `request_reevaluation`. "
-                f"Utilise `run_cte` uniquement si tu as besoin d'inspecter les valeurs réelles d'une CTE spécifique."
+                f"Le test [{failing_uid_trigger}] a été jugé Insuffisant : ses données "
+                f"d'entrée ne satisfont pas ses contraintes (diagnostic CTE ci-dessus, avec "
+                f"l'étape bloquante). Corrige de façon CIBLÉE plutôt que tout régénérer : "
+                f"utilise `patch_test_field` / `add_test_row` / `remove_test_row` pour ajuster "
+                f"précisément les données de l'étape bloquante (ex. pour un anti-join "
+                f"`… IS NULL`, fais en sorte que la clé NE matche PAS la table anti-jointe). "
+                f"Utilise `run_cte` d'abord si tu dois inspecter les valeurs réelles d'une CTE. "
+                f"Ne recours à `update_test_data` (régénération complète) que si une correction "
+                f"ciblée est impossible. Si le comportement observé est en réalité attendu, "
+                f"appelle `request_reevaluation`."
             )
         messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
+    elif user_input:
+        messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
 
     _DEBUG_TOOLS = {"run_cte"}
     _DATA_PATCH_TOOLS = {"patch_test_field", "remove_test_row", "add_test_row"}
@@ -612,6 +643,8 @@ Agis maintenant en conséquence (génère ou corrige le test approprié). Ne rep
         "agent_tool_call": agent_tool_call,
         "agent_tool_args": agent_tool_args,
         "input": new_input,
+        # Flag consommé : éviter qu'il ne fuite sur un tour suivant (ex. chat user).
+        "auto_correct": False,
     }
     if evaluation_feedback == "bad_data":
         current_retries = state.get("gen_retries")

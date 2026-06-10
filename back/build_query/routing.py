@@ -78,7 +78,10 @@ async def routing(state: QueryState):
         )
         return {"route": "fixer", "messages": error_history}
 
-    # When existing tests are present, route all natural language input to the conversational agent
+    # When existing tests are present, route all natural language input to the conversational agent.
+    # Inclut le clic sur une suggestion (suggestion_intent) : l'agent peut alors détecter qu'elle
+    # recoupe un test existant et l'étendre plutôt que créer un doublon. Le garde-fou anti-no-op
+    # (cf. route_agent_output) garantit qu'un test sort quand même si l'agent ne produit rien.
     if (
         input_text
         and state.get("has_existing_tests")

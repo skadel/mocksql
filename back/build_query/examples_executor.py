@@ -575,11 +575,37 @@ def _build_cte_sql_with_suffix(
     return sql_code
 
 
+def _joined_alias(join_expr: exp.Expression) -> Optional[str]:
+    """Lowercased alias (or name) of the table newly introduced by `join_expr`."""
+    src = join_expr.this
+    if src is None:
+        return None
+    alias = (getattr(src, "alias", "") or "") or (src.name or "")
+    return alias.lower() or None
+
+
 def _extract_right_key_from_join(join_expr: exp.Expression) -> Optional[exp.Column]:
-    """Return the right-side column of the first equality in the ON clause."""
+    """Return the join-key column belonging to the **newly joined** table.
+
+    The ON clause may be written either way (`joined.col = base.col` or
+    `base.col = joined.col`), so the syntactic right operand is unreliable: it can
+    point at the base table and make the step-trace miss the real non-match. We
+    therefore prefer the column qualified by the join's own alias, falling back to
+    the previous heuristic (right operand of the first equality).
+    """
     on = join_expr.args.get("on")
     if on:
-        for eq in on.find_all(exp.EQ):
+        eqs = list(on.find_all(exp.EQ))
+        joined = _joined_alias(join_expr)
+        if joined:
+            for eq in eqs:
+                for col in (eq.this, eq.expression):
+                    if (
+                        isinstance(col, exp.Column)
+                        and (col.table or "").lower() == joined
+                    ):
+                        return col
+        for eq in eqs:
             right = eq.expression
             if isinstance(right, exp.Column):
                 return right
@@ -613,6 +639,15 @@ def _build_count_steps_query(
     joins: List[exp.Expression] = tree.args.get("joins") or []
     where: Optional[exp.Expression] = tree.args.get("where")
 
+    # Un LEFT/RIGHT/FULL JOIN ne filtre pas (la ligne de base survit sans match) —
+    # sauf s'il est rendu forçant par un prédicat WHERE non null-tolérant. On réutilise
+    # la même classification que la génération focalisée (cte_graph) pour ne PAS
+    # étiqueter à tort un LEFT JOIN non-matché comme « étape bloquante » : seuls les
+    # INNER JOINs et les OUTER JOINs forçants éliminent réellement des lignes.
+    from build_query.cte_graph import _forced_outer_aliases
+
+    forced = _forced_outer_aliases(tree) if isinstance(tree, exp.Select) else set()
+
     labels: List[str] = []
     select_parts: List[str] = ["COUNT(*) AS base_count"]
     base_name = from_expr.this.alias_or_name if from_expr else "base"
@@ -622,13 +657,19 @@ def _build_count_steps_query(
     left_join_sqls: List[str] = []
 
     for i, join in enumerate(joins):
+        side = (join.args.get("side") or "").upper()
+        is_outer = side in {"LEFT", "RIGHT", "FULL"}
+        joined_alias = _joined_alias(join)
+        # Un OUTER JOIN ne filtre que s'il est forçant ; un INNER JOIN filtre toujours.
+        filters = (not is_outer) or (joined_alias in forced)
+
         join_copy = join.copy()
         join_copy.set("side", "LEFT")
         join_copy.set("kind", None)
         left_join_sqls.append(join_copy.sql(dialect=dialect))
 
         right_col = _extract_right_key_from_join(join)
-        if right_col:
+        if right_col is not None and filters:
             col_sql = right_col.sql(dialect=dialect)
             join_null_conditions.append(f"{col_sql} IS NOT NULL")
             cumul = " AND ".join(join_null_conditions)
@@ -637,8 +678,18 @@ def _build_count_steps_query(
             )
             labels.append(f"+ JOIN ({col_sql} IS NOT NULL)")
         else:
-            select_parts.append(f"COUNT(*) AS after_join_{i + 1}")
-            labels.append(f"+ JOIN {i + 1}")
+            # Join optionnel : on suit le cumul courant (fan-out visible) sans
+            # ajouter de condition `IS NOT NULL` — la non-correspondance est voulue.
+            if join_null_conditions:
+                cumul = " AND ".join(join_null_conditions)
+                select_parts.append(
+                    f"SUM(CASE WHEN {cumul} THEN 1 ELSE 0 END) AS after_join_{i + 1}"
+                )
+            else:
+                select_parts.append(f"COUNT(*) AS after_join_{i + 1}")
+            lbl = joined_alias or (right_col.table if right_col else str(i + 1))
+            side_txt = f"{side} " if is_outer else ""
+            labels.append(f"+ {side_txt}JOIN {lbl} (préservé)")
 
     where_conds = _extract_conditions(where.this) if where else []
     cumul_parts = list(join_null_conditions)
@@ -730,6 +781,38 @@ async def _run_cte_trace(
     return trace
 
 
+def _select_failing_cte(ctes: list, cte_trace: dict, dialect: str) -> Optional[str]:
+    """Pick the CTE to target for correction and annotate `cte_trace` in place.
+
+    Naively taking the first empty CTE mislabels LEFT-optional / anti-join CTEs as
+    blockers (cf. TMP_MR / SIRET_ONUS dans c1). We defer to
+    `cte_graph.classify_blocking_ctes`, which keeps only CTEs reachable from the
+    final result via *required* edges (FROM / INNER / forcing OUTER). Each empty CTE
+    gets a `blocking` flag so the diagnostic hint can stop alarming on optional ones.
+
+    Falls back to the first empty CTE if classification is unavailable.
+    """
+    blocking_order: list = []
+    try:
+        from build_query.cte_graph import classify_blocking_ctes
+
+        blocking_order = classify_blocking_ctes(ctes, cte_trace, dialect)
+    except Exception:
+        blocking_order = []
+
+    if blocking_order:
+        blocking = set(blocking_order)
+        for name, info in cte_trace.items():
+            if isinstance(info, dict) and info.get("row_count") == 0:
+                info["blocking"] = name in blocking
+        return blocking_order[0]
+
+    return next(
+        (name for name, info in cte_trace.items() if info.get("row_count") == 0),
+        None,
+    )
+
+
 async def _run_single_test_case(
     state: QueryState,
     test_case: Dict[str, Any],
@@ -812,10 +895,7 @@ async def _run_single_test_case(
             cte_trace = await _run_cte_trace(
                 ctes, suffix, state["project"], dialect, con
             )
-            failing_cte = next(
-                (name for name, info in cte_trace.items() if info["row_count"] == 0),
-                None,
-            )
+            failing_cte = _select_failing_cte(ctes, cte_trace, dialect)
             return {
                 **base,
                 "status": "empty_results",
@@ -1038,6 +1118,16 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
 - Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`,
   écris `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`.
   "Vérifier ce qui ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
+- UNE dimension par assertion : chaque `expected_condition` ne valide qu'UNE seule propriété
+  observable (une colonne, ou un invariant portant sur une colonne). Si le scénario exige de
+  vérifier plusieurs propriétés, émets PLUSIEURS assertions — le schéma en accepte 1 à N.
+  ✗ INTERDIT — combiner deux colonnes sans rapport avec `OR`/`AND` : un `OR` est vrai dès qu'une
+    branche l'est, donc ne pince RIEN et masque la vraie intention ; un `AND` entre colonnes
+    d'intentions distinctes fait échouer l'assertion pour une raison ambiguë (on ne sait pas
+    quelle propriété est violée).
+  ✓ Découpe : une assertion par colonne/propriété, chacune vérifiable seule.
+  Exception : `AND` reste permis quand les deux termes décrivent le MÊME invariant sur la MÊME
+  colonne (ex. bornes d'un intervalle : `col >= 0 AND col <= 100`).
 - Utilise UNIQUEMENT les colonnes de `<result_schema>` (noms exacts, sensibles à la casse).
 - N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
   Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
@@ -1305,35 +1395,60 @@ async def _regenerate_assertion(
     schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
     schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
 
-    prompt = f"""Tu es un expert en tests SQL DuckDB dbt-style.
+    # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
+    system_content = """Tu es un expert en tests SQL DuckDB dbt-style. Une assertion a \
+échoué à l'exécution ; tu dois la réécrire pour qu'elle soit valide en DuckDB.
 
-L'assertion SQL suivante a produit une erreur lors de son exécution :
+Le message suivant contient ces sections, délimitées par des balises :
+- `<test_context>` : la description métier du scénario testé.
+- `<result_schema>` : le schéma exact de la table `__result__` (colonnes + types).
+- `<query>` : la requête SQL testée.
+- `<input_data>` : les données d'entrée injectées dans DuckDB.
+- `<broken_assertion>` : l'assertion fautive et l'erreur qu'elle a produite.
+- `<task>` : ce que tu dois produire.
 
+**Règles de réécriture :**
+- Corrige UNIQUEMENT le SQL pour qu'il soit valide en DuckDB.
+- L'assertion doit retourner 0 ligne si OK, des lignes si KO (convention dbt-style).
+- INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Si l'assertion
+  originale référençait une autre table (source ou suffixée), réécris-la pour n'utiliser que
+  `__result__` et ses colonnes de `<result_schema>`.
+- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
+
+Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
+{"description": "...", "sql": "SELECT ..."}"""
+
+    # ── Human : sections balisées contexte → tables → SQL → input → assertion fautive → ask ──
+    human_content = f"""<test_context>
+{test_description}
+</test_context>
+
+<result_schema>
+{schema_str}
+</result_schema>
+
+<query>
+```sql
+{duckdb_sql}
+```
+</query>
+
+<input_data>
+{test_data}
+</input_data>
+
+<broken_assertion>
 Description : {original.get("description", "")}
 SQL :
 ```sql
 {original.get("sql", "")}
 ```
-
 Erreur : {error}
+</broken_assertion>
 
-Contexte :
-- Description du test : {test_description}
-- Requête SQL testée :
-```sql
-{duckdb_sql}
-```
-- Schéma exact de `__result__` :
-{schema_str}
-- Données de test input : {test_data}
-
-Corrige uniquement le SQL pour qu'il soit valide en DuckDB.
-Règle : l'assertion doit retourner 0 ligne si OK, des lignes si KO.
-INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Si l'assertion originale référençait une autre table (source ou suffixée), réécris-la pour n'utiliser que `__result__` et ses colonnes du schéma ci-dessus.
-Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
-
-Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
-{{"description": "...", "sql": "SELECT ..."}}"""
+<task>
+Réécris l'assertion (description + sql valide DuckDB) en respectant les règles du message système.
+</task>"""
 
     llm = make_llm()
     try:
@@ -1342,7 +1457,9 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
             original.get("description", ""),
         )
         logger.diag("[regen_assertion] erreur: %s", error)
-        result = await llm.ainvoke(prompt)
+        result = await llm.ainvoke(
+            [SystemMessage(content=system_content), HumanMessage(content=human_content)]
+        )
         content = normalize_llm_content(result.content)
         logger.diag("[regen_assertion] réponse brute:\n%s", content[:500])
         json_match = re.search(r"\{[\s\S]*\}", content)
@@ -1449,81 +1566,128 @@ async def _fix_logically_failing_assertions(
     if not failing_indices:
         return results
 
-    for i in failing_indices:
+    # ── System : rôle + index des sections + règles. Un seul appel traite TOUTES les
+    #    assertions échouées : le contexte commun (schema/query/input/sample) n'est envoyé
+    #    qu'une fois et le LLM décide/corrige chacune via son `id` local (#0, #1, …) — au
+    #    lieu d'un appel séquentiel par assertion qui re-postait ce contexte à chaque tour. ──
+    system_content = """Tu es un expert en tests SQL DuckDB dbt-style. Tu viens de générer \
+plusieurs assertions qui échouent (chacune retourne des lignes alors qu'elle devrait en \
+retourner 0). Pour CHACUNE, tu dois déterminer si elle est logiquement correcte, ou si tu as \
+fait une erreur dans sa logique.
+
+Le message suivant contient ces sections, délimitées par des balises :
+- `<test_context>` : la description métier du scénario testé.
+- `<result_schema>` : le schéma exact de la table `__result__` (colonnes + types).
+- `<query>` : la requête SQL testée.
+- `<input_data>` : les données d'entrée injectées dans DuckDB.
+- `<result_sample>` : des exemples du résultat réel.
+- `<failing_assertions>` : les assertions qui échouent, chacune identifiée par un `id` (#0, #1, …),
+  avec son SQL et les lignes qu'elle remonte.
+- `<task>` : ce que tu dois produire.
+
+**Décision attendue pour chaque assertion :** est-elle logiquement correcte par rapport au
+résultat réel, ou as-tu fait une erreur dans sa formulation (mauvaise valeur attendue, mauvaise
+colonne, condition inversée, etc.) ?
+- Si l'assertion est **correcte** et le test échoue vraiment → `{"id": <id>, "correct": true}`
+- Si l'assertion est **incorrecte** (tu as fait une erreur) → régénère-la :
+  `{"id": <id>, "correct": false, "description": "...", "sql": "SELECT ..."}`
+
+**Règles DuckDB strictes :**
+- Utilise UNIQUEMENT les colonnes de `<result_schema>`.
+- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
+
+Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion :
+{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "sql": "SELECT ..."}]}"""
+
+    # ── Bloc <failing_assertions> : une entrée par assertion échouée, indexée par `id` local. ──
+    blocks = []
+    for local_id, i in enumerate(failing_indices):
         a = results[i]
         failing_rows = a.get("failing_rows", [])
         logger.diag(
-            "[assertion_fixer] correction assertion %s: %r", i, a.get("description", "")
+            "[assertion_fixer] #%s (idx %s): %r", local_id, i, a.get("description", "")
         )
-
-        prompt = f"""Tu es un expert en tests SQL DuckDB dbt-style.
-
-Tu viens de générer une assertion qui échoue (retourne des lignes alors qu'elle devrait en retourner 0).
-Détermine si l'assertion est logiquement correcte ou si tu as fait une erreur dans sa logique.
-
-Description du test : {test_description}
-
-Données de test input :
-{test_data}
-
-Requête SQL testée :
-```sql
-{duckdb_sql}
-```
-
-Schéma exact de `__result__` :
-{schema_str}
-
-Exemples de résultat réel :
-{json.dumps(sample, ensure_ascii=False, default=str)}
-
-Assertion qui échoue :
-- Description : {a.get("description", "")}
-- SQL :
+        blocks.append(
+            f"""#{local_id}
+Description : {a.get("description", "")}
+SQL :
 ```sql
 {a.get("sql", "")}
 ```
+Lignes remontées (violations détectées) :
+{json.dumps(failing_rows[:10], ensure_ascii=False, default=str)}"""
+        )
+    failing_block = "\n\n".join(blocks)
 
-Lignes retournées par l'assertion (violations détectées) :
-{json.dumps(failing_rows[:10], ensure_ascii=False, default=str)}
+    human_content = f"""<test_context>
+{test_description}
+</test_context>
 
-Question : l'assertion est-elle logiquement correcte par rapport au résultat réel, \
-ou as-tu fait une erreur dans sa formulation (mauvaise valeur attendue, mauvaise colonne, condition inversée, etc.) ?
+<result_schema>
+{schema_str}
+</result_schema>
 
-- Si l'assertion est **correcte** et le test échoue vraiment → réponds : {{"correct": true}}
-- Si l'assertion est **incorrecte** (tu as fait une erreur) → régénère-la : \
-{{"correct": false, "description": "...", "sql": "SELECT ..."}}
+<query>
+```sql
+{duckdb_sql}
+```
+</query>
 
-Règles DuckDB strictes :
-- Utilise UNIQUEMENT les colonnes du schéma ci-dessus
-- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête
+<input_data>
+{test_data}
+</input_data>
 
-Réponds UNIQUEMENT avec un objet JSON (aucun texte autour)."""
+<result_sample>
+{json.dumps(sample, ensure_ascii=False, default=str)}
+</result_sample>
 
-        llm = make_llm()
-        try:
-            result = await llm.ainvoke(prompt)
-            content = normalize_llm_content(result.content)
-            logger.diag("[assertion_fixer] réponse LLM:\n%s", content[:500])
-            json_match = re.search(r"\{[\s\S]*\}", content)
-            if not json_match:
+<failing_assertions>
+{failing_block}
+</failing_assertions>
+
+<task>
+Pour chaque assertion (#0 … #{len(failing_indices) - 1}), décide si elle est correcte ou erronée,
+et réponds selon le format du message système (un objet `decisions` listant une entrée par `id`).
+</task>"""
+
+    llm = make_llm()
+    try:
+        result = await llm.ainvoke(
+            [
+                SystemMessage(content=system_content),
+                HumanMessage(content=human_content),
+            ]
+        )
+        content = normalize_llm_content(result.content)
+        logger.diag("[assertion_fixer] réponse LLM:\n%s", content[:800])
+        json_match = re.search(r"\{[\s\S]*\}", content)
+        if not json_match:
+            return results
+        parsed = json.loads(json_match.group())
+        decisions = parsed.get("decisions") if isinstance(parsed, dict) else None
+        if not isinstance(decisions, list):
+            return results
+
+        for dec in decisions:
+            if not isinstance(dec, dict) or dec.get("correct"):
                 continue
-            parsed = json.loads(json_match.group())
-            if not isinstance(parsed, dict):
+            local_id = dec.get("id")
+            if not isinstance(local_id, int) or not (
+                0 <= local_id < len(failing_indices)
+            ):
                 continue
-            if parsed.get("correct"):
-                continue
-            new_sql = parsed.get("sql")
+            new_sql = dec.get("sql")
             if not new_sql:
                 continue
+            target = failing_indices[local_id]
             new_assertion = {
-                "description": parsed.get("description", a["description"]),
+                "description": dec.get("description", results[target]["description"]),
                 "sql": new_sql,
             }
             new_eval = _evaluate_assertions([new_assertion], view_name, con)
-            results[i] = new_eval[0]
-        except Exception:
-            pass
+            results[target] = new_eval[0]
+    except Exception:
+        pass
 
     return results
 

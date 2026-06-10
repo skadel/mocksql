@@ -55,9 +55,16 @@
   },
   "submission": {
     "validating_detail": [
-      "Compilation et dry-run de la requête…",
-      "Optimisation et découpage du SQL…",
-      "Extraction des colonnes et des conditions utilisées…"
+      "Validation de la requête SQL…",
+      "Dry-run sur le moteur source…",
+      "Analyse de l'arbre syntaxique…",
+      "Qualification des tables…",
+      "Qualification des colonnes…",
+      "Résolution du lineage des CTEs…",
+      "Pushdown des prédicats…",
+      "Extraction des contraintes…",
+      "Simplification des contraintes…",
+      "Détection des expressions dérivées…"
     ]
   },
   "action": {

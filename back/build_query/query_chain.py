@@ -96,11 +96,14 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
         return "[]"
 
 
-async def _bad_data_regen(state: QueryState):
-    """Decrements gen_retries before routing back to generator on bad_data retry.
-    Replaces the decrement that conversational_agent used to do on this path."""
-    gen_retries = state.get("gen_retries")
-    return {"gen_retries": (gen_retries - 1) if gen_retries is not None else -1}
+async def _bad_data_to_agent(state: QueryState):
+    """Entry into the automatic bad_data correction loop, routed to the
+    conversational_agent.
+
+    Sets ``auto_correct`` so the agent takes its auto-correction branch even if a
+    stale ``input`` lingers in state. Does NOT decrement ``gen_retries`` — the agent
+    decrements it itself on the bad_data path (see conversational_agent)."""
+    return {"auto_correct": True}
 
 
 async def _bad_data_exhausted(state: QueryState):
@@ -246,6 +249,55 @@ async def _handle_other(state: QueryState):
     }
 
 
+def route_agent_output(state: QueryState):
+    """Route la sortie du conversational_agent selon l'outil qu'il a appelé.
+
+    Défini au niveau module (et non imbriqué) pour rester testable : ne dépend que de
+    ``state``. Le garde-fou final garantit qu'aucune intention actionnable (boucle bad_data
+    OU clic sur suggestion) ne se termine en no-op `history_saver` — on retombe alors sur
+    le `generator` pour qu'un test sorte quand même."""
+    tool_call = state.get("agent_tool_call")
+    logger.diag("[route_agent_output] agent_tool_call=%s", tool_call)
+    if tool_call in (
+        "patch_test_field",
+        "remove_test_row",
+        "add_test_row",
+        "data_batch",
+    ):
+        return "data_patcher"
+    if tool_call in ("generate_test_data", "update_test_data"):
+        return "generator"
+    if tool_call == "delete_test":
+        return "delete_test_node"
+    if tool_call == "update_test_description":
+        return "update_test_node"
+    if tool_call == "generate_suggestions":
+        return "suggestions_generator"
+    if tool_call in ("run_cte", "count_cte_steps", "debug_batch"):
+        return "debug_node"
+    if tool_call == "request_reevaluation":
+        return "test_evaluator"
+    if tool_call == "ask_clarification":
+        logger.diag("[route_agent_output] → history_saver (ask_clarification)")
+        return "history_saver"
+    # Auto-correction loop (bad_data) : si l'agent n'a émis aucun outil actionnable,
+    # ne pas tuer le retry par un history_saver — retomber sur la régénération
+    # complète du generator. Garantit que le rebranch n'est jamais pire que le regen.
+    # Idem pour un clic sur suggestion (suggestion_intent) : on garantit qu'un test
+    # sort toujours, même si l'agent a répondu en texte libre au lieu d'agir.
+    if (
+        state.get("auto_correct")
+        or state.get("evaluation_feedback") == "bad_data"
+        or state.get("suggestion_intent")
+    ):
+        logger.diag(
+            "[route_agent_output] aucun tool_call (bad_data/suggestion) → generator (fallback)"
+        )
+        return "generator"
+    logger.diag("[route_agent_output] aucun tool_call actionnable → history_saver")
+    return "history_saver"
+
+
 def build_query_graph():
     from langgraph.graph import END, StateGraph, START
     from utils.timing import timed_node
@@ -269,7 +321,7 @@ def build_query_graph():
     add_timed_node("assertion_generator", generate_assertions)
     add_timed_node("assertion_corrector", correct_assertions)
     add_timed_node("test_evaluator", evaluate_tests)
-    add_timed_node("bad_data_regen", _bad_data_regen)
+    add_timed_node("bad_data_to_agent", _bad_data_to_agent)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
     add_timed_node("suggestions_generator", generate_suggestions)
     add_timed_node("final_response", final_response)
@@ -301,34 +353,6 @@ def build_query_graph():
             len(state.get("used_columns", [])),
         )
         return "generator"
-
-    def route_agent_output(state: QueryState):
-        tool_call = state.get("agent_tool_call")
-        logger.diag("[route_agent_output] agent_tool_call=%s", tool_call)
-        if tool_call in (
-            "patch_test_field",
-            "remove_test_row",
-            "add_test_row",
-            "data_batch",
-        ):
-            return "data_patcher"
-        if tool_call in ("generate_test_data", "update_test_data"):
-            return "generator"
-        if tool_call == "delete_test":
-            return "delete_test_node"
-        if tool_call == "update_test_description":
-            return "update_test_node"
-        if tool_call == "generate_suggestions":
-            return "suggestions_generator"
-        if tool_call in ("run_cte", "count_cte_steps", "debug_batch"):
-            return "debug_node"
-        if tool_call == "request_reevaluation":
-            return "test_evaluator"
-        if tool_call == "ask_clarification":
-            logger.diag("[route_agent_output] → history_saver (ask_clarification)")
-            return "history_saver"
-        logger.diag("[route_agent_output] aucun tool_call actionnable → history_saver")
-        return "history_saver"
 
     def route_executor(state: QueryState):
         if state.get("error") or state.get("status") == "error":
@@ -374,9 +398,10 @@ def build_query_graph():
         if feedback == "bad_data":
             if retries > 0:
                 logger.diag(
-                    "[route_evaluator] → bad_data_regen (bad_data retries=%d)", retries
+                    "[route_evaluator] → bad_data_to_agent (bad_data retries=%d)",
+                    retries,
                 )
-                return "bad_data_regen"
+                return "bad_data_to_agent"
             logger.diag(
                 "[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)"
             )
@@ -406,7 +431,7 @@ def build_query_graph():
     builder.add_conditional_edges("executor", route_executor)
     builder.add_edge("assertion_generator", "test_evaluator")
     builder.add_conditional_edges("test_evaluator", route_evaluator)
-    builder.add_edge("bad_data_regen", "generator")
+    builder.add_edge("bad_data_to_agent", "conversational_agent")
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_edge("suggestions_generator", "final_response")

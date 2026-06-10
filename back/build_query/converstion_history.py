@@ -241,6 +241,17 @@ def format_history(
                 examples_emitted = True
             pending_results_text = _format_execution_results(results_data)
 
+    # Flush du dernier résultat : sans message d'instruction après lui, le résultat
+    # du dernier exemple resterait dans pending_results_text et serait perdu. On
+    # l'émet en HumanMessage final pour que le LLM voie le couple données→résultat.
+    if pending_results_text:
+        result.append(
+            HumanMessage(
+                content="Voici ce que j'ai obtenu en exécutant ma requête SQL sur les données générées :\n"
+                + pending_results_text
+            )
+        )
+
     return result
 
 

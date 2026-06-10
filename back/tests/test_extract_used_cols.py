@@ -114,8 +114,9 @@ class TestExtractUsedColumns:
         SELECT name FROM filtered_users
         """
 
-        # Without optimize=True, CTE selected columns are not pruned — id is included even if not used by outer SELECT
-        expected = [{"table": "users", "used_columns": ["age", "id", "name"]}]
+        # pushdown_projections élague `id` : sélectionné par le CTE mais jamais
+        # consommé par le SELECT externe. `name` (sortie) et `age` (filtre) restent.
+        expected = [{"table": "users", "used_columns": ["age", "name"]}]
         tables = {"users": {"id": "INT", "name": "STRING", "age": "INT"}}
         result = await _extract(query, tables)
         assert _used_cols(result) == expected
@@ -129,8 +130,9 @@ class TestExtractUsedColumns:
         )
         SELECT id FROM adult_users
         """
-        # SELECT * expands to all columns; without pruning, all are included
-        expected = [{"table": "users", "used_columns": ["age", "id", "name"]}]
+        # SELECT * est expansé puis élagué : seules `id` (sortie finale) et `age`
+        # (filtres des deux CTE) sont consommées en aval ; `name` est retirée.
+        expected = [{"table": "users", "used_columns": ["age", "id"]}]
         tables = {"users": {"id": "INT", "name": "STRING", "age": "INT"}}
         result = await _extract(query, tables)
         assert _used_cols(result) == expected
@@ -199,11 +201,12 @@ class TestExtractUsedColumns:
             },
         }
 
-        # SELECT * expands to all columns of user_details; without pruning, other_col is included too
+        # SELECT * sur user_details est expansé puis élagué : `other_col` n'est
+        # jamais consommée en aval → retirée. Restent `email` et `user_id`.
         expected = [
             {
                 "table": "user_details",
-                "used_columns": ["email", "other_col", "user_id"],
+                "used_columns": ["email", "user_id"],
             },
             {"table": "users", "used_columns": ["age", "id", "name"]},
         ]
