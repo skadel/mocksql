@@ -35,7 +35,12 @@ class QueryState(TypedDict):
     used_columns_changed: bool
     optimize: bool
     save: Union[str, None]
-    test_index: Optional[int]  # if set, only regenerate/modify this test (0-based)
+    test_uid: Optional[
+        str
+    ]  # stable test identity to target (preferred over test_index)
+    test_index: Optional[
+        int
+    ]  # legacy slot/order number; fallback target if no test_uid
     profile_result: Optional[str]  # JSON uploaded by user after running profile query
     profile_complete: Optional[
         bool

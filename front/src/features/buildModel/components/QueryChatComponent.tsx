@@ -365,7 +365,8 @@ const ChatComponent: React.FC = () => {
       testIndex?: number,
       profileResult?: string,
       isAssertionOnly?: boolean,
-      forceRoute?: string
+      forceRoute?: string,
+      testUid?: string
     ): Promise<boolean> => {
       const text = (input ?? '').trim();
       if (!text && !userTables && !currentSqlQuery && !profileResult) return false;
@@ -401,6 +402,7 @@ const ChatComponent: React.FC = () => {
           parentMessageId,
           userTables,
           profileResult,
+          testUid,
           testIndex,
           assertionOnly: isAssertionOnly,
           forceRoute,
@@ -655,9 +657,14 @@ const ChatComponent: React.FC = () => {
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
       const lastMessageId = lastMessage ? lastMessage.id : '';
 
+      // Cible le test par son identité stable (test_uid) plutôt que par son rang.
+      const effectiveTestUid = effectiveTestIndex !== undefined
+        ? (testResults || []).find((tr: any) => String(tr.test_index) === String(effectiveTestIndex))?.test_uid
+        : undefined;
+
       const routeHint = forcedRouteRef.current;
       forcedRouteRef.current = '';
-      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly, routeHint || undefined);
+      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly, routeHint || undefined, effectiveTestUid);
       setIsSending(false);
 
       if (ok) {
@@ -667,7 +674,7 @@ const ChatComponent: React.FC = () => {
         if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
       }
     },
-    [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly]
+    [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
   );
 
   const onSendClick = useCallback(() => {
@@ -985,6 +992,7 @@ const ChatComponent: React.FC = () => {
       ChangedMessageId: '',
       t,
       parentMessageId,
+      testUid: test?.test_uid,
       testIndex: idx,
       forceRoute: 'generator',
       silent: true,
