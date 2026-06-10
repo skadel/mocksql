@@ -16,11 +16,17 @@ import os
 os.environ.setdefault("DB_CONNECTION_TYPE", "duckdb")
 os.environ.setdefault("DUCKDB_PATH", ":memory:")
 
+import datetime
+
 import duckdb
 import pytest
 
 from utils.examples import create_test_tables
-from utils.insert_examples import insert_examples
+from utils.insert_examples import (
+    build_insert_statement,
+    insert_examples,
+    to_duck_expr,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -318,3 +324,115 @@ class TestReservedWordColumns:
         table_name = reserved_tables[0]["table_name"]
         row = con.execute(f'SELECT "begin", "end" FROM {table_name}').fetchone()
         assert row == ("19490101", "20231231")
+
+
+# ---------------------------------------------------------------------------
+# Valeurs scalaires déjà entourées de quotes (artefact LLM qui recopie un
+# littéral SQL verbatim, ex. WHERE partition_date = '2025-04-01').
+# Le contenu d'un type DATE/TIMESTAMP/numérique ne peut jamais contenir
+# d'apostrophe → on la retire. Pour TEXT, le contenu est intouchable.
+# ---------------------------------------------------------------------------
+
+QUOTED_SCHEMA = {
+    "table_name": "ds.t",
+    "columns": [
+        {"name": "compte", "type": "TEXT"},
+        {"name": "banque", "type": "TEXT"},
+        {"name": "partition_date", "type": "DATE"},
+        {"name": "ts", "type": "TIMESTAMP"},
+        {"name": "montant", "type": "BIGINT"},
+    ],
+}
+
+
+class TestPrequotedScalarValues:
+    def test_date_prequoted_not_double_quoted(self):
+        expr = to_duck_expr("'2025-04-01'", "DATE")
+        assert "'''" not in expr, expr
+
+    def test_int_prequoted_stripped(self):
+        assert to_duck_expr("'5'", "BIGINT") == "5"
+
+    def test_text_apostrophe_content_preserved(self):
+        # Une apostrophe dans une vraie valeur texte doit rester (échappée).
+        assert to_duck_expr("O'Brien", "TEXT") == "'O''Brien'"
+
+    def test_text_fully_quoted_value_preserved(self):
+        # Pour TEXT, on NE strippe PAS : "'hello'" est un contenu légitime.
+        assert to_duck_expr("'hello'", "TEXT") == "'''hello'''"
+
+    def test_clean_date_still_works(self, con):
+        con.execute('CREATE TABLE t1 ("partition_date" DATE);')
+        stmt = build_insert_statement(
+            "t1",
+            [{"partition_date": "2025-04-01"}],
+            {
+                "table_name": "t1",
+                "columns": [{"name": "partition_date", "type": "DATE"}],
+            },
+        )
+        con.execute(stmt)
+        assert con.execute("SELECT partition_date FROM t1").fetchone()[0] == (
+            datetime.date(2025, 4, 1)
+        )
+
+    def test_insert_prequoted_date_executes(self, con):
+        con.execute(
+            'CREATE TABLE t2 ("compte" TEXT, "banque" TEXT, '
+            '"partition_date" DATE, "ts" TIMESTAMP, "montant" BIGINT);'
+        )
+        stmt = build_insert_statement(
+            "t2",
+            [
+                {
+                    "compte": "10107",
+                    "banque": "BP",
+                    "partition_date": "'2025-04-01'",
+                    "ts": "'2025-04-01 12:30:00'",
+                    "montant": "'42'",
+                }
+            ],
+            QUOTED_SCHEMA,
+        )
+        con.execute(stmt)
+        row = con.execute("SELECT partition_date, ts, montant FROM t2").fetchone()
+        assert row[0] == datetime.date(2025, 4, 1)
+        assert row[1] == datetime.datetime(2025, 4, 1, 12, 30, 0)
+        assert row[2] == 42
+
+
+class TestBooleanValues:
+    """La string "false" est truthy en Python : un `if value` naïf rend TRUE."""
+
+    def test_bool_real_true_false(self):
+        assert to_duck_expr(True, "BOOL") == "TRUE"
+        assert to_duck_expr(False, "BOOL") == "FALSE"
+
+    def test_string_false_is_false(self):
+        assert to_duck_expr("false", "BOOL") == "FALSE"
+        assert to_duck_expr("False", "BOOLEAN") == "FALSE"
+        assert to_duck_expr("FALSE", "BOOL") == "FALSE"
+
+    def test_string_true_is_true(self):
+        assert to_duck_expr("true", "BOOL") == "TRUE"
+
+    def test_prequoted_bool(self):
+        assert to_duck_expr("'false'", "BOOL") == "FALSE"
+
+    def test_numeric_bool(self):
+        assert to_duck_expr(0, "BOOL") == "FALSE"
+        assert to_duck_expr(1, "BOOL") == "TRUE"
+
+    def test_string_zero_one(self):
+        assert to_duck_expr("0", "BOOL") == "FALSE"
+        assert to_duck_expr("1", "BOOL") == "TRUE"
+
+    def test_insert_string_false_stored_as_false(self, con):
+        con.execute('CREATE TABLE tb ("actif" BOOLEAN);')
+        stmt = build_insert_statement(
+            "tb",
+            [{"actif": "false"}],
+            {"table_name": "tb", "columns": [{"name": "actif", "type": "BOOLEAN"}]},
+        )
+        con.execute(stmt)
+        assert con.execute("SELECT actif FROM tb").fetchone()[0] is False

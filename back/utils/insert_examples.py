@@ -48,6 +48,64 @@ def parse_struct_definition(schema: str) -> List[tuple]:
     return parsed
 
 
+# DuckDB scalar types dont une valeur ne peut jamais contenir d'apostrophe :
+# une paire de quotes entourant la valeur est forcément un artefact (le LLM a
+# recopié un littéral SQL verbatim, ex. WHERE partition_date = '2025-04-01').
+_TEMPORAL_DUCK_TYPES = {
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "DATETIME",
+    "TIMESTAMP WITH TIME ZONE",
+    "TIMESTAMP_NS",
+    "TIMESTAMP_MS",
+    "TIMESTAMP_S",
+}
+
+
+def _strip_surrounding_quotes(value: Any) -> Any:
+    """Retire une paire de quotes simples entourant une valeur *chaîne*.
+
+    Réservé aux scalaires typés non-texte (DATE/TIMESTAMP/numériques) : pour ces
+    types une apostrophe n'est jamais une donnée réelle, donc des quotes
+    entourantes sont toujours un artefact à supprimer. Les valeurs non-chaînes
+    (int, float déjà typés) sont rendues inchangées.
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+    if len(s) >= 2 and s[0] == "'" and s[-1] == "'":
+        return s[1:-1].strip()
+    return s
+
+
+_BOOL_TRUE_STRINGS = {"true", "t", "1", "yes", "y"}
+_BOOL_FALSE_STRINGS = {"false", "f", "0", "no", "n", ""}
+
+
+def _to_duck_bool(value: Any) -> str:
+    """Rend un littéral booléen DuckDB depuis une valeur générée.
+
+    Gère les vrais bools, les nombres (0 = FALSE), et les orthographes string
+    courantes ("false"/"f"/"0"/"no"...). La string "false" étant *truthy* en
+    Python, un `if value` naïf rendrait TRUE à tort — d'où la table explicite.
+    Toute string inconnue retombe sur la truthiness Python (aucune régression sur
+    les cas qui marchaient déjà).
+    """
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, (int, float)):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, str):
+        s = _strip_surrounding_quotes(value).lower()
+        if s in _BOOL_FALSE_STRINGS:
+            return "FALSE"
+        if s in _BOOL_TRUE_STRINGS:
+            return "TRUE"
+    return "TRUE" if value else "FALSE"
+
+
 def null_struct_expr(duck_type: str) -> str:
     duck_type = duck_type.strip()
     if duck_type.endswith("[]"):
@@ -100,25 +158,39 @@ def to_duck_expr(value: Any, duck_type: str) -> str:
             return f"[{', '.join(elements)}]::{duck_type}"
         return f"[]::{duck_type}"
 
-    # Types texte
-    if duck_type.upper() in ["TEXT", "STRING"]:
+    base = duck_type.upper()
+
+    # Types texte — NE PAS toucher au contenu : une apostrophe (O'Brien) ou même
+    # une valeur littéralement entre quotes peut être une donnée légitime.
+    if base in ("TEXT", "STRING", "VARCHAR"):
         escaped_value = str(value).replace("'", "''")
         return f"'{escaped_value}'"
 
     # Types booléens
-    if duck_type.upper() in ["BOOL", "BOOLEAN"]:
-        return "TRUE" if value else "FALSE"
+    if base in ("BOOL", "BOOLEAN"):
+        return _to_duck_bool(value)
+
+    # À partir d'ici : scalaires typés non-texte → on retire d'éventuelles quotes
+    # entourantes (artefact LLM) au point d'émission unique de la valeur.
+    clean = _strip_surrounding_quotes(value)
 
     # Types entiers
-    if duck_type.upper() in ["INT", "INT64", "BIGINT"]:
-        return str(int(value)) if value is not None else "NULL"
+    if base in ("INT", "INT64", "INTEGER", "BIGINT", "HUGEINT", "SMALLINT", "TINYINT"):
+        return str(int(clean))
 
     # Types flottants
-    if duck_type.upper() in ["FLOAT", "DOUBLE"]:
-        return str(float(value)) if value is not None else "NULL"
+    if base in ("FLOAT", "DOUBLE", "REAL"):
+        return str(float(clean))
 
-    # Par défaut, on échappe en string
-    escaped_value = str(value).replace("'", "''")
+    # Types temporels — CAST explicite : sans ambiguïté de coercition, robuste au
+    # double-quoting.
+    if base in _TEMPORAL_DUCK_TYPES:
+        escaped_value = str(clean).replace("'", "''")
+        return f"CAST('{escaped_value}' AS {duck_type})"
+
+    # Par défaut (DECIMAL, etc.) : littéral string échappé, DuckDB caste via le
+    # type de la colonne cible.
+    escaped_value = str(clean).replace("'", "''")
     return f"'{escaped_value}'"
 
 
