@@ -68,31 +68,10 @@ export const getTestsByModelName = async (modelName: string): Promise<TestSessio
 
 export const createModel = createAsyncThunk(
   'models/createModel',
-  async (model: Model, { rejectWithValue, dispatch }) => {
-    const url = `${import.meta.env.VITE_BACKEND_URL}/api/models`;
-    return apiRequest<Model>({
-      url,
-      method: 'POST',
-      body: { model },
-      defaultFailureMessage: 'Failed to add the model',
-      dispatch,
-      rejectWithValue,
-    });
-  }
-);
-export const updateModel = createAsyncThunk(
-  'models/addModel',
-  async (model: Model, { rejectWithValue, dispatch }) => {
-    const url = `${import.meta.env.VITE_BACKEND_URL}/api/models`;
-    return apiRequest<Model>({
-      url,
-      method: 'POST',
-      body: { model },
-      defaultFailureMessage: 'Failed to add the model',
-      dispatch,
-      rejectWithValue,
-    });
-  }
+  // Aucun endpoint POST /models côté backend : les modèles sont des fichiers .sql
+  // et la session est persistée par le graphe chatQuery (history_saver). On
+  // enregistre la session de façon optimiste (reducer .pending), sans appel réseau.
+  async (model: Model) => model
 );
 
 export const deleteModel = createAsyncThunk(

@@ -13,7 +13,7 @@ import {
 } from "../features/buildModel/buildModelSlice";
 import { formatMessage } from "../utils/messages";
 import { ChatQueryParams } from '../utils/types';
-import { updateModel } from "./models";
+import { updateModelName } from "../features/appBar/appBarSlice";
 import { apiRequest, streamThunk } from "./utils";
 
 const chatController = new AbortController();
@@ -179,12 +179,7 @@ export const chatQuery = createAsyncThunk(
               .toLowerCase()
               .replace(/[^\p{L}\p{N}]+/gu, '_');
             if (title) {
-              dispatch(updateModel({
-                name: title,
-                session_id: sessionId,
-                user_sub: user,
-                project_id: project,
-              }));
+              dispatch(updateModelName({ session_id: sessionId, name: title }));
             }
           }
           else if (pd.event === 'on_chat_model_stream') {
