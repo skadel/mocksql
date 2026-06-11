@@ -1,5 +1,5 @@
 import { PayloadAction, createSlice } from '@reduxjs/toolkit';
-import { updateModel, deleteModel, fetchModels, createModel } from '../../api/models';
+import { deleteModel, fetchModels, createModel } from '../../api/models';
 import { addProject, deleteProject, fetchProjects } from '../../api/projects';
 import { handleRejectedCaseAppBar } from '../../utils/errorCase';
 import { AppBarState, Model, Project } from '../../utils/types';
@@ -72,30 +72,6 @@ export const buildAppBarSlice = createSlice({
     },
     extraReducers: (builder) => {
         builder
-            .addCase(updateModel.pending, (state) => {
-                state.loadingAppBar = true;
-                state.error = null;
-            })
-            .addCase(updateModel.rejected, (state, action) => {
-                state.loadingAppBar = false;
-                state.error = action.payload as string;
-            })
-            .addCase(updateModel.fulfilled, (state, action) => {
-                state.loadingAppBar = false;
-                if (action.payload['existing']) {
-                    state.models = state.models.map((model) => {
-                        if (model.session_id === action.payload['session_id']) {
-                            return {
-                                ...model,
-                                name: action.payload['name']
-                            };
-                        }
-                        return model;
-                    });
-                } else {
-                    state.error = `The model ${action.payload['id']} does not exist`;
-                }
-            })
             .addCase(createModel.pending, (state, action) => {
               state.loadingAppBar = true;
               state.error = null;
