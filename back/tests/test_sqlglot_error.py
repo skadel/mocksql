@@ -1,6 +1,7 @@
 import sqlglot
+from sqlglot import expressions as exp
 
-from build_query.validator import optimize_query
+from build_query.validator import expand_positional_group_by, optimize_query
 
 # Schéma d’exemple
 TABLES = {"x": {"a": "STRING", "b": "STRING", "v": "INT"}}
@@ -152,3 +153,67 @@ class TestOptimizeQuery:
             "GROUP BY `x`.`a`"
         )
         assert "".join(res.split()) == "".join(expected.split())
+
+
+class TestExpandPositionalGroupBy:
+    """Filet de sécurité : si un GROUP BY positionnel survit à qualify (étoile non
+    expansée, repli sur SQL brut), on le binde aux colonnes du SELECT pour qu'un
+    élagage ultérieur ne crée pas un « GROUP BY out of range » sur DuckDB.
+    """
+
+    def test_ordinals_bound_to_columns(self):
+        sql = "SELECT a AS c1, b AS c2, v AS c3, COUNT(*) AS n FROM x GROUP BY 1, 2, 3"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        out = expand_positional_group_by(expr)
+        # Plus aucun littéral entier dans le GROUP BY : ils pointent vers des colonnes.
+        group = out.find(exp.Group)
+        assert not any(
+            isinstance(g, exp.Literal) and g.is_int for g in group.expressions
+        )
+        assert out.sql(dialect="bigquery") == (
+            "SELECT a AS c1, b AS c2, v AS c3, COUNT(*) AS n FROM x GROUP BY a, b, v"
+        )
+
+    def test_survives_projection_pruning_without_out_of_range(self):
+        """Cœur du bug : un ordinal qui pointe APRÈS une colonne ensuite élaguée.
+        Après expansion + suppression de la projection, le GROUP BY tient toujours
+        la bonne colonne (pas d'ordinal hors-plage).
+        """
+        sql = "SELECT a AS c1, b AS c2, v AS c3 FROM x GROUP BY 1, 3"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        expand_positional_group_by(expr)
+        # Simule l'élagage de la 2e projection (b) par pushdown_projections.
+        select = expr.find(exp.Select)
+        select.set("expressions", [select.expressions[0], select.expressions[2]])
+        rendered = expr.sql(dialect="bigquery")
+        assert rendered == "SELECT a AS c1, v AS c3 FROM x GROUP BY a, v"
+
+    def test_skips_select_star(self):
+        """Projection avec étoile non expansée → positions ambiguës, on ne touche pas."""
+        sql = "SELECT * FROM x GROUP BY 1, 2"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        out = expand_positional_group_by(expr)
+        assert out.sql(dialect="bigquery") == "SELECT * FROM x GROUP BY 1, 2"
+
+    def test_skips_group_by_all(self):
+        sql = "SELECT a, COUNT(*) FROM x GROUP BY ALL"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        out = expand_positional_group_by(expr)
+        assert "GROUP BY ALL" in out.sql(dialect="bigquery")
+
+    def test_constant_projection_ordinal_dropped(self):
+        """Grouper par une projection constante est un no-op : l'ordinal est retiré
+        plutôt que rendu en littéral (un `GROUP BY 5` littéral serait ré-interprété
+        comme ordinal par DuckDB)."""
+        sql = "SELECT 'X' AS k, a AS c, COUNT(*) AS n FROM x GROUP BY 1, 2"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        out = expand_positional_group_by(expr)
+        assert out.sql(dialect="bigquery") == (
+            "SELECT 'X' AS k, a AS c, COUNT(*) AS n FROM x GROUP BY a"
+        )
+
+    def test_out_of_range_ordinal_dropped(self):
+        sql = "SELECT a, b FROM x GROUP BY 1, 5"
+        expr = sqlglot.parse_one(sql, dialect="bigquery")
+        out = expand_positional_group_by(expr)
+        assert out.sql(dialect="bigquery") == "SELECT a, b FROM x GROUP BY a"

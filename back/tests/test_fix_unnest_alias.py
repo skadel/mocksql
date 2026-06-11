@@ -278,3 +278,56 @@ def test_alert_when_duckdb_error_message_format_changes(con):
             f"Message reçu : {error_msg!r}\n"
             f"Vérifier le regex dans _fix_bare_unnest_col_refs et mettre à jour si besoin."
         )
+
+
+def test_bare_unnest_fix_does_not_leak_alias_across_cte_scopes():
+    """Régression c2.sql : _fix_bare_unnest_col_refs ne doit PAS préfixer une colonne
+    avec l'alias UNNEST d'une AUTRE CTE.
+
+    CTE `prep` contient l'UNNEST `_t0(value)`. CTE `main` référence une colonne nue
+    `cd_evenement` (du fait d'une qualification incomplète en amont) dans son LEFT JOIN.
+    L'ancien code prenait le DERNIER alias UNNEST du tree (`_t0`) et l'injectait
+    partout → `_t0.value.cd_evenement` dans `main`, où `_t0` est hors scope →
+    DuckDB "Referenced table _t0 not found". Le fix scope-aware doit laisser
+    `main` intacte (aucun UNNEST local) et donc retourner None ici.
+    """
+    sql = """
+        WITH prep AS (
+          SELECT TRIM(_t0.value) AS code
+          FROM ref_table AS ref_table
+          CROSS JOIN UNNEST(STR_SPLIT(ref_table.raw, ',')) AS _t0(value)
+        ),
+        main AS (
+          SELECT r.id
+          FROM porteur AS r
+          JOIN prep AS p ON r.code_smp = p.code
+          LEFT JOIN evt AS e
+            ON cd_evenement IN ('A', 'B') AND e.bank = r.bank
+        )
+        SELECT * FROM main
+    """
+    error_msg = (
+        'Binder Error: Referenced column "cd_evenement" not found in FROM clause!'
+    )
+    patched = _fix_bare_unnest_col_refs(sql, error_msg)
+
+    # main n'a aucun UNNEST local → le fix ne doit rien toucher.
+    assert patched is None, f"Le fix a injecté un alias UNNEST hors scope :\n{patched}"
+
+
+def test_bare_unnest_fix_still_patches_within_same_scope():
+    """Le fix scope-aware doit TOUJOURS corriger une colonne nue qui est un champ
+    de struct de l'UNNEST défini dans le MÊME scope (cas GA nominal)."""
+    sql = """
+        SELECT productrevenue
+        FROM ds_ga
+        CROSS JOIN UNNEST(hits) AS _hits_u(hits)
+        CROSS JOIN UNNEST(_hits_u.hits.product) AS _product_u(product)
+    """
+    error_msg = (
+        'Binder Error: Referenced column "productrevenue" not found in FROM clause!'
+    )
+    patched = _fix_bare_unnest_col_refs(sql, error_msg)
+
+    assert patched is not None
+    assert "_product_u.product.productrevenue" in patched.lower()

@@ -750,6 +750,124 @@ async def _run_cte_step_trace(
     ]
 
 
+def _single_alias_of(expr: exp.Expression) -> Optional[str]:
+    """Alias (lowercase) qualifiant TOUTES les colonnes de *expr*, ou None."""
+    aliases = {(c.table or "").lower() for c in expr.find_all(exp.Column) if c.name}
+    aliases.discard("")
+    return next(iter(aliases)) if len(aliases) == 1 else None
+
+
+async def _run_join_predicate_breakdown(
+    ctes: list, failing_idx: int, suffix: str, project: str, dialect: str, con
+) -> list:
+    """Décomposition par prédicat des JOINs filtrants de la CTE bloquante.
+
+    L'étiquette cumulative ``+ JOIN (col IS NOT NULL)`` du step-trace peut désigner
+    la mauvaise colonne quand le ON porte plusieurs prédicats (incident 2026-06-11 :
+    l'agent a patché `cd_chef_file` alors que le prédicat bloquant était l'égalité
+    sur `code_produit_bpce_ps`). Ici chaque égalité du ON est évaluée
+    **indépendamment** sur les données réelles : ensembles DISTINCT des deux côtés
+    (requêtes DuckDB triviales) + nombre de valeurs communes, prédicat fautif marqué
+    ``← BLOQUANT``. Retourne une liste de lignes texte prêtes pour le diagnostic.
+    """
+    cte = ctes[failing_idx]
+    preceding = [c for c in ctes[:failing_idx] if c["name"] != "final_query"]
+    try:
+        tree = sqlglot.parse_one(cte["code"], read=dialect)
+    except Exception:
+        return []
+    if not isinstance(tree, exp.Select):
+        return []
+    from_expr = tree.args.get("from") or tree.args.get("from_")
+    joins = tree.args.get("joins") or []
+    if from_expr is None or not joins:
+        return []
+
+    from build_query.cte_graph import _forced_outer_aliases
+
+    try:
+        forced = _forced_outer_aliases(tree)
+    except Exception:
+        forced = set()
+
+    # alias (lowercase) → source SQL rendue avec son alias, prête pour un FROM
+    sources: Dict[str, str] = {}
+
+    def _register(src) -> None:
+        if src is None:
+            return
+        alias = (getattr(src, "alias", "") or "") or (getattr(src, "name", "") or "")
+        if alias:
+            sources[alias.lower()] = src.sql(dialect=dialect)
+
+    _register(from_expr.this)
+    for j in joins:
+        _register(j.this)
+
+    with_prefix = ""
+    if preceding:
+        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding]
+        with_prefix = "WITH " + ",\n".join(with_parts) + "\n"
+
+    async def _distinct_values(side_expr: exp.Expression, alias: str) -> list:
+        sql = (
+            f"{with_prefix}SELECT DISTINCT {side_expr.sql(dialect=dialect)} AS v "
+            f"FROM {sources[alias]} LIMIT 50"
+        )
+        df, _ = await run_query_on_test_dataset(sql, suffix, project, dialect, con)
+        return ["NULL" if v is None or v != v else str(v) for v in df.iloc[:, 0]]
+
+    def _fmt_set(vals: list) -> str:
+        shown = ", ".join(vals[:5])
+        more = f", … ({len(vals)} valeurs)" if len(vals) > 5 else ""
+        return "{" + shown + more + "}"
+
+    lines: list = []
+    for join in joins:
+        side = (join.args.get("side") or "").upper()
+        is_outer = side in {"LEFT", "RIGHT", "FULL"}
+        joined_alias = _joined_alias(join)
+        if is_outer and joined_alias not in forced:
+            continue  # join non filtrant : la non-correspondance est tolérée
+        on = join.args.get("on")
+        if on is None:
+            continue
+
+        pred_lines: list = []
+        for pred in _extract_conditions(on):
+            pred_sql = pred.sql(dialect=dialect)
+            decomposed = False
+            if isinstance(pred, exp.EQ):
+                lhs, rhs = pred.this, pred.args.get("expression")
+                la = _single_alias_of(lhs) if lhs is not None else None
+                ra = _single_alias_of(rhs) if rhs is not None else None
+                if la and ra and la != ra and la in sources and ra in sources:
+                    try:
+                        lvals = await _distinct_values(lhs, la)
+                        rvals = await _distinct_values(rhs, ra)
+                        common = (set(lvals) & set(rvals)) - {"NULL"}
+                        marker = " ← BLOQUANT" if not common else ""
+                        pred_lines.append(
+                            f"{pred_sql} → {len(common)} valeur(s) commune(s) — "
+                            f"gauche {_fmt_set(lvals)}, droite {_fmt_set(rvals)}{marker}"
+                        )
+                        decomposed = True
+                    except Exception as exc:
+                        logger.debug(
+                            "join breakdown failed for %s: %s — sql: %s",
+                            pred_sql,
+                            exc,
+                            cte["code"][:500],
+                        )
+            if not decomposed:
+                pred_lines.append(f"{pred_sql} → (prédicat non décomposé)")
+
+        if pred_lines:
+            lines.append(f"JOIN {joined_alias or '?'} — décomposition par prédicat :")
+            lines.extend(f"  {pl}" for pl in pred_lines)
+    return lines
+
+
 async def _run_cte_trace(
     ctes: list, suffix: str, project: str, dialect: str, con
 ) -> dict:
@@ -778,7 +896,17 @@ async def _run_cte_trace(
                     result["steps"] = steps
             trace[cte["name"]] = result
         except Exception as e:
-            trace[cte["name"]] = {"row_count": -1, "error": str(e)}
+            # Message DuckDB + SQL de l'étape : sans eux, impossible de distinguer
+            # un vrai problème (types, colonne absente) d'une simple conséquence du
+            # 0-ligne amont (règle projet : toujours logger la requête fautive).
+            logger.warning(
+                "[executor] CTE trace `%s` : %s — sql:\n%s", cte["name"], e, sql
+            )
+            trace[cte["name"]] = {
+                "row_count": -1,
+                "error": str(e),
+                "sql": cte["code"],
+            }
     return trace
 
 
@@ -897,6 +1025,27 @@ async def _run_single_test_case(
                 ctes, suffix, state["project"], dialect, con
             )
             failing_cte = _select_failing_cte(ctes, cte_trace, dialect)
+            # Décomposition par prédicat des JOINs de la CTE bloquante : nomme le
+            # prédicat fautif avec les valeurs des deux côtés (quelques requêtes
+            # DuckDB triviales), là où l'étiquette cumulative peut désigner la
+            # mauvaise colonne.
+            if failing_cte and cte_trace.get(failing_cte, {}).get("row_count") == 0:
+                failing_idx = next(
+                    (i for i, c in enumerate(ctes) if c["name"] == failing_cte), None
+                )
+                if failing_idx is not None:
+                    try:
+                        breakdown = await _run_join_predicate_breakdown(
+                            ctes, failing_idx, suffix, state["project"], dialect, con
+                        )
+                        if breakdown:
+                            cte_trace[failing_cte]["join_breakdown"] = breakdown
+                    except Exception as exc:
+                        logger.debug(
+                            "join predicate breakdown failed for %s: %s",
+                            failing_cte,
+                            exc,
+                        )
             return {
                 **base,
                 "status": "empty_results",

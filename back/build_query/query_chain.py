@@ -102,8 +102,28 @@ async def _bad_data_to_agent(state: QueryState):
 
     Sets ``auto_correct`` so the agent takes its auto-correction branch even if a
     stale ``input`` lingers in state. Does NOT decrement ``gen_retries`` — the agent
-    decrements it itself on the bad_data path (see conversational_agent)."""
-    return {"auto_correct": True}
+    decrements it itself on the bad_data path (see conversational_agent).
+
+    Also completes the ``outcome`` of the last ``correction_attempts`` entry from
+    the fresh diagnostic (one-line digest: blocking step), so the agent's next
+    round sees « tentative N → sans effet » instead of rediscovering the problem."""
+    update: dict = {"auto_correct": True}
+    attempts = list(state.get("correction_attempts") or [])
+    if attempts and attempts[-1].get("outcome") is None:
+        from build_query.examples_generator import _get_failing_cte_from_results
+
+        failing_cte, _trace = _get_failing_cte_from_results(state.get("messages", []))
+        digest = (
+            f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
+            if failing_cte
+            else "verdict toujours Insuffisant (bad_data)"
+        )
+        attempts[-1] = {
+            **attempts[-1],
+            "outcome": {"blocking_cte": failing_cte, "digest": digest},
+        }
+        update["correction_attempts"] = attempts
+    return update
 
 
 async def _bad_data_exhausted(state: QueryState):

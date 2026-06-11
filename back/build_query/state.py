@@ -96,3 +96,13 @@ class QueryState(TypedDict):
     reevaluation_context: Optional[
         str
     ]  # set by conversational_agent when it suspects the evaluation was wrong; triggers LLM re-eval in test_evaluator
+    correction_attempts: Optional[
+        list
+    ]  # bad_data loop ledger (state-level — distinct from the per-test
+    # `correction_attempts` used by assertion_corrector). One entry per round:
+    # {round, test_uid, ops: [{tool, table, row_index, field, value_json}…],
+    #  outcome: {blocking_cte, digest} | None}. Written by data_patcher/generator,
+    # outcome completed by bad_data_to_agent from the fresh diagnostic, rendered as
+    # an alternating AI/HUMAN conversation in conversational_agent, reset by
+    # history_saver (loop exit). Also feeds the anti-no-op guard (a batch identical
+    # to a past attempt is rejected without consuming a retry).
