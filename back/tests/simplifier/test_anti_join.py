@@ -367,3 +367,23 @@ class TestC1SqlAntiJoinPattern:
         assert ">= 100" not in conditions and "100" not in conditions, (
             f"Anti-join CTE condition 'amount >= 100' must not appear in hint: {conditions!r}"
         )
+
+
+# ── P3.1 — contrat `anti_joins` : clé toujours émise quand un hint existe ─────
+
+
+class TestAntiJoinsKeyContract:
+    """Le SYSTEM du générateur documente la clé `anti_joins` de <constraints> :
+    elle doit être émise systématiquement (liste vide incluse) dès qu'un hint
+    existe — une clé absente serait ambiguë (« pas d'anti-join » vs
+    « extraction incomplète »)."""
+
+    def test_key_present_and_empty_without_anti_join(self):
+        hint = build_conditions_hint(
+            "SELECT a FROM proj.ds.t AS t WHERE t.b = 'x'", dialect="bigquery"
+        )
+        assert hint  # un hint existe (conditions)
+        assert hint.get("anti_joins") == []
+
+    def test_unparseable_sql_still_returns_empty_dict(self):
+        assert build_conditions_hint("", dialect="bigquery") == {}

@@ -138,7 +138,9 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
             merged = _merge_profiles(_load_model_profile(), incoming)
             _save_model_profile(merged)
 
-    return {"save": "success"}
+    # Sortie de la boucle bad_data (succès, retries épuisés, ou run sans boucle) :
+    # le ledger des tentatives ne doit pas fuiter sur le tour suivant.
+    return {"save": "success", "correction_attempts": []}
 
 
 def get_history_from_state(

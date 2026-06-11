@@ -22,6 +22,45 @@ import utils.logger  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# Champs d'args conservés dans le ledger des tentatives (le reste — test_index
+# notamment — est un détail de résolution interne, pas une donnée de l'op).
+_LEDGER_OP_FIELDS = (
+    "table",
+    "row_index",
+    "field",
+    "value_json",
+    "tables",
+    "instruction",
+)
+
+
+def append_correction_attempt(state: QueryState, test_uid, ops: list) -> list:
+    """Retourne le ledger ``correction_attempts`` augmenté d'une entrée pour ce lot.
+
+    ``ops`` : liste ``[{tool, args}]`` (format ``agent_tool_args["calls"]``) ou
+    ``[{"tool": "regen"}]`` pour une régénération complète. L'``outcome`` est
+    laissé à None — complété par ``bad_data_to_agent`` quand la boucle re-rentre.
+    """
+    attempts = list(state.get("correction_attempts") or [])
+    flat_ops = []
+    for op in ops:
+        args = op.get("args") or {}
+        flat_ops.append(
+            {
+                "tool": op.get("tool", "?"),
+                **{k: args[k] for k in _LEDGER_OP_FIELDS if k in args},
+            }
+        )
+    attempts.append(
+        {
+            "round": len(attempts) + 1,
+            "test_uid": test_uid,
+            "ops": flat_ops,
+            "outcome": None,
+        }
+    )
+    return attempts
+
 
 async def apply_single_patch(
     state: QueryState, test_case: dict, data: dict, tool_name: str, args: dict
@@ -37,7 +76,26 @@ async def apply_single_patch(
             value = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             value = raw
-        if table in data and row_idx < len(data[table]):
+        if table not in data or row_idx >= len(data[table]):
+            logger.warning(
+                "[data_patcher] patch_test_field test=%s: cible %s[%d] introuvable — patch ignoré",
+                test_index,
+                table,
+                row_idx,
+            )
+        elif field not in data[table][row_idx]:
+            # Ne jamais créer un champ fantôme absent de la ligne : il corromprait
+            # les données du test (colonne inexistante dans le schéma réel). L'agent
+            # est censé avoir été renvoyé en amont (_validate_data_patch_calls).
+            logger.warning(
+                "[data_patcher] patch_test_field test=%s: champ '%s' absent de %s[%d] — patch ignoré (champs: %s)",
+                test_index,
+                field,
+                table,
+                row_idx,
+                sorted(data[table][row_idx]),
+            )
+        else:
             data[table][row_idx][field] = value
             logger.diag(
                 "[data_patcher] patch_test_field test=%s %s[%d].%s = %r",
@@ -54,6 +112,13 @@ async def apply_single_patch(
             data[table].pop(row_idx)
             logger.diag(
                 "[data_patcher] remove_test_row test=%s %s[%d] supprimé",
+                test_index,
+                table,
+                row_idx,
+            )
+        else:
+            logger.warning(
+                "[data_patcher] remove_test_row test=%s: cible %s[%d] introuvable — suppression ignorée",
                 test_index,
                 table,
                 row_idx,
@@ -148,10 +213,19 @@ async def data_patcher_node(state: QueryState):
                 "request_id": state.get("request_id"),
             },
         )
-        return {
+        update = {
             "examples": [msg],
             "test_index": int(test_index) if str(test_index).isdigit() else None,
         }
+        # Ledger de la boucle bad_data : mémorise les ops du lot pour que le round
+        # suivant les voie (l'outcome est complété par bad_data_to_agent si la
+        # boucle re-rentre). Sans lui, le round 2 ne sait pas que le round 1 a
+        # déjà patché telle colonne sans effet et peut répéter/défaire le patch.
+        if state.get("evaluation_feedback") == "bad_data":
+            update["correction_attempts"] = append_correction_attempt(
+                state, test_case.get("test_uid"), ops
+            )
+        return update
 
     # Comportement existant — opération chirurgicale unique
     test_index = args.get("test_index")

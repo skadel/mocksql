@@ -460,7 +460,12 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
     for cte_name, info in cte_trace.items():
         row_count = info.get("row_count", -1)
         if row_count == -1:
-            lines.append(f"- `{cte_name}` : erreur d'exécution")
+            err = info.get("error", "")
+            err_txt = f" — {err}" if err else ""
+            lines.append(f"- `{cte_name}` : erreur d'exécution{err_txt}")
+            step_sql = info.get("sql", "")
+            if step_sql:
+                lines.append(f"  - SQL de l'étape : `{step_sql[:400]}`")
             continue
         # Une CTE vide n'est « bloquante » que si elle est atteignable depuis le
         # résultat final par des arêtes requises (cf. _select_failing_cte /
@@ -495,6 +500,13 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
                     lines.append(
                         f"  - {step.get('label', '?')} → {cnt} ligne(s){zero_marker}"
                     )
+        # Décomposition par prédicat des JOINs (étiquette cumulative pas fiable
+        # quand le ON porte plusieurs prédicats) : nomme le prédicat fautif avec
+        # les ensembles de valeurs des deux côtés.
+        join_breakdown = info.get("join_breakdown")
+        if join_breakdown and is_blocking:
+            for bl in join_breakdown:
+                lines.append(f"  - {bl}")
     lines.append(
         f"\nLa CTE `{failing_cte}` produit 0 ligne, bloquée à l'étape ci-dessus. "
         "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), génère "
@@ -692,6 +704,16 @@ async def generate_examples(state: QueryState):
             )
         ]
     }
+
+    # Boucle bad_data : consigne la régénération complète dans le ledger des
+    # tentatives, au même titre qu'un lot de patches (le round suivant doit savoir
+    # qu'un regen a déjà été tenté sans effet).
+    if state.get("evaluation_feedback") == "bad_data":
+        from build_query.data_patcher import append_correction_attempt
+
+        result["correction_attempts"] = append_correction_attempt(
+            state, state.get("test_uid"), [{"tool": "regen"}]
+        )
 
     # Emit the "query understanding" card on the very first generation only.
     # Skip retries (which re-enter this node with status == "empty_results") AND
@@ -945,6 +967,16 @@ async def generate_examples_(
     with timed("gen:prompt_build"):
         eval_history = _build_eval_messages(state, existing_tests)
 
+        # Recettes de jointure pré-calculées (clés dérivées) : inversion CASE,
+        # vérification forward DuckDB, format CAST. Mises en cache par (sql, dialect).
+        from build_query.join_recipes import build_join_recipes_block
+
+        join_recipes_block = build_join_recipes_block(
+            optimized_sql, dialect=dialect, schema=schema
+        )
+        if join_recipes_block:
+            logger.debug("[generator] join_recipes_block:\n%s", join_recipes_block)
+
         prompt = await create_appropriate_prompt(
             state,
             existing_tests,
@@ -955,6 +987,7 @@ async def generate_examples_(
             excluded_columns=excluded_col_names,
             eval_history=eval_history,
             native_thinking=native_thinking,
+            join_recipes_block=join_recipes_block,
         )
     if prompt is None:
         return None, None
@@ -1094,13 +1127,15 @@ def get_generation_output_type(
             str,
             Field(
                 description=(
-                    "Phrase courte (max 20 mots) destinée à un responsable métier non-développeur, "
-                    "décrivant le comportement fonctionnel vérifié par ce test. "
-                    "Commence obligatoirement par un verbe d'assertion : 'Vérifie que…', 'S'assure que…', 'Contrôle que…'. "
+                    "Description métier contextualisée au format "
+                    '"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] '
+                    '[condition] → [résultat attendu]". Destinée à un responsable métier non-développeur. '
+                    "Nommer la branche choisie quand le SQL a des alternatives (OR, CASE, UNION). "
                     "✓ Bons exemples : "
-                    "'Vérifie que le chiffre d'affaires est nul quand aucune commande n'est passée.' "
-                    "'S'assure qu'un client sans adresse n'apparaît pas dans les résultats.' "
-                    "✗ À proscrire absolument — noms de colonnes SQL, noms de CTEs, syntaxe SQL : "
+                    "'Pour un client sans commande sur janvier → son chiffre d'affaires est nul.' "
+                    "'Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse.' "
+                    "✗ À proscrire absolument — noms de colonnes SQL, noms de CTEs, syntaxe SQL, "
+                    "formulation générique type 'Vérifie que le calcul est correct' : "
                     "'Vérifie que price > 0 dans la CTE orders_filtered.' "
                     "'S'assure que le LEFT JOIN sur user_id retourne NULL.'"
                 )
@@ -1130,6 +1165,7 @@ async def create_appropriate_prompt(
     excluded_columns: list[str] | None = None,
     eval_history: list | None = None,
     native_thinking: bool = False,
+    join_recipes_block: str = "",
 ):
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
@@ -1148,6 +1184,7 @@ async def create_appropriate_prompt(
             model_context=model_context,
             eval_history=eval_history,
             native_thinking=native_thinking,
+            join_recipes_block=join_recipes_block,
         )
     elif state.get("input", "").strip():
         if state.get("test_uid") or state.get("test_index") is not None:
@@ -1193,6 +1230,7 @@ async def create_appropriate_prompt(
             model_context=model_context,
             eval_history=eval_history,
             native_thinking=native_thinking,
+            join_recipes_block=join_recipes_block,
         )
     elif state.get("status") == "empty_results":
         failing_cte, cte_trace = _get_failing_cte_from_results(
@@ -1213,6 +1251,7 @@ async def create_appropriate_prompt(
             trace_hint=trace_hint,
             eval_history=eval_history,
             native_thinking=native_thinking,
+            join_recipes_block=join_recipes_block,
         )
     else:
         return None
@@ -1230,7 +1269,10 @@ def _all_refs_resolved(sim_result, base_tables: set[str]) -> bool:
         + list(sim_result.derived_columns.keys())
         + [ref for eq_class in sim_result.equivalence_classes for ref in eq_class]
     )
-    return all(ref.table.lower() in base_tables for ref in all_refs)
+    # is_identity=False refs are DELIBERATELY CTE-qualified (predicate on a derived
+    # column, never remapped to its base column) — not a silent fallback. Their base
+    # source columns are excluded from Faker via FilterConstraint.source_columns.
+    return all(ref.table.lower() in base_tables for ref in all_refs if ref.is_identity)
 
 
 def _compute_faker_columns(
@@ -1253,6 +1295,12 @@ def _compute_faker_columns(
     for eq_class in sim_result.equivalence_classes:
         for ref in eq_class:
             constrained.add((ref.table.lower(), ref.column.lower()))
+    # Base columns feeding a constraint kept in CTE form (is_identity=False):
+    # the constraint key doesn't name them, but Faker must not fill them blindly —
+    # the LLM has to pick their values so the derived expression satisfies the filter.
+    for f in sim_result.filters:
+        for src in f.source_columns:
+            constrained.add((src.table.lower(), src.column.lower()))
 
     # GROUP BY columns need repeated values across rows — Faker would assign unique values
     # per row, destroying the aggregation structure (STDDEV=0, wrong counts, etc.).

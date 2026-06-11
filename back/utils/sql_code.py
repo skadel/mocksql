@@ -343,17 +343,73 @@ def safe_process_sql(content, dialect, remove_db=False):
         return content
 
 
-def get_all_columns_with_sources(sql_expression: sg.exp.Expression) -> list[dict]:
-    """Retourne pour chaque table source les colonnes réellement référencées dans l'AST qualifié."""
+def get_all_columns_with_sources(
+    sql_expression: sg.exp.Expression,
+    schema_mapping: dict | None = None,
+) -> list[dict]:
+    """Retourne pour chaque table source les colonnes réellement référencées dans l'AST qualifié.
+
+    ``schema_mapping`` (``{"dataset.table": {col: type, ...}}``, ou clé courte
+    ``table``) sert à rattacher les colonnes **non qualifiées** : sur des CTEs
+    complexes, ``qualify_columns`` laisse parfois une colonne de table de base
+    sans préfixe (il n'ose pas deviner la table). Sans cette résolution, la
+    colonne disparaît de ``used_columns`` → la table de test est créée sans elle
+    → DuckDB "column not found". On l'attribue alors à toute table de base du
+    scope dont le schéma déclare ce nom : la sur-inclusion est sûre (une colonne
+    générée en trop ne casse jamais l'exécution), l'omission ne l'est pas.
+    """
     col_with_sources: dict[tuple, dict] = {}
 
+    # Index case-insensitive des colonnes connues par table, pour la résolution
+    # des colonnes nues uniquement.
+    schema_index: dict[str, set[str]] = {}
+    if schema_mapping:
+        for table_key, cols in schema_mapping.items():
+            schema_index[table_key.lower()] = {str(c).lower() for c in cols}
+
+    def _record(project_text, database_text, table_name_text, alias_text, col_name):
+        key = (project_text, database_text, table_name_text)
+        if key not in col_with_sources:
+            col_with_sources[key] = {
+                "project": project_text,
+                "database": database_text,
+                "table": table_name_text,
+                "alias": alias_text,
+                "used_columns": set(),
+            }
+        col_with_sources[key]["used_columns"].add(col_name.lower())
+
+    def _base_tables(scope):
+        """Tables de base (exp.Table) du scope, avec leurs colonnes de schéma."""
+        out = []
+        for alias_key, source in scope.sources.items():
+            if not isinstance(source, exp.Table):
+                continue
+            table_token = source.this
+            table_name_text = table_token.this if table_token else alias_key
+            alias = source.args.get("alias")
+            alias_text = alias.text("this") if alias else table_name_text
+            project_text = source.catalog
+            database_text = source.db
+            cols: set[str] = set()
+            if schema_index:
+                qualified = (
+                    f"{database_text}.{table_name_text}".lower()
+                    if database_text
+                    else table_name_text.lower()
+                )
+                cols = (
+                    schema_index.get(qualified)
+                    or schema_index.get(table_name_text.lower())
+                    or set()
+                )
+            out.append((project_text, database_text, table_name_text, alias_text, cols))
+        return out
+
     def _extract(scope) -> None:
+        base_tables = None  # résolu paresseusement, seulement si besoin
         for column in scope.columns:
             table_alias = column.table
-            project_text = None
-            database_text = None
-            table_name_text = None
-            alias_text = None
 
             if table_alias in scope.sources:
                 source = scope.sources[table_alias]
@@ -369,23 +425,43 @@ def get_all_columns_with_sources(sql_expression: sg.exp.Expression) -> list[dict
                 else:
                     table_name_text = table_alias
                     alias_text = table_alias
+                    project_text = None
+                    database_text = None
+                if not table_name_text:
+                    continue
+                _record(
+                    project_text,
+                    database_text,
+                    table_name_text,
+                    alias_text,
+                    column.name,
+                )
+            elif not table_alias and schema_index:
+                # Colonne nue : qualify_columns n'a pas su la rattacher. On
+                # l'attribue à chaque table de base du scope qui la déclare.
+                if base_tables is None:
+                    base_tables = _base_tables(scope)
+                cname = column.name.lower()
+                for (
+                    project_text,
+                    database_text,
+                    table_name_text,
+                    alias_text,
+                    cols,
+                ) in base_tables:
+                    if cname in cols:
+                        _record(
+                            project_text,
+                            database_text,
+                            table_name_text,
+                            alias_text,
+                            column.name,
+                        )
             else:
-                table_name_text = table_alias
-                alias_text = table_alias
-
-            if not table_name_text:
-                continue
-
-            key = (project_text, database_text, table_name_text)
-            if key not in col_with_sources:
-                col_with_sources[key] = {
-                    "project": project_text,
-                    "database": database_text,
-                    "table": table_name_text,
-                    "alias": alias_text,
-                    "used_columns": set(),
-                }
-            col_with_sources[key]["used_columns"].add(column.name.lower())
+                # table_alias présent mais hors sources (ex. réf. corrélée externe)
+                if not table_alias:
+                    continue
+                _record(None, None, table_alias, table_alias, column.name)
 
     global_columns: set[str] = set()
     for col in sql_expression.find_all(exp.Column):
@@ -437,7 +513,7 @@ def extract_used_columns_from_sql(
     parsed = qualify_columns(parsed, schema, infer_schema=True)
 
     result = []
-    for entry in get_all_columns_with_sources(parsed):
+    for entry in get_all_columns_with_sources(parsed, schema_mapping=mapping):
         if not entry.get("database"):
             continue  # CTE ou ref non résolue
         result.append(

@@ -437,6 +437,7 @@ def generate_data_prompt(
     trace_hint: str = "",
     eval_history: list | None = None,
     native_thinking: bool = False,
+    join_recipes_block: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
@@ -502,8 +503,10 @@ def generate_data_prompt(
         # Le modèle raisonne nativement en amont : le champ ne porte qu'une
         # justification brève (1 phrase) → JSON court, pas de troncature.
         reasoning_bullet = (
-            "- `unit_test_build_reasoning`: **1 phrase maximum.** Justification courte : "
-            "quelle clause structurelle du SQL est ciblée et pourquoi les données la satisfont."
+            "- `unit_test_build_reasoning` (**en premier**): **1 phrase maximum.** Citez la clause "
+            "éliminatoire qui aurait pu vider le résultat (JOIN sur clé dérivée, borne de date, "
+            "anti-jointure) et comment vos données la franchissent. Le raisonnement détaillé se fait "
+            "dans votre canal de réflexion, pas dans le JSON."
         )
     else:
         reasoning_bullet = (
@@ -515,47 +518,40 @@ def generate_data_prompt(
 
     system_message_content = (
         """
-Vous êtes un data QA, testeur de requêtes SQL et expert en génération de données de test JSON.
-À partir du schéma des tables sources et de la requête SQL fournis, générez un unique test unitaire au format JSON.
+Vous êtes un data QA, expert en test de requêtes SQL et en génération de données de test JSON.
+À partir du schéma des tables sources et de la requête SQL fournis, générez UN seul test unitaire au format JSON.
 
 La conversation contient ces sections, délimitées par des balises. Le schéma, la requête et les contraintes sont fournis **en premier** (ils s'appliquent à tout l'échange, y compris aux exemples) ; la tâche à produire arrive **en dernier message** :
 - `<schema>` : les tables sources à peupler, leurs colonnes, et le profil statistique éventuel.
 - `<business_context>` : contexte métier du projet (optionnel).
-- `<query>` : la requête SQL à tester.
-- `<constraints>` : contraintes extraites du SQL — `conditions` (à rendre VRAIES), `anti_joins` (à rendre FAUSSES : générer des données qui NE matchent PAS la table anti-jointe), `format_constraints`, `lineages`.
+- `<query>` : la requête SQL à tester — **elle fait toujours autorité**.
+- `<constraints>` : aides extraites du SQL — `conditions` (à rendre VRAIES), `anti_joins` (à rendre FAUSSES : générer des données qui NE matchent PAS la table anti-jointe), `format_constraints`, `lineages`. ⚠️ Ces extractions peuvent être incomplètes ou bruitées : en cas de doute, raisonnez directement sur `<query>` et ignorez toute contrainte tautologique (`X = X`) ou manifestement absurde.
 - `<diagnostic>` : diagnostic de la tentative précédente, s'il y a lieu (optionnel).
 - `<task>` : ce que vous devez produire.
+
+**Objectif** : produire des données qui parcourent réellement la LOGIQUE MÉTIER de la requête (filtres, jointures, conditions temporelles, déduplication) et qui survivent jusqu'au SELECT final (sauf si l'instruction utilisateur demande explicitement un résultat vide).
 
 **Consignes principales :**
 """
         + consignes_1_2
         + """
-3. **Contrôle strict des types et fonctions** :
-   - Si une colonne est convertie (`CAST`, `SAFE_CAST`) en entier, la valeur d'origine doit être
-     un format numérique (p.ex. "123" ou "00123" acceptables, mais pas "ABC").
-   - Si une fonction de date (`PARSE_DATE`, `SAFE.PARSE_DATE`, etc.) est utilisée, la chaîne
-     d'entrée doit respecter exactement le format attendu.
-   - Si un JOIN est fait sur un champ de type entier, assurez-vous que les valeurs correspondent
-     dans les deux tables.
-4. **Respect strict de la casse (majuscules/minuscules)** :
-   - Le nom des tables dans la clé `data` doit **strictement** refléter la casse attendue.
-
-5. **Aucune valeur NULL ou vide** dans les colonnes générées : fournissez des données
-   complètes sur chaque colonne utilisée.
-
-6. **Format obligatoire des clés de tables dans `data`** : chaque clé doit être
-   `{dataset}_{table}` (les deux derniers segments du nom qualifié, joints par `_`).
-   Exemple : pour `bigquery-public-data.covid19_open_data.covid19_open_data`,
-   la clé doit être `covid19_open_data_covid19_open_data` — jamais `covid19_open_data` seul.
-
-7. **Ne pas inclure la requête SQL** dans le résultat.
-8. **Un seul test** dans la clé `unit_tests`.
-9. **Conditions OR / groupes de contraintes multiples** : quand le SQL contient plusieurs branches alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** par test et construire des données qui satisfont uniquement cette branche. Ne pas essayer de couvrir plusieurs alternatives à la fois. La description doit nommer explicitement la branche choisie (ex. "Pour un utilisateur premium …" plutôt que "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les autres branches alimentent les suggestions.
-10. **Heuristiques Métier Obligatoires** :
-    - **Règle Agrégation** : Si le SQL contient COUNT()/AVG()/STDDEV()/CORR() ou d'autres agrégats GROUP BY, générez plusieurs lignes qui partagent la **même valeur de clé GROUP BY** pour que COUNT > 1 par groupe. Exemple : si GROUP BY date, insérez 3 lignes avec `date = '2024-01-01'` et 2 lignes avec `date = '2024-01-02'` — NE PAS générer une date différente pour chaque ligne, ce qui donnerait COUNT=1 partout et STDDEV=0. Si la requête utilise ORDER BY + OFFSET sur le résultat agrégé, assurez-vous que les COUNT sont tous différents pour que l'OFFSET retourne toujours la même ligne (ex: counts = 3, 2, 1 — pas 3, 1, 1, 1 qui créent un ex æquo).
-    - **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles. Si l'agrégat porte sur une jointure, gardez la clé **unique côté table de dimension** (au plus une ligne par valeur de clé) pour éviter qu'un many-to-many involontaire ne multiplie les lignes et ne fausse l'agrégat.
-    - **Règle Cohérence inter-tables** : les valeurs partagées entre tables — clés de jointure, mais aussi les littéraux des filtres (année, dates, statuts, devises) — doivent être **cohérentes dans toutes les tables**. Si la requête filtre sur 2017, ne mettez aucune donnée 2016 ; si une dimension référence un pays, ses mesures (population, montants) doivent être plausibles pour ce pays. Une valeur cohérente sur une table mais incohérente avec les autres rend le test invalide.
-    - **Règle Cas Limites** : Ne testez qu'une seule branche OR ou CASE WHEN à la fois.
+3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions.
+4. **Clés de jointure DÉRIVÉES (le point le plus important)** : quand une clé de JOIN est le produit d'un `CASE` / `CAST` / `SAFE_CAST` / `SUBSTR` / `SPLIT` / `REGEXP`, générez la valeur SOURCE qui, APRÈS transformation, égale la clé de l'autre côté — **pas** la valeur finale.
+   - `JOIN ON a.k = CASE WHEN t.reseau='BP' THEN '1' END` et `a.k` vient de `t2` → mettez `t2.k = '1'`.
+   - `SUBSTR(col, 2, LEN(col)-2)` puis `SPLIT ','` : la colonne SOURCE doit inclure les caractères de bord qui seront retirés (ex. `"'PROD1'"` → après SUBSTR/TRIM → `PROD1`), pas `PROD1` brut.
+   - `SAFE_CAST(x AS INT64)` utilisé en clé : `x` doit être numérique des deux côtés et égal.
+5. **Contrôle strict des types et fonctions** :
+   - colonne convertie (`CAST`, `SAFE_CAST`) en entier → valeur d'origine au format numérique ("123", "00123" acceptables, pas "ABC").
+   - fonction de date (`PARSE_DATE`, `SAFE.PARSE_DATE`, …) → la chaîne d'entrée respecte exactement le format attendu.
+   - JOIN sur un champ entier → les valeurs correspondent dans les deux tables.
+6. **Conditions temporelles** : décodez les bornes de chaque filtre de date AVANT de générer. Les bornes viennent des **littéraux du SQL, jamais de la date courante**. Si une CTE exige `dt_deb < D1 AND dt_fin >= D2` et qu'une autre caractérise la branche par l'inverse (présent en M, absent en M-1), placez les dates dans l'intervalle qui satisfait UNIQUEMENT la branche visée. Méfiez-vous des sentinelles (`'0001-01-01'`, `'9999-12-31'`).
+7. **Cohérence inter-tables** : les valeurs partagées entre tables — clés de jointure ET littéraux des filtres (année, dates, statuts, devises) — doivent être **cohérentes dans TOUTES les tables**. Si la requête filtre 2017, aucune donnée 2016. Une valeur cohérente sur une table mais incohérente avec les autres rend le test invalide.
+8. **Agrégats** : si le SQL contient `GROUP BY` + `COUNT`/`SUM`/`AVG`/`STDDEV`/`CORR`, mettez plusieurs lignes partageant la **même clé de groupe** (sinon COUNT=1, STDDEV=0). Ex. : GROUP BY date → 3 lignes `date='2024-01-01'` et 2 lignes `date='2024-01-02'`, pas une date par ligne. Gardez la clé **unique côté table de dimension** pour éviter un fan-out many-to-many qui fausse l'agrégat. Si `ORDER BY` + `OFFSET` sur l'agrégat, des COUNT tous distincts (3, 2, 1 — pas 3, 1, 1, 1 qui créent un ex æquo) pour un OFFSET déterministe.
+9. **LEFT JOIN** : le prédicat ON n'a PAS à matcher pour qu'une ligne survive — une table en LEFT JOIN peut rester vide si le scénario ne la requiert pas. Les INNER JOIN, eux, exigent des clés correspondantes et non nulles.
+10. **Anti-jointures / `NOT IN` / `NOT EXISTS`** : générez des données qui NE matchent PAS la table anti-jointe (sinon la ligne est supprimée).
+11. **NULL** : pas de valeur NULL/vide GRATUITE. Exception explicite : si la logique testée DÉPEND d'un NULL (ex. `LEFT JOIN … WHERE x IS NULL`, `segment IS NULL`), produisez ce NULL — c'est le test.
+12. **Respect strict de la casse** : les clés de `data` reprennent EXACTEMENT les clés de `<schema>`, au format `{dataset}_{table}` (les deux derniers segments du nom qualifié, joints par `_`). Ex. : `bigquery-public-data.covid19_open_data.covid19_open_data` → `covid19_open_data_covid19_open_data`, jamais `covid19_open_data` seul.
+13. **Un seul test**, et **ne pas inclure la requête SQL** dans le résultat.
 
 **Ce que cet outil NE doit PAS tester** (laisser au moteur de warehouse) :
 - Les expressions constantes dans le SELECT final (ex. `SELECT 'valeur_fixe' AS col`) : résultat trivial, aucune logique métier à valider.
@@ -564,11 +560,12 @@ La conversation contient ces sections, délimitées par des balises. Le schéma,
 - Les règles de calcul que toute implémentation SQL correcte produirait identiquement.
 Privilégier des scénarios où **la logique métier** — les filtres, jointures, conditions temporelles, règles de déduplication — est réellement testée.
 
-**Format de sortie obligatoire** : un objet JSON unique.
+**Format de sortie obligatoire** : un objet JSON unique, champs dans l'ordre du schéma (reasoning d'abord).
 """
         + reasoning_bullet
         + """
-- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes] [condition/situation] → [résultat attendu]"*. Le sujet doit mentionner des valeurs concrètes (IDs, dates, montants, statuts). Exemple : "Pour un client ayant 3 ouvertures en sept. 2025 puis toutes fermées, qui réouvre en octobre → il est compté comme nouveau PDV sur le mois d'analyse". Éviter les formulations génériques comme "Vérifie que le calcul est correct".
+- `test_name`: 3-6 mots, lecteur métier, sans jargon SQL ni noms techniques (ex. "Ouverture nouveau client janvier"). Pas de noms de CTE/colonnes.
+- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] [condition/situation] → [résultat attendu]"*. Nommer la branche choisie quand le SQL a des alternatives. Exemple : "Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse". Interdits : noms de colonnes/CTE, syntaxe SQL, formulations génériques type "Vérifie que le calcul est correct".
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
 
@@ -622,7 +619,8 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
     query_section = f"<query>\n```sql\n{sql}\n```\n</query>\n" if sql else ""
 
     constraints_inner = (
-        f"{constraints_block}{unnest_block}{volume_hints_block}{fanout_hint_block}"
+        f"{constraints_block}{join_recipes_block}"
+        f"{unnest_block}{volume_hints_block}{fanout_hint_block}"
     )
     constraints_section = (
         f"<constraints>\n{constraints_inner}</constraints>\n"
@@ -639,7 +637,7 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
     task_section = f"""<task>
 Génère un test unitaire conforme aux consignes du message système, avec :
 - Un seul test
-- Résultat JSON uniquement (champs dans l'ordre : unit_test_description, unit_test_build_reasoning, tags, data)
+- Résultat JSON uniquement (champs dans l'ordre du schéma : `unit_test_build_reasoning` d'abord, puis `test_name`, `unit_test_description`, `tags`, `data`)
 - `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
 - `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
 - Pas de requête SQL source dans la sortie

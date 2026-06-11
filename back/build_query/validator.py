@@ -332,7 +332,9 @@ async def optimize_and_extract_info(parsed: E, tables, dialect, optimize=False):
 
 
 async def get_source_columns(optimized, tables):
-    all_columns_with_sources = get_all_columns_with_sources(optimized)
+    all_columns_with_sources = get_all_columns_with_sources(
+        optimized, schema_mapping=tables
+    )
 
     used_columns = []
     for entry in all_columns_with_sources:
@@ -430,6 +432,84 @@ def prune_constant_group_by(expr: exp.Expression) -> exp.Expression:
     return expr
 
 
+def expand_positional_group_by(expr: exp.Expression) -> exp.Expression:
+    """Réécrit les références ordinales du GROUP BY (`GROUP BY 1, 2`) en copies des
+    expressions du SELECT correspondantes, afin qu'aucun élagage de projection en
+    aval ne puisse laisser un ordinal hors-plage — DuckDB lèverait alors
+    « Binder Error: GROUP BY term out of range ».
+
+    Normalement ``qualify_columns`` fait déjà cette expansion ; cette passe est un
+    filet de sécurité pour les chemins où le positionnel survit (qualify partiel,
+    repli sur le SQL brut quand l'optimisation lève). À exécuter **avant** tout
+    pruning (pushdown_projections).
+
+    Garde-fous :
+      - on ignore les SELECT dont la projection contient encore une étoile non
+        expansée (les positions y sont ambiguës) ;
+      - on ignore GROUP BY ALL / ROLLUP / CUBE / GROUPING SETS ;
+      - une projection purement constante (sans colonne) est un no-op de groupage :
+        on retire l'ordinal plutôt que d'émettre un littéral (un `GROUP BY 5`
+        littéral serait ré-interprété comme ordinal par DuckDB) ;
+      - un ordinal déjà hors-plage (corrompu en amont) est retiré avec un warning.
+    """
+    for select in expr.find_all(exp.Select):
+        group = select.args.get("group")
+        if not group:
+            continue
+        if (
+            group.args.get("all")
+            or group.args.get("rollup")
+            or group.args.get("cube")
+            or group.args.get("grouping_sets")
+        ):
+            continue
+
+        projections = select.expressions
+
+        # On ignore les SELECT contenant une étoile de projection NON expansée
+        # (`SELECT *`, `t.*`) : les positions y sont ambiguës. Attention : une étoile
+        # imbriquée dans un agrégat (`COUNT(*)`) n'est PAS une projection-étoile.
+        def _is_star_projection(p: exp.Expression) -> bool:
+            node = p.this if isinstance(p, exp.Alias) else p
+            return isinstance(node, exp.Star) or (
+                isinstance(node, exp.Column) and isinstance(node.this, exp.Star)
+            )
+
+        if any(_is_star_projection(p) for p in projections):
+            continue
+
+        new_group: list[exp.Expression] = []
+        changed = False
+        for g in group.expressions:
+            if isinstance(g, exp.Literal) and g.is_int:
+                pos = int(g.this)
+                if not (1 <= pos <= len(projections)):
+                    logger.warning(
+                        "expand_positional_group_by: ordinal %s hors-plage (1..%s), retiré.",
+                        pos,
+                        len(projections),
+                    )
+                    changed = True
+                    continue
+                proj = projections[pos - 1]
+                target = proj.this if isinstance(proj, exp.Alias) else proj
+                changed = True
+                if target.find(exp.Column) is None:
+                    # projection constante → groupage sans effet, on retire l'ordinal
+                    continue
+                new_group.append(target.copy())
+            else:
+                new_group.append(g)
+
+        if changed:
+            if new_group:
+                select.set("group", exp.Group(expressions=new_group))
+            else:
+                select.set("group", None)
+
+    return expr
+
+
 def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
     from sqlglot.optimizer.qualify_columns import qualify_columns
@@ -446,6 +526,7 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     if optimize:
         try:
             pre_optimize = prune_constant_group_by(parsed)
+            pre_optimize = expand_positional_group_by(pre_optimize)
         except Exception:
             pre_optimize = parsed
         try:
@@ -489,6 +570,10 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     passes = [
         ("_fix_unnest_alias_conflicts", _fix_unnest_alias_conflicts),
         ("_fix_unnest_scope_leak", _fix_unnest_scope_leak),
+        # Filet de sécurité AVANT pushdown : si qualify a laissé des ordinaux dans le
+        # GROUP BY (étoile non expansée…), on les binde aux expressions du SELECT pour
+        # que l'élagage de projection ne crée pas un « GROUP BY out of range ».
+        ("expand_positional_group_by", expand_positional_group_by),
         (
             "pushdown_projections",
             lambda e: pushdown_projections(e, schema, dialect=dialect),

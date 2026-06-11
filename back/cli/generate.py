@@ -91,6 +91,41 @@ def build_used_columns(
     return result
 
 
+def find_used_columns_missing_from_schema(
+    used_columns: list, schemas: list[dict]
+) -> list[tuple[str, list[str]]]:
+    """Colonnes référencées dans le SQL (used_columns) mais ABSENTES du schéma
+    en cache de leur table.
+
+    Sans cette détection, ces colonnes sont droppées silencieusement (modèle de
+    génération + création de table DuckDB) → "column not found" à l'exécution.
+    La cause est un schéma en cache périmé : on échoue tôt avec un message clair
+    (cf. refresh-schemas) plutôt que de fabriquer un test vert sur des données
+    impossibles. Retourne [(table_name complet, [colonnes manquantes]), ...].
+    """
+    used_index: dict[str, list[str]] = {}
+    for uc in used_columns:
+        entry = json.loads(uc) if isinstance(uc, str) else uc
+        db = entry.get("database") or ""
+        table = entry.get("table") or ""
+        key = (f"{db}.{table}" if db else table).lower()
+        used_index[key] = entry.get("used_columns", [])
+
+    problems: list[tuple[str, list[str]]] = []
+    for tbl in schemas:
+        parts = tbl["table_name"].split(".")
+        key = ".".join(parts[-2:]).lower() if len(parts) >= 2 else parts[-1].lower()
+        if key not in used_index:
+            continue
+        schema_cols = {c["name"].lower() for c in tbl.get("columns", [])}
+        missing = sorted(
+            c for c in used_index[key] if "." not in c and c.lower() not in schema_cols
+        )
+        if missing:
+            problems.append((tbl["table_name"], missing))
+    return problems
+
+
 def build_initial_state(
     sql: str,
     dialect: str,
@@ -399,6 +434,35 @@ async def run_generate(
     model_context = _load_model_context(model_name, models_base) or None
 
     state = build_initial_state(sql, dialect, schemas, project_id, session_id)
+
+    # Garde-fou : colonnes du SQL absentes du schéma en cache → schéma périmé.
+    # On échoue tôt (avant l'appel LLM) avec la commande de refresh ciblée.
+    schema_gaps = find_used_columns_missing_from_schema(state["used_columns"], schemas)
+    if schema_gaps:
+        typer.echo(
+            "[ERROR] Colonne(s) référencée(s) dans le SQL mais absente(s) du schéma "
+            "en cache :",
+            err=True,
+        )
+        for table_name, cols in schema_gaps:
+            typer.echo(f"  - {table_name}: {', '.join(cols)}", err=True)
+        refreshable = [tn for tn, _ in schema_gaps if len(tn.split(".")) == 3]
+        typer.echo(
+            "\nLe schéma en cache est probablement périmé. Rafraîchis-le puis "
+            "relance la génération :",
+            err=True,
+        )
+        if refreshable:
+            hint = " ".join(f"-t {tn}" for tn in refreshable)
+            typer.echo(f"  mocksql refresh-schemas {hint}", err=True)
+        else:
+            typer.echo("  mocksql refresh-schemas", err=True)
+        typer.echo(
+            "(Si la colonne n'existe vraiment pas dans la table, corrige le SQL.)",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     if model_context:
         state["model_context"] = model_context
         typer.echo(f"[OK] Business context loaded ({len(model_context)} chars).")
@@ -412,7 +476,7 @@ async def run_generate(
     # This applies qualify_columns + _fix_unnest_alias_conflicts + _fix_unnest_scope_leak,
     # which prevents DuckDB "Ambiguous reference" errors on UNNEST aliases.
     from common_vars import get_tables_mapping
-    from build_query.validator import optimize_query
+    from build_query.validator import expand_positional_group_by, optimize_query
 
     try:
         tables_mapping = await get_tables_mapping(project_id)
@@ -421,6 +485,14 @@ async def run_generate(
         state["optimized_sql"] = qualified_ast.sql(dialect=dialect, pretty=True)
     except Exception as e:
         typer.echo(f"[WARN] SQL qualification failed ({e}), using raw SQL.")
+        # Repli sur le SQL brut : qualify n'a pas tourné, donc le GROUP BY positionnel
+        # survit. On le binde au moins aux colonnes du SELECT pour éviter un
+        # « GROUP BY out of range » si une projection est élaguée plus loin.
+        try:
+            guarded = expand_positional_group_by(sqlglot.parse_one(sql, read=dialect))
+            state["optimized_sql"] = guarded.sql(dialect=dialect, pretty=True)
+        except Exception:
+            pass
 
     from build_query.query_chain import _lightweight_query_decomposed
 

@@ -55,6 +55,224 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
     )
 
 
+def _validate_data_patch_calls(calls: list, uid_to_test: dict) -> tuple[list, list]:
+    """Valide les opérations de patch contre les données réelles des tests ciblés.
+
+    Sans cette validation, un `patch_test_field` sur un champ inexistant créerait un
+    champ fantôme dans la ligne (corruption silencieuse), et une table ou un indice
+    de ligne inexistants seraient ignorés sans bruit par le data_patcher — le tour
+    deviendrait un no-op sans que l'agent n'apprenne que sa demande était invalide.
+
+    Simule l'application en ordre (un `add_test_row` ajoute 1 ligne par table) pour
+    autoriser un patch sur une ligne ajoutée plus tôt dans le même lot.
+    Retourne ``(calls_valides, erreurs)`` — les erreurs sont prêtes à être renvoyées
+    au LLM pour qu'il ré-émette une demande corrigée."""
+    valid: list = []
+    errors: list = []
+    row_counts: dict = {}  # (uid, table) → nb de lignes simulé (None = table absente)
+    known_fields: dict = {}  # (uid, table) → union des champs des lignes existantes
+
+    def _init(uid: str, table: str, data: dict) -> tuple:
+        key = (uid, table)
+        if key not in row_counts:
+            rows = (data or {}).get(table)
+            row_counts[key] = len(rows) if rows is not None else None
+            known_fields[key] = (
+                set().union(*(r.keys() for r in rows)) if rows else set()
+            )
+        return key
+
+    for op in calls:
+        tool, args = op["tool"], op["args"]
+        uid = args.get("test_uid", "")
+        data = (uid_to_test.get(uid) or {}).get("data") or {}
+
+        if tool == "add_test_row":
+            for table in args.get("tables") or []:
+                key = _init(uid, table, data)
+                row_counts[key] = (row_counts[key] or 0) + 1
+            valid.append(op)
+            continue
+
+        table = args.get("table", "")
+        key = _init(uid, table, data)
+        if row_counts[key] is None:
+            errors.append(
+                f"{tool} : la table '{table}' n'existe pas dans les données du test "
+                f"[{uid}]. Tables disponibles : {', '.join(data) or 'aucune'}."
+            )
+            continue
+        try:
+            row_idx = int(args.get("row_index", 0))
+        except (TypeError, ValueError):
+            errors.append(
+                f"{tool} : row_index invalide ({args.get('row_index')!r}) pour {table}."
+            )
+            continue
+        if not 0 <= row_idx < row_counts[key]:
+            errors.append(
+                f"{tool} : l'indice de ligne {row_idx} est hors limites pour {table} "
+                f"({row_counts[key]} ligne(s), indices 0..{row_counts[key] - 1})."
+            )
+            continue
+        if tool == "patch_test_field":
+            field = args.get("field", "")
+            fields = known_fields[key]
+            if fields and field not in fields:
+                errors.append(
+                    f"patch_test_field : le champ '{field}' n'existe pas dans {table}. "
+                    f"Champs disponibles : {', '.join(sorted(fields))}."
+                )
+                continue
+        elif tool == "remove_test_row":
+            row_counts[key] -= 1
+        valid.append(op)
+
+    return valid, errors
+
+
+def _format_ledger_op(op: dict) -> str:
+    """Rend une op du ledger en une clause courte et lisible par l'agent."""
+    tool = op.get("tool", "?")
+    if tool == "patch_test_field":
+        return (
+            f"patch_test_field {op.get('table', '?')}[{op.get('row_index', '?')}]"
+            f".{op.get('field', '?')} = {op.get('value_json', '?')}"
+        )
+    if tool == "remove_test_row":
+        return f"remove_test_row {op.get('table', '?')}[{op.get('row_index', '?')}]"
+    if tool == "add_test_row":
+        tables = op.get("tables") or []
+        instr = op.get("instruction", "")
+        suffix = f" ({instr})" if instr else ""
+        return f"add_test_row {', '.join(tables)}{suffix}"
+    if tool == "regen":
+        return "update_test_data (régénération complète des données)"
+    return tool
+
+
+def _render_attempt_messages(attempts: list) -> list[BaseMessage]:
+    """Rend le ledger des tentatives en conversation alternée AI/HUMAN.
+
+    Le ledger est la source (pas de persistance de vrais messages LangChain) ;
+    le rendu est reconstruit à chaque round et inséré avant le trigger
+    ``auto_correct``, pour que l'agent raisonne « ce levier a déjà été actionné
+    sans effet → le bloqueur est ailleurs » au lieu de redécouvrir le problème.
+    """
+    msgs: list[BaseMessage] = []
+    for a in attempts or []:
+        rnd = a.get("round", "?")
+        ops_txt = " ; ".join(_format_ledger_op(op) for op in a.get("ops") or [])
+        msgs.append(AIMessage(content=f"Tentative {rnd} — {ops_txt}"))
+        outcome = a.get("outcome")
+        if outcome:
+            msgs.append(
+                HumanMessage(
+                    content=(
+                        f"Résultat tentative {rnd} : {outcome.get('digest', '?')}. "
+                        "Ne répète pas une tentative équivalente."
+                    )
+                )
+            )
+    return msgs
+
+
+def _normalized_ops(ops: list) -> tuple:
+    """Forme canonique d'un lot d'ops pour comparaison avec le ledger.
+
+    Accepte les deux formats : ``[{tool, args}]`` (lot en cours) et les entrées
+    plates du ledger (``{tool, table, row_index, …}``).
+    """
+    norm = []
+    for op in ops or []:
+        src = op.get("args") if isinstance(op.get("args"), dict) else op
+        norm.append(
+            (
+                op.get("tool", "?"),
+                str(src.get("table", "")),
+                str(src.get("row_index", "")),
+                str(src.get("field", "")),
+                str(src.get("value_json", "")),
+                tuple(src.get("tables") or []),
+                str(src.get("instruction", "")),
+            )
+        )
+    return tuple(sorted(norm))
+
+
+def _noop_batch_reason(
+    pending_calls: list, uid_to_test: dict, attempts: list
+) -> str | None:
+    """Motif de rejet d'un lot de patches inopérant, ou None si le lot est valable.
+
+    Deux gardes (incident 2026-06-11 : l'échange PROD1↔PROD2 entre deux lignes —
+    identiques après SUBSTR — a consommé un round executor+evaluator complet sans
+    pouvoir changer le résultat) :
+    1. lot identique à une tentative passée du ledger → rejet avec le round ;
+    2. lot de patches qui ne change le multiset d'AUCUNE colonne touchée → rejet.
+    """
+    batch_norm = _normalized_ops(pending_calls)
+    for a in attempts or []:
+        if a.get("ops") and _normalized_ops(a["ops"]) == batch_norm:
+            digest = (a.get("outcome") or {}).get("digest", "sans effet")
+            return (
+                f"⛔ Lot rejeté sans ré-exécution : il est identique à la tentative "
+                f"{a.get('round')} ({digest}). Propose une correction DIFFÉRENTE — "
+                "le bloqueur est ailleurs."
+            )
+
+    import copy
+
+    datas: dict = {}
+    touched: set = set()
+    for call in pending_calls:
+        tool = call.get("tool")
+        args = call.get("args") or {}
+        uid = args.get("test_uid", "")
+        test = uid_to_test.get(uid)
+        if test is None or tool == "add_test_row":
+            return None  # injugeable / ajout de ligne → toujours effectif
+        data = datas.setdefault(uid, copy.deepcopy(test.get("data") or {}))
+        table = args.get("table", "")
+        try:
+            row_idx = int(args.get("row_index", 0))
+        except (TypeError, ValueError):
+            return None
+        rows = data.get(table)
+        if rows is None or row_idx >= len(rows):
+            return None  # op invalide : data_patcher la loguera, pas un no-op
+        if tool == "remove_test_row":
+            rows.pop(row_idx)
+            return None  # une suppression change toujours les multisets
+        if tool == "patch_test_field":
+            field = args.get("field", "")
+            raw = args.get("value_json", "null")
+            try:
+                value = json.loads(raw)
+            except (json.JSONDecodeError, TypeError):
+                value = raw
+            rows[row_idx][field] = value
+            touched.add((uid, table, field))
+
+    if not touched:
+        return None
+    for uid, table, field in touched:
+        before = [
+            repr(r.get(field))
+            for r in (uid_to_test[uid].get("data") or {}).get(table, [])
+        ]
+        after = [repr(r.get(field)) for r in datas[uid].get(table, [])]
+        if sorted(before) != sorted(after):
+            return None
+    return (
+        "⛔ Lot rejeté sans ré-exécution : ces patches ne modifient le multiset "
+        "d'aucune colonne touchée (ex. échange de valeurs entre deux lignes — le "
+        "résultat de la requête serait identique). Change la VALEUR d'au moins une "
+        "colonne impliquée dans l'étape bloquante, en suivant les recettes de "
+        "jointure si la clé est dérivée."
+    )
+
+
 def _format_data_indexed(data: dict) -> str:
     """Affiche les données d'un test avec les indices de lignes pour référencer [table][i]."""
     lines = []
@@ -243,11 +461,23 @@ async def conversational_agent(state: QueryState):
             "renforce le test existant via `add_test_row`."
         )
 
+    # Recettes de jointure (clés dérivées) : sans elles, face à un écart du type
+    # `code_produit = ROD` vs données `PROD1`, l'agent interprète l'écart comme une
+    # inversion de lignes et patche à côté jusqu'à épuisement des retries (incident
+    # du 2026-06-11). Mises en cache par (sql, dialect) — coût nul après le 1ᵉʳ appel.
+    from build_query.join_recipes import build_join_recipes_block
+
+    join_recipes_block = build_join_recipes_block(
+        state.get("optimized_sql") or state.get("query", ""),
+        dialect=state.get("dialect", "bigquery"),
+        schema=state.get("schemas") or None,
+    )
+
     system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
 
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
 {state.get("optimized_sql") or state.get("query", "")}
-
+{join_recipes_block}
 Étapes inspectables avec run_cte / count_cte_steps : {cte_names_str}
 
 Tests existants :
@@ -471,7 +701,12 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 f"ciblée est impossible. Si le comportement observé est en réalité attendu, "
                 f"appelle `request_reevaluation`."
             )
-        messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
+        # Mémoire des tentatives : rendu du ledger en conversation alternée
+        # AI/HUMAN, inséré entre l'historique et le trigger courant.
+        attempt_msgs = _render_attempt_messages(state.get("correction_attempts") or [])
+        messages_for_llm = (
+            messages_for_llm + attempt_msgs + [HumanMessage(content=trigger)]
+        )
     elif user_input:
         messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
 
@@ -484,6 +719,8 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     result = None
     _UID_RETRY_MAX = 2
     uid_retries = 0
+    _NOOP_RETRY_MAX = 2
+    noop_retries = 0
 
     logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
     if eval_context:
@@ -577,6 +814,70 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             break
 
         if pending_data_calls:
+            # Validation des cibles (table / indice de ligne / champ) contre les
+            # données réelles : une cible inexistante est renvoyée à l'agent pour
+            # qu'il refasse sa demande — sinon le data_patcher l'ignorerait en
+            # silence (ou créerait un champ fantôme) et le tour serait perdu.
+            pending_data_calls, patch_errors = _validate_data_patch_calls(
+                pending_data_calls, uid_to_test
+            )
+            if patch_errors:
+                if uid_retries < _UID_RETRY_MAX:
+                    uid_retries += 1
+                    logger.diag(
+                        "[conv_agent] cible(s) de patch invalide(s) — retry %d/%d :\n%s",
+                        uid_retries,
+                        _UID_RETRY_MAX,
+                        "\n".join(patch_errors),
+                    )
+                    error_feedback = (
+                        "Certaines opérations ciblent des éléments inexistants "
+                        "dans les données du test :\n- "
+                        + "\n- ".join(patch_errors)
+                        + "\nRé-émets tes corrections avec des cibles valides "
+                        "(les données indexées sont visibles dans le contexte)."
+                    )
+                    messages_for_llm = messages_for_llm + [
+                        result,
+                        HumanMessage(content=error_feedback),
+                    ]
+                    continue
+                # Retries épuisés : les ops invalides sont abandonnées ; s'il ne
+                # reste rien, aucun outil actionnable → fallback route_agent_output.
+                logger.diag(
+                    "[conv_agent] cibles invalides persistantes — %d op(s) abandonnée(s)",
+                    len(patch_errors),
+                )
+                if not pending_data_calls:
+                    break
+            # Garde anti-no-op (boucle bad_data uniquement) : un lot identique à
+            # une tentative passée, ou qui ne change le multiset d'aucune colonne
+            # touchée, est renvoyé à l'agent SANS relancer l'executor ni consommer
+            # de retry supplémentaire.
+            if is_auto_correct:
+                noop_reason = _noop_batch_reason(
+                    pending_data_calls,
+                    uid_to_test,
+                    state.get("correction_attempts") or [],
+                )
+                if noop_reason:
+                    if noop_retries < _NOOP_RETRY_MAX:
+                        noop_retries += 1
+                        logger.diag(
+                            "[conv_agent] lot no-op rejeté (retry %d/%d) : %s",
+                            noop_retries,
+                            _NOOP_RETRY_MAX,
+                            noop_reason[:200],
+                        )
+                        messages_for_llm = messages_for_llm + [
+                            result,
+                            HumanMessage(content=noop_reason),
+                        ]
+                        continue
+                    # Épuisé : aucun outil actionnable → route_agent_output
+                    # retombe sur le generator (régénération complète).
+                    logger.diag("[conv_agent] lots no-op répétés — fallback generator")
+                    break
             agent_tool_call = "data_batch"
             agent_tool_args = {"calls": pending_data_calls}
             logger.diag(

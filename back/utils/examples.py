@@ -715,9 +715,17 @@ def _fix_bare_unnest_col_refs(sql: str, error_msg: str) -> str | None:
     """
     Piloted by DuckDB BinderException: finds the exact bare column name from the
     error message (e.g. productrevenue) and injects the full struct path from the
-    innermost UNNEST alias.  Only touches the one reported column — never corrupts
-    other references like fullvisitorid.
+    UNNEST alias.  Only touches the one reported column — never corrupts other
+    references like fullvisitorid.
+
+    Scope-aware: a bare column is only rewritten to ``<unnest_tbl>.<unnest_col>.<field>``
+    when an UNNEST is defined in the **same scope** as that column.  Without this,
+    a multi-CTE query where the UNNEST lives in CTE A and the bare column in CTE B
+    would get ``_t0.value.<col>`` injected into B, where ``_t0`` is out of scope —
+    producing a worse "Referenced table _t0 not found" error (see c2.sql regression).
     """
+    from sqlglot.optimizer.scope import traverse_scope
+
     m = re.search(
         r'(?:Referenced )?[Cc]olumn "([^"]+)" (?:not found|referenced that exists)',
         error_msg,
@@ -732,30 +740,51 @@ def _fix_bare_unnest_col_refs(sql: str, error_msg: str) -> str | None:
     except Exception:
         return None
 
-    unnest_aliases = []
-    for unnest in tree.find_all(exp.Unnest):
-        table_alias = unnest.args.get("alias")
-        if isinstance(table_alias, exp.TableAlias):
-            t_name = table_alias.name
-            cols = table_alias.args.get("columns", [])
-            if t_name and cols:
-                unnest_aliases.append((t_name, cols[0].name))
-
-    if not unnest_aliases:
-        return None
-
-    target_t, target_c = unnest_aliases[-1]
-
     patched = False
-    for col in tree.find_all(exp.Column):
-        if (
-            col.name.lower() == bare_col
-            and not col.args.get("table")
-            and not col.args.get("db")
-        ):
-            col.set("table", exp.to_identifier(target_c))
-            col.set("db", exp.to_identifier(target_t))
-            patched = True
+    for scope in traverse_scope(tree):
+        # UNNEST aliases defined directly as sources of THIS scope only.
+        local_unnest: list[tuple[str, str]] = []
+        for source in scope.sources.values():
+            unnest = (
+                source.expression
+                if hasattr(source, "expression")
+                and isinstance(source.expression, exp.Unnest)
+                else source
+                if isinstance(source, exp.Unnest)
+                else None
+            )
+            if unnest is None:
+                continue
+            table_alias = unnest.args.get("alias")
+            if isinstance(table_alias, exp.TableAlias):
+                t_name = table_alias.name
+                cols = table_alias.args.get("columns", [])
+                if t_name and cols:
+                    local_unnest.append((t_name, cols[0].name))
+
+        if not local_unnest:
+            continue
+
+        target_t, target_c = local_unnest[-1]
+
+        # Only columns directly in this scope's expression — never reach into a
+        # nested Subquery, which traverse_scope visits as its own scope.
+        subquery_col_ids = {
+            id(c)
+            for sq in scope.expression.find_all(exp.Subquery)
+            for c in sq.find_all(exp.Column)
+        }
+        for col in scope.expression.find_all(exp.Column):
+            if id(col) in subquery_col_ids:
+                continue
+            if (
+                col.name.lower() == bare_col
+                and not col.args.get("table")
+                and not col.args.get("db")
+            ):
+                col.set("table", exp.to_identifier(target_c))
+                col.set("db", exp.to_identifier(target_t))
+                patched = True
 
     if not patched:
         return None

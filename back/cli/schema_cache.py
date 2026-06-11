@@ -5,18 +5,37 @@ from pathlib import Path
 
 
 def load_schema_cache(cache_path: str) -> list[dict]:
+    """Return the cached table list.
+
+    The on-disk format is ``{"tables": [...], "profile": {...}}`` (written by
+    the server path in ``models/schemas.py``); the legacy format was a plain
+    list. Both are unwrapped to a ``list[dict]`` here so downstream code never
+    iterates the dict keys by mistake.
+    """
     p = Path(cache_path)
     if not p.exists():
         return []
-    with open(p) as f:
-        return json.load(f)
+    with open(p, encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, dict):
+        return data.get("tables", [])
+    return data
 
 
 def save_schema_cache(cache_path: str, tables: list[dict]) -> None:
+    """Persist the table list, preserving any sibling keys (``profile``,
+    ``sample_values``) already stored in the dict-format cache file."""
     p = Path(cache_path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    with open(p, "w") as f:
-        json.dump(tables, f, indent=2)
+    raw: dict = {}
+    if p.exists():
+        with open(p, encoding="utf-8") as f:
+            existing = json.load(f)
+        if isinstance(existing, dict):
+            raw = existing
+    raw["tables"] = tables
+    with open(p, "w", encoding="utf-8") as f:
+        json.dump(raw, f, indent=2)
 
 
 def merge_into_cache(existing: list[dict], new_tables: list[dict]) -> list[dict]:

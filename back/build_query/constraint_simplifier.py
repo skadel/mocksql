@@ -51,7 +51,7 @@ from __future__ import annotations
 import logging
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import sqlglot
@@ -78,6 +78,12 @@ class ColumnRef:
     # Real base-table name when the alias differs (compare=False: doesn't affect equality/hash).
     # e.g. table="indicators_data_2", real_table="indicators_data"
     real_table: str = field(default="", compare=False)
+    # True when the lineage chain is a pure rename (every non-Table node is a bare
+    # column or an alias of a bare column). False when the resolution traversed a
+    # real derivation (aggregate, CASE, arithmetic, concat, …) — in that case the
+    # (table, column) pair deliberately keeps the CTE-qualified form: remapping the
+    # predicate onto the base column would assert something false about it.
+    is_identity: bool = field(default=True, compare=False)
 
     def __str__(self) -> str:
         if self.real_table and self.real_table != self.table:
@@ -605,19 +611,24 @@ class _LineageResolver:
             base_table = col.table
             base_col = col.column
             lineage_sql = ""
+            is_identity = True
             for n in node.walk():
                 if isinstance(n.expression, exp.Table):
                     base_table = n.expression.name.lower()
                     base_col = n.name.split(".")[-1].lower()
                 else:
+                    expr = n.expression
+                    col_expr = expr.this if isinstance(expr, exp.Alias) else expr
+                    # Any non-column step (aggregate, CASE, arithmetic, …) means the
+                    # resolved base column is NOT equivalent to the original column.
+                    if not isinstance(col_expr, exp.Column):
+                        is_identity = False
+                    # Skip aggregate nodes — sqlglot sometimes links COUNT(*)/SUM
+                    # as descendants of GROUP BY keys, producing nonsensical
+                    # lineage like "SELECT COUNT(*) FROM rcomp AS rcomp".
+                    if isinstance(col_expr, exp.AggFunc):
+                        continue
                     try:
-                        expr = n.expression
-                        col_expr = expr.this if isinstance(expr, exp.Alias) else expr
-                        # Skip aggregate nodes — sqlglot sometimes links COUNT(*)/SUM
-                        # as descendants of GROUP BY keys, producing nonsensical
-                        # lineage like "SELECT COUNT(*) FROM rcomp AS rcomp".
-                        if isinstance(col_expr, exp.AggFunc):
-                            continue
                         lineage_sql = _build_column_sql(
                             col_expr, n.source, self._dialect
                         )
@@ -629,7 +640,9 @@ class _LineageResolver:
                             exc,
                         )
                         lineage_sql = n.name
-            return ColumnRef(base_table, base_col, lineage=lineage_sql)
+            return ColumnRef(
+                base_table, base_col, lineage=lineage_sql, is_identity=is_identity
+            )
         except Exception as exc:
             logger.debug(
                 "resolve lineage failed for %s.%s: %s", col.table, col.column, exc
@@ -748,7 +761,7 @@ def _collect_format_constraints(
         if ref is None:
             continue
         src_cols = resolver.resolve_all(ref)
-        ref = resolver.resolve(ref)
+        ref = _identity_or_raw(ref, resolver.resolve(ref))
 
         op = (
             "safe_cast_not_null"
@@ -850,11 +863,30 @@ def _collect_is_null_cols(
         if _is_column(pred.this) and isinstance(right, exp.Null):
             ref = _col_ref(pred.this, alias_map)
             if ref:
-                result.add(resolver.resolve(ref))
+                # Same identity policy as the equality collectors, so anti-join
+                # IS NULL refs keep matching the ON-clause equality refs.
+                result.add(_identity_or_raw(ref, resolver.resolve(ref)))
     return result
 
 
 # ─── Constraint extraction ────────────────────────────────────────────────────
+
+
+def _identity_or_raw(raw: ColumnRef, resolved: ColumnRef) -> ColumnRef:
+    """Return *resolved* when the lineage is a pure rename chain, else *raw*.
+
+    A predicate on a DERIVED column (e.g. ``typ_client = CASE WHEN SUM(…) …``)
+    must never be remapped onto the base column the lineage walk ends on
+    (``no_carte = 'OUVERTURE'`` is false and actively harmful). The raw
+    CTE-qualified ref is kept instead, flagged ``is_identity=False`` so
+    downstream consumers can tell a deliberate CTE-form ref from a silent
+    lineage-resolution fallback. The derivation detail stays available in
+    ``lineage``.
+    """
+    if resolved.is_identity:
+        return resolved
+    return replace(raw, lineage=resolved.lineage, is_identity=False)
+
 
 _CMP_OP_MAP = {
     exp.EQ: "eq",
@@ -904,7 +936,7 @@ def _dispatch_pred(
             raw = _col_ref(left, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 op = "is_null" if isinstance(right, exp.Null) else "is_not_null"
                 filters.append(
                     FilterConstraint(column=ref, op=op, source_columns=src_cols)
@@ -917,7 +949,7 @@ def _dispatch_pred(
             raw = _col_ref(inner.this, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 filters.append(
                     FilterConstraint(
                         column=ref, op="is_not_null", source_columns=src_cols
@@ -930,7 +962,7 @@ def _dispatch_pred(
                 raw = _col_ref(col_node, alias_map)
                 if raw and pat_node:
                     src_cols = resolver.resolve_all(raw)
-                    ref = resolver.resolve(raw)
+                    ref = _identity_or_raw(raw, resolver.resolve(raw))
                     filters.append(
                         FilterConstraint(
                             column=ref,
@@ -946,7 +978,7 @@ def _dispatch_pred(
                     raw = _col_ref(inner_col, alias_map)
                     if raw:
                         src_cols = resolver.resolve_all(raw)
-                        ref = resolver.resolve(raw)
+                        ref = _identity_or_raw(raw, resolver.resolve(raw))
                         filters.append(
                             FilterConstraint(
                                 column=ref,
@@ -959,7 +991,7 @@ def _dispatch_pred(
             raw = _col_ref(inner.this, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 vals = [_literal_value(v) for v in inner.expressions]
                 filters.append(
                     FilterConstraint(
@@ -979,7 +1011,7 @@ def _dispatch_pred(
             raw = _col_ref(col_node, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 filters.append(
                     FilterConstraint(
                         column=ref,
@@ -995,7 +1027,7 @@ def _dispatch_pred(
                 raw = _col_ref(inner_col, alias_map)
                 if raw:
                     src_cols = resolver.resolve_all(raw)
-                    ref = resolver.resolve(raw)
+                    ref = _identity_or_raw(raw, resolver.resolve(raw))
                     filters.append(
                         FilterConstraint(
                             column=ref,
@@ -1014,7 +1046,7 @@ def _dispatch_pred(
             raw = _col_ref(col_node, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 vals = [_literal_value(v) for v in pred.expressions]
                 op = "not_in" if pred.args.get("not") else "in"
                 filters.append(
@@ -1033,7 +1065,7 @@ def _dispatch_pred(
             raw = _col_ref(col_node, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 filters.append(
                     FilterConstraint(
                         column=ref,
@@ -1066,8 +1098,8 @@ def _dispatch_pred(
         ref_l = _col_ref(left, alias_map)
         ref_r = _col_ref(right, alias_map)
         if ref_l and ref_r:
-            ref_l = resolver.resolve(ref_l)
-            ref_r = resolver.resolve(ref_r)
+            ref_l = _identity_or_raw(ref_l, resolver.resolve(ref_l))
+            ref_r = _identity_or_raw(ref_r, resolver.resolve(ref_r))
             if ref_l != ref_r:
                 equalities.append((ref_l, ref_r))
         return
@@ -1080,8 +1112,12 @@ def _dispatch_pred(
             if ref_derived:
                 ref_source = _col_ref(inner_col, alias_map)
                 if ref_source:
-                    ref_derived = resolver.resolve(ref_derived)
-                    ref_source = resolver.resolve(ref_source)
+                    ref_derived = _identity_or_raw(
+                        ref_derived, resolver.resolve(ref_derived)
+                    )
+                    ref_source = _identity_or_raw(
+                        ref_source, resolver.resolve(ref_source)
+                    )
                     if ref_derived != ref_source:
                         functional.append(
                             FunctionalConstraint(
@@ -1100,8 +1136,10 @@ def _dispatch_pred(
         if ref_derived and inner_col:
             ref_source = _col_ref(inner_col, alias_map)
             if ref_source:
-                ref_derived = resolver.resolve(ref_derived)
-                ref_source = resolver.resolve(ref_source)
+                ref_derived = _identity_or_raw(
+                    ref_derived, resolver.resolve(ref_derived)
+                )
+                ref_source = _identity_or_raw(ref_source, resolver.resolve(ref_source))
                 if ref_derived != ref_source:
                     functional.append(
                         FunctionalConstraint(
@@ -1120,7 +1158,7 @@ def _dispatch_pred(
             raw = _col_ref(inner_col, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 filters.append(
                     FilterConstraint(
                         column=ref,
@@ -1138,7 +1176,7 @@ def _dispatch_pred(
             raw = _col_ref(inner_col, alias_map)
             if raw:
                 src_cols = resolver.resolve_all(raw)
-                ref = resolver.resolve(raw)
+                ref = _identity_or_raw(raw, resolver.resolve(raw))
                 filters.append(
                     FilterConstraint(
                         column=ref,
@@ -1154,7 +1192,7 @@ def _dispatch_pred(
         raw = _col_ref(left, alias_map)
         if raw:
             src_cols = resolver.resolve_all(raw)
-            ref = resolver.resolve(raw)
+            ref = _identity_or_raw(raw, resolver.resolve(raw))
             filters.append(
                 FilterConstraint(
                     column=ref,
@@ -1170,7 +1208,7 @@ def _dispatch_pred(
         raw = _col_ref(right, alias_map)
         if raw:
             src_cols = resolver.resolve_all(raw)
-            ref = resolver.resolve(raw)
+            ref = _identity_or_raw(raw, resolver.resolve(raw))
             filters.append(
                 FilterConstraint(
                     column=ref,
@@ -1257,6 +1295,23 @@ def _is_volume_pred(node: exp.Expression, window_aliases: set[str]) -> bool:
     return col_node is not None and col_node.name.lower() in window_aliases
 
 
+def _is_tautological_comparison(node: exp.Expression) -> bool:
+    """Return True for ``X = X`` (always true) or ``X <> X`` (always false).
+
+    Such predicates carry no usable signal: an equality of a term with itself adds
+    nothing, and an inequality of a term with itself is an impossible contradiction.
+    Injected into the generator prompt they are pure noise — at best ignored, at
+    worst they push the model to make a value differ from itself. Both sides are
+    compared **before** lineage rewriting, on the raw AST, so a genuine self-join
+    (`a.x = b.x`, distinct aliases) is preserved.
+    """
+    if not isinstance(node, (exp.EQ, exp.NEQ)):
+        return False
+    left = node.args.get("this")
+    right = node.args.get("expression")
+    return left is not None and right is not None and left == right
+
+
 def _resolve_pred_node(
     node: exp.Expression,
     alias_map: dict[str, str],
@@ -1275,6 +1330,12 @@ def _resolve_pred_node(
             if raw is None:
                 return n
             resolved = resolver.resolve(raw)
+            # Colonne dérivée (CASE / agrégat / arithmétique dans le lineage) :
+            # substituer la colonne de base affirmerait une contrainte fausse sur
+            # elle (`no_carte = 'OUVERTURE'`). On garde la forme CTE-qualifiée ;
+            # le détail de la dérivation reste disponible dans `lineages`.
+            if not resolved.is_identity:
+                return n
             tbl = (
                 resolved.real_table
                 if (resolved.real_table and resolved.real_table != resolved.table)
@@ -1285,7 +1346,21 @@ def _resolve_pred_node(
         return n
 
     try:
-        return node.transform(_transform_fn).sql(dialect=dialect)
+        resolved_node = node.transform(_transform_fn)
+        # Collapse post-résolution : deux colonnes distinctes (ex. regpment_new /
+        # regpment_old) dont les lineages remontent à la même colonne de base
+        # s'écrasent en `X OP X` — tautologie trompeuse (=) ou contradiction
+        # insatisfiable (<>). Le prédicat brut, lui, est une vraie contrainte :
+        # on le rend sous sa forme alias-qualifiée d'origine.
+        # NB : depuis le garde `is_identity` ci-dessus, les colonnes dérivées ne
+        # sont plus substituées — ce collapse ne reste atteignable que pour des
+        # purs renommages convergeant vers la même colonne de base (ex. deux
+        # photos M/M-1 de la même table). Filet de sécurité : ne pas retirer.
+        if _is_tautological_comparison(
+            resolved_node
+        ) and not _is_tautological_comparison(node):
+            return node.sql(dialect=dialect)
+        return resolved_node.sql(dialect=dialect)
     except Exception:
         return node.sql(dialect=dialect)
 
@@ -1486,6 +1561,11 @@ def _serialize_cond(
     if _is_volume_pred(node, window_aliases):
         return None
 
+    # Drop tautologies (X = X) and contradictions (X <> X): noise that misleads
+    # the generator rather than constraining the data.
+    if _is_tautological_comparison(node):
+        return None
+
     return _resolve_pred_node(node, alias_map, resolver, dialect)
 
 
@@ -1508,7 +1588,7 @@ def _collect_format_constraints_strings(
         raw = _col_ref(col_node, alias_map)
         if raw is None:
             return None
-        resolved = resolver.resolve(raw)
+        resolved = _identity_or_raw(raw, resolver.resolve(raw))
         tbl = (
             resolved.real_table
             if (resolved.real_table and resolved.real_table != resolved.table)
@@ -1743,7 +1823,9 @@ def _walk_select_grouped(
                     if tbl in anti_join_sources:
                         ref = _col_ref(pred.this, alias_map)
                         if ref:
-                            anti_join_is_null_cols.add(resolver.resolve(ref))
+                            anti_join_is_null_cols.add(
+                                _identity_or_raw(ref, resolver.resolve(ref))
+                            )
         if anti_join_is_null_cols:
             where_filters = [
                 f
@@ -2164,12 +2246,15 @@ def build_conditions_hint(
     result: dict = {}
     if conditions:
         result["conditions"] = conditions
-    if anti_joins:
-        result["anti_joins"] = anti_joins
     if format_constraints:
         result["format_constraints"] = format_constraints
     if lineages:
         result["lineages"] = lineages
+    # Contrat avec le SYSTEM du générateur (qui documente la clé `anti_joins`) :
+    # émise systématiquement dès qu'un hint existe, liste vide incluse — une clé
+    # absente serait ambiguë (« pas d'anti-join » vs « extraction incomplète »).
+    if result or anti_joins:
+        result["anti_joins"] = anti_joins
     return result
 
 
