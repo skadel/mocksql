@@ -814,20 +814,29 @@ export interface SqlStripProps {
   historyRestoreTrigger?: number;
   collapseSignal?: number;
   sqlFileName?: string;
+  hasTests?: boolean;
 }
 
-function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName }: SqlStripProps) {
-  const [open, setOpen] = useState(true);
+function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName, hasTests }: SqlStripProps) {
+  // Démarre fermé dès qu'il y a des tests : on ne déroule le SQL que sur action explicite.
+  const [open, setOpen] = useState(() => !hasTests);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
   const prevDisabled = useRef(disabled);
   const prevTrigger = useRef(historyRestoreTrigger);
   const prevCollapseSignal = useRef(collapseSignal);
+  // Vrai uniquement quand l'utilisateur a explicitement déroulé le SQL (clic).
+  const userExpandedRef = useRef(false);
 
   useEffect(() => {
     if (prevDisabled.current && !disabled && !hasError) setOpen(false);
     prevDisabled.current = disabled;
   }, [disabled, hasError]);
+
+  // Quand des tests apparaissent et que l'utilisateur n'a pas déroulé le SQL : refermer.
+  useEffect(() => {
+    if (hasTests && !userExpandedRef.current) setOpen(false);
+  }, [hasTests]);
 
   useEffect(() => {
     if (optimizedSql) setViewMode('raw');
@@ -858,6 +867,7 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
 
   const handleToggle = () => {
     if (!open) setViewMode('raw');
+    userExpandedRef.current = !open;
     setOpen((v) => !v);
   };
 
@@ -1847,7 +1857,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       )}
 
       {/* SQL strip */}
-      {sqlProps?.sql && <SqlStrip {...sqlProps} />}
+      {sqlProps?.sql && <SqlStrip {...sqlProps} hasTests={testResults.length > 0} />}
 
       {/* Loading skeleton */}
       {testResults.length === 0 && (isLoading || !!sqlProps?.loading) && (
