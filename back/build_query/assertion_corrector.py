@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import pandas as pd
 from langchain_core.messages import AIMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
@@ -20,7 +20,13 @@ logger = logging.getLogger(__name__)
 
 
 class _Assertion(BaseModel):
-    description: str
+    description: str = Field(
+        description=(
+            "Phrase EN FRANÇAIS, courte (max 12 mots), en langage métier lisible par un "
+            "responsable non-développeur. Jamais en anglais. Sans noms de colonnes/CTEs ni "
+            "mots-clés SQL. ✓ 'Le montant total reste positif.' ✗ 'amount > 0 sur __result__'."
+        )
+    )
     expected_condition: str
 
 
@@ -132,6 +138,15 @@ Chaque assertion fournit une `expected_condition` : une **condition booléenne P
 être VRAIE pour chaque ligne quand le test réussit. **Tu n'écris PAS de SQL `SELECT`/`WHERE` et tu
 n'écris JAMAIS la négation** — MockSQL négocie ta condition lui-même pour produire la requête de
 validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue, à l'affirmative.
+
+OBJECTIF — capter les régressions : une assertion ne sert à rien si elle resterait vraie quand la
+logique SQL régresse. Pince la VALEUR DE SORTIE CONCRÈTE attendue pour ce scénario (lis les exemples
+de lignes), pas un invariant générique.
+- ✗ FAIBLE : `montant > 0`, `montant >= 0` ("pas négatif"), `total IS NOT NULL` — survivent à une
+  régression du calcul.
+- ✓ FORT : la valeur exacte produite par les entrées (ex. `total = 150`, `date = '2026-01-02'`).
+- Exception : un invariant non-trivial est valide s'il EST l'objet même du test (ex. solde jamais
+  négatif). Par défaut, préfère la valeur exacte.
 
 Règles strictes :
 - Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`, écris

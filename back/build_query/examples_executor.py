@@ -52,8 +52,9 @@ def _assertion_sql_from_condition(expected_condition: str) -> str:
 class _Assertion(BaseModel):
     description: str = Field(
         description=(
-            "Phrase courte (max 15 mots) décrivant l'assertion en termes métier, "
-            "lisible par un responsable non-développeur. "
+            "Phrase EN FRANÇAIS, courte (max 12 mots), décrivant l'assertion en termes "
+            "métier, lisible par un responsable non-développeur. Jamais en anglais, même "
+            "si les colonnes le sont. Sans noms de colonnes/CTEs ni mots-clés SQL. "
             "✓ Bon : 'Le montant total est toujours positif.' "
             "'Chaque commande appartient à un client actif.' "
             "✗ À proscrire : 'price > 0 pour toutes les lignes de __result__', "
@@ -1109,6 +1110,30 @@ Le message suivant contient ces sections, délimitées par des balises :
   le même COUNT → même Z-score → OFFSET 1 retourne n'importe lequel) → `bad_data`. La correction est
   d'assigner des cardinalités distinctes à chaque groupe de façon à avoir un ordre unique.
 
+**Règle du champ `description` (ce que l'utilisateur lit dans l'UI) :**
+Chaque assertion porte une `description` : une phrase **en français**, **courte (max 12 mots)**,
+en **langage métier** lisible par un responsable non-développeur. Elle affirme ce qui est vérifié,
+pas la mécanique SQL.
+- OBLIGATOIRE en français — jamais en anglais, même si la requête ou les colonnes sont en anglais.
+- INTERDIT : noms de colonnes/CTEs, mots-clés SQL, opérateurs (`>`, `=`, `IS NULL`…), `__result__`.
+- ✓ Bon : « Le montant total reste positif. » / « Chaque commande a un client actif. »
+- ✗ À proscrire : « price > 0 for every row of __result__ », « COALESCE(amount, 0) != NULL ».
+
+**OBJECTIF — capter les régressions, pas énoncer des évidences :**
+Une assertion ne sert à RIEN si elle resterait vraie quand la logique SQL régresse. Le but est
+qu'une modification fautive du SQL (mauvais calcul, mauvaise jointure, mauvais filtre) fasse
+ÉCHOUER l'assertion. Pour cela, **pince la VALEUR DE SORTIE CONCRÈTE** attendue pour ce scénario,
+calculée à partir des données d'entrée injectées (lis `<result_sample>`).
+- ✗ FAIBLE — invariants génériques qui survivraient à une régression : `montant > 0`, `montant
+  >= 0` ("pas négatif"), `total IS NOT NULL`. Le total peut devenir faux tout en restant positif :
+  l'assertion ne capte rien.
+- ✓ FORT — la valeur exacte que le scénario doit produire : si les entrées impliquent un total de
+  150, écris `total = 150` (pas `total > 0`). Si la date attendue est `2026-01-02`, écris
+  `date = '2026-01-02'`. Si le scénario teste un rang/ordre, pince la valeur classée attendue.
+- Exception légitime : un invariant non-trivial EST l'objet même du test (ex. le scénario vérifie
+  explicitement qu'un solde ne peut jamais être négatif après remboursement) — alors `solde >= 0`
+  est valide. Mais par défaut, préfère toujours la valeur exacte.
+
 **Règles des assertions (`expected_condition`) — entre 1 et plusieurs, selon le scénario :**
 Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
 être VRAIE pour chaque ligne de `__result__` quand le test réussit. **Tu n'écris PAS de SQL
@@ -1137,8 +1162,10 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
   ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
   ✗ une condition basée sur `IS NOT NULL` d'une colonne déjà non-nulle dans les exemples
   Une condition triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
-- OBLIGATOIRE pour les requêtes ORDER BY + LIMIT/OFFSET : inclure au moins une condition qui pince
-  la VALEUR CONCRÈTE retournée. Utilise `<result_sample>` pour identifier le résultat attendu.
+- OBLIGATOIRE — au moins une assertion qui pince la VALEUR CONCRÈTE de sortie (cf. OBJECTIF
+  ci-dessus), tirée de `<result_sample>`. C'est elle qui capte les régressions. À fortiori pour
+  les requêtes avec agrégat (SUM/COUNT/AVG/MAX), CASE, ou ORDER BY + LIMIT/OFFSET : la valeur
+  calculée doit être figée, pas seulement bornée.
   Exemple : si `__result__` contient `{"date": "2026-01-02"}`, écris `expected_condition: "date = '2026-01-02'"`.
   Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
 
@@ -1414,6 +1441,7 @@ Le message suivant contient ces sections, délimitées par des balises :
   originale référençait une autre table (source ou suffixée), réécris-la pour n'utiliser que
   `__result__` et ses colonnes de `<result_schema>`.
 - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
+- Recopie la `description` d'origine À L'IDENTIQUE (en français, courte) : seul le SQL était cassé.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
 {"description": "...", "sql": "SELECT ..."}"""
@@ -1466,6 +1494,11 @@ Réécris l'assertion (description + sql valide DuckDB) en respectant les règle
         if json_match:
             parsed = loads_lenient_json(json_match.group())
             if isinstance(parsed, dict) and parsed.get("sql"):
+                # Seul le SQL était cassé : on conserve la description métier d'origine
+                # (évite une réécriture en anglais ou verbeuse par le LLM).
+                parsed["description"] = original.get("description", "") or parsed.get(
+                    "description", ""
+                )
                 return parsed
     except Exception as e:
         logger.diag("[regen_assertion] ERREUR: %s", e)
@@ -1595,6 +1628,9 @@ colonne, condition inversée, etc.) ?
 **Règles DuckDB strictes :**
 - Utilise UNIQUEMENT les colonnes de `<result_schema>`.
 - Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
+
+**Règle de la `description` (si tu régénères une assertion) :** phrase EN FRANÇAIS, courte
+(max 12 mots), en langage métier — jamais en anglais, sans noms de colonnes/CTEs ni mots-clés SQL.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion :
 {"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "sql": "SELECT ..."}]}"""
