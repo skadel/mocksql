@@ -822,6 +822,56 @@ async def _run_join_predicate_breakdown(
         more = f", … ({len(vals)} valeurs)" if len(vals) > 5 else ""
         return "{" + shown + more + "}"
 
+    def _unwrap(e: exp.Expression) -> exp.Expression:
+        while isinstance(e, exp.Paren):
+            e = e.this
+        return e
+
+    async def _eq_line(eq: exp.EQ, cte_code: str) -> Optional[tuple]:
+        """``(ligne de diagnostic, satisfiable)`` pour une égalité, ou None."""
+        lhs, rhs = eq.this, eq.args.get("expression")
+        la = _single_alias_of(lhs) if lhs is not None else None
+        ra = _single_alias_of(rhs) if rhs is not None else None
+        if not (la and ra and la != ra and la in sources and ra in sources):
+            return None
+        try:
+            lvals = await _distinct_values(lhs, la)
+            rvals = await _distinct_values(rhs, ra)
+        except Exception as exc:
+            logger.debug(
+                "join breakdown failed for %s: %s — sql: %s",
+                eq.sql(dialect=dialect),
+                exc,
+                cte_code[:500],
+            )
+            return None
+        common = (set(lvals) & set(rvals)) - {"NULL"}
+        return (
+            f"{eq.sql(dialect=dialect)} → {len(common)} valeur(s) commune(s) — "
+            f"gauche {_fmt_set(lvals)}, droite {_fmt_set(rvals)}",
+            bool(common),
+        )
+
+    async def _is_null_line(is_node: exp.Is) -> Optional[tuple]:
+        """``(ligne de diagnostic, satisfiable)`` pour ``<expr> IS NULL``, ou None."""
+        if not isinstance(is_node.args.get("expression"), exp.Null):
+            return None
+        target = is_node.this
+        alias = _single_alias_of(target)
+        if alias is None or alias not in sources:
+            return None
+        try:
+            vals = await _distinct_values(target, alias)
+        except Exception:
+            return None
+        has_null = "NULL" in vals
+        detail = (
+            "satisfaite (NULL présent)"
+            if has_null
+            else f"aucune valeur NULL — valeurs {_fmt_set(vals)}"
+        )
+        return f"{is_node.sql(dialect=dialect)} → {detail}", has_null
+
     lines: list = []
     for join in joins:
         side = (join.args.get("side") or "").upper()
@@ -836,29 +886,48 @@ async def _run_join_predicate_breakdown(
         pred_lines: list = []
         for pred in _extract_conditions(on):
             pred_sql = pred.sql(dialect=dialect)
+            inner = _unwrap(pred)
             decomposed = False
-            if isinstance(pred, exp.EQ):
-                lhs, rhs = pred.this, pred.args.get("expression")
-                la = _single_alias_of(lhs) if lhs is not None else None
-                ra = _single_alias_of(rhs) if rhs is not None else None
-                if la and ra and la != ra and la in sources and ra in sources:
-                    try:
-                        lvals = await _distinct_values(lhs, la)
-                        rvals = await _distinct_values(rhs, ra)
-                        common = (set(lvals) & set(rvals)) - {"NULL"}
-                        marker = " ← BLOQUANT" if not common else ""
-                        pred_lines.append(
-                            f"{pred_sql} → {len(common)} valeur(s) commune(s) — "
-                            f"gauche {_fmt_set(lvals)}, droite {_fmt_set(rvals)}{marker}"
+            if isinstance(inner, exp.EQ):
+                res = await _eq_line(inner, cte["code"])
+                if res is not None:
+                    line, satisfiable = res
+                    marker = "" if satisfiable else " ← BLOQUANT"
+                    pred_lines.append(line + marker)
+                    decomposed = True
+            elif isinstance(inner, exp.Or):
+                # Un OR (typiquement `clé = … OR clé IS NULL`) ne bloque que si
+                # AUCUNE branche n'est satisfiable — l'évaluer branche par
+                # branche, sinon c'est précisément le prédicat fautif qui reste
+                # affiché « non décomposé » (incident 2026-06-11).
+                branch_lines: list = []
+                satisfiable_flags: list = []
+                for branch in inner.flatten():
+                    branch = _unwrap(branch)
+                    if isinstance(branch, exp.EQ):
+                        res = await _eq_line(branch, cte["code"])
+                    elif isinstance(branch, exp.Is):
+                        res = await _is_null_line(branch)
+                    else:
+                        res = None
+                    if res is None:
+                        branch_lines.append(
+                            f"{branch.sql(dialect=dialect)} → (branche non décomposée)"
                         )
-                        decomposed = True
-                    except Exception as exc:
-                        logger.debug(
-                            "join breakdown failed for %s: %s — sql: %s",
-                            pred_sql,
-                            exc,
-                            cte["code"][:500],
-                        )
+                        satisfiable_flags.append(None)
+                    else:
+                        branch_lines.append(res[0])
+                        satisfiable_flags.append(res[1])
+                if any(f is not None for f in satisfiable_flags):
+                    blocking = all(f is False for f in satisfiable_flags)
+                    marker = (
+                        " ← BLOQUANT (aucune branche du OR n'est satisfiable)"
+                        if blocking
+                        else ""
+                    )
+                    pred_lines.append(f"{pred_sql} — par branche :{marker}")
+                    pred_lines.extend(f"  · {bl}" for bl in branch_lines)
+                    decomposed = True
             if not decomposed:
                 pred_lines.append(f"{pred_sql} → (prédicat non décomposé)")
 

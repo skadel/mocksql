@@ -28,9 +28,9 @@ import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
 import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages } from '../buildModelSlice';
-import { getMessages, patchModelSql, clearHistoryApi } from '../../../api/messages';
+import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
-import { ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
+import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
 
 // Dialect is read from the current project — fallback to bigquery for backward compat.
@@ -153,6 +153,7 @@ const ChatComponent: React.FC = () => {
   const pendingSessionRef = useRef<string | null>(null);
   const prevLoadingRef = useRef<boolean | null>(null);
   const isGeneratingRef = useRef(false);
+  const lastChatQueryArgsRef = useRef<ChatQueryParams | null>(null);
 
   const {
     queryComponentGraph: messages,
@@ -176,6 +177,15 @@ const ChatComponent: React.FC = () => {
   const currentProjectId = useAppSelector((state) => state.appBarModel.currentProjectId);
   const currentProject = useAppSelector((state) => state.appBarModel.currentProject);
   const DIALECT = currentProject?.dialect ?? 'bigquery';
+
+  const isRetryableError = (msg: string) =>
+    msg.includes('Connexion perdue') || msg.includes('connexion réseau');
+
+  const dispatchChatQuery = useCallback((args: ChatQueryParams) => {
+    lastChatQueryArgsRef.current = args;
+    return dispatch(chatQuery(args));
+  }, [dispatch]);
+
   const currentModel = useMemo(
     () => allModels.find(m => m.session_id === currentModelId),
     [allModels, currentModelId],
@@ -391,7 +401,7 @@ const ChatComponent: React.FC = () => {
 
       try {
         isGeneratingRef.current = true;
-        await dispatch(chatQuery({
+        await dispatchChatQuery({
           userInput: text,
           sessionId: session,
           project: '',
@@ -406,7 +416,7 @@ const ChatComponent: React.FC = () => {
           testIndex,
           assertionOnly: isAssertionOnly,
           forceRoute,
-        })).unwrap?.();
+        }).unwrap?.();
         return true;
       } catch {
         return false;
@@ -470,7 +480,7 @@ const ChatComponent: React.FC = () => {
         const doStream = () => {
           setPendingFirstLoad(true);
           isGeneratingRef.current = true;
-          dispatch(chatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' }));
+          dispatchChatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' });
         };
         let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
         setPendingAutoProfile({
@@ -523,7 +533,7 @@ const ChatComponent: React.FC = () => {
 
     try {
       isGeneratingRef.current = true;
-      await dispatch(chatQuery({
+      await dispatchChatQuery({
         userInput: '',
         sessionId,
         project: '',
@@ -532,7 +542,7 @@ const ChatComponent: React.FC = () => {
         ChangedMessageId: '',
         t,
         parentMessageId: validateResult?.sql_message_id ?? '',
-      })).unwrap?.();
+      }).unwrap?.();
     } catch {}
 
     pendingSessionRef.current = null;
@@ -730,7 +740,7 @@ const ChatComponent: React.FC = () => {
       }
       dispatch(pushSqlHistory({ id: uuidv4(), sql: newSql, optimizedSql: resolvedOptimizedSql, parentMessageId: effectiveParentId }));
       try {
-        await dispatch(chatQuery({
+        await dispatchChatQuery({
           userInput: '',
           sessionId: currentModelId,
           project: '',
@@ -741,7 +751,7 @@ const ChatComponent: React.FC = () => {
           parentMessageId: effectiveParentId,
           context: 'sql_update',
           silent: true,
-        })).unwrap?.();
+        }).unwrap?.();
       } catch {}
       setSqlDirty(false);
       setIsSending(false);
@@ -775,7 +785,7 @@ const ChatComponent: React.FC = () => {
     if (!currentModelId || !sqlQuery.trim()) return;
     try {
       const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [] });
-      const doStream = () => dispatch(chatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' }));
+      const doStream = () => dispatchChatQuery({ userInput: '', sessionId: currentModelId, project: '', dialect: DIALECT, query: sqlQuery, ChangedMessageId: '', t, parentMessageId: '' });
       if (result.profile_error) {
         dispatch(setError(result.profile_error));
         return;
@@ -891,13 +901,24 @@ const ChatComponent: React.FC = () => {
     }
     if (prevLoadingRef.current === true && loading === false && isGeneratingRef.current) {
       isGeneratingRef.current = false;
+      if (error && !pendingFirstLoad) {
+        setSubmitError(error);
+      }
       if (Notification.permission === 'granted') {
         const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
         new Notification('MockSQL', { body, icon: '/favicon.ico' });
       }
     }
     prevLoadingRef.current = loading;
-  }, [loading, error, t]);
+  }, [loading, error, t, pendingFirstLoad]);
+
+  const handleRetry = useCallback(() => {
+    if (!lastChatQueryArgsRef.current) return;
+    setSubmitError(null);
+    dispatch(setError(''));
+    isGeneratingRef.current = true;
+    dispatchChatQuery(lastChatQueryArgsRef.current);
+  }, [dispatch, dispatchChatQuery]);
 
   const handleAddTest = useCallback(() => {
     setSelectedTestIndex(null);
@@ -920,7 +941,7 @@ const ChatComponent: React.FC = () => {
     const lastMessageId = lastMessage ? lastMessage.id : '';
     try {
       isGeneratingRef.current = true;
-      await dispatch(chatQuery({
+      await dispatchChatQuery({
         userInput: text,
         sessionId: currentModelId,
         project: '',
@@ -930,13 +951,23 @@ const ChatComponent: React.FC = () => {
         t,
         parentMessageId: lastMessageId,
         suggestionIntent: true,
-      })).unwrap?.();
+      }).unwrap?.();
     } catch {
       /* erreur déjà gérée par le thunk */
     } finally {
       setIsSending(false);
     }
   }, [isSending, currentModelId, renderMessages, selectedChildIndices, sqlQuery, dispatch, t]);
+
+  const handleDismissSuggestion = useCallback(async (text: string) => {
+    if (!currentModelId) return;
+    dispatch(dismissSuggestion(text));
+    try {
+      await dismissSuggestionApi(currentModelId, text);
+    } catch {
+      /* silent — l'optimistic update suffit pour l'UX */
+    }
+  }, [currentModelId, dispatch]);
 
   // Régénération à la demande : court-circuite l'agent (regenerate_suggestions) →
   // suggestions_generator direct, pas de message de clôture dans le fil.
@@ -948,7 +979,7 @@ const ChatComponent: React.FC = () => {
     const lastMessageId = lastMessage ? lastMessage.id : '';
     try {
       isGeneratingRef.current = true;
-      await dispatch(chatQuery({
+      await dispatchChatQuery({
         userInput: '',
         sessionId: currentModelId,
         project: '',
@@ -959,7 +990,7 @@ const ChatComponent: React.FC = () => {
         parentMessageId: lastMessageId,
         regenerateSuggestions: true,
         silent: true,
-      })).unwrap?.();
+      }).unwrap?.();
     } catch {
       /* erreur déjà gérée par le thunk */
     } finally {
@@ -983,7 +1014,7 @@ const ChatComponent: React.FC = () => {
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
     // threadParentId ensures the rerun lands as a sibling of the original, not a child
     const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
-    dispatch(chatQuery({
+    dispatchChatQuery({
       userInput: '',
       sessionId: currentModelId || '',
       project: '',
@@ -996,7 +1027,7 @@ const ChatComponent: React.FC = () => {
       testIndex: idx,
       forceRoute: 'generator',
       silent: true,
-    }));
+    });
   }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t, testResults]);
 
 
@@ -1017,7 +1048,16 @@ const ChatComponent: React.FC = () => {
       {uiPhase === 'workspace' && (submitError || (lastError && !lastErrorDismissed) || missingTables) && (
         <Box sx={{ flexShrink: 0, px: 2, pt: 1 }}>
           {submitError && (
-            <Alert severity="error" sx={{ borderRadius: '12px', mb: 1 }} onClose={() => setSubmitError(null)}>
+            <Alert
+              severity="error"
+              sx={{ borderRadius: '12px', mb: 1 }}
+              onClose={() => setSubmitError(null)}
+              action={isRetryableError(submitError) && lastChatQueryArgsRef.current ? (
+                <Button size="small" color="inherit" onClick={handleRetry} sx={{ whiteSpace: 'nowrap', ml: 1 }}>
+                  Réessayer
+                </Button>
+              ) : undefined}
+            >
               {submitError}
             </Alert>
           )}
@@ -1417,6 +1457,7 @@ const ChatComponent: React.FC = () => {
                 onEditAssertions={handleEditAssertions}
                 onRerunTest={handleRerunTest}
                 onSuggestionClick={handleSuggestionClick}
+                onDismissSuggestion={handleDismissSuggestion}
                 onRegenerateSuggestions={handleRegenerateSuggestions}
                 selectedTestIndex={selectedTestIndex}
                 retryBadDataTestIndex={retryBadDataTestIndex}

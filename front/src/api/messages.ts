@@ -1,6 +1,16 @@
 ﻿import { createAsyncThunk } from '@reduxjs/toolkit';
 import { apiRequest } from "./utils";
 
+export async function dismissSuggestionApi(sessionId: string, suggestion: string): Promise<void> {
+  const token = localStorage.getItem('jwt') || '';
+  await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/suggestions/dismiss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify({ sessionId, suggestion }),
+  });
+}
+
+
 export async function clearHistoryApi(sessionId: string): Promise<void> {
   const token = localStorage.getItem('jwt') || '';
   await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/clearHistory`, {

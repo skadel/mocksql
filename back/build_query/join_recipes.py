@@ -169,6 +169,17 @@ def _derived_expr_of_column(
     return None
 
 
+def _is_degenerate(expr: exp.Expression) -> bool:
+    """Dérivation inexploitable pour une recette : aucune colonne source
+    (littéral pur — ex. la branche ``'' AS regpment_old`` d'un UNION ALL) ou
+    lineage non résolu (``Placeholder``, rendu ``?``). Une recette émise sur
+    ces dérivations est du bruit actif (« choisis la valeur source telle que
+    `''` = … ») qui parasite la correction au lieu de la guider."""
+    if not any(True for _ in expr.find_all(exp.Column)):
+        return True
+    return any(True for _ in expr.find_all(exp.Placeholder))
+
+
 def _derivation_of(
     side: exp.Expression, alias_map: dict[str, str], resolver: _LineageResolver
 ) -> exp.Expression | None:
@@ -177,10 +188,13 @@ def _derivation_of(
         raw = _col_ref(side, alias_map)
         if raw is None or raw.table == "__unknown__":
             return None
-        return _derived_expr_of_column(raw, resolver)
+        derived = _derived_expr_of_column(raw, resolver)
+        if derived is not None and _is_degenerate(derived):
+            return None
+        return derived
     # Expression inline dans le ON (ex. b.k = CASE WHEN a.reseau = 'BP' …) :
     # la dérivation est l'expression elle-même, si elle référence une colonne.
-    if any(True for _ in side.find_all(exp.Column)):
+    if not _is_degenerate(side):
         return side
     return None
 

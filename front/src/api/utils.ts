@@ -128,6 +128,8 @@ export async function streamThunk(
           networkHint.includes('getaddrinfo') ||
           networkHint.includes('HTTPSConnectionPool') ||
           networkHint.includes('ConnectionError') ||
+          networkHint.toLowerCase().includes('connection aborted') ||
+          networkHint.includes('RemoteDisconnected') ||
           networkHint.includes('Failed to fetch') ||
           networkHint.includes('NetworkError')
         ) {

@@ -273,6 +273,18 @@ def _noop_batch_reason(
     )
 
 
+def _plain_text(content) -> str:
+    """Contenu texte d'un message LLM — Gemini avec bind_tools peut renvoyer
+    une liste de parts au lieu d'une chaîne."""
+    if isinstance(content, list):
+        return "".join(
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return content or ""
+
+
 def _format_data_indexed(data: dict) -> str:
     """Affiche les données d'un test avec les indices de lignes pour référencer [table][i]."""
     lines = []
@@ -407,7 +419,7 @@ Tentatives de correction restantes : {retries_left}
 - `update_test_data` — régénérer complètement les données (si la correction est trop complexe)
 - `request_reevaluation` — si le comportement observé est intentionnel
 
-⚠️ Règle impérative : préfère les corrections chirurgicales groupées à la régénération complète. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Ne demande pas de confirmation."""
+⚠️ Règle impérative : préfère les corrections chirurgicales groupées à la régénération complète. Utilise `update_test_data` seulement si la logique du scénario doit être refondée. Applique ces corrections directement, sans demander de confirmation (la confirmation préalable n'est exigée que pour `delete_test`)."""
 
     return eval_context, eval_test_idx
 
@@ -438,7 +450,7 @@ async def conversational_agent(state: QueryState):
     cte_names_str = ", ".join(f'"{n}"' for n in cte_names) if cte_names else "aucune"
 
     debug_retries = state.get("debug_retries") or 0
-    debug_budget_note = f"\nRounds de debug restants : {debug_retries}." + (
+    debug_budget_note = f"\nRounds de debug (run_cte) restants : {debug_retries}." + (
         " Tu ne peux plus appeler run_cte — prends une décision (demander une précision à l'utilisateur ou regénérer le test)."
         if debug_retries == 0
         else ""
@@ -459,6 +471,30 @@ async def conversational_agent(state: QueryState):
             "`ask_clarification`.\n"
             "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
             "renforce le test existant via `add_test_row`."
+        )
+
+    # Canal de raisonnement : quand le thinking natif Gemini est actif (flash/pro),
+    # le raisonnement se fait hors du contenu → interdire le texte de réflexion
+    # garde les réponses propres. Quand il est INACTIF (flash-lite, budget 0), le
+    # contenu est le seul canal de raisonnement : l'interdire force le modèle à
+    # émettre un appel d'outil complexe « à froid » — c'est un facteur direct de
+    # MALFORMED_FUNCTION_CALL. Le texte émis avec un outil n'est de toute façon
+    # jamais montré à l'utilisateur (cf. filtrage de raw_content plus bas).
+    from storage.config import is_native_thinking_active
+
+    if is_native_thinking_active():
+        reasoning_note = (
+            "Ne produis pas de texte de réflexion quand tu appelles un outil — "
+            "l'outil parle pour toi.\n"
+            "Réserve le texte libre aux réponses purement conversationnelles (sans outil)."
+        )
+    else:
+        reasoning_note = (
+            "Avant d'appeler un outil, tu peux poser ton raisonnement en 1 à 2 phrases "
+            "de texte (jamais montrées à l'utilisateur), puis émets l'appel d'outil "
+            "avec des arguments JSON valides.\n"
+            "Réserve les réponses développées aux réponses purement conversationnelles "
+            "(sans outil)."
         )
 
     # Recettes de jointure (clés dérivées) : sans elles, face à un écart du type
@@ -497,8 +533,7 @@ Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
 ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétique),
 utilise `ask_clarification` pour signaler l'incohérence et demander confirmation avant d'agir.
 
-Ne produis pas de texte de réflexion quand tu appelles un outil — l'outil parle pour toi.
-Réserve le texte libre aux réponses purement conversationnelles (sans outil).{debug_budget_note}{suggestion_note}{eval_context}"""
+{reasoning_note}{debug_budget_note}{suggestion_note}{eval_context}"""
 
     # Build uid→test lookup (test_uid is assigned by retrieve_existing_tests above)
     uid_to_test: dict = {t["test_uid"]: t for t in existing_tests if t.get("test_uid")}
@@ -689,17 +724,15 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 f"attendu pour ce scénario, appelle `request_reevaluation` avec la justification."
             )
         else:
+            # Ne pas répéter ici les règles d'usage des outils : elles sont déjà
+            # dans le contexte automatique du SYSTEM — la duplication allonge le
+            # prompt sans gain et crée des risques d'incohérence entre les deux.
             trigger = (
                 f"Le test [{failing_uid_trigger}] a été jugé Insuffisant : ses données "
-                f"d'entrée ne satisfont pas ses contraintes (diagnostic CTE ci-dessus, avec "
-                f"l'étape bloquante). Corrige de façon CIBLÉE plutôt que tout régénérer : "
-                f"utilise `patch_test_field` / `add_test_row` / `remove_test_row` pour ajuster "
-                f"précisément les données de l'étape bloquante (ex. pour un anti-join "
-                f"`… IS NULL`, fais en sorte que la clé NE matche PAS la table anti-jointe). "
-                f"Utilise `run_cte` d'abord si tu dois inspecter les valeurs réelles d'une CTE. "
-                f"Ne recours à `update_test_data` (régénération complète) que si une correction "
-                f"ciblée est impossible. Si le comportement observé est en réalité attendu, "
-                f"appelle `request_reevaluation`."
+                f"d'entrée ne satisfont pas ses contraintes (diagnostic CTE et règles "
+                f"d'usage des outils dans le contexte automatique ci-dessus). Applique "
+                f"maintenant une correction CIBLÉE de l'étape bloquante — `run_cte` "
+                f"d'abord si tu dois inspecter les valeurs réelles d'une CTE."
             )
         # Mémoire des tentatives : rendu du ledger en conversation alternée
         # AI/HUMAN, inséré entre l'historique et le trigger courant.
@@ -721,6 +754,8 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     uid_retries = 0
     _NOOP_RETRY_MAX = 2
     noop_retries = 0
+    _MALFORMED_RETRY_MAX = 2
+    malformed_retries = 0
 
     logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
     if eval_context:
@@ -741,6 +776,36 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         )
 
         if not tool_calls:
+            # Réponse totalement vide : typiquement `finish_reason:
+            # MALFORMED_FUNCTION_CALL` sur Gemini (flash-lite surtout) — l'appel
+            # d'outil n'a pas pu être parsé et est perdu. Sans retry, le tour
+            # brûle un gen_retry et retombe sur le generator (régénération
+            # complète) alors qu'une ré-émission suffit le plus souvent.
+            if (
+                not _plain_text(result.content).strip()
+                and malformed_retries < _MALFORMED_RETRY_MAX
+            ):
+                malformed_retries += 1
+                finish_reason = (getattr(result, "response_metadata", None) or {}).get(
+                    "finish_reason", "?"
+                )
+                logger.diag(
+                    "[conv_agent] réponse vide (finish_reason=%s) — retry %d/%d",
+                    finish_reason,
+                    malformed_retries,
+                    _MALFORMED_RETRY_MAX,
+                )
+                messages_for_llm = messages_for_llm + [
+                    HumanMessage(
+                        content=(
+                            "Ta réponse précédente était vide (appel d'outil malformé "
+                            "ou interrompu). Ré-émets-la proprement : soit UN appel "
+                            "d'outil avec des arguments JSON valides, soit une réponse "
+                            "texte."
+                        )
+                    )
+                ]
+                continue
             logger.diag("[conv_agent] LLM n'a appelé aucun outil → réponse texte libre")
             break
 
@@ -1015,14 +1080,7 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 )
             )
 
-    # Gemini with bind_tools may return content as a list of parts instead of a plain string
-    raw_content = result.content
-    if isinstance(raw_content, list):
-        raw_content = "".join(
-            part.get("text", "") if isinstance(part, dict) else ""
-            for part in raw_content
-            if isinstance(part, dict) and part.get("type") == "text"
-        )
+    raw_content = _plain_text(result.content)
 
     # Only display raw LLM text when no tool was called (pure conversational response).
     # When a tool is called, the raw_content is internal reasoning — not user-facing.

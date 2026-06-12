@@ -94,6 +94,75 @@ async def test_cte_trace_errors_carry_message_and_sql(con):
     assert "SQL de l'étape" in hint
 
 
+# ── Prédicat OR (égalité OU IS NULL) : décomposition par branche ─────────────
+# Incident 2026-06-11 (requête bancaire) : le prédicat réellement bloquant
+# `(corr.filtre_didd = rp.cd_chef_file OR corr.filtre_didd IS NULL)` était le
+# seul affiché « (prédicat non décomposé) » — l'agent n'avait aucun signal.
+
+_OR_CTES = [
+    {
+        "name": "corr",
+        "code": (
+            "SELECT cartes.filtre_didd AS filtre_didd, "
+            "cartes.cd_chef_file AS cd_chef_file FROM proj.ds.cartes AS cartes"
+        ),
+    },
+    {
+        "name": "temp_carte",
+        "code": (
+            "SELECT corr.cd_chef_file AS cd FROM corr AS corr "
+            "JOIN proj.ds.ref_port AS rp ON corr.cd_chef_file = rp.cd_chef_file "
+            "AND (corr.filtre_didd = rp.cd_chef_file OR corr.filtre_didd IS NULL)"
+        ),
+    },
+    {
+        "name": "final_query",
+        "code": "SELECT temp_carte.cd FROM temp_carte AS temp_carte",
+    },
+]
+
+
+def _or_con(filtre_values):
+    c = duckdb.connect()
+    c.execute(f"CREATE TABLE ds_cartes_{_SUFFIX} (filtre_didd TEXT, cd_chef_file TEXT)")
+    for v in filtre_values:
+        c.execute(f"INSERT INTO ds_cartes_{_SUFFIX} VALUES (?, '1')", [v])
+    c.execute(f"CREATE TABLE ds_ref_port_{_SUFFIX} (cd_chef_file TEXT)")
+    c.execute(f"INSERT INTO ds_ref_port_{_SUFFIX} VALUES ('1')")
+    return c
+
+
+@pytest.mark.asyncio
+async def test_or_predicate_decomposed_and_marked_blocking():
+    # filtre_didd ∈ {D, I}, jamais NULL ; cd_chef_file = '1' → aucune branche
+    # du OR n'est satisfiable → le OR est le prédicat bloquant.
+    c = _or_con(["D", "I"])
+    lines = await _run_join_predicate_breakdown(
+        _OR_CTES, 1, _SUFFIX, "proj", "bigquery", c
+    )
+    text = "\n".join(lines)
+    assert "(prédicat non décomposé)" not in text
+    # chaque branche est évaluée : l'égalité (0 commune) et la branche IS NULL
+    assert "0 valeur(s) commune(s)" in text
+    assert "IS NULL" in text and "NULL" in text
+    blocking = [ln for ln in lines if "BLOQUANT" in ln]
+    assert len(blocking) == 1
+    assert "OR" in blocking[0]
+
+
+@pytest.mark.asyncio
+async def test_or_predicate_with_satisfiable_null_branch_not_blocking():
+    # Une ligne avec filtre_didd NULL satisfait la branche IS NULL → pas de
+    # marqueur BLOQUANT sur le OR.
+    c = _or_con(["D", None])
+    lines = await _run_join_predicate_breakdown(
+        _OR_CTES, 1, _SUFFIX, "proj", "bigquery", c
+    )
+    text = "\n".join(lines)
+    assert "IS NULL" in text
+    assert "BLOQUANT" not in text
+
+
 @pytest.mark.asyncio
 async def test_left_join_not_decomposed(con):
     ctes = [

@@ -457,15 +457,35 @@ def _get_failing_cte_from_results(messages) -> tuple:
 def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
     """Format enriched CTE trace into a diagnostic block for the generator prompt."""
     lines = ["⚠️ **Diagnostic DuckDB (tentative précédente) :**"]
+    # Les CTEs situées APRÈS la CTE bloquante ciblée ne font que propager son
+    # 0-ligne (cascades de « 0 ligne — filtre bloquant » et erreurs d'exécution
+    # avec leur dump SQL) : repliées en une ligne chacune, sinon elles noient
+    # le seul signal actionnable. La trace suit l'ordre de définition des CTEs.
+    past_failing = False
     for cte_name, info in cte_trace.items():
+        downstream = past_failing
+        if cte_name == failing_cte:
+            past_failing = True
         row_count = info.get("row_count", -1)
         if row_count == -1:
             err = info.get("error", "")
             err_txt = f" — {err}" if err else ""
+            if downstream:
+                lines.append(
+                    f"- `{cte_name}` : erreur d'exécution{err_txt} "
+                    "(conséquence probable du 0-ligne amont)"
+                )
+                continue
             lines.append(f"- `{cte_name}` : erreur d'exécution{err_txt}")
             step_sql = info.get("sql", "")
             if step_sql:
                 lines.append(f"  - SQL de l'étape : `{step_sql[:400]}`")
+            continue
+        if downstream and info.get("blocking", row_count == 0):
+            lines.append(
+                f"- `{cte_name}` : 0 ligne(s) (conséquence du 0-ligne de "
+                f"`{failing_cte}` en amont)"
+            )
             continue
         # Une CTE vide n'est « bloquante » que si elle est atteignable depuis le
         # résultat final par des arêtes requises (cf. _select_failing_cte /

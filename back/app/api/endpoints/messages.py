@@ -45,6 +45,11 @@ class PatchSqlRequest(BaseModel):
     last_error: Optional[str] = None
 
 
+class DismissSuggestionRequest(BaseModel):
+    sessionId: str
+    suggestion: str
+
+
 @router.post("/getMessages")
 async def get_messages(body: MessageRequest):
     if not is_initialized():
@@ -223,6 +228,33 @@ async def apply_assertions(body: ApplyAssertionsRequest):
         }
     except HTTPException:
         raise
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.post("/suggestions/dismiss")
+async def dismiss_suggestion(body: DismissSuggestionRequest):
+    try:
+        test = get_test(body.sessionId)
+        if not test:
+            return {"ok": True}
+
+        suggestion = body.suggestion.strip()
+
+        suggestions = [
+            s for s in (test.get("suggestions") or []) if s.strip() != suggestion
+        ]
+
+        dismissed: list = list(test.get("dismissed_suggestions") or [])
+        if suggestion not in [d.strip() for d in dismissed]:
+            dismissed.append(suggestion)
+
+        update_test(
+            body.sessionId,
+            {"suggestions": suggestions, "dismissed_suggestions": dismissed},
+        )
+        return {"ok": True}
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
