@@ -424,6 +424,84 @@ def _build_fanout_hint_block(sql: str, dialect: str = "bigquery") -> str:
     )
 
 
+# ── Exemple few-shot statique « clé dérivée + photos M/M-1 » (P2a) ──────────
+# Mini-requête FICTIVE concentrant les deux pièges qui vident le plus souvent
+# le résultat : (a) clé de JOIN dérivée d'un CASE — il faut générer la valeur
+# SOURCE, pas la valeur finale ; (b) filtre photo M / M-1 — l'absence en M-1
+# fait partie du scénario. Le même exemple est injecté quel que soit le modèle
+# testé : il enseigne la MÉTHODE, pas des valeurs à réutiliser.
+# Vérifié forward sur DuckDB par tests/test_few_shot_example.py — toute
+# modification ici doit garder ce test vert.
+FEW_SHOT_EXAMPLE_SQL = """\
+WITH photo_m AS (
+    SELECT num_carte, reseau, type_carte
+    FROM cartes.stock
+    WHERE dt_photo = '2024-03-31'
+),
+photo_m1 AS (
+    SELECT num_carte
+    FROM cartes.stock
+    WHERE dt_photo = '2024-02-29'
+)
+SELECT m.num_carte, p.libelle
+FROM photo_m m
+JOIN ref.produits p
+    ON p.code = CASE WHEN m.reseau = 'BP' THEN CONCAT('BP', m.type_carte) ELSE m.type_carte END
+LEFT JOIN photo_m1 m1 ON m1.num_carte = m.num_carte
+WHERE m1.num_carte IS NULL"""
+
+FEW_SHOT_EXAMPLE_DATA = {
+    "cartes_stock": [
+        {
+            "num_carte": "C001",
+            "reseau": "BP",
+            "type_carte": "GOLD",
+            "dt_photo": "2024-03-31",
+        }
+    ],
+    "ref_produits": [{"code": "BPGOLD", "libelle": "Carte Gold BP"}],
+}
+
+_FEW_SHOT_EXAMPLE_ANSWER = json.dumps(
+    {
+        "unit_test_build_reasoning": (
+            "La clé de jointure est dérivée (CASE → CONCAT('BP', type_carte)) : "
+            "type_carte='GOLD' produit 'BPGOLD' = produits.code, et C001 n'a "
+            "aucune ligne au 2024-02-29 pour rester une ouverture."
+        ),
+        "test_name": "Ouverture carte Gold réseau BP",
+        "unit_test_description": (
+            "Pour la carte C001 (réseau BP, type GOLD) présente sur la photo du "
+            "2024-03-31 et absente de celle du 2024-02-29 → elle ressort comme "
+            "ouverture avec le libellé Carte Gold BP."
+        ),
+        "tags": ["Logique métier"],
+        "data": FEW_SHOT_EXAMPLE_DATA,
+    },
+    ensure_ascii=False,
+    indent=2,
+)
+
+_FEW_SHOT_EXAMPLE_HUMAN = f"""<example>
+Exemple travaillé — tables et requête FICTIVES : n'en réutilisez ni les noms ni les valeurs. Seuls <schema> et <query> font autorité pour votre réponse.
+
+Tables sources : `cartes_stock` (num_carte, reseau, type_carte, dt_photo) ; `ref_produits` (code, libelle).
+
+```sql
+{FEW_SHOT_EXAMPLE_SQL}
+```
+
+Cette requête concentre les deux pièges classiques :
+✗ **Clé de jointure dérivée** — générer `type_carte = 'BPGOLD'` (la valeur FINALE de la clé) : après le CASE, la clé devient 'BPBPGOLD', la jointure ne matche jamais → résultat vide. Il faut générer la valeur SOURCE (`'GOLD'`), dont la transformation produit 'BPGOLD' = `produits.code`.
+✗ **Photos M / M-1** — ajouter « par complétude » une ligne C001 datée du 2024-02-29 : la carte existe alors en M-1 et le `WHERE m1.num_carte IS NULL` l'élimine → résultat vide. L'ABSENCE en M-1 fait partie du scénario d'ouverture.
+</example>"""
+
+_FEW_SHOT_MESSAGES: list[tuple[str, str]] = [
+    ("human", _FEW_SHOT_EXAMPLE_HUMAN),
+    ("ai", _FEW_SHOT_EXAMPLE_ANSWER),
+]
+
+
 def generate_data_prompt(
     history: list[BaseMessage],
     dialect: str,
@@ -526,6 +604,7 @@ La conversation contient ces sections, délimitées par des balises. Le schéma,
 - `<business_context>` : contexte métier du projet (optionnel).
 - `<query>` : la requête SQL à tester — **elle fait toujours autorité**.
 - `<constraints>` : aides extraites du SQL — `conditions` (à rendre VRAIES), `anti_joins` (à rendre FAUSSES : générer des données qui NE matchent PAS la table anti-jointe), `format_constraints`, `lineages`. ⚠️ Ces extractions peuvent être incomplètes ou bruitées : en cas de doute, raisonnez directement sur `<query>` et ignorez toute contrainte tautologique (`X = X`) ou manifestement absurde.
+- `<example>` : un exemple travaillé sur une mini-requête FICTIVE (clé de jointure dérivée + photos M/M-1) — appliquez-en la méthode, ne réutilisez jamais ses tables ni ses valeurs.
 - `<diagnostic>` : diagnostic de la tentative précédente, s'il y a lieu (optionnel).
 - `<task>` : ce que vous devez produire.
 
@@ -665,8 +744,10 @@ Génère un test unitaire conforme aux consignes du message système, avec :
     )
     ask_human_msg = ("human", ask_message_content)
 
-    # Ordre : system → référence → few-shot history → eval retry → ask.
-    prompt_messages = [system_msg, reference_human_msg]
+    # Ordre : system → référence → exemple travaillé (P2a, statique) →
+    # few-shot history → eval retry → ask.
+    prompt_messages: list = [system_msg, reference_human_msg]
+    prompt_messages.extend(_FEW_SHOT_MESSAGES)
     prompt_messages.extend(history_with_results)
     if eval_history:
         prompt_messages.extend(eval_history)

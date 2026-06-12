@@ -3,6 +3,7 @@ import AddIcon from '@mui/icons-material/Add';
 import CancelIcon from '@mui/icons-material/Cancel';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import DeleteIcon from '@mui/icons-material/Delete';
+import ThumbDownOutlinedIcon from '@mui/icons-material/ThumbDownOutlined';
 import EditIcon from '@mui/icons-material/Edit';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
@@ -702,7 +703,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
 }
 
 /* ─── SuggestionRow ──────────────────────────────────────────────── */
-function SuggestionRow({ text, tag, onAdd, onFill }: { text: string; tag?: string; onAdd?: () => void; onFill?: () => void }) {
+function SuggestionRow({ text, tag, onAdd, onFill, onDismiss }: { text: string; tag?: string; onAdd?: () => void; onFill?: () => void; onDismiss?: () => void }) {
   const tc = tag ? tagStyle(tag) : { bg: SURFACE, fg: MUTED };
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, p: '9px 11px', border: `1px solid ${BORDER}`, borderRadius: '10px', bgcolor: '#fafcfc' }}>
@@ -721,6 +722,22 @@ function SuggestionRow({ text, tag, onAdd, onFill }: { text: string; tag?: strin
       >
         <AddIcon sx={{ fontSize: 12 }} /> Ajouter
       </Box>
+      {onDismiss && (
+        <Tooltip title="Non pertinent — ne plus suggérer">
+          <Box
+            component="button"
+            onClick={onDismiss}
+            sx={{
+              display: 'inline-flex', alignItems: 'center',
+              p: '5px', bgcolor: 'transparent', color: MUTED, border: 'none',
+              borderRadius: '6px', cursor: 'pointer', flexShrink: 0,
+              '&:hover': { bgcolor: '#fef2f2', color: '#e57373' },
+            }}
+          >
+            <ThumbDownOutlinedIcon sx={{ fontSize: 13 }} />
+          </Box>
+        </Tooltip>
+      )}
     </Box>
   );
 }
@@ -729,15 +746,29 @@ function SuggestionRow({ text, tag, onAdd, onFill }: { text: string; tag?: strin
 /* Panneau dédié des suggestions de couverture (hors fil de conversation).
  * Source : state.buildModel.suggestions (champ modèle, chargé via getMessages).
  * « Ajouter » consomme la suggestion (→ test) ; « Régénérer » en demande de nouvelles. */
-function SuggestionsSection({ suggestions, onAdd, onRegenerate, regenerating }: {
+function SuggestionsSection({ suggestions, onAdd, onDismiss, onRegenerate, regenerating, highlighted, boxRef }: {
   suggestions: string[];
   onAdd?: (text: string) => void;
+  onDismiss?: (text: string) => void;
   onRegenerate?: () => void;
   regenerating?: boolean;
+  highlighted?: boolean;
+  boxRef?: React.RefObject<HTMLDivElement>;
 }) {
   if (suggestions.length === 0) return null;
   return (
-    <Box sx={{ mt: 1.5, border: `1px solid ${BORDER}`, borderRadius: '12px', bgcolor: SURFACE, p: '12px 13px' }}>
+    <Box
+      ref={boxRef}
+      sx={{
+        mt: 1.5,
+        border: `1px solid ${highlighted ? TEAL : BORDER}`,
+        borderRadius: '12px',
+        bgcolor: SURFACE,
+        p: '12px 13px',
+        transition: 'border-color 0.5s ease, box-shadow 0.5s ease',
+        boxShadow: highlighted ? `0 0 0 3px ${TEAL}22` : 'none',
+      }}
+    >
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         <AutoAwesomeIcon sx={{ fontSize: 15, color: TEAL }} />
         <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: INK }}>
@@ -771,7 +802,7 @@ function SuggestionsSection({ suggestions, onAdd, onRegenerate, regenerating }: 
       </Box>
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
         {suggestions.map((s, i) => (
-          <SuggestionRow key={i} text={s} onAdd={() => onAdd?.(s)} />
+          <SuggestionRow key={i} text={s} onAdd={() => onAdd?.(s)} onDismiss={onDismiss ? () => onDismiss(s) : undefined} />
         ))}
       </Box>
     </Box>
@@ -1646,6 +1677,7 @@ interface TestsPanelProps {
   onRerunTest?: (idx: number) => void;
   onOpenChat?: () => void;
   onSuggestionClick?: (text: string) => void;
+  onDismissSuggestion?: (text: string) => void;
   onRegenerateSuggestions?: () => void;
   modelId?: string;
   retryBadDataTestIndex?: number | null;
@@ -1656,7 +1688,7 @@ interface TestsPanelProps {
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onRegenerateSuggestions, modelId,
+  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions, modelId,
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
@@ -1665,6 +1697,20 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
   const suggestions: string[] = useAppSelector((state) => state.buildModel.suggestions ?? []);
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
+
+  const [suggestionsHighlighted, setSuggestionsHighlighted] = useState(false);
+  const suggestionsRef = useRef<HTMLDivElement>(null);
+  const prevSuggestionsLengthRef = useRef(suggestions.length);
+
+  useEffect(() => {
+    const prev = prevSuggestionsLengthRef.current;
+    prevSuggestionsLengthRef.current = suggestions.length;
+    if (prev === 0 && suggestions.length > 0) {
+      setSuggestionsHighlighted(true);
+      setTimeout(() => suggestionsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 80);
+      setTimeout(() => setSuggestionsHighlighted(false), 2500);
+    }
+  }, [suggestions.length]);
   const loadingTestIndex = useAppSelector((state) => state.buildModel.loadingTestIndex);
 
   const {
@@ -1959,8 +2005,11 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
           <SuggestionsSection
             suggestions={suggestions}
             onAdd={onSuggestionClick}
+            onDismiss={onDismissSuggestion}
             onRegenerate={onRegenerateSuggestions}
             regenerating={isLoading}
+            highlighted={suggestionsHighlighted}
+            boxRef={suggestionsRef}
           />
 
         </Box>

@@ -794,6 +794,59 @@ class TestFormatCteTraceHintBlocking:
         out = _format_cte_trace_hint("c", trace)
         assert "filtre bloquant" in out
 
+    def test_downstream_consequences_are_collapsed(self):
+        # Incident 2026-06-11 : les CTEs situées APRÈS la CTE bloquante ciblée
+        # (0 ligne en cascade, erreurs « cannot convert float NaN to integer »
+        # avec 400 chars de SQL chacune) noyaient le seul signal utile. Elles
+        # doivent être repliées en une ligne, sans steps ni dump SQL.
+        trace = {
+            "temp_carte": {
+                "row_count": 0,
+                "blocking": True,
+                "steps": [
+                    {"label": "ref_port", "count": 2},
+                    {"label": "+ JOIN (corr.cd_chef_file IS NOT NULL)", "count": 0},
+                ],
+            },
+            "temp_vision": {
+                "row_count": 0,
+                "blocking": True,
+                "steps": [{"label": "temp_carte", "count": 0}],
+            },
+            "photo_m_1": {
+                "row_count": -1,
+                "error": "cannot convert float NaN to integer",
+                "sql": "SELECT cd_banque_emetteur, COUNT(no_carte) FROM temp_carte",
+            },
+        }
+        out = _format_cte_trace_hint("temp_carte", trace)
+        # La CTE ciblée garde le détail complet.
+        assert "`temp_carte` : 0 ligne(s) ← **0 ligne — filtre bloquant**" in out
+        assert "étape bloquante" in out
+        # Les CTEs aval sont repliées : pas de steps, pas de dump SQL.
+        assert "conséquence" in out
+        assert "`temp_vision`" in out
+        assert out.count("← **étape bloquante**") == 1
+        assert "SQL de l'étape" not in out
+        # Le message d'erreur reste visible (une ligne), le SQL non.
+        assert "cannot convert float NaN to integer" in out
+        assert "COUNT(no_carte)" not in out
+
+    def test_error_upstream_of_failing_cte_keeps_sql(self):
+        # Une erreur AVANT la CTE ciblée est potentiellement la vraie cause →
+        # elle garde le SQL de l'étape (règle de logging projet).
+        trace = {
+            "broken_dim": {
+                "row_count": -1,
+                "error": "Binder Error: no_such_col",
+                "sql": "SELECT no_such_col FROM dim",
+            },
+            "main": {"row_count": 0, "blocking": True},
+        }
+        out = _format_cte_trace_hint("main", trace)
+        assert "SQL de l'étape" in out
+        assert "no_such_col" in out
+
 
 # ---------------------------------------------------------------------------
 # _select_failing_cte — choisit la CTE réellement bloquante et annote la trace.

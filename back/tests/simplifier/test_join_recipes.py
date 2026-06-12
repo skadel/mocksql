@@ -151,6 +151,42 @@ def test_case_with_null_else_mentions_null_branch():
     assert "NULL" in r
 
 
+# ── Dérivations dégénérées → aucune recette (bruit actif) ────────────────────
+# Incident 2026-06-11 (requête bancaire) : le prompt de l'agent contenait
+# « cette clé est dérivée par `''` » (branche littérale d'un UNION ALL) et
+# « dérivée par `?` » (lineage non résolu sur colonne nue multi-tables) —
+# consignes inactionnables qui parasitent la correction.
+
+_UNION_LITERAL_SQL = """
+WITH mvt AS (
+  SELECT a.id AS id, '' AS regpment FROM proj.ds.a AS a
+  UNION ALL
+  SELECT b.id AS id, b.regpment AS regpment FROM proj.ds.b AS b
+)
+SELECT * FROM mvt JOIN proj.ds.ref AS r ON mvt.regpment = r.regroupement
+"""
+
+
+def test_literal_union_branch_produces_no_recipe():
+    assert build_join_recipes(_UNION_LITERAL_SQL, dialect="bigquery") == []
+
+
+_UNRESOLVED_BARE_COL_SQL = """
+WITH temp_carte AS (
+  SELECT rp.cd_banque AS cd_banque, cd_iban AS cd_iban
+  FROM proj.ds.ref_port AS rp
+  JOIN proj.ds.evt AS e ON e.no_carte = rp.no_carte
+)
+SELECT * FROM temp_carte AS t
+JOIN proj.ds.cli AS c ON t.cd_iban = c.cd_iban
+"""
+
+
+def test_unresolved_lineage_placeholder_produces_no_recipe():
+    recipes = build_join_recipes(_UNRESOLVED_BARE_COL_SQL, dialect="bigquery")
+    assert recipes == []
+
+
 # ── Bloc prompt ──────────────────────────────────────────────────────────────
 
 

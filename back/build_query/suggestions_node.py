@@ -10,7 +10,7 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.prompt_tools import _format_profile_block
 from build_query.state import QueryState
-from storage.test_repository import update_test
+from storage.test_repository import get_test, update_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
@@ -23,12 +23,11 @@ logger = logging.getLogger(__name__)
 class TestSuggestionsOutput(BaseModel):
     analyse_des_manques: str = Field(
         description=(
-            "Raisonnement en deux étapes. "
-            "1) Identifie l'algorithme ou le pattern métier implémenté par le SQL "
-            "(détection d'anomalies, classement, agrégation multi-niveaux, cohorte, etc.). "
-            "2) Liste les hypothèses implicites que cet algorithme fait sur les données "
-            "et les cas concrets où ces hypothèses peuvent être violées. "
-            "Ce raisonnement guide le choix des 3 suggestions."
+            "Raisonnement en 3 à 4 phrases maximum. "
+            "Identifie le pattern métier du SQL et les hypothèses implicites sur les données "
+            "dont dépend son bon fonctionnement. "
+            "Ce raisonnement guide le choix des 3 suggestions. "
+            "Ne pas dépasser 4 phrases."
         )
     )
     suggestions: list[str] = Field(
@@ -118,6 +117,11 @@ async def generate_suggestions(state: QueryState):
         raw_instructions = " ".join(str(x) for x in raw_instructions if x)
     instructions = raw_instructions.strip()
 
+    stored = get_test(state["session"]) or {}
+    dismissed_suggestions = [
+        s.strip() for s in (stored.get("dismissed_suggestions") or []) if s.strip()
+    ]
+
     verdicts = _extract_verdicts(state)
     test_blocks = []
     for tc in test_cases:
@@ -136,6 +140,13 @@ async def generate_suggestions(state: QueryState):
     )
     existing_tests_block = (
         existing if existing else "Aucun test existant pour le moment."
+    )
+    dismissed_block = (
+        "<suggestions_rejetees>\n"
+        + "\n".join(f"- {s}" for s in dismissed_suggestions)
+        + "\n</suggestions_rejetees>"
+        if dismissed_suggestions
+        else ""
     )
 
     # --- 2. Construction du Prompt ---
@@ -161,7 +172,11 @@ Voici les tests déjà générés avec leurs données d'entrée, résultats d'ex
 {existing_tests_block}
 </tests_existants>
 
+{dismissed_block}
+
 {profile_section}
+
+Si des suggestions ont été jugées non pertinentes par l'ingénieur (bloc <suggestions_rejetees>), ne les régénère pas ni de variantes proches — elles ont été explicitement écartées.
 
 En t'appuyant sur les données d'entrée et les résultats de chaque test, identifie les cas non couverts : combinaisons de valeurs absentes, comportements limites non testés, scénarios que les données actuelles ne permettent pas de valider.
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
@@ -222,6 +237,7 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                 sql=sql,
                 instruction_block=instruction_block,
                 existing_tests_block=existing_tests_block,
+                dismissed_block=dismissed_block,
                 profile_section=profile_section,
             )
             logger.diag(
@@ -241,6 +257,7 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                 "sql": sql,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,
+                "dismissed_block": dismissed_block,
                 "profile_section": profile_section,
             }
         )

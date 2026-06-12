@@ -21,8 +21,9 @@ demandée au LLM.
 | **P1c** — garde anti-no-op + mémoire des tentatives (ledger `QueryState.correction_attempts`, conversation alternée, rejet sans consommer de retry) | `conversational_agent.py` (`_noop_batch_reason`, `_render_attempt_messages`), `data_patcher.py` (`append_correction_attempt`), `query_chain.py` (`_bad_data_to_agent`), reset `utils/saver.py`, tests `tests/test_correction_ledger.py` |
 | **P3.1** — clé `anti_joins` émise systématiquement (liste vide incluse) | `build_conditions_hint`, tests `tests/simplifier/test_anti_join.py` |
 | **P3.3** — garde collapse documenté comme filet de sécurité post-P1b | commentaire `_resolve_pred_node` |
+| **P2a** — exemple few-shot statique « clé dérivée + photos M/M-1 » | `FEW_SHOT_EXAMPLE_*` + `_FEW_SHOT_MESSAGES` (`prompt_tools.py`), tests `tests/test_few_shot_example.py` (forward DuckDB + positionnement dans le prompt) |
 
-Les chantiers restants, par ordre de priorité : **P0** (éval A/B via `/eval-mocksql` — runs LLM, à lancer manuellement), puis **P2a + P2b** (décision sur les chiffres de l'éval), **P3.2** (vérif du contrat sortie attendue).
+Les chantiers restants, par ordre de priorité : **P0** (éval A/B via `/eval-mocksql` — runs LLM, à lancer manuellement), puis **P2b** (décision sur les chiffres de l'éval), **P3.2** (vérif du contrat sortie attendue).
 
 ---
 
@@ -312,7 +313,7 @@ les implémenter ensemble.
 
 ---
 
-## P2a — Exemple few-shot « clé dérivée + bornes M/M-1 »
+## P2a — Exemple few-shot « clé dérivée + bornes M/M-1 » ✅ livré
 
 ### Problème
 Le SYSTEM mentionne que les consignes s'appliquent « y compris aux exemples »,
