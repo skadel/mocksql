@@ -13,6 +13,7 @@ from build_query.state import QueryState
 from storage.test_repository import get_test, update_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_message_type
 from utils.test_utils import build_test_detail
 
@@ -154,7 +155,10 @@ async def generate_suggestions(state: QueryState):
         [
             (
                 "system",
-                """Tu es un expert en assurance qualité et en tests unitaires SQL (dialecte: {dialect}).
+                MOCKSQL_PRODUCT_PREAMBLE
+                + """
+
+Ici, tu agis comme l'expert en assurance qualité et en tests unitaires SQL de MockSQL (dialecte: {dialect}). Tu proposes à l'utilisateur les cas de tests les plus utiles **non encore couverts**.
 Ton objectif est d'identifier les cas de tests les plus utiles — ceux où le résultat est contre-intuitif, ambigu, ou où l'ingénieur pourrait se tromper sur ce que la requête retourne réellement.
 Raisonne en mode chain-of-thought : commence par comprendre ce que fait le SQL (quel algorithme, quel pattern métier), puis identifie les hypothèses implicites sur les données, avant de proposer les suggestions.""",
             ),

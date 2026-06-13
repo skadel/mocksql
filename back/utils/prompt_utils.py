@@ -13,6 +13,22 @@ import utils.logger  # noqa: F401 — registers DIAG level
 logger = logging.getLogger(__name__)
 
 
+# Préambule produit partagé — injecté UNIQUEMENT dans les prompts conversationnels
+# (ceux dont la sortie est lue directement par l'utilisateur : route `other`, agent
+# conversationnel, suggestions, réévaluation de verdict). Les prompts « transformateurs »
+# (génération/modification de données, fixers SQL, naming) n'en ont pas besoin : leur
+# rôle est déjà précis et l'ajouter ne ferait que diluer la tâche.
+# But : que le LLM sache où il est (MockSQL, test unitaire SQL) et ce que l'utilisateur
+# voit à l'écran (tests + verdicts + couverture, exécution locale DuckDB).
+MOCKSQL_PRODUCT_PREAMBLE = """\
+Tu opères au sein de MockSQL, un outil de test unitaire de requêtes SQL pour data engineers. \
+L'utilisateur a choisi un fichier .sql à tester ; MockSQL génère automatiquement les jeux de \
+données d'entrée, les exécute en local sur DuckDB (aucune requête facturée sur BigQuery), \
+attribue à chaque test un verdict argumenté (Bon / Insuffisant / Incorrect) et signale les cas \
+limites non couverts. L'utilisateur n'écrit jamais ses données de test à la main : il dialogue \
+avec toi pour les générer, les corriger et comprendre les verdicts."""
+
+
 def escape_unescaped_placeholders(text):
     # Match {content} but not {{content}}
     return re.sub(r"(?<!\{)\{([^{}]*)\}(?!\})", r"{{\1}}", text)

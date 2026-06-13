@@ -32,8 +32,14 @@ async def delete_test_node(state: QueryState):
                 content=json.dumps({"test_index": test_index}),
                 id=str(uuid.uuid4()),
                 additional_kwargs={
+                    # Chaîner sous le dernier message du tour (comme update_test_node),
+                    # pas sous parent_message_id : sinon ce message partagerait son parent
+                    # avec le QUERY de l'utilisateur (créé dans routing.py) et formerait
+                    # une branche sœur parasite au lieu de suivre la conversation.
                     "type": MsgType.DELETE_TEST,
-                    "parent": state.get("parent_message_id"),
+                    "parent": state["messages"][-1].id
+                    if state.get("messages")
+                    else state.get("parent_message_id"),
                     "request_id": state.get("request_id"),
                     "test_index": test_index,
                 },

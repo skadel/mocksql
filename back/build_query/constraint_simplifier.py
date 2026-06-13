@@ -844,31 +844,6 @@ def _collect_cols_shallow(
     return result
 
 
-def _collect_is_null_cols(
-    cond: exp.Expression,
-    alias_map: dict[str, str],
-    resolver: _LineageResolver,
-) -> set[ColumnRef]:
-    """Return resolved ColumnRefs that appear in IS NULL predicates in top-level ANDs.
-
-    Used to detect anti-join patterns: when a column from the nullable side of
-    an outer join appears here, the corresponding ON-clause equality is not a
-    true equality constraint but a filter saying "no match in the other table".
-    """
-    result: set[ColumnRef] = set()
-    for pred in _flatten_and(cond):
-        if not isinstance(pred, exp.Is):
-            continue
-        right = pred.args.get("expression") or pred.args.get("to")
-        if _is_column(pred.this) and isinstance(right, exp.Null):
-            ref = _col_ref(pred.this, alias_map)
-            if ref:
-                # Same identity policy as the equality collectors, so anti-join
-                # IS NULL refs keep matching the ON-clause equality refs.
-                result.add(_identity_or_raw(ref, resolver.resolve(ref)))
-    return result
-
-
 # ─── Constraint extraction ────────────────────────────────────────────────────
 
 
@@ -918,6 +893,140 @@ def _extract_from_condition(
     """Parse a single predicate and append to the appropriate list."""
     for pred in _flatten_and(cond):
         _dispatch_pred(pred, alias_map, resolver, filters, equalities, functional)
+
+
+def _scalar_agg_subquery(
+    node: exp.Expression,
+) -> tuple[exp.Select, exp.Column] | None:
+    """Return ``(inner_select, agg_col_node)`` if *node* is a scalar MAX/MIN
+    subquery over a single source — ``(SELECT MAX(col) FROM t [WHERE …])`` —
+    else None. Pattern d'épinglage de partition BigQuery."""
+    sub = node
+    while isinstance(sub, exp.Paren):
+        sub = sub.this
+    if not isinstance(sub, exp.Subquery):
+        return None
+    inner = sub.this
+    if not isinstance(inner, exp.Select):
+        return None
+    if inner.args.get("joins") or inner.args.get("group"):
+        return None
+    if len(inner.expressions) != 1:
+        return None
+    proj = inner.expressions[0]
+    if isinstance(proj, exp.Alias):
+        proj = proj.this
+    if not isinstance(proj, (exp.Max, exp.Min)):
+        return None
+    col = proj.this
+    if not isinstance(col, exp.Column):
+        return None
+    return inner, col
+
+
+def _handle_pinning_subquery(
+    col_side: exp.Expression,
+    sub_side: exp.Expression,
+    alias_map: dict[str, str],
+    resolver: _LineageResolver,
+    filters: list[FilterConstraint],
+    equalities: list[tuple[ColumnRef, ColumnRef]],
+) -> bool:
+    """``col = (SELECT MAX/MIN(col') FROM t [WHERE …])`` — épinglage de partition.
+
+    Sans ce branchement le prédicat est muet : la colonne paraît « non
+    contrainte », sort du schéma LLM du générateur et part en remplissage
+    aléatoire (sparse_filler) → le filtre de partition ne matche jamais et la
+    CTE devient vide. Stratégie de génération encodée ici :
+
+      * équivalence colonne externe ↔ colonne interne (même valeur des deux
+        côtés rend le MAX/MIN trivialement égal — cas cross-table type
+        ``banques.partition_date = MAX(banques_france.partition_date)``) ;
+      * le WHERE interne (ex. ``partition_date <= <date>``) devient une
+        contrainte conservatrice sur toutes les lignes générées.
+
+    Returns True if the pattern matched (predicate fully handled).
+    """
+    if not _is_column(col_side):
+        return False
+    parsed = _scalar_agg_subquery(sub_side)
+    if parsed is None:
+        return False
+    inner_select, inner_col_node = parsed
+
+    outer_raw = _col_ref(col_side, alias_map)
+    if outer_raw is None:
+        return True
+    if outer_raw.table == "__unknown__":
+        # Colonne nue : qualifier avec l'unique table du scope courant (le fixup
+        # `default_table` du caller ne couvre que les filtres, pas les égalités).
+        real_tables = {v for v in alias_map.values() if v and not v.startswith("__")}
+        if len(real_tables) == 1:
+            t = next(iter(real_tables))
+            outer_raw = ColumnRef(t, outer_raw.column, real_table=t)
+
+    local_map: dict[str, str] = {}
+    _collect_aliases(inner_select, local_map)
+    inner_from = inner_select.args.get("from_")
+    default_inner = (
+        inner_from.this.name.lower()
+        if inner_from is not None and isinstance(inner_from.this, exp.Table)
+        else None
+    )
+
+    inner_raw = _col_ref(inner_col_node, local_map)
+    if inner_raw is not None and inner_raw.table == "__unknown__" and default_inner:
+        inner_raw = ColumnRef(
+            default_inner,
+            inner_raw.column,
+            real_table=local_map.get(default_inner, default_inner),
+        )
+    if inner_raw is None:
+        return True
+
+    outer_ref = _identity_or_raw(outer_raw, resolver.resolve(outer_raw))
+    inner_ref = _identity_or_raw(inner_raw, resolver.resolve(inner_raw))
+    if outer_ref != inner_ref:
+        equalities.append((outer_ref, inner_ref))
+
+    inner_where = inner_select.args.get("where")
+    tmp_filters: list[FilterConstraint] = []
+    tmp_eq: list[tuple[ColumnRef, ColumnRef]] = []
+    tmp_func: list[FunctionalConstraint] = []
+    if inner_where is not None:
+        _extract_from_condition_recursive(
+            inner_where.this, local_map, resolver, tmp_filters, tmp_eq, tmp_func
+        )
+    if default_inner:
+        tmp_filters = [
+            FilterConstraint(
+                column=ColumnRef(
+                    default_inner,
+                    f.column.column,
+                    real_table=local_map.get(default_inner, default_inner),
+                ),
+                op=f.op,
+                value=f.value,
+                source_columns=[ColumnRef(default_inner, f.column.column)],
+            )
+            if f.column.table == "__unknown__"
+            else f
+            for f in tmp_filters
+        ]
+    filters.extend(tmp_filters)
+    equalities.extend(tmp_eq)
+
+    # Self-pinning sans borne exploitable : marquer quand même la colonne pour
+    # qu'elle reste dans le schéma LLM (le hint `conditions` porte le détail).
+    if outer_ref == inner_ref and not tmp_filters:
+        filters.append(
+            FilterConstraint(
+                column=outer_ref,
+                op="is_not_null",
+                source_columns=resolver.resolve_all(outer_raw),
+            )
+        )
+    return True
 
 
 def _dispatch_pred(
@@ -1103,6 +1212,14 @@ def _dispatch_pred(
             if ref_l != ref_r:
                 equalities.append((ref_l, ref_r))
         return
+
+    # col = (SELECT MAX/MIN(col') FROM t [WHERE …])  →  épinglage de partition
+    if op_str == "eq":
+        for col_side, sub_side in ((left, right), (right, left)):
+            if _handle_pinning_subquery(
+                col_side, sub_side, alias_map, resolver, filters, equalities
+            ):
+                return
 
     # col = func(col)  →  functional dependency
     if left_is_col and right_func and op_str == "eq":
@@ -1398,10 +1515,73 @@ def _detect_anti_join_aliases(sel: exp.Select) -> set[str]:
     return anti_join_aliases
 
 
+def _anti_join_source_notes(
+    inner: exp.Select,
+    resolver: "_LineageResolver",
+    dialect: str,
+) -> list[str]:
+    """Remonte les colonnes du critère d'exclusion à leurs colonnes SOURCES.
+
+    Le critère est rendu en termes de colonnes de CTE (``prop_siret_banque.groupe``)
+    alors que le générateur remplit les colonnes de base (``banques_france.groupe``).
+    Quand la colonne est dérivée (CASE, agrégat…), la dérivation est exposée pour
+    que le modèle évalue le critère APRÈS transformation — sinon il choisit une
+    valeur interdite sans le savoir (c1.sql : groupe='Banque Populaire' → mappé
+    'BPCE' par un CASE amont → SIRET capturé par l'anti-join → 0 ligne).
+    """
+    where = inner.args.get("where")
+    if where is None:
+        return []
+
+    local_map: dict[str, str] = {}
+    _collect_aliases(inner, local_map)
+    inner_from = inner.args.get("from_")
+    default = (
+        inner_from.this.name.lower()
+        if inner_from is not None and isinstance(inner_from.this, exp.Table)
+        else None
+    )
+
+    notes: list[str] = []
+    seen_cols: set[tuple[str, str]] = set()
+    for c in where.this.find_all(exp.Column):
+        raw = _col_ref(c, local_map)
+        if raw is None:
+            continue
+        if raw.table == "__unknown__" and default:
+            raw = ColumnRef(
+                default, raw.column, real_table=local_map.get(default, default)
+            )
+        key = (raw.real_table or raw.table, raw.column)
+        if key in seen_cols:
+            continue
+        seen_cols.add(key)
+        try:
+            resolved = resolver.resolve(raw)
+        except Exception:
+            continue
+        label = f"{(raw.real_table or raw.table)}.{raw.column}"
+        if resolved.is_identity:
+            base = f"{resolved.real_table or resolved.table}.{resolved.column}"
+            if base != label:
+                notes.append(f"`{label}` = colonne source `{base}`")
+        elif (
+            resolved.lineage
+            and "?" not in resolved.lineage
+            # Garde de cohérence : le lineage des expressions fenêtre/agrégées
+            # retombe parfois sur une colonne sans rapport — une « dérivation »
+            # qui ne mentionne même pas la colonne embrouillerait le modèle.
+            and raw.column in resolved.lineage.lower()
+        ):
+            notes.append(f"`{label}` ← dérivée : {resolved.lineage}")
+    return notes
+
+
 def _collect_anti_joins(
     statement: exp.Expression,
     alias_map: dict[str, str],
     dialect: str,
+    resolver: "_LineageResolver | None" = None,
 ) -> list[str]:
     """Describe anti-join patterns (``LEFT JOIN x ON … WHERE x.col IS NULL``) in
     NEGATIVE terms for the generator.
@@ -1414,6 +1594,9 @@ def _collect_anti_joins(
 
       * the join key whose value must NOT exist in the excluded set,
       * the excluded set's own selection criteria (rendered as-is),
+      * the criteria's SOURCE columns with their derivation when the lineage
+        crosses a CASE / computed CTE column (the generator fills base columns,
+        not CTE columns — see :func:`_anti_join_source_notes`),
 
     so the model knows precisely what to make FALSE.
     """
@@ -1477,6 +1660,14 @@ def _collect_anti_joins(
                     f" — `{real_tbl}` sélectionne les lignes où : {crit_sql}. "
                     "Génère des données telles que ce critère soit FAUX (sinon la ligne est exclue)."
                 )
+                if inner is not None and resolver is not None:
+                    notes = _anti_join_source_notes(inner, resolver, dialect)
+                    if notes:
+                        desc += (
+                            " Colonnes sources du critère : "
+                            + " ; ".join(notes)
+                            + " — choisis les valeurs SOURCES telles que le critère reste FAUX APRÈS dérivation."
+                        )
             if desc not in seen:
                 seen.add(desc)
                 descriptions.append(desc)
@@ -1711,9 +1902,6 @@ def _walk_select_grouped(
 
     # ── Anti-join detection ────────────────────────────────────────────────────
     where = select.args.get("where")
-    where_is_null_cols: set[ColumnRef] = set()
-    if where:
-        where_is_null_cols = _collect_is_null_cols(where.this, alias_map, resolver)
 
     # Collect aliases on the nullable side of outer joins
     outer_join_aliases: set[str] = set()
@@ -1728,13 +1916,17 @@ def _walk_select_grouped(
             if alias:
                 outer_join_aliases.add(alias)
 
+    # Aliases IS-NULLés au WHERE de tête — niveau alias, sans résolution lineage.
+    where_is_null_aliases: set[str] = set()
     anti_join_sources: set[str] = set()
-    if where and outer_join_aliases:
+    if where:
         for pred in _flatten_and(where.this):
             if isinstance(pred, exp.Is):
                 right_node = pred.args.get("expression") or pred.args.get("to")
                 if _is_column(pred.this) and isinstance(right_node, exp.Null):
                     tbl = (pred.this.table or "").lower()
+                    if tbl:
+                        where_is_null_aliases.add(tbl)
                     if tbl in outer_join_aliases:
                         anti_join_sources.add(tbl)
 
@@ -1750,23 +1942,42 @@ def _walk_select_grouped(
             continue
         join_side = (join.args.get("side") or "").upper()
         is_outer_join = join_side in {"LEFT", "RIGHT", "FULL"}
-        if is_outer_join and where_is_null_cols:
+        join_src = join.this
+        if isinstance(join_src, exp.Table):
+            join_alias = (join_src.alias or join_src.name).lower()
+        elif isinstance(join_src, exp.Subquery):
+            join_alias = (join_src.alias or "").lower()
+        else:
+            join_alias = ""
+        # Anti-join : un alias IS-NULLé du WHERE se trouve du côté NULLABLE de
+        # CETTE jointure (LEFT → l'alias joint ; RIGHT → le côté FROM référencé
+        # par l'ON ; FULL → les deux). Comparer des ColumnRefs résolus à la table
+        # de base classerait à tort les jointures d'enrichissement quand le CTE
+        # anti-joint dérive sa clé de la table sondée (ex. SIRET_ONUS ← RCOMP :
+        # onus.no_siret se résout en rcomp.no_siret, la clé de TOUS les LEFT JOIN
+        # du SELECT).
+        is_anti = False
+        if is_outer_join and where_is_null_aliases:
+            if join_side == "LEFT":
+                nullable_aliases = {join_alias}
+            else:
+                on_aliases = {
+                    (c.table or "").lower() for c in on.find_all(exp.Column) if c.table
+                }
+                if join_side == "RIGHT":
+                    nullable_aliases = on_aliases - {join_alias}
+                else:  # FULL — les deux côtés sont nullables
+                    nullable_aliases = on_aliases
+            is_anti = bool(nullable_aliases & where_is_null_aliases)
+        if is_anti:
             tmp_eq: list[tuple[ColumnRef, ColumnRef]] = []
             tmp_func: list[FunctionalConstraint] = []
             _extract_from_condition(
                 on, alias_map, resolver, shared_filters, tmp_eq, tmp_func
             )
-            for a, b in tmp_eq:
-                if a not in where_is_null_cols and b not in where_is_null_cols:
-                    shared_equalities.append((a, b))
-                else:
-                    shared_col_inequalities.append((a, b))
-            for fc in tmp_func:
-                if (
-                    fc.derived not in where_is_null_cols
-                    and fc.source not in where_is_null_cols
-                ):
-                    shared_functional.append(fc)
+            # L'ON d'un anti-join décrit le match EXCLU : égalités inversées,
+            # contraintes fonctionnelles abandonnées.
+            shared_col_inequalities.extend((a, b) for a, b in tmp_eq if a != b)
         else:
             _extract_from_condition(
                 on,
@@ -2094,6 +2305,15 @@ def build_conditions_hint(
         for join in sel.args.get("joins") or []:
             on = join.args.get("on")
             if on:
+                # Skip the ON clause for anti-join legs — the condition would
+                # look like "rcomp.NO_SIRET = onus.NO_SIRET" which contradicts
+                # the anti_joins directive that says "must NOT exist in onus".
+                join_tbl = join.args.get("this")
+                join_alias = (
+                    (join_tbl.alias or join_tbl.name).lower() if join_tbl else ""
+                )
+                if join_alias in anti_join_aliases:
+                    continue
                 _add(
                     _serialize_cond(
                         on,
@@ -2241,7 +2461,7 @@ def build_conditions_hint(
             col_label = f"{resolved.real_table or resolved.table}.{resolved.column}"
             lineages.append(f"{col_label} : {resolved.lineage}")
 
-    anti_joins = _collect_anti_joins(statement, alias_map, dialect)
+    anti_joins = _collect_anti_joins(statement, alias_map, dialect, resolver=resolver)
 
     result: dict = {}
     if conditions:

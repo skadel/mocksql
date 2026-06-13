@@ -80,6 +80,29 @@ def _strip_surrounding_quotes(value: Any) -> Any:
     return s
 
 
+def _strip_nested_quote_artifact(value: Any) -> Any:
+    """Retire un emballage de quotes **doublement imbriqué** (`'"X"'`, `"'X'"`, `''X''`…) —
+    artefact LLM non-ambigu : un littéral SQL/JSON recopié verbatim avec ses délimiteurs
+    (bq086 : `country_code` valait `'"FRA"'` au lieu de `FRA`).
+
+    Conservateur — n'agit QUE s'il y a DEUX couches d'emballage. Une *seule* paire de quotes
+    est laissée intacte : un texte peut légitimement être entre quotes ou contenir une
+    apostrophe (O'Brien). Cf. `test_text_fully_quoted_value_preserved`.
+    """
+    if not isinstance(value, str):
+        return value
+    s = value.strip()
+
+    def _wrapped(x: str) -> bool:
+        return len(x) >= 2 and x[0] in "\"'" and x[-1] == x[0]
+
+    # Déclenche uniquement sur l'imbrication (couche externe ET interne emballées).
+    if _wrapped(s) and _wrapped(s[1:-1].strip()):
+        while _wrapped(s):
+            s = s[1:-1].strip()
+    return s
+
+
 _BOOL_TRUE_STRINGS = {"true", "t", "1", "yes", "y"}
 _BOOL_FALSE_STRINGS = {"false", "f", "0", "no", "n", ""}
 
@@ -160,10 +183,12 @@ def to_duck_expr(value: Any, duck_type: str) -> str:
 
     base = duck_type.upper()
 
-    # Types texte — NE PAS toucher au contenu : une apostrophe (O'Brien) ou même
-    # une valeur littéralement entre quotes peut être une donnée légitime.
+    # Types texte — on préserve le contenu (une apostrophe O'Brien ou une seule paire de
+    # quotes peut être une donnée légitime), MAIS on retire l'emballage doublement imbriqué
+    # `'"X"'` qui est un artefact LLM non-ambigu (cf. _strip_nested_quote_artifact, bq086).
     if base in ("TEXT", "STRING", "VARCHAR"):
-        escaped_value = str(value).replace("'", "''")
+        cleaned = _strip_nested_quote_artifact(value)
+        escaped_value = str(cleaned).replace("'", "''")
         return f"'{escaped_value}'"
 
     # Types booléens

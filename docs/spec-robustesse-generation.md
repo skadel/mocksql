@@ -22,8 +22,9 @@ demandée au LLM.
 | **P3.1** — clé `anti_joins` émise systématiquement (liste vide incluse) | `build_conditions_hint`, tests `tests/simplifier/test_anti_join.py` |
 | **P3.3** — garde collapse documenté comme filet de sécurité post-P1b | commentaire `_resolve_pred_node` |
 | **P2a** — exemple few-shot statique « clé dérivée + photos M/M-1 » | `FEW_SHOT_EXAMPLE_*` + `_FEW_SHOT_MESSAGES` (`prompt_tools.py`), tests `tests/test_few_shot_example.py` (forward DuckDB + positionnement dans le prompt) |
+| **P2b** — dégraissage du prompt : casse documentée une seule fois (consigne 12 + rappel court `<schema>`), `<task>` réduit au volatil + pointeur système, troncature de `conditions` au-delà de 2 000 car. | `prompt_tools.py` (`task_section`, suppression du double ⚠️), `_serialize_hint`/`_CONDITIONS_MAX_CHARS` (`examples_generator.py`), tests `tests/test_conditions_truncation.py` |
 
-Les chantiers restants, par ordre de priorité : **P0** (éval A/B via `/eval-mocksql` — runs LLM, à lancer manuellement), puis **P2b** (décision sur les chiffres de l'éval), **P3.2** (vérif du contrat sortie attendue).
+Seul chantier restant : **P0** (éval A/B via `/eval-mocksql` — runs LLM, à lancer manuellement). Les vérifications P3.1/P3.2/P3.3 sont closes (cf. § P3).
 
 ---
 
@@ -337,7 +338,7 @@ l'exemple est peut-être superflu : décider sur les chiffres de l'éval.
 
 ---
 
-## P2b — Dégraissage du prompt
+## P2b — Dégraissage du prompt ✅ livré
 
 ### Problème
 Redondances qui diluent l'attention : la casse des tables est répétée 3 fois
@@ -371,11 +372,28 @@ Petite (~1-2 h). À grouper avec P2a dans un même run d'éval.
    Soit l'émettre systématiquement (liste vide incluse), soit conditionner la
    mention dans le SYSTEM à sa présence. Vérifier `_collect_anti_joins`
    (`constraint_simplifier.py:1343`).
-2. **Champ sortie attendue** : le schéma de génération ne porte ni colonne
-   cible ni valeurs attendues, alors que le produit définit un test comme
-   « données d'entrée + sortie attendue ». Vérifier que la chaîne d'assertions
-   (commit `7813192`, assertions sur valeurs concrètes) couvre bien ce contrat
-   en aval ; sinon, spécifier l'ajout.
+2. **Champ sortie attendue** ✅ vérifié (2026-06-12) — *contrat couvert en aval,
+   aucun ajout de code.* Le schéma de génération `UnitTestData`
+   (`examples_generator.py:1153`) ne porte effectivement ni colonne cible ni
+   valeurs attendues (`reasoning`/`test_name`/`description`/`tags`/`data`). Mais
+   le contrat « entrée + sortie attendue » est rempli **post-exécution** par la
+   chaîne d'assertions (commit `7813192`) :
+   - `_generate_assertions_and_evaluate` (`examples_executor.py:1372`) voit le
+     résultat **réellement exécuté** (`<result_sample>`) et produit 1-N
+     `_Assertion` (`min_length=1`) = `description` métier + `expected_condition`
+     (booléen positif sur `__result__`).
+   - Les règles OBJECTIF + OBLIGATOIRE (`examples_executor.py:1449-1483`) forcent
+     au moins une assertion qui **pince la valeur de sortie concrète**
+     (`date = '2026-01-02'`, `total = 150`) — la « colonne cible » = colonne du
+     `expected_condition`, la « valeur attendue » = le littéral.
+   - `_evaluate_assertions` (`examples_executor.py:1674`) exécute
+     `SELECT * FROM __result__ WHERE (cond) IS NOT TRUE` contre la sortie réelle ;
+     violante → `bad_assertions` / execStatus fail. Persisté en `assertion_results`
+     (description + condition + sql + passed), affiché dans `TestsPanel.tsx`.
+   - **Décision** : ne PAS ajouter `target_column`/`expected_value` au schéma de
+     génération — cela reviendrait à demander au générateur de prédire la sortie
+     à l'aveugle (avant exécution), alors que le nœud d'assertions la pince depuis
+     le résultat réel (plus fiable, déjà en place).
 3. **Garde `_serialize_cond` post-résolution** : une fois P1b livré, vérifier
    si le fix « collapse » de `_resolve_pred_node` reste atteignable (il devrait
    devenir un filet de sécurité) — ne PAS le retirer, le documenter comme tel.

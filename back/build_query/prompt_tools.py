@@ -1,7 +1,7 @@
 import datetime
 import difflib
 import json
-from typing import Literal, Optional, List
+from typing import Optional, List
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -9,7 +9,7 @@ from langchain_core.prompts.chat import MessageLike
 
 from build_query.converstion_history import format_history
 from utils.msg_types import MsgType
-from utils.prompt_utils import escape_unescaped_placeholders
+from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE, escape_unescaped_placeholders
 from utils.saver import get_message_type
 
 
@@ -23,9 +23,10 @@ def build_other_prompt(
     prompt_messages = [
         (
             "system",
-            """Vous êtes un data analyst expert.
-Votre rôle est de répondre à l'instruction donnée après avoir analysé le schéma de la base de données.
-Ne pas inclure de code dans la réponse.
+            MOCKSQL_PRODUCT_PREAMBLE
+            + """
+
+Ici, l'utilisateur **pose une question ou réfléchit à voix haute** — il n'a PAS demandé de générer ou modifier un test. Réponds en français, de façon concise et naturelle, en gardant à l'esprit le contexte de test ci-dessus (la requête testée, ses tests et leurs verdicts). Aide-le à comprendre un résultat, une couverture, une redondance, ou à décider quoi tester ensuite. N'inclus pas de code dans la réponse et ne génère pas de données de test.
 
 **Description de la base de données**:
 {descriptions}""",
@@ -648,9 +649,6 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
 
-⚠️ **Toute casse incorrecte dans les noms de tables sera considérée comme une erreur.**
-⚠️ **Les clés de `data` doivent être `{dataset}_{table}` (ex. `covid19_open_data_covid19_open_data`), jamais le nom court seul (ex. `covid19_open_data`).**
-
 Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans clôture markdown** (pas de ```json ni de backticks autour de l'objet)."""
     )
 
@@ -714,17 +712,7 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
     )
 
     task_section = f"""<task>
-Génère un test unitaire conforme aux consignes du message système, avec :
-- Un seul test
-- Résultat JSON uniquement (champs dans l'ordre du schéma : `unit_test_build_reasoning` d'abord, puis `test_name`, `unit_test_description`, `tags`, `data`)
-- `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
-- `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
-- Pas de requête SQL source dans la sortie
-- Données complètes, sans colonnes nulles ni vides (sauf si l'instruction le demande explicitement)
-- Attention stricte à la **casse exacte** des noms de tables dans le JSON (clés `data` = celles de <schema>)
-- ⚠️ Respecte les `conditions` de <constraints> (à rendre VRAIES) et les `anti_joins` (à rendre FAUSSES : ne génère PAS de données qui matchent la table anti-jointe)
-- Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
-- Si le SQL a des conditions OR, plusieurs branches CASE, ou plusieurs branches UNION ALL, choisir **une seule branche** et nommer explicitement la branche dans la description — les tables spécifiques aux autres branches peuvent être laissées à null, mais les tables partagées entre branches doivent être remplies avec des valeurs cohérentes avec la branche choisie
+Génère **un seul** test unitaire en appliquant les consignes du message système.
 {non_empty_constraint}{instruction_block}
 {format_instructions}
 </task>"""
@@ -923,15 +911,14 @@ def query_change_data_prompt(
 
 
 def make_routing_prompt(
-    granularity: Literal["coarse", "fine"],
     *,
-    format_instructions: str = "",
     dialect: str = "",
     history: Optional[List[BaseMessage]] = None,
 ) -> ChatPromptTemplate:
-    """
-    'coarse' → JSON: {"title","route","reasoning"} with route in {"query","analysis","other"}
-    'fine'   → JSON: {"reasoning","route"} with route in {"generator","other"}
+    """Routeur d'intention MockSQL → JSON {"reasoning","route"} avec route ∈ {"generator","other"}.
+
+    `generator` = l'utilisateur demande à MockSQL d'agir (créer/modifier/supprimer un test) ;
+    `other` = l'utilisateur pose une question ou réfléchit à voix haute.
     """
     history_parsed = format_history(
         history,
@@ -944,80 +931,6 @@ def make_routing_prompt(
         f"Historique de conversation :\n{history_parsed}\n" if history_parsed else ""
     )
 
-    if granularity == "coarse":
-        prompt_messages = [
-            (
-                "system",
-                """Vous êtes un routeur qui classe la question utilisateur dans : `query`, `analysis`, `other`.
-
-Définitions strictes :
-- `query` : la demande peut être satisfaite par **une seule requête SQL** (éventuellement avec agrégats, joins, fenêtres, filtres, seuils) SANS nécessiter d'interpréter un résultat pour décider d'une requête suivante.
-- `analysis` : besoin d'un **raisonnement multi-étapes** avec **itération ou branchement** après inspection des résultats (ex. diagnostic de causes, segmentation exploratoire, boucles "voir résultat → ajuster la stratégie/filtre → refaire", formulation d'hypothèses, choix de plusieurs vues/visualisations). Si une seule requête suffit, **ne classez PAS** en analysis.
-- `other` : le reste.
-
-Règles de décision (top-down) :
-1) La demande est-elle résoluble par une seule requête SQL claire ? → `query`.
-2) Sinon, la demande requiert-elle d'**interpréter** des résultats pour **choisir** des requêtes suivantes OU de **tester des hypothèses**/**segmentations multiples** ? → `analysis`.
-3) Sinon → `other`.
-
-Signaux forts de `query` : verbes "liste/compte/compare/vérifie/filtre", seuils simples (ex. "> 10%"), périodes précises, métriques nettes.
-Signaux forts de `analysis` : "pourquoi/expliquer les causes/proposer axes d'analyse/identifier segments contributeurs", "itérer jusqu'à trouver…", "explorer".
-
-Sortie JSON (un seul objet) :
-- Toujours : "title" (2–3 mots, concrets), "route", "reasoning" (≤35 mots, expliquant la règle activée).
-N'affichez rien d'autre.
-
-**Description de la base** :
-{{descriptions}}
-"""
-                + (format_instructions or ""),
-            ),
-            # Exemples positifs/négatifs pour stabiliser la frontière
-            (
-                "human",
-                "<question>\nTop 5 des clients par chiffre d'affaires ?\n</question>",
-            ),
-            (
-                "ai",
-                '{"title": "Top 5 CA", "route": "query", "reasoning": "Une seule agrégation/tri suffit ; pas d\'itération sur résultats."}',
-            ),
-            (
-                "human",
-                "<question>\nQuel est l'évolution du chiffre d'affaires sur le dernier mois ?\n</question>",
-            ),
-            (
-                "ai",
-                '{"title": "Évolution CA", "route": "query", "reasoning": "Mesure temporelle simple ; une requête avec filtre période et agrégat."}',
-            ),
-            (
-                "human",
-                "<question>\nNotre chiffre d'affaires a baissé de 12% au T2 vs T1. Pourquoi ?\n</question>",
-            ),
-            (
-                "ai",
-                '{"title": "Explication baisse CA", "route": "analysis", "reasoning": "Recherche de causes/segments → nécessite itérations et interprétation des résultats."}',
-            ),
-            (
-                "human",
-                "<question>\nQue puis-je analyser sur les utilisateurs ?\n</question>",
-            ),
-            (
-                "ai",
-                '{"title": "Axes utilisateurs", "route": "analysis", "reasoning": "Demande ouverte d\'exploration multi-étapes, non une requête unique."}',
-            ),
-            (
-                "human",
-                "<question>\nVérifie que sur la dernière partition_date je n'ai pas de baisse du nombre de contrats de plus de 10%.\n</question>",
-            ),
-            (
-                "ai",
-                '{"title": "Check baisse 10%", "route": "query", "reasoning": "Vérification booléenne avec comparaison N/N-1 ; une seule requête suffit."}',
-            ),
-            ("human", history_block + "<question>\n{{input}}\n</question>\n"),
-        ]
-        return ChatPromptTemplate.from_messages(prompt_messages, "mustache")
-
-    # ---- fine ----
     prompt_messages = [
         (
             "system",

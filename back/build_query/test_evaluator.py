@@ -10,6 +10,7 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_message_type
 from utils.test_utils import find_current_test
 
@@ -58,7 +59,10 @@ Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
         logger.diag("[evaluator] PROMPT LLM (réévaluation):\n%s", prompt[:3000])
         result = await llm.ainvoke(
             [
-                SystemMessage(content="Tu es un expert en tests SQL pour MockSQL."),
+                SystemMessage(
+                    content=MOCKSQL_PRODUCT_PREAMBLE
+                    + "\n\nTu réévalues ici la qualité d'un test (verdict argumenté) pour l'utilisateur."
+                ),
                 HumanMessage(content=prompt),
             ]
         )

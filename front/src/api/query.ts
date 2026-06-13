@@ -64,7 +64,11 @@ export const chatQuery = createAsyncThunk(
           id: userMessageId,
           type: 'user',
           contents: { text: userInput },
-          parent: (ChangedMessageId && ChangedMessageId !== '') ? ChangedMessageId : (parentMessageId || undefined),
+          // Parent must mirror the backend, which always attaches the new user message under
+          // parent_message_id (see routing.py). When editing a message, ChangedMessageId is the
+          // edited message itself — the new message is its SIBLING under the common parent, not its
+          // child. Using ChangedMessageId here mis-parented the optimistic bubble until reload.
+          parent: parentMessageId || undefined,
           children: [],
         }));
       }

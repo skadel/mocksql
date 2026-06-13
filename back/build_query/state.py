@@ -82,7 +82,9 @@ class QueryState(TypedDict):
     ]  # concatenated mocksql.md files (global → file-specific)
     evaluation_feedback: Optional[
         str
-    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows"
+    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows" | "bad_description"
+    # "bad_description" = la description annonce une sortie contredite par le résultat réel
+    # (donnée valide, narratif faux) → flagué, aucune boucle de retry (route vers complétion).
     empty_results_regen: Optional[
         bool
     ]  # set by test_evaluator: DuckDB returned 0 rows → route straight to generator
