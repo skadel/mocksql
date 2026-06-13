@@ -289,11 +289,15 @@ def _uc_key(uc: dict) -> str:
     return "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
 
-def _resolve_duck_type(bq_ddl_type: str, dialect: str) -> str:
-    """Convert a BigQuery DDL type string to DuckDB DDL type string via sqlglot."""
+def _resolve_duck_type(bq_ddl_type: str) -> str:
+    """Convert a BigQuery DDL type string to DuckDB DDL type string via sqlglot.
+
+    Le type d'entrée est toujours en syntaxe BigQuery (STRING / STRUCT<> /
+    ARRAY<>), donc on parse comme bigquery quel que soit le dialect source.
+    """
     try:
         dummy = sqlglot.parse_one(
-            f"CREATE TABLE _t (_c {bq_ddl_type})", dialect=dialect
+            f"CREATE TABLE _t (_c {bq_ddl_type})", dialect="bigquery"
         )
         col_def = dummy.find(exp.ColumnDef)
         return col_def.args["kind"].sql(dialect="duckdb")
@@ -385,9 +389,14 @@ def create_test_tables(
             create_table_query = f"CREATE TABLE {table_name} ({columns_def});"
             logger.debug("Creating table %s ...", table_name)
 
-            # Parse and convert SQL to DuckDB dialect
+            # Le DDL ci-dessus est TOUJOURS en syntaxe BigQuery (backticks +
+            # STRING/STRUCT<>/ARRAY<>, issus de bq_ddl_type / _get_ddl_type),
+            # indépendamment du dialect SOURCE du projet. On le parse donc comme
+            # bigquery, jamais comme `dialect` : sinon, pour un projet
+            # dialect=duckdb/postgres, les backticks font échouer le parse
+            # ("Expecting )"). La cible d'exécution reste DuckDB.
             create_test_table_query = sqlglot.parse_one(
-                create_table_query, dialect=dialect
+                create_table_query, dialect="bigquery"
             ).sql(dialect="duckdb")
 
             # Handle unsupported types (e.g., GEOGRAPHY)
@@ -411,7 +420,7 @@ def create_test_tables(
                         {
                             **col,
                             "type": _resolve_duck_type(
-                                _get_ddl_type(col["name"], filtered_columns), dialect
+                                _get_ddl_type(col["name"], filtered_columns)
                             ),
                         }
                         for col in root_columns
