@@ -148,7 +148,7 @@ Exemple de `mocksql.yml` généré :
 
 ```yaml
 version: "2"
-dialect: bigquery          # bigquery | postgres
+dialect: bigquery          # bigquery | postgres | duckdb
 models_path: ./models
 duckdb_path: data/mocksql.duckdb   # chemin de la base DuckDB locale
 llm:
@@ -157,6 +157,18 @@ llm:
   streaming: false
 schema_cache: .mocksql/schema_cache.json
 ```
+
+#### Dialects supportés
+
+Le `dialect` décrit le SQL **source** : il pilote la validation (dry-run) et l'optimisation. L'exécution des tests se fait **toujours sur DuckDB en local**.
+
+| Dialect | Source | Validation (dry-run) | Schéma |
+|---------|--------|----------------------|--------|
+| `bigquery` | BigQuery | dry-run BigQuery | fetch BigQuery → cache |
+| `postgres` | PostgreSQL | dry-run Postgres | fetch Postgres → cache |
+| `duckdb` | DuckDB / dbt-DuckDB | dry-run DuckDB local | cache pré-rempli (voir [quickstart-dbt.md](quickstart-dbt.md)) |
+
+> En `dialect: duckdb`, MockSQL n'interroge aucune source distante : le cache de schéma doit être pré-rempli (bootstrap depuis une base DuckDB). C'est le mode utilisé pour les projets **dbt-DuckDB** — voir **[quickstart-dbt.md](quickstart-dbt.md)**.
 
 **Clés `llm`** :
 

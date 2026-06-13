@@ -39,6 +39,21 @@ Pour le setup complet (GCP, IAM, Web UI, développement) → **[docs/quickstart.
 
 ---
 
+## Projets dbt
+
+MockSQL teste des `.sql` plats ; un projet dbt utilise du Jinja (`{{ ref }}`, macros…). La passerelle est `dbt compile` (Jinja → SQL pur) + un cache de schéma bootstrapé depuis la base DuckDB :
+
+```bash
+cd mon_projet_dbt
+dbt compile && dbt run        # Jinja résolu + tables matérialisées
+# bootstrap du schema_cache depuis la base DuckDB, puis :
+mocksql generate models/mon_modele.sql --config mocksql.yml
+```
+
+Recette complète (compile, bootstrap du cache, `dialect: duckdb`) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
+
+---
+
 ## Structure du projet
 
 ```
@@ -49,6 +64,7 @@ front/      # React 18 + TypeScript + Redux (Web Hub)
 examples/   # Exemples de projets MockSQL
 docs/       # Documentation
   quickstart.md               # Setup complet (GCP, IAM, CLI, Web UI)
+  quickstart-dbt.md           # Tester un projet dbt-DuckDB
   workflow-query-generation.md  # Flux frontend → backend → DuckDB
 ```
 

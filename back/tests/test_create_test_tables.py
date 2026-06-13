@@ -150,6 +150,29 @@ class TestCreateTestTables:
         col_types = {row[0]: row[1] for row in info}
         assert "STRUCT" in col_types["trafficSource"].upper()
 
+    def test_duckdb_dialect_creates_table(self, con):
+        """dialect=duckdb (modèles dbt/DuckDB-natifs) : le DDL interne est en
+        syntaxe BigQuery (backticks + STRING/STRUCT<>) quel que soit le dialect
+        SOURCE. Il doit toujours être parsé comme bigquery → DuckDB, sinon les
+        backticks font échouer le parse ('Expecting )')."""
+        table = {
+            "table_name": "airbnb.main.fct_reviews",
+            "description": "",
+            "columns": [
+                {"name": "LISTING_ID", "type": "INTEGER", "mode": "NULLABLE"},
+                {"name": "REVIEW_TEXT", "type": "STRING", "mode": "NULLABLE"},
+            ],
+            "primary_keys": [],
+        }
+        result = create_test_tables(
+            tables=[table], suffix="duck", con=con, dialect="duckdb"
+        )
+        assert len(result) == 1
+        info = con.execute(f"DESCRIBE {result[0]['table_name']}").fetchall()
+        col_types = {row[0]: row[1].upper() for row in info}
+        assert col_types["LISTING_ID"].startswith(("INT", "BIGINT"))
+        assert col_types["REVIEW_TEXT"] == "VARCHAR"
+
 
 # ---------------------------------------------------------------------------
 # insert_examples — pas de "Duplicate column name"
