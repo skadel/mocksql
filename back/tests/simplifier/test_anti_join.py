@@ -387,3 +387,108 @@ class TestAntiJoinsKeyContract:
 
     def test_unparseable_sql_still_returns_empty_dict(self):
         assert build_conditions_hint("", dialect="bigquery") == {}
+
+
+# ── Régression — anti-join auto-dérivé (pattern SIRET_ONUS de c1.sql) ─────────
+
+
+class TestSelfDerivedAntiJoin:
+    """L'anti-join dont le CTE dérive sa clé de la table sondée elle-même ne
+    doit pas contaminer les autres LEFT JOIN du même SELECT.
+
+    Avant le fix, la classification reposait sur les ColumnRefs résolus à la
+    table de base : ``onus.no_siret IS NULL`` se résout en ``trans.no_siret``
+    (lineage à travers le CTE), la même colonne qui sert de clé à TOUS les
+    LEFT JOIN — chaque jointure d'enrichissement était alors marquée
+    ``col_inequality`` (« Anti-join (NOT IN) »), en contradiction frontale
+    avec le hint ``conditions`` qui exige l'égalité.
+    """
+
+    SQL = """
+    WITH rcomp AS (
+        SELECT no_siret, amount FROM `ds.trans` WHERE amount > 0
+    ),
+    onus AS (
+        SELECT no_siret FROM rcomp WHERE amount > 100
+    )
+    SELECT r.no_siret
+    FROM rcomp r
+    LEFT JOIN `ds.clients` c ON r.no_siret = c.id_immatriculation
+    LEFT JOIN onus o ON r.no_siret = o.no_siret
+    WHERE o.no_siret IS NULL
+      AND r.no_siret IS NOT NULL
+    """
+
+    def test_enrichment_join_is_not_flagged_as_anti_join(self):
+        groups = extract_constraints(self.SQL, dialect="bigquery")
+        assert not _has_col_inequality(
+            groups, "trans", "no_siret", "clients", "id_immatriculation"
+        ), (
+            "le LEFT JOIN d'enrichissement sur clients n'est pas un anti-join — "
+            "le marquer NOT IN contredit le hint conditions (égalité requise)"
+        )
+
+    def test_enrichment_join_stays_an_equality(self):
+        groups = extract_constraints(self.SQL, dialect="bigquery")
+        found = False
+        for g in groups:
+            for a, b in g.equalities:
+                pair = {(x.real_table or x.table, x.column) for x in (a, b)} | {
+                    (x.table, x.column) for x in (a, b)
+                }
+                if {("trans", "no_siret"), ("clients", "id_immatriculation")} <= pair:
+                    found = True
+        assert found, "l'égalité de jointure d'enrichissement doit être préservée"
+
+    def test_no_self_contradictory_inequality(self):
+        """La paire (trans.no_siret, trans.no_siret) — issue de l'ON de l'anti-join
+        lui-même après résolution — est auto-contradictoire et ne doit pas sortir."""
+        groups = extract_constraints(self.SQL, dialect="bigquery")
+        assert not _has_col_inequality(groups, "trans", "no_siret", "trans", "no_siret")
+
+
+# ── Régression — hint anti-join actionnable (colonnes sources du critère) ─────
+
+
+class TestAntiJoinSourceColumnsInHint:
+    """Le hint anti-join cite le critère en termes de colonnes de CTE
+    (`prop_siret_banque.groupe IN (…)`) — illisible pour le générateur qui
+    remplit `banques_france.groupe`. Quand le critère porte sur une colonne
+    dérivée (CASE), le hint doit nommer la colonne SOURCE et sa dérivation,
+    sinon le modèle choisit une valeur interdite sans le savoir (c1.sql :
+    groupe='Banque Populaire' → mappé 'BPCE' → SIRET capturé par l'anti-join
+    → 0 ligne)."""
+
+    SQL = """
+    WITH banques AS (
+        SELECT code_banque,
+               CASE WHEN groupe IN ('BP', 'CE') THEN 'BPCE' ELSE groupe END AS groupe
+        FROM `ds.banques_france`
+    ),
+    onus AS (
+        SELECT b.code_banque
+        FROM banques b
+        WHERE b.groupe IN ('BPCE')
+    )
+    SELECT t.id
+    FROM `ds.trans` t
+    LEFT JOIN onus o ON t.cd_banque = o.code_banque
+    WHERE o.code_banque IS NULL
+    """
+
+    def test_hint_names_source_column(self):
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        anti = " ".join(hint.get("anti_joins", []))
+        assert anti, "un anti-join doit être détecté"
+        assert "banques_france.groupe" in anti, (
+            "le hint doit remonter à la colonne source générée "
+            f"(banques_france.groupe), pas seulement au critère CTE : {anti!r}"
+        )
+
+    def test_hint_exposes_derivation(self):
+        hint = build_conditions_hint(self.SQL, dialect="bigquery")
+        anti = " ".join(hint.get("anti_joins", []))
+        assert "CASE" in anti, (
+            "la dérivation CASE doit être visible pour que le modèle évalue "
+            f"le critère APRÈS transformation : {anti!r}"
+        )

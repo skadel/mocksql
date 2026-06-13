@@ -358,8 +358,22 @@ class TestPrequotedScalarValues:
         assert to_duck_expr("O'Brien", "TEXT") == "'O''Brien'"
 
     def test_text_fully_quoted_value_preserved(self):
-        # Pour TEXT, on NE strippe PAS : "'hello'" est un contenu légitime.
+        # Pour TEXT, on NE strippe PAS une SEULE paire : "'hello'" est un contenu légitime.
         assert to_duck_expr("'hello'", "TEXT") == "'''hello'''"
+
+    def test_text_double_nested_quote_artifact_stripped(self):
+        # bq086 : artefact LLM non-ambigu — valeur emballée dans DEUX couches de quotes
+        # imbriquées ('"FRA"'). On dé-quote jusqu'à la valeur nue → 'FRA'.
+        assert to_duck_expr("'\"FRA\"'", "VARCHAR") == "'FRA'"
+
+    def test_text_double_nested_inverse_quotes_stripped(self):
+        # Couches inversées ("'FRA'") : même artefact, même traitement.
+        assert to_duck_expr("\"'FRA'\"", "VARCHAR") == "'FRA'"
+
+    def test_text_single_double_quote_layer_preserved(self):
+        # Une SEULE couche de doubles quotes reste intacte (peut être une donnée
+        # légitime — on ne strippe que l'imbrication non-ambiguë).
+        assert to_duck_expr('"hello"', "VARCHAR") == "'\"hello\"'"
 
     def test_clean_date_still_works(self, con):
         con.execute('CREATE TABLE t1 ("partition_date" DATE);')

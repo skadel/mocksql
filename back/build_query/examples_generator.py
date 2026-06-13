@@ -77,6 +77,26 @@ _hint_cache: dict[tuple[str, str], str] = {}
 _output_type_cache: dict[tuple[str, bool, bool], object] = {}
 _SIMPLIFY_CACHE_MAXSIZE = 64
 
+# Budget de la chaîne `conditions` du hint (P2b). Au-delà, le LLM ne lit plus le
+# bloc et `<query>` fait autorité : on tronque avec un renvoi explicite vers elle.
+_CONDITIONS_MAX_CHARS = 2000
+
+
+def _serialize_hint(hint: dict | None) -> str:
+    """Sérialise le hint de contraintes en JSON, en tronquant `conditions` au-delà
+    du budget (P2b). La troncature se fait sur la *valeur* (chaîne), pas sur le JSON
+    global, pour ne pas casser les autres clés (`anti_joins`, `format_constraints`…)."""
+    if not hint:
+        return ""
+    conditions = hint.get("conditions")
+    if isinstance(conditions, str) and len(conditions) > _CONDITIONS_MAX_CHARS:
+        hint = {
+            **hint,
+            "conditions": conditions[:_CONDITIONS_MAX_CHARS]
+            + " … (tronqué — voir <query>)",
+        }
+    return json.dumps(hint, ensure_ascii=False, indent=2)
+
 
 def _run_simplify(
     sql_query: str, schema: list[dict] | None = None, dialect: str = "bigquery"
@@ -211,7 +231,7 @@ def _simplification_to_hint(
         from build_query.constraint_simplifier import build_conditions_hint
 
         hint = build_conditions_hint(sql, dialect=dialect, schema=schema)
-        result_str = json.dumps(hint, ensure_ascii=False, indent=2) if hint else ""
+        result_str = _serialize_hint(hint)
         if len(_hint_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
             _hint_cache.pop(next(iter(_hint_cache)))
         _hint_cache[cache_key] = result_str
@@ -251,7 +271,7 @@ def _run_simplify_and_hint(
         )
         sim_result, hint = None, {}
 
-    hint_str = json.dumps(hint, ensure_ascii=False, indent=2) if hint else ""
+    hint_str = _serialize_hint(hint)
     if len(_simplify_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
         _simplify_cache.pop(next(iter(_simplify_cache)))
     _simplify_cache[cache_key] = sim_result

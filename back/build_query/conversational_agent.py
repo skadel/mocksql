@@ -10,6 +10,7 @@ from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_history_from_state, get_message_type
 
 logger = logging.getLogger(__name__)
@@ -509,7 +510,9 @@ async def conversational_agent(state: QueryState):
         schema=state.get("schemas") or None,
     )
 
-    system_content = f"""Tu es un assistant expert en tests SQL pour MockSQL.
+    system_content = f"""{MOCKSQL_PRODUCT_PREAMBLE}
+
+Tu es l'assistant conversationnel de MockSQL : tu réponds aux questions de l'utilisateur sur ses tests et tu les modifies via tes outils.
 
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
 {state.get("optimized_sql") or state.get("query", "")}
@@ -532,6 +535,12 @@ Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
 (ex : l'utilisateur attend un tri par volume mais la requête utilise MAX() alphabétique,
 ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétique),
 utilise `ask_clarification` pour signaler l'incohérence et demander confirmation avant d'agir.
+
+Si la demande n'indique pas clairement s'il faut CRÉER UN NOUVEAU TEST ou
+MODIFIER UN TEST EXISTANT, et que le contexte (test ancré, formulation) ne lève pas
+le doute, n'agis PAS à l'aveugle : appelle `ask_clarification` pour demander lequel
+des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test) et
+`add_test_row` / `update_test_data` / `update_test_description` (test existant).
 
 {reasoning_note}{debug_budget_note}{suggestion_note}{eval_context}"""
 
@@ -807,6 +816,27 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 ]
                 continue
             logger.diag("[conv_agent] LLM n'a appelé aucun outil → réponse texte libre")
+            break
+
+        # `ask_clarification` est EXCLUSIF et TERMINAL : poser une question doit
+        # mettre le tour en pause et attendre la réponse de l'utilisateur (cf. reprise
+        # stateless plus bas). Le modèle a tendance à le combiner avec une action
+        # (generate_test_data, add_test_row…) dans la même réponse — il signale
+        # l'incohérence ET tente de satisfaire la demande. Sans ce court-circuit, la
+        # priorité debug > data_batch > première action exécutait l'action selon
+        # l'ordre des tool_calls : l'agent « n'attendait pas » et générait un test.
+        clarif_tc = next(
+            (tc for tc in tool_calls if tc["name"] == "ask_clarification"), None
+        )
+        if clarif_tc:
+            agent_tool_call = "ask_clarification"
+            agent_tool_args = dict(clarif_tc["args"])
+            logger.diag(
+                "[conv_agent] ask_clarification prioritaire → tour terminal "
+                "(autres outils ignorés : %s)",
+                [tc["name"] for tc in tool_calls if tc["name"] != "ask_clarification"]
+                or "aucun",
+            )
             break
 
         # Collect debug calls (batch), data patch calls (batch), and first other action

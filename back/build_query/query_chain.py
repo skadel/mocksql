@@ -134,8 +134,13 @@ async def _bad_data_exhausted(state: QueryState):
                 content="",
                 id=str(uuid.uuid4()),
                 additional_kwargs={
+                    # Chaîner sous le dernier message du tour (évaluation/résultats) plutôt
+                    # que sous parent_message_id, pour ne pas créer de branche sœur parasite
+                    # avec un éventuel QUERY de ce tour. L'ancrage métier se fait par test_index.
                     "type": MsgType.RETRY_PROMPT,
-                    "parent": state.get("parent_message_id"),
+                    "parent": state["messages"][-1].id
+                    if state.get("messages")
+                    else state.get("parent_message_id"),
                     "request_id": state.get("request_id"),
                     "test_index": state.get("test_index"),
                 },
@@ -244,8 +249,10 @@ async def _handle_other(state: QueryState):
                         content=error_msg,
                         id=str(uuid.uuid4()),
                         additional_kwargs={
+                            # Même raison que la réponse OTHER ci-dessous : chaîner sous
+                            # la question (user_message_id), pas en frère du QUERY.
                             "type": MsgType.ERROR,
-                            "parent": state.get("parent_message_id"),
+                            "parent": state.get("user_message_id"),
                             "request_id": state.get("request_id"),
                         },
                     )
@@ -260,8 +267,14 @@ async def _handle_other(state: QueryState):
                 content=result.content,
                 id=str(uuid.uuid4()),
                 additional_kwargs={
+                    # Chaîner SOUS la question (user_message_id), pas en frère :
+                    # le message QUERY de l'utilisateur a déjà parent=parent_message_id
+                    # (cf. routing.py). Si la réponse partageait ce même parent, question
+                    # et réponse deviendraient des branches sœurs et la réponse tomberait
+                    # sur une branche morte, invisible à get_messages_history (qui remonte
+                    # la chaîne de parents) → le conversational_agent ne la verrait plus.
                     "type": MsgType.OTHER,
-                    "parent": state.get("parent_message_id"),
+                    "parent": state.get("user_message_id"),
                     "request_id": state.get("request_id"),
                 },
             )

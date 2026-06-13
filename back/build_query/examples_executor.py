@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pandas import DataFrame
 from pydantic import BaseModel, Field, model_validator
 from sqlglot import exp
+from sqlglot.optimizer.simplify import simplify
 
 from utils.llm_errors import normalize_llm_content, loads_lenient_json
 from utils.llm_factory import make_llm
@@ -47,6 +48,134 @@ def _assertion_sql_from_condition(expected_condition: str) -> str:
     """
     cond = expected_condition.strip().rstrip(";").strip()
     return f"SELECT * FROM __result__ WHERE ({cond}) IS NOT TRUE"
+
+
+def _has_negative_form(expr: exp.Expression) -> bool:
+    """Vrai si l'AST contient une forme négative détournée (« vérifie ce qui ne doit PAS
+    être là ») — mêmes interdits que la consigne du champ ``_Assertion.expected_condition`` :
+    ``!=`` / ``<>`` (et ``IS DISTINCT FROM``), ``NOT IN``, ``NOT (...)``, ``NOT LIKE``,
+    ``IS NULL``.
+
+    On inspecte l'arbre sqlglot plutôt qu'une regex pour ne pas se faire piéger par un
+    littéral chaîne (``status = 'is null'`` n'est PAS une clause ``IS NULL``).
+
+    Seule négation tolérée : ``X IS NOT NULL`` — une affirmation de présence, donc une
+    forme positive légitime (que l'ancienne garde regex autorisait déjà).
+    """
+    for node in expr.walk():
+        # `!=` / `<>` et son équivalent NULL-safe `X IS DISTINCT FROM Y` (= `!=`).
+        if isinstance(node, (exp.NEQ, exp.NullSafeNEQ)):
+            return True
+        if isinstance(node, exp.Not):
+            inner = node.this
+            # `X IS NOT NULL` = Not(Is(..., Null)) sans parenthèses → toléré.
+            if isinstance(inner, exp.Is) and isinstance(inner.expression, exp.Null):
+                continue
+            return True
+        if isinstance(node, exp.Is) and isinstance(node.expression, exp.Null):
+            # `X IS NULL` nu interdit ; l'`Is` interne d'un `IS NOT NULL` est sous un
+            # `Not` déjà toléré ci-dessus → ne pas le re-flaguer.
+            if not isinstance(node.parent, exp.Not):
+                return True
+    return False
+
+
+# Comparaisons dont des opérandes identiques rendent l'assertion vacuité : `x = x` /
+# `x >= x` / `x <= x` toujours vraies (ne signalent jamais rien), `x > x` / `x < x` toujours
+# fausses (`(faux) IS NOT TRUE` toujours vrai → 0 ligne violante → « passe » sans tester).
+_SAME_OPERAND_COMPARISONS = (exp.EQ, exp.GT, exp.LT, exp.GTE, exp.LTE)
+
+# Sous-ensemble TOUJOURS-VRAI (et non toujours-faux) : sert à la propagation AND/OR, où
+# seul un opérande toujours-vrai compte (`x > x` toujours-faux n'aide pas à rendre un OR vrai).
+_ALWAYS_TRUE_SAME_OPERAND = (exp.EQ, exp.GTE, exp.LTE)
+
+
+def _is_always_true(expr: exp.Expression) -> bool:
+    """Vrai si ``expr`` est TOUJOURS vraie (tautologie stricte). Distinct du test
+    « constante booléenne » de ``_is_trivial_tautology`` qui rejette aussi les contradictions
+    (toujours-fausses) : pour propager via ``OR`` (``FALSE OR x`` ≡ ``x``, non vacuité) il faut
+    pouvoir dire qu'un opérande est vrai, pas seulement constant.
+
+    Couvre la constante ``TRUE`` après ``simplify``, les comparaisons same-operand toujours-vraies
+    (``x = x`` / ``x >= x`` / ``x <= x``), et la propagation : ``AND`` vrai ssi TOUS ses opérandes
+    le sont, ``OR`` vrai ssi AU MOINS UN l'est (sqlglot imbrique ``a AND b AND c`` en
+    ``And(And(a, b), c)`` → la récursion couvre les arités > 2).
+    """
+    node = expr.unnest()
+    try:
+        s = simplify(node.copy())
+        if isinstance(s, exp.Boolean):
+            return bool(s.this)  # TRUE seulement, pas FALSE
+    except Exception:
+        pass
+    if isinstance(node, _ALWAYS_TRUE_SAME_OPERAND) and node.this == node.expression:
+        return True
+    if isinstance(node, exp.And):
+        return _is_always_true(node.this) and _is_always_true(node.expression)
+    if isinstance(node, exp.Or):
+        return _is_always_true(node.this) or _is_always_true(node.expression)
+    return False
+
+
+def _is_trivial_tautology(expr: exp.Expression) -> bool:
+    """Vrai si la condition ne contraint rien : elle « passe » quelles que soient les
+    données. Familles couvertes :
+
+    - constante booléenne après ``simplify`` (``1 = 1``, ``TRUE``, ``1 < 2``…) ;
+    - comparaison de tête à opérandes structurellement identiques (``x = x``, ``x >= x``,
+      ``lower(c) = lower(c)``) ;
+    - composé ``AND`` / ``OR`` toujours-vrai par propagation (``x = x AND y = y``,
+      ``x = x OR y > 5``) — délégué à ``_is_always_true``.
+
+    C'est la seule classe de vacuité que la ré-exécution (Garde 2) laisse passer : une
+    tautologie « passe » sur les données réelles ET sur n'importe quelles données, donc
+    `_evaluate_assertions` la valide à tort. (Les composés toujours-FAUX, eux, échouent
+    bruyamment et sont rejetés par la ré-exécution.)
+    """
+    try:
+        if isinstance(simplify(expr.copy()), exp.Boolean):
+            return True
+    except Exception:
+        pass
+    node = expr.unnest()
+    if isinstance(node, _SAME_OPERAND_COMPARISONS) and node.this == node.expression:
+        return True
+    if isinstance(node, (exp.And, exp.Or)):
+        return _is_always_true(node)
+    return False
+
+
+def _is_valid_positive_condition(cond: str) -> bool:
+    """Vrai si ``cond`` est une condition booléenne POSITIVE exploitable par
+    ``_assertion_sql_from_condition`` : non vide, parsable, expression booléenne (pas une
+    requête ``SELECT``/``WHERE``), sans forme négative détournée (cf. ``_has_negative_form``)
+    et non tautologique (cf. ``_is_trivial_tautology``).
+
+    Garde anti-blanchiment du fixer d'assertions : empêche de remplacer une assertion
+    échouée par du SQL libre auto-contradictoire (ex. ``x = 2 AND (SELECT COUNT(*) … ) = 0``)
+    qui « passe » sans rien tester. Une condition positive enveloppée dans ``IS NOT TRUE``
+    ne peut jamais être vacuité : si aucune ligne ne la satisfait, l'assertion échoue
+    bruyamment au lieu de passer.
+
+    Le filtrage passe par l'AST sqlglot (et non une regex) : un littéral chaîne contenant
+    ``is null`` / ``not in`` reste une condition positive valide, et une sous-requête
+    relative (``z = (SELECT MAX(z) …)``) n'est pas confondue avec une requête de tête.
+    """
+    c = cond.strip().rstrip(";").strip()
+    if not c:
+        return False
+    try:
+        parsed = sqlglot.parse_one(c, dialect="duckdb")
+    except Exception:
+        # Non parsable → on ne sait pas la maîtriser : rejet (on garde l'assertion
+        # d'origine en échec plutôt que d'injecter une forme inconnue).
+        return False
+    # On attend une expression booléenne, pas une requête complète.
+    if isinstance(parsed, exp.Select):
+        return False
+    if _is_trivial_tautology(parsed):
+        return False
+    return not _has_negative_form(parsed)
 
 
 class _Assertion(BaseModel):
@@ -102,7 +231,9 @@ class _AssertionsAndEvaluation(BaseModel):
     reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
     assertions: List[_Assertion] = Field(min_length=1)
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
-    reason_type: Optional[Literal["bad_data", "bad_assertions"]] = None
+    reason_type: Optional[Literal["bad_data", "bad_assertions", "bad_description"]] = (
+        None
+    )
     explanation: str
     assertion_fix: Optional[_AssertionFix] = None
     diagnostic: Optional[DiagnosticBlock] = None
@@ -1390,9 +1521,11 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
 **Verdict de qualité :**
 - `verdict` : "Excellent", "Bon", ou "Insuffisant"
 - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
-  mauvais types, contraintes non respectées, résultat inattendu) ou "bad_assertions"
+  mauvais types, contraintes non respectées, résultat inattendu), "bad_assertions"
   (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
-  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat)
+  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat), ou
+  "bad_description" (cf. ci-dessous — la description annonce une sortie que la requête ne
+  produit pas)
 - `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
   sans noms de colonnes, de CTEs ni de mots-clés SQL.
   ✓ 'Les données couvrent correctement le scénario nominal.'
@@ -1430,6 +1563,18 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
              et [col]='2016-01-03' pour en avoir 2 → COUNT varie → STDDEV > 0."
   - `affected_tables` : liste des noms de tables dont les données doivent être corrigées
   - `affected_ctes` : liste des CTEs impactées par le problème
+
+**Cohérence description ↔ sortie réelle (`bad_description`) :**
+Compare la valeur de sortie ANNONCÉE dans `<test_context>` au résultat réel de `<result_sample>`.
+Si la description affirme une valeur de sortie CONCRÈTE (« le total est de 2.0M », « la corrélation
+vaut 0.2 », « le résultat attendu est X ») que le résultat réel CONTREDIT (valeur différente), le
+test ment au lecteur **même si les assertions passent** (elles ont pu être alignées sur le réel).
+Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "bad_description"`, et `explanation` qui pointe
+l'écart en langage métier (ex. « La description annonce une valeur que le calcul ne produit pas »).
+Les données sont valides — NE les corrige PAS, NE relance rien : c'est le narratif qui est faux.
+⚠️ N'utilise ce motif QUE si la description énonce une valeur concrète contredite — JAMAIS pour une
+description qualitative ou structurelle (« vérifie que les régions sans trajet n'apparaissent pas »),
+ni quand la description ne donne aucune valeur chiffrée précise.
 
 **Cas particulier — résultat vide intentionnel :** si `<test_context>` mentionne explicitement
 "plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
@@ -1839,19 +1984,29 @@ Le message suivant contient ces sections, délimitées par des balises :
 **Décision attendue pour chaque assertion :** est-elle logiquement correcte par rapport au
 résultat réel, ou as-tu fait une erreur dans sa formulation (mauvaise valeur attendue, mauvaise
 colonne, condition inversée, etc.) ?
-- Si l'assertion est **correcte** et le test échoue vraiment → `{"id": <id>, "correct": true}`
-- Si l'assertion est **incorrecte** (tu as fait une erreur) → régénère-la :
-  `{"id": <id>, "correct": false, "description": "...", "sql": "SELECT ..."}`
+- Si l'assertion est **correcte** et le test échoue vraiment → `{"id": <id>, "correct": true}`.
+  ⚠️ C'est aussi le cas si le **résultat réel ne correspond pas** à ce que le test annonçait
+  (la donnée d'entrée ou la description sont en cause, pas l'assertion) : laisse-la en échec,
+  ne fabrique JAMAIS une assertion qui « passe » artificiellement.
+- Si l'assertion est **incorrecte** (tu as fait une erreur de logique) → régénère-la en
+  fournissant une **`expected_condition` POSITIVE** (l'affirmation métier qui doit être VRAIE
+  sur chaque ligne) : `{"id": <id>, "correct": false, "description": "...", "expected_condition": "..."}`
 
-**Règles DuckDB strictes :**
-- Utilise UNIQUEMENT les colonnes de `<result_schema>`.
-- Ne jamais référencer un alias SELECT dans le WHERE — utiliser une sous-requête.
+**Règles de l'`expected_condition` :**
+- Condition booléenne POSITIVE exprimée directement (jamais sa négation). MockSQL la négocie
+  lui-même pour produire la requête de validation.
+- INTERDIT : tout `!=`, `<>`, `NOT IN`, `NOT (...)`, `IS NULL`, ou une clause `SELECT`/`WHERE`
+  de tête — écris seulement l'expression booléenne (ex. `montant > 0`, `date = '2026-01-02'`).
+- INTERDIT : toute clause qui se neutralise elle-même (ex. `x = 2 AND (SELECT COUNT(*) … x = 2) = 0`) :
+  c'est une assertion creuse qui ne teste rien.
+- Utilise UNIQUEMENT les colonnes de `<result_schema>` (casse exacte). Pour une valeur relative,
+  une sous-requête sur `__result__` uniquement. Jamais d'alias SELECT dans une condition.
 
 **Règle de la `description` (si tu régénères une assertion) :** phrase EN FRANÇAIS, courte
 (max 12 mots), en langage métier — jamais en anglais, sans noms de colonnes/CTEs ni mots-clés SQL.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion :
-{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "sql": "SELECT ..."}]}"""
+{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "..."}]}"""
 
     # ── Bloc <failing_assertions> : une entrée par assertion échouée, indexée par `id` local. ──
     blocks = []
@@ -1930,15 +2085,32 @@ et réponds selon le format du message système (un objet `decisions` listant un
                 0 <= local_id < len(failing_indices)
             ):
                 continue
-            new_sql = dec.get("sql")
-            if not new_sql:
-                continue
             target = failing_indices[local_id]
+            new_cond = (dec.get("expected_condition") or "").strip()
+            # Garde 1 — condition positive valide. Sinon (vide, négative, SQL brut) on garde
+            # l'assertion d'origine en échec : pas de blanchiment via une forme non maîtrisée.
+            if not _is_valid_positive_condition(new_cond):
+                logger.diag(
+                    "[assertion_fixer] #%s rejeté : expected_condition invalide/vide %r",
+                    local_id,
+                    new_cond,
+                )
+                continue
             new_assertion = {
                 "description": dec.get("description", results[target]["description"]),
-                "sql": new_sql,
+                "expected_condition": new_cond,
+                "sql": _assertion_sql_from_condition(new_cond),
             }
             new_eval = _evaluate_assertions([new_assertion], view_name, con)
+            # Garde 2 — anti-blanchiment : si la réécriture échoue toujours (ou erreur), le
+            # problème n'est pas la logique de l'assertion (donnée/description en cause) →
+            # on conserve l'assertion d'origine en échec plutôt que de la remplacer.
+            if not new_eval[0].get("passed"):
+                logger.diag(
+                    "[assertion_fixer] #%s rejeté : la réécriture échoue toujours (pas un fix de logique)",
+                    local_id,
+                )
+                continue
             results[target] = new_eval[0]
     except Exception:
         pass

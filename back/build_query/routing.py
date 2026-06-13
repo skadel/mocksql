@@ -159,7 +159,6 @@ async def _classify_intent(state: QueryState, input_text: str) -> str:
         ],
     )
     prompt = make_routing_prompt(
-        granularity="fine",
         dialect=state.get("dialect", ""),
         history=history,
     )
