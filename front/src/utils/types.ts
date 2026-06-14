@@ -81,6 +81,8 @@ export interface MessageContents {
   error?: string;
   profileRequest?: ProfileRequest;
   suggestions?: string[];
+  /** Explications [PROD] ancrées sur le profil, indexées par texte de suggestion. */
+  rationales?: Record<string, string>;
   profileAvailable?: boolean;
   reasoning?: string;
   evaluationText?: string;
@@ -200,6 +202,8 @@ export interface BuildModelState {
     lastError?: string;
     workspaceMode: boolean;
     suggestions: string[];
+    /** Explications [PROD] indexées par texte de suggestion (tag cliquable). */
+    suggestionRationales: Record<string, string>;
     loadingTestIndex?: number;
     retryBadDataTestIndex?: number | null;
 }
@@ -337,6 +341,7 @@ export interface ChatQueryParams {
   silent?: boolean;
   suggestionIntent?: boolean;
   regenerateSuggestions?: boolean;
+  validateIntent?: boolean;  // « Je valide l'état actuel » sur un test needs_validation
 }
 
 

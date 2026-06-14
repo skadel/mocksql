@@ -6,6 +6,7 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from langchain_core.messages import AIMessage
 from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
+from build_query.accept_validation import accept_validation
 from build_query.conversational_agent import conversational_agent
 from build_query.data_patcher import data_patcher_node
 from build_query.debug_node import debug_test_node
@@ -358,6 +359,11 @@ def route_evaluator(state: QueryState):
     if feedback == "too_many_rows":
         logger.diag("[route_evaluator] → history_saver (too_many_rows)")
         return "history_saver"
+    # Désync description↔cardinalité (données valides) : pas de boucle — l'état est sauvé
+    # et un VALIDATION_PROMPT a été émis ; on attend la décision de l'utilisateur.
+    if feedback == "needs_validation":
+        logger.diag("[route_evaluator] → history_saver (needs_validation)")
+        return "history_saver"
     if feedback == "bad_data":
         if retries > 0:
             logger.diag(
@@ -391,7 +397,14 @@ def route_after_suggestions(state: QueryState):
     """Sortie de ``suggestions_generator``. Régénération à la demande → ``history_saver``
     (pas de message de clôture « j'ai généré des tests », qui serait faux) ; flux normal de
     1ʳᵉ génération → ``final_response``. Module-level pour rester testable."""
-    if state.get("regenerate_suggestions"):
+    # Régénération à la demande : bouton du panneau (regenerate_suggestions) OU
+    # l'agent conversationnel qui a appelé generate_suggestions. Dans les deux cas,
+    # pas de message de clôture « j'ai généré un test » (faux : seules les
+    # suggestions ont changé) — le panneau se rafraîchit via le message SSE.
+    if (
+        state.get("regenerate_suggestions")
+        or state.get("agent_tool_call") == "generate_suggestions"
+    ):
         logger.diag("[route_after_suggestions] → history_saver (régénération)")
         return "history_saver"
     logger.diag("[route_after_suggestions] → final_response")
@@ -415,6 +428,7 @@ def build_query_graph():
     add_timed_node("debug_node", debug_test_node)
     add_timed_node("delete_test_node", delete_test_node)
     add_timed_node("update_test_node", update_test_node)
+    add_timed_node("accept_validation", accept_validation)
     add_timed_node("generator", generate_examples)
     add_timed_node("assertion_modifier", modify_assertions)
     add_timed_node("executor", run_on_examples)
@@ -433,6 +447,9 @@ def build_query_graph():
             logger.diag("[route_input] → history_saver (error=%s)", state.get("error"))
             return "history_saver"
         route = state.get("route", "").lower()
+        if route == "accept_validation":
+            logger.diag("[route_input] → accept_validation")
+            return "accept_validation"
         if route == "conversational_agent":
             logger.diag("[route_input] → conversational_agent")
             return "conversational_agent"
@@ -488,6 +505,7 @@ def build_query_graph():
     builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("update_test_node", "history_saver")
+    builder.add_edge("accept_validation", "history_saver")
     builder.add_edge("data_patcher", "executor")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")

@@ -103,7 +103,26 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
             existing_suggestions = (stored or {}).get("suggestions") or []
             remaining = [s for s in existing_suggestions if s.strip() != consumed]
             if len(remaining) != len(existing_suggestions):
-                update_test(session, {"suggestions": remaining})
+                # On garde une trace des suggestions transformées en test pour que
+                # le générateur de suggestions ne les repropose pas (cf. suggestions_node).
+                accepted = list((stored or {}).get("accepted_suggestions") or [])
+                if consumed not in (s.strip() for s in accepted):
+                    accepted.append(consumed)
+                rationales = {
+                    k: v
+                    for k, v in (
+                        (stored or {}).get("suggestion_rationales") or {}
+                    ).items()
+                    if k.strip() != consumed
+                }
+                update_test(
+                    session,
+                    {
+                        "suggestions": remaining,
+                        "accepted_suggestions": accepted,
+                        "suggestion_rationales": rationales,
+                    },
+                )
 
     # Persister les résultats (merge par test_index)
     results_msgs = [

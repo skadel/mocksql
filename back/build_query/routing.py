@@ -23,6 +23,12 @@ async def routing(state: QueryState):
     - query provided → parser → generator (parse SQL, then generate tests)
     - chat input only → classify intent; if off-topic → other, else → generator
     """
+    # Clic « Je valide l'état actuel » sur un test needs_validation : action déterministe,
+    # court-circuite le routage LLM → réalignement description + verdict Bon (accept_validation).
+    if state.get("validate_intent"):
+        logger.diag("[routing] → accept_validation (validate_intent présent)")
+        return {"route": "accept_validation"}
+
     profile_result = state.get("profile_result")
     if profile_result:
         logger.diag("[routing] → profile_checker (profile_result présent)")

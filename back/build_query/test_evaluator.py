@@ -325,6 +325,65 @@ async def evaluate_tests(state: QueryState):
     )
 
     eval_test_index = current_test.get("test_index")
+
+    # Désync description↔cardinalité (données valides) : on NE boucle PAS. On sauve l'état,
+    # on émet le verdict puis un VALIDATION_PROMPT actionnable (Valider / Corriger côté UI).
+    # Cf. assertion_generator (détection) et accept_validation (réalignement à la validation).
+    if reason_type == "needs_validation":
+        actual_rows = 0
+        try:
+            actual_rows = len(json.loads(current_test.get("results_json") or "[]"))
+        except Exception:
+            actual_rows = 0
+        expected_rows = current_test.get("expected_row_count")
+        if expected_rows is not None and actual_rows:
+            question = (
+                f"Le résultat produit {actual_rows} ligne(s) alors que ce scénario en "
+                f"suppose {expected_rows}. Valides-tu ce résultat tel quel (la description "
+                f"sera réalignée), ou faut-il corriger le test ?"
+            )
+        else:
+            question = (
+                "Le résultat ne correspond pas à la cardinalité supposée par la description. "
+                "Valides-tu ce résultat tel quel, ou faut-il corriger le test ?"
+            )
+        eval_msg_id = str(uuid.uuid4())
+        logger.diag(
+            "[evaluator] needs_validation test=%s attendu=%s réel=%s",
+            eval_test_index,
+            expected_rows,
+            actual_rows,
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=f"**{verdict}** — {explanation}",
+                    id=eval_msg_id,
+                    additional_kwargs={
+                        "type": MsgType.EVALUATION,
+                        "parent": last_results.id,
+                        "request_id": state.get("request_id"),
+                        "test_index": eval_test_index,
+                    },
+                ),
+                AIMessage(
+                    content=question,
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.VALIDATION_PROMPT,
+                        "parent": eval_msg_id,
+                        "request_id": state.get("request_id"),
+                        "test_index": eval_test_index,
+                        "expected_row_count": expected_rows,
+                        "actual_row_count": actual_rows,
+                    },
+                ),
+            ],
+            "evaluation_feedback": "needs_validation",
+            "status": "complete",
+            "empty_results_regen": False,
+        }
+
     gen_retries = (
         state.get("gen_retries") if state.get("gen_retries") is not None else 1
     )

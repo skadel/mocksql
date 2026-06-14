@@ -13,7 +13,6 @@ import {
   Divider,
   FormControlLabel,
   Grid,
-  TextField,
   Tooltip,
   Typography
 } from '@mui/material';
@@ -341,22 +340,56 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
 
             <CardContent sx={{ px: 1.5, py: 0.75, '&:last-child': { pb: 0.75 } }}>
               {editMessageId === (msg as any).id ? (
-                <>
-                  <TextField
-                    fullWidth
-                    variant="outlined"
-                    value={editText}
-                    onChange={(e) => setEditText(e.target.value)}
-                    multiline
+                <Box sx={{ mt: 1 }}>
+                  {/* Édition du message — aligné sur le redesign « Chat » (.edit-area) */}
+                  <Box
+                    component="textarea"
+                    autoFocus
                     rows={3}
-                    size="small"
-                    sx={{ mt: 1, borderRadius: '8px' }}
+                    value={editText}
+                    onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setEditText(e.target.value)}
+                    sx={{
+                      width: '100%',
+                      resize: 'none',
+                      font: '400 13px/1.5 "Inter", system-ui, sans-serif',
+                      color: '#0f272a',
+                      bgcolor: '#fff',
+                      border: '1px solid #46b3aa',
+                      borderRadius: '8px',
+                      p: '9px 11px',
+                      outline: 'none',
+                      boxShadow: '0 0 0 3px rgba(70,179,170,.16)',
+                    }}
                   />
-                  <Box sx={{ display: 'flex', justifyContent: 'flex-end', gap: 1, mt: 0.5 }}>
-                    <StyledButton onClick={handleUpdateMessage}>{t('action.send')}</StyledButton>
-                    <StyledButton onClick={cancelUpdateMessage}>{t('action.cancel')}</StyledButton>
+                  <Box sx={{ display: 'flex', gap: '8px', mt: '9px' }}>
+                    {/* Envoyer — bouton sombre (.ebtn.send) */}
+                    <Box
+                      component="button"
+                      onClick={handleUpdateMessage}
+                      sx={{
+                        font: '600 12.5px "Inter", system-ui, sans-serif',
+                        borderRadius: '8px', px: '14px', py: '6px', cursor: 'pointer',
+                        border: '1px solid transparent', bgcolor: '#1b2a2c', color: '#fff',
+                        '&:hover': { bgcolor: '#16746e' },
+                      }}
+                    >
+                      {t('action.send')}
+                    </Box>
+                    {/* Annuler — bouton fantôme (.ebtn.cancel) */}
+                    <Box
+                      component="button"
+                      onClick={cancelUpdateMessage}
+                      sx={{
+                        font: '600 12.5px "Inter", system-ui, sans-serif',
+                        borderRadius: '8px', px: '14px', py: '6px', cursor: 'pointer',
+                        border: '1px solid #dae2e4', bgcolor: 'transparent', color: '#4f676b',
+                        '&:hover': { bgcolor: '#f3f6f7', color: '#0f272a' },
+                      }}
+                    >
+                      {t('action.cancel')}
+                    </Box>
                   </Box>
-                </>
+                </Box>
               ) : (
                 renderMessageBody(msg)
               )}

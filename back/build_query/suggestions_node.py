@@ -1,6 +1,10 @@
 import json
 import logging
+import re
 import uuid
+
+import sqlglot
+from sqlglot import exp
 from pydantic import BaseModel, Field
 
 from langchain_core.messages import AIMessage
@@ -20,25 +24,113 @@ from utils.test_utils import build_test_detail
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Catalogue de pièges — sélectionné selon les constructions réellement présentes
+# dans le SQL (cf. _select_pitfalls). Évite de noyer le prompt sous des sections
+# non pertinentes (ex. fonctions fenêtre absentes du SQL analysé).
+# ---------------------------------------------------------------------------
+
+_PITFALL_AGG = """Agrégats contre-intuitifs :
+- COUNT DISTINCT non-additif : sum(count_distinct par sous-groupe) ≠ count_distinct global — un même élément peut apparaître dans plusieurs groupes
+- Ratio d'agrégats : sum(ratio) ≠ sum(numérateur) / sum(dénominateur) — le ratio ne peut pas être ré-agrégé
+- NULL exclus silencieusement : COUNT(col) ≠ COUNT(*) quand col contient des NULLs ; SUM/AVG ignorent aussi les NULLs
+- Dénominateur nul : si le dénominateur d'un ratio peut être 0, la requête explose ou retourne NULL sans warning
+- Agrégation multi-niveaux : une métrique calculée à granularité fine puis ré-agrégée peut différer du calcul direct au niveau grossier"""
+
+_PITFALL_WINDOW = """Fonctions fenêtre (LAG, LEAD, RANK, etc.) :
+- LAG/LEAD retournent NULL sur la première/dernière ligne de la partition — que fait la logique en aval avec ce NULL ?
+- ROW_NUMBER sur ex æquo : non-déterministe sans colonne de départage unique
+- RANK vs DENSE_RANK : RANK saute des numéros après un ex æquo (1,1,3), DENSE_RANK non (1,1,2) — lequel est attendu ?
+- LAST_VALUE piège : la frame par défaut est ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, pas toute la partition — LAST_VALUE retourne souvent la valeur courante, pas la dernière de la partition
+- Fenêtre glissante en début de série : les N premières lignes ont une fenêtre plus petite que N → moyenne/variance calculée sur moins de points, ce qui peut générer de faux positifs ou faux négatifs
+- Cumul avec ORDER BY et doublons : si deux lignes ont la même valeur de tri, leur ordre relatif est aléatoire et le cumul est non-déterministe"""
+
+_PITFALL_STATS = """Algorithmes statistiques (z-score, anomalies, seuils dynamiques) :
+- Contamination du baseline : si une anomalie fait partie de la fenêtre de calcul de la moyenne/variance, elle tire le seuil vers le haut — exemple : stable pendant 11 mois, hausse en M+12, hausse similaire en M+13 → M+12 gonfle la variance et M+13 n'est plus détecté comme anomalie
+- Dérive progressive masquée : une série d'anomalies successives peut décaler le baseline progressivement sans qu'aucune ne dépasse le seuil individuellement
+- Fenêtre trop courte : en début de série, la variance est calculée sur peu de points, le z-score est instable et peut déclencher de faux positifs"""
+
+_PITFALL_JOINS = """JOINs :
+- Fan-out silencieux : clé de jointure non-unique → multiplication des lignes avant agrégation, les SUM/COUNT sont gonflés sans erreur
+- Comptage d'entités via JOIN sur table de faits : si le SQL compte des entités distinctes (clients, points de vente, commandes) en les joingnant à une table où elles apparaissent plusieurs fois (contrats, transactions, événements), chaque entité est comptée N fois sauf si un DISTINCT ou une dédoublication explicite est en place — c'est l'un des bugs les plus fréquents en BI, souvent invisible car le résultat reste plausible (ex. +5%)
+- NULL dans la clé de jointure : un NULL ne matche jamais un autre NULL en SQL → lignes silencieusement perdues avec INNER JOIN"""
+
+_ALL_PITFALLS = "\n\n".join(
+    [_PITFALL_AGG, _PITFALL_WINDOW, _PITFALL_STATS, _PITFALL_JOINS]
+)
+
+# Fonctions d'agrégation statistique → déclenchent la section z-score/anomalies.
+_STAT_FUNC_RE = re.compile(
+    r"\b(?:STDDEV\w*|VARIANCE|VAR_(?:POP|SAMP)|PERCENTILE_(?:CONT|DISC)"
+    r"|APPROX_QUANTILES|CORR|COVAR_(?:POP|SAMP))\s*\(",
+    re.IGNORECASE,
+)
+
+
+def _select_pitfalls(sql: str, dialect: str) -> str:
+    """Ne garder que les sections du catalogue pertinentes pour ce SQL.
+
+    Détection via l'AST sqlglot (fenêtres, agrégats, joins) + regex (fonctions
+    statistiques). En cas d'échec de parsing, on retombe sur le catalogue complet
+    pour ne jamais perdre de couverture.
+    """
+    try:
+        tree = sqlglot.parse_one(sql, dialect=dialect)
+    except Exception:
+        return _ALL_PITFALLS
+    if tree is None:
+        return _ALL_PITFALLS
+
+    sections: list[str] = []
+    if tree.find(exp.AggFunc) is not None or tree.find(exp.Group) is not None:
+        sections.append(_PITFALL_AGG)
+    if tree.find(exp.Window) is not None:
+        sections.append(_PITFALL_WINDOW)
+    if _STAT_FUNC_RE.search(sql):
+        sections.append(_PITFALL_STATS)
+    if tree.find(exp.Join) is not None:
+        sections.append(_PITFALL_JOINS)
+
+    return "\n\n".join(sections) if sections else _ALL_PITFALLS
+
+
 # 1. Structure Pydantic (avec Chain of Thought)
+class TestSuggestion(BaseModel):
+    text: str = Field(
+        description=(
+            "La suggestion, formulée en langage métier. Commence par un verbe et décrit un "
+            "comportement observable pour le domaine (ex : un total incohérent, des lignes "
+            "manquantes, un classement incorrect). Ne jamais mentionner de fonctions SQL, "
+            "d'opérateurs ou de détails d'implémentation (pas de EXTRACT, COUNT DISTINCT, LAG, "
+            'NULL, JOIN, CTE, etc.). Préfixée par "[PROD] " si et seulement si elle est ancrée '
+            "sur le profil statistique réel fourni."
+        )
+    )
+    rationale: str = Field(
+        default="",
+        description=(
+            "OBLIGATOIRE et NON VIDE pour les suggestions [PROD], vide sinon. "
+            "Une phrase en langage métier qui cite la preuve chiffrée tirée du profil et qui "
+            "explique pourquoi ce cas mérite un test — ex : "
+            "\"Le profil indique que le champ 'code banque' est vide 3% du temps : ce cas n'est "
+            'couvert par aucun test existant." Doit citer une valeur concrète du profil '
+            "(taux de NULL, min/max, cardinalité, valeur observée), jamais une fonction SQL."
+        ),
+    )
+
+
 class TestSuggestionsOutput(BaseModel):
     analyse_des_manques: str = Field(
         description=(
-            "Raisonnement en 3 à 4 phrases maximum. "
+            "Justification brève : 3 ou 4 phrases maximum, jamais plus. "
+            "Le raisonnement détaillé se fait dans le canal de réflexion (thinking natif), "
+            "hors de ce champ — ici on ne garde que la conclusion. "
             "Identifie le pattern métier du SQL et les hypothèses implicites sur les données "
-            "dont dépend son bon fonctionnement. "
-            "Ce raisonnement guide le choix des 3 suggestions. "
-            "Ne pas dépasser 4 phrases."
+            "dont dépend son bon fonctionnement, pour justifier le choix des 3 suggestions."
         )
     )
-    suggestions: list[str] = Field(
-        description=(
-            "Liste exacte de 3 suggestions de cas de tests, chacune formulée en langage métier. "
-            "Chaque suggestion commence par un verbe et décrit un comportement observable pour le domaine "
-            "(ex : un total incohérent, des lignes manquantes, un classement incorrect). "
-            "Ne jamais mentionner de fonctions SQL, d'opérateurs ou de détails d'implémentation "
-            "(pas de EXTRACT, COUNT DISTINCT, LAG, NULL, JOIN, CTE, etc.) dans le texte final."
-        ),
+    suggestions: list[TestSuggestion] = Field(
+        description="Liste exacte de 3 suggestions de cas de tests non couverts.",
         min_length=1,
         max_length=3,
     )
@@ -119,8 +211,16 @@ async def generate_suggestions(state: QueryState):
     instructions = raw_instructions.strip()
 
     stored = get_test(state["session"]) or {}
-    dismissed_suggestions = [
-        s.strip() for s in (stored.get("dismissed_suggestions") or []) if s.strip()
+
+    def _clean(items) -> list[str]:
+        return [s.strip() for s in (items or []) if isinstance(s, str) and s.strip()]
+
+    dismissed_suggestions = _clean(stored.get("dismissed_suggestions"))
+    accepted_suggestions = _clean(stored.get("accepted_suggestions"))
+    # « En attente » = encore dans le panneau, ni acceptée ni rejetée.
+    _resolved = set(dismissed_suggestions) | set(accepted_suggestions)
+    pending_suggestions = [
+        s for s in _clean(stored.get("suggestions")) if s not in _resolved
     ]
 
     verdicts = _extract_verdicts(state)
@@ -142,11 +242,27 @@ async def generate_suggestions(state: QueryState):
     existing_tests_block = (
         existing if existing else "Aucun test existant pour le moment."
     )
-    dismissed_block = (
-        "<suggestions_rejetees>\n"
-        + "\n".join(f"- {s}" for s in dismissed_suggestions)
-        + "\n</suggestions_rejetees>"
-        if dismissed_suggestions
+    prior_sections = []
+    if accepted_suggestions:
+        prior_sections.append(
+            "  Déjà transformées en test par l'ingénieur (couvertes — ne pas reproposer) :\n"
+            + "\n".join(f"  - {s}" for s in accepted_suggestions)
+        )
+    if pending_suggestions:
+        prior_sections.append(
+            "  Actuellement en attente dans le panneau (déjà visibles — ne pas produire de doublon) :\n"
+            + "\n".join(f"  - {s}" for s in pending_suggestions)
+        )
+    if dismissed_suggestions:
+        prior_sections.append(
+            "  Rejetées par l'ingénieur (ne pas reproposer, ni variante proche) :\n"
+            + "\n".join(f"  - {s}" for s in dismissed_suggestions)
+        )
+    prior_suggestions_block = (
+        "<suggestions_deja_proposees>\n"
+        + "\n\n".join(prior_sections)
+        + "\n</suggestions_deja_proposees>"
+        if prior_sections
         else ""
     )
 
@@ -176,49 +292,26 @@ Voici les tests déjà générés avec leurs données d'entrée, résultats d'ex
 {existing_tests_block}
 </tests_existants>
 
-{dismissed_block}
+{prior_suggestions_block}
 
 {profile_section}
 
-Si des suggestions ont été jugées non pertinentes par l'ingénieur (bloc <suggestions_rejetees>), ne les régénère pas ni de variantes proches — elles ont été explicitement écartées.
+Le bloc <suggestions_deja_proposees> liste les suggestions déjà traitées, regroupées par statut. Ne reproduis aucune d'elles, ni de variante proche : les **rejetées** ont été explicitement écartées par l'ingénieur, les **acceptées** sont déjà couvertes par un test existant, les **en attente** sont déjà affichées dans le panneau. Tes 3 nouvelles suggestions doivent être distinctes de toutes ces entrées.
 
 En t'appuyant sur les données d'entrée et les résultats de chaque test, identifie les cas non couverts : combinaisons de valeurs absentes, comportements limites non testés, scénarios que les données actuelles ne permettent pas de valider.
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
 Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").
 
-**Priorise les cas où le résultat attendu est incertain ou contre-intuitif.** Voici un catalogue de pièges classiques — consulte-le et applique ceux qui sont pertinents pour ce SQL :
+**Priorise les cas où le résultat attendu est incertain ou contre-intuitif.** Voici les pièges classiques pertinents pour les constructions détectées dans ce SQL — consulte-les et applique ceux qui s'appliquent réellement :
 
-Agrégats contre-intuitifs :
-- COUNT DISTINCT non-additif : sum(count_distinct par sous-groupe) ≠ count_distinct global — un même élément peut apparaître dans plusieurs groupes
-- Ratio d'agrégats : sum(ratio) ≠ sum(numérateur) / sum(dénominateur) — le ratio ne peut pas être ré-agrégé
-- NULL exclus silencieusement : COUNT(col) ≠ COUNT(*) quand col contient des NULLs ; SUM/AVG ignorent aussi les NULLs
-- Dénominateur nul : si le dénominateur d'un ratio peut être 0, la requête explose ou retourne NULL sans warning
-- Agrégation multi-niveaux : une métrique calculée à granularité fine puis ré-agrégée peut différer du calcul direct au niveau grossier
-
-Fonctions fenêtre (LAG, LEAD, RANK, etc.) :
-- LAG/LEAD retournent NULL sur la première/dernière ligne de la partition — que fait la logique en aval avec ce NULL ?
-- ROW_NUMBER sur ex æquo : non-déterministe sans colonne de départage unique
-- RANK vs DENSE_RANK : RANK saute des numéros après un ex æquo (1,1,3), DENSE_RANK non (1,1,2) — lequel est attendu ?
-- LAST_VALUE piège : la frame par défaut est ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, pas toute la partition — LAST_VALUE retourne souvent la valeur courante, pas la dernière de la partition
-- Fenêtre glissante en début de série : les N premières lignes ont une fenêtre plus petite que N → moyenne/variance calculée sur moins de points, ce qui peut générer de faux positifs ou faux négatifs
-- Cumul avec ORDER BY et doublons : si deux lignes ont la même valeur de tri, leur ordre relatif est aléatoire et le cumul est non-déterministe
-
-Algorithmes statistiques (z-score, anomalies, seuils dynamiques) :
-- Contamination du baseline : si une anomalie fait partie de la fenêtre de calcul de la moyenne/variance, elle tire le seuil vers le haut — exemple : stable pendant 11 mois, hausse en M+12, hausse similaire en M+13 → M+12 gonfle la variance et M+13 n'est plus détecté comme anomalie
-- Dérive progressive masquée : une série d'anomalies successives peut décaler le baseline progressivement sans qu'aucune ne dépasse le seuil individuellement
-- Fenêtre trop courte : en début de série, la variance est calculée sur peu de points, le z-score est instable et peut déclencher de faux positifs
-
-JOINs :
-- Fan-out silencieux : clé de jointure non-unique → multiplication des lignes avant agrégation, les SUM/COUNT sont gonflés sans erreur
-- Comptage d'entités via JOIN sur table de faits : si le SQL compte des entités distinctes (clients, points de vente, commandes) en les joingnant à une table où elles apparaissent plusieurs fois (contrats, transactions, événements), chaque entité est comptée N fois sauf si un DISTINCT ou une dédoublication explicite est en place — c'est l'un des bugs les plus fréquents en BI, souvent invisible car le résultat reste plausible (ex. +5%)
-- NULL dans la clé de jointure : un NULL ne matche jamais un autre NULL en SQL → lignes silencieusement perdues avec INNER JOIN
+{pitfalls_block}
 
 Pour ces patterns, formule la suggestion en décrivant uniquement le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite toute mention de fonctions SQL, d'opérateurs ou de détails d'implémentation — l'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *pourquoi techniquement*.
 
 Mauvais exemple : "Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
 Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la somme des totaux mensuels — un écart indiquerait des incidents invisibles dans le rapport annuel."
 
-Si un profil statistique est fourni, au moins une suggestion doit cibler un cas qui existe réellement dans les données — formule-la ainsi : "[PROD] Vérifie que..." pour la distinguer des suggestions génériques. Cette suggestion doit aussi rester en langage métier.""",
+{prod_instruction_block}""",
             ),
         ]
     )
@@ -233,6 +326,22 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
         if profile_block
         else ""
     )
+    pitfalls_block = _select_pitfalls(sql, dialect)
+    # Consigne [PROD] injectée seulement si un profil réel est disponible : sinon
+    # le préfixe [PROD] serait un mensonge (aucune donnée de prod sous la main).
+    prod_instruction_block = (
+        "Un profil statistique réel des données est fourni ci-dessus. Au moins une de tes "
+        "3 suggestions doit cibler un cas qui existe réellement dans ces données mesurées, "
+        'et son champ `text` doit être préfixé par "[PROD] " (ex : "[PROD] Vérifie que..."). '
+        "Pour CHAQUE suggestion [PROD], le champ `rationale` est obligatoire et non vide : une "
+        "phrase en langage métier qui cite la preuve chiffrée tirée du profil (taux de valeurs "
+        "vides, min/max, cardinalité, valeur observée) et explique pourquoi ce cas mérite un test — "
+        "ex : \"Le profil indique que le champ 'code banque' est vide 3% du temps, un cas "
+        "qu'aucun test existant ne couvre.\" Les suggestions non-[PROD] laissent `rationale` vide."
+        if profile_block
+        else "Aucun profil statistique réel n'est disponible : n'emploie jamais le préfixe \"[PROD]\" "
+        "et laisse le champ `rationale` vide pour toutes les suggestions."
+    )
 
     try:
         try:
@@ -241,8 +350,10 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                 sql=sql,
                 instruction_block=instruction_block,
                 existing_tests_block=existing_tests_block,
-                dismissed_block=dismissed_block,
+                prior_suggestions_block=prior_suggestions_block,
                 profile_section=profile_section,
+                pitfalls_block=pitfalls_block,
+                prod_instruction_block=prod_instruction_block,
             )
             logger.diag(
                 "[suggestions] PROMPT LLM — system (extrait):\n%s",
@@ -261,20 +372,34 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                 "sql": sql,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,
-                "dismissed_block": dismissed_block,
+                "prior_suggestions_block": prior_suggestions_block,
                 "profile_section": profile_section,
+                "pitfalls_block": pitfalls_block,
+                "prod_instruction_block": prod_instruction_block,
             }
         )
         logger.diag(
             "[suggestions] analyse_des_manques:\n%s",
             result.analyse_des_manques[:1500],
         )
+        items = result.suggestions[:3]
+        # Aplatissement : on conserve `suggestions` en list[str] (dedup / consommation /
+        # rejet restent indexés sur le texte) et on transporte les explications [PROD]
+        # dans une side-map {texte → rationale} (cf. front : tag [PROD] cliquable).
+        suggestions = [s.text.strip() for s in items if s.text and s.text.strip()]
+        rationales = {
+            s.text.strip(): s.rationale.strip()
+            for s in items
+            if s.text and s.text.strip() and s.rationale and s.rationale.strip()
+        }
         logger.diag(
             "[suggestions] suggestions générées (%d):\n%s",
-            len(result.suggestions),
-            "\n".join(f"  [{i + 1}] {s}" for i, s in enumerate(result.suggestions)),
+            len(suggestions),
+            "\n".join(
+                f"  [{i + 1}] {s}" + (f"  ⟪{rationales[s]}⟫" if s in rationales else "")
+                for i, s in enumerate(suggestions)
+            ),
         )
-        suggestions = result.suggestions[:3]
 
     except Exception as e:
         print(f"Erreur LLM lors de la génération des suggestions: {e}")
@@ -288,7 +413,10 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
     # on les stocke sur le fichier test. Le message SUGGESTIONS émis plus bas ne sert
     # qu'au rafraîchissement live du panneau via SSE et n'est PAS persisté dans
     # l'historique de conversation (cf. history_saver).
-    update_test(state["session"], {"suggestions": suggestions})
+    update_test(
+        state["session"],
+        {"suggestions": suggestions, "suggestion_rationales": rationales},
+    )
 
     # --- 4. Détermination du parent_id ---
     messages = state.get("messages", [])
@@ -317,6 +445,7 @@ Si un profil statistique est fourni, au moins une suggestion doit cibler un cas 
                     "parent": parent_id,
                     "request_id": state.get("request_id"),
                     "profile_available": bool(profile_block),
+                    "rationales": rationales,
                 },
             )
         ]

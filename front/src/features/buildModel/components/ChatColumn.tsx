@@ -63,6 +63,7 @@ interface ChatColumnProps {
   isSending: boolean;
   loading: boolean | null;
   loading_message?: string | null;
+  queuedCount?: number;
   understandingDraft?: Array<{ database?: string; table: string; columns: string[] }> | null;
   validationMs?: number | null;
   error: string | null;
@@ -95,6 +96,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   isSending,
   loading,
   loading_message,
+  queuedCount = 0,
   understandingDraft,
   validationMs,
   error,
@@ -538,16 +540,27 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           bgcolor: '#f3f6f7',
         }}
       >
+        {queuedCount > 0 && (
+          <Box
+            sx={{
+              display: 'inline-flex', alignItems: 'center', gap: 0.5,
+              alignSelf: 'flex-start', mb: 0.75, px: 1, py: 0.25,
+              borderRadius: '12px', bgcolor: 'rgba(28,168,164,0.12)',
+              color: '#1ca8a4', fontSize: 11, fontWeight: 600,
+            }}
+          >
+            {queuedCount} instruction{queuedCount > 1 ? 's' : ''} en file · prise{queuedCount > 1 ? 's' : ''} en compte après la génération
+          </Box>
+        )}
         <DroppableTextField
           userInput={userInput}
           setUserInput={setUserInput}
           sendMessage={onSend}
           stopStream={onStopStream}
-          disabled={isSending}
           inputRef={inputRef}
           placeholder={
-            isSending
-              ? 'En cours…'
+            isLoading
+              ? 'Ajoute une instruction — elle sera prise en compte par l’agent…'
               : selectedTestIndex !== null
               ? 'Comment améliorer ce test ?'
               : 'Décris un cas à couvrir, ou demande un ajustement…'
@@ -557,7 +570,9 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           variant="caption"
           sx={{ color: '#9aabb0', mt: 0.75, display: 'block', textAlign: 'center', fontSize: 10.5 }}
         >
-          Entrée pour envoyer · Maj+Entrée pour saut de ligne
+          {isLoading
+            ? 'Entrée pour ajouter une instruction à la génération en cours'
+            : 'Entrée pour envoyer · Maj+Entrée pour saut de ligne'}
         </Typography>
       </Box>
     </Box>

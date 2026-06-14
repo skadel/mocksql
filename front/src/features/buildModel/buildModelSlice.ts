@@ -32,6 +32,7 @@ const initialState: BuildModelState = {
   lastError: undefined,
   workspaceMode: false,
   suggestions: [],
+  suggestionRationales: {},
   retryBadDataTestIndex: undefined,
 };
 
@@ -152,6 +153,7 @@ export const buildModelSlice = createSlice({
       // (canal live SSE) et on n'insère pas le message dans queryComponentGraph.
       if (msg.contentType === 'suggestions') {
         if (Array.isArray(msg.contents.suggestions)) state.suggestions = msg.contents.suggestions;
+        state.suggestionRationales = msg.contents.rationales ?? {};
         return;
       }
 
@@ -229,6 +231,10 @@ export const buildModelSlice = createSlice({
             ...t,
             ...(newName ? { test_name: newName } : {}),
             ...(newDescription ? { unit_test_description: newDescription } : {}),
+            // Validation acceptée (accept_validation) : la désync est résolue → on retire le
+            // marqueur needs_validation pour faire disparaître le prompt (le verdict Bon arrive
+            // via le message EVALUATION qui suit).
+            ...(t.reason_type === 'needs_validation' ? { reason_type: null, expected_row_count: undefined } : {}),
           };
         });
       }
@@ -309,6 +315,8 @@ export const buildModelSlice = createSlice({
     // (le backend la retire aussi du modèle, cf. history_saver/suggestion_intent).
     dismissSuggestion(state, action: PayloadAction<string>) {
       state.suggestions = state.suggestions.filter((s) => s !== action.payload);
+      const { [action.payload]: _removed, ...rest } = state.suggestionRationales ?? {};
+      state.suggestionRationales = rest;
     },
     pushSqlHistory(state, action: PayloadAction<SqlHistoryEntry>) {
       const last = state.sqlHistory[state.sqlHistory.length - 1];
@@ -347,9 +355,10 @@ export const buildModelSlice = createSlice({
       state.lastError = undefined;
       state.testResults = [];
       state.suggestions = [];
+      state.suggestionRationales = {};
     })
-      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; suggestions?: string[]; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
-        const { messages, sql, optimized_sql, test_results, suggestions, restored_message_id, last_error, sql_history } = action.payload;
+      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; suggestions?: string[]; suggestion_rationales?: Record<string, string>; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
+        const { messages, sql, optimized_sql, test_results, suggestions, suggestion_rationales, restored_message_id, last_error, sql_history } = action.payload;
         state.error = '';
         state.loading = false;
         if (sql) state.query = sql;
@@ -357,6 +366,7 @@ export const buildModelSlice = createSlice({
         if (test_results?.length) state.testResults = test_results;
         // Suggestions = état du modèle (panneau dédié), chargé comme test_results.
         if (suggestions?.length) state.suggestions = suggestions;
+        state.suggestionRationales = suggestion_rationales ?? {};
         if (restored_message_id) state.restoredMessageId = restored_message_id;
         state.lastError = last_error || undefined;
         if (sql_history?.length) state.sqlHistory = sql_history;

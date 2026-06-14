@@ -28,6 +28,17 @@ class _Assertion(BaseModel):
         )
     )
     expected_condition: str
+    scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "OPTIONNEL. Sélecteur de lignes : `expected_condition` n'est testée que sur "
+            "les lignes de `__result__` où `scope` est vrai. Sert à affirmer un fait sur "
+            "UNE ligne précise d'un résultat multi-lignes en restant positif (ex. "
+            '`scope: "d = (SELECT MIN(d) FROM __result__)"`). Laisse `null` si la '
+            "condition vaut pour toutes les lignes. Un scope ne couvrant aucune ligne "
+            "fait échouer l'assertion."
+        ),
+    )
 
 
 class _ImprovedAssertions(BaseModel):
@@ -158,6 +169,12 @@ Règles strictes :
 - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Pas de sous-requête vers une table source.
 - Pour vérifier un MAX : compare les colonnes de `__result__` entre elles via une sous-requête sur
   `__result__` uniquement, ex. : `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`
+- ⚠️ Chaque `expected_condition` est testée sur CHAQUE ligne. Donc `val = (SELECT MAX(val) …)` n'est
+  correcte que si le résultat a UNE seule ligne. Pour affirmer un fait sur UNE ligne précise d'un
+  résultat MULTI-lignes (le min/max, la 1ʳᵉ, une clé), renseigne `scope` (sélecteur de lignes) au
+  lieu de tout mettre dans `expected_condition` :
+  `scope: "d = (SELECT MIN(d) FROM __result__)"`, `expected_condition: "id = 'X'"`. Reste positif et
+  pince une régression de tri/association. Un scope ne couvrant aucune ligne fait échouer l'assertion.
 - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse)
 
 Puis évalue la qualité de ces nouvelles assertions :

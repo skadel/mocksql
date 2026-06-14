@@ -82,9 +82,17 @@ class QueryState(TypedDict):
     ]  # concatenated mocksql.md files (global → file-specific)
     evaluation_feedback: Optional[
         str
-    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows" | "bad_description"
+    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows" | "bad_description" | "needs_validation"
     # "bad_description" = la description annonce une sortie contredite par le résultat réel
     # (donnée valide, narratif faux) → flagué, aucune boucle de retry (route vers complétion).
+    # "needs_validation" = la description suppose une cardinalité (nb de lignes) que le résultat
+    # ne produit pas, MAIS les données d'entrée sont valides → on NE corrige pas en boucle :
+    # on sauve l'état et on demande à l'utilisateur de valider (VALIDATION_PROMPT). Cf.
+    # accept_validation (réaligne la description sur le réel + verdict Bon).
+    validate_intent: Optional[
+        bool
+    ]  # set by the front when the user clicks « Je valide l'état actuel » on a
+    # needs_validation test → routing routes to accept_validation (deterministic).
     empty_results_regen: Optional[
         bool
     ]  # set by test_evaluator: DuckDB returned 0 rows → route straight to generator

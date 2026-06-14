@@ -12,6 +12,7 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import DisplayTable from './DisplayTable';
 import QueryUnderstandingCard from './QueryUnderstandingCard';
 import { StyledButton } from '../../../style/StyledComponents';
+import { getVerdictInfo } from '../../../utils/verdict';
 import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
 
 type MessageBodyProps = {
@@ -283,6 +284,7 @@ const TestResultRow: React.FC<{ testResult: any; index: number }> = ({ testResul
   const kind: StatusKind = isSuccess ? 'pass' : isEmpty ? 'warn' : 'fail';
   const chipLabel = isComplete ? `${rowCount} ligne${rowCount > 1 ? 's' : ''}` : isEmpty ? 'Vide' : 'Erreur';
   const cfg = STATUS_CFG[kind];
+  const { label: verdictLabel, text: verdictText } = getVerdictInfo(testResult);
 
   return (
     <Box sx={{ borderRadius: '10px', p: '10px 11px', bgcolor: '#fff', border: '1px solid #dae2e4' }}>
@@ -307,6 +309,11 @@ const TestResultRow: React.FC<{ testResult: any; index: number }> = ({ testResul
           {chipLabel}
         </Box>
       </Box>
+      {/* Verdict inline — aligné sur le redesign « Chat » (.vd-inline) */}
+      <Typography sx={{ fontSize: 12, lineHeight: 1.5, color: '#6b8287', mt: 1 }}>
+        <Box component="strong" sx={{ fontWeight: 700, color: cfg.color }}>{verdictLabel}</Box>
+        {' — '}{verdictText}
+      </Typography>
       {isComplete && rowCount > 0 && (
         <TestDataPeek caption={`résultat — ${rowCount} ligne${rowCount > 1 ? 's' : ''}`} rows={rows} />
       )}
