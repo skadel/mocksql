@@ -31,10 +31,10 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions
+      parentMessageId, userTables, profileResult, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent
     } = params;
 
-    if (!userInput && !query && !userTables && !profileResult) return;
+    if (!userInput && !query && !userTables && !profileResult && !validateIntent) return;
     dispatch(setLoading(true));
 
     // For silent ops (sql_update, rerun test), reuse parentMessageId so bot responses
@@ -143,6 +143,7 @@ export const chatQuery = createAsyncThunk(
             suggestion_intent: suggestionIntent ?? false,
             regenerate_suggestions: regenerateSuggestions ?? false,
             rerun_only: rerunOnly ?? false,
+            validate_intent: validateIntent ?? false,
             profile_complete: null,
             profile: null,
             profile_billing_tb: null,

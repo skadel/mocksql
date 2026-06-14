@@ -27,8 +27,8 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages } from '../buildModelSlice';
-import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi } from '../../../api/messages';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage } from '../buildModelSlice';
+import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi, queueInstructionApi, flushInstructionsApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
@@ -94,6 +94,9 @@ const ChatComponent: React.FC = () => {
   const [sqlCollapseSignal, setSqlCollapseSignal] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
   const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
+  // Instructions supplémentaires saisies pendant qu'une génération est en cours :
+  // mises en file côté backend (peek à chaud), comptées ici pour l'indicateur UI.
+  const [queuedCount, setQueuedCount] = useState(0);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
   const [demoZoom, setDemoZoom] = useState<'chat' | 'tests' | null>(null);
@@ -687,9 +690,30 @@ const ChatComponent: React.FC = () => {
     [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
   );
 
+  // Met en file une instruction supplémentaire pendant qu'un run est déjà en cours.
+  // Elle est consultée à chaud par l'évaluateur / le conversational_agent, et rejouée
+  // en fin de run si elle n'a pas été consommée (cf. effet de complétion plus bas).
+  const queueInstruction = useCallback(async (text: string) => {
+    const trimmed = (text ?? '').trim();
+    if (!trimmed || !currentModelId) return;
+    setUserInput('');
+    if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
+    try {
+      const { queued } = await queueInstructionApi(currentModelId, trimmed);
+      setQueuedCount(typeof queued === 'number' ? queued : (n) => n + 1);
+    } catch {
+      setQueuedCount((n) => n + 1);
+    }
+  }, [currentModelId]);
+
   const onSendClick = useCallback(() => {
+    // Pendant une génération en cours : le message devient une instruction en file.
+    if (loading || isSending) {
+      queueInstruction(userInput);
+      return;
+    }
     handleSendMessage(userInput);
-  }, [userInput, handleSendMessage]);
+  }, [loading, isSending, userInput, queueInstruction, handleSendMessage]);
 
   // -------- SQL bar update (re-run with new SQL)
   const handleSQLUpdate = useCallback(
@@ -908,9 +932,29 @@ const ChatComponent: React.FC = () => {
         const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
         new Notification('MockSQL', { body, icon: '/favicon.ico' });
       }
+      // Replay des instructions supplémentaires non consommées en vol : on les
+      // récupère + on vide la session, puis on relance un message de suivi (route
+      // conversational_agent). Si l'agent les a déjà appliquées en vol, le flush
+      // renvoie vide → pas de replay → terminaison garantie. Pas de replay en cas
+      // d'erreur : on garde la file pour le prochain run.
+      if (currentModelId && !error) {
+        (async () => {
+          try {
+            const { instructions } = await flushInstructionsApi(currentModelId);
+            setQueuedCount(0);
+            if (instructions && instructions.length) {
+              const joined = instructions.length === 1
+                ? instructions[0]
+                : 'Instructions supplémentaires :\n' + instructions.map((s, i) => `${i + 1}. ${s}`).join('\n');
+              const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+              sendMessage(joined, sqlQuery, '', lastMessage ? lastMessage.id : '');
+            }
+          } catch { /* flush best-effort */ }
+        })();
+      }
     }
     prevLoadingRef.current = loading;
-  }, [loading, error, t, pendingFirstLoad]);
+  }, [loading, error, t, pendingFirstLoad, currentModelId, renderMessages, selectedChildIndices, sendMessage, sqlQuery]);
 
   const handleRetry = useCallback(() => {
     if (!lastChatQueryArgsRef.current) return;
@@ -979,6 +1023,9 @@ const ChatComponent: React.FC = () => {
     const lastMessageId = lastMessage ? lastMessage.id : '';
     try {
       isGeneratingRef.current = true;
+      // Affiche d'emblée le bon libellé (sinon le fallback « Extraction des
+      // colonnes… » s'affiche pendant pre_routing/routing avant suggestions_generator).
+      dispatch(setLoadingMessage(t('loading.generating_suggestions')));
       await dispatchChatQuery({
         userInput: '',
         sessionId: currentModelId,
@@ -1029,6 +1076,34 @@ const ChatComponent: React.FC = () => {
       silent: true,
     });
   }, [isSending, currentModelId, sqlQuery, renderMessages, selectedChildIndices, dispatch, t, testResults]);
+
+  // « Je valide l'état actuel » sur un test needs_validation : l'utilisateur tranche
+  // l'ambiguïté en faveur du réel → accept_validation réaligne la description + verdict Bon.
+  const handleValidateTest = useCallback((idx: number) => {
+    if (isSending) return;
+    const test = (testResults || []).find((t: any) => t.test_index === idx);
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
+    dispatchChatQuery({
+      userInput: '',
+      sessionId: currentModelId || '',
+      project: '',
+      dialect: DIALECT,
+      query: '',
+      ChangedMessageId: '',
+      t,
+      parentMessageId,
+      testUid: test?.test_uid,
+      testIndex: idx,
+      validateIntent: true,
+      silent: true,
+    });
+  }, [isSending, currentModelId, DIALECT, renderMessages, selectedChildIndices, t, testResults, dispatchChatQuery]);
+
+  // « Corriger le test » : on ancre le chat sur ce test pour que l'utilisateur décrive le fix.
+  const handleCorrectTest = useCallback((idx: number) => {
+    handleSelectTestForModification(idx);
+  }, [handleSelectTestForModification]);
 
 
   return (
@@ -1406,6 +1481,7 @@ const ChatComponent: React.FC = () => {
             isSending={isSending}
             loading={loading}
             loading_message={loading_message}
+            queuedCount={queuedCount}
             understandingDraft={understandingDraft}
             validationMs={validationMs}
             error={error}
@@ -1456,6 +1532,8 @@ const ChatComponent: React.FC = () => {
                 onSelectForModification={handleSelectTestForModification}
                 onEditAssertions={handleEditAssertions}
                 onRerunTest={handleRerunTest}
+                onValidateTest={handleValidateTest}
+                onCorrectTest={handleCorrectTest}
                 onSuggestionClick={handleSuggestionClick}
                 onDismissSuggestion={handleDismissSuggestion}
                 onRegenerateSuggestions={handleRegenerateSuggestions}

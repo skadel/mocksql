@@ -33,7 +33,9 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 logger = logging.getLogger(__name__)
 
 
-def _assertion_sql_from_condition(expected_condition: str) -> str:
+def _assertion_sql_from_condition(
+    expected_condition: str, scope: Optional[str] = None
+) -> str:
     """Wrappe une condition positive (vérité métier qui doit tenir sur chaque ligne)
     en requête dbt-style retournant les lignes VIOLANTES (0 ligne = OK).
 
@@ -45,8 +47,20 @@ def _assertion_sql_from_condition(expected_condition: str) -> str:
     On utilise ``IS NOT TRUE`` (et non ``NOT (...)``) pour que les NULL comptent comme
     violations : ``NOT(NULL)`` vaut NULL et laisserait passer un NULL là où une valeur
     est attendue, alors que ``(NULL) IS NOT TRUE`` est vrai → la ligne est remontée.
+
+    ``scope`` (optionnel) restreint l'univers : la condition n'est testée QUE sur les
+    lignes que ``scope`` sélectionne. Indispensable pour affirmer un fait sur UNE ligne
+    précise d'un résultat MULTI-lignes (ex. « la ligne au montant le plus ancien est X »)
+    sans que les autres lignes ne soient comptées comme violantes. Reste POSITIF :
+    ``scope = "d = (SELECT MIN(d) FROM __result__)"`` + ``condition = "id = 'X'"`` plutôt
+    que la forme ``id = 'X' AND d = (SELECT MIN(d) …)`` qui échoue à tort sur toute autre
+    ligne. La couverture du scope (≥1 ligne) est vérifiée à l'exécution — un scope vide
+    rend l'assertion vacuité et la fait échouer (cf. ``_evaluate_assertions``).
     """
     cond = expected_condition.strip().rstrip(";").strip()
+    sc = (scope or "").strip().rstrip(";").strip()
+    if sc:
+        return f"SELECT * FROM __result__ WHERE ({sc}) AND (({cond}) IS NOT TRUE)"
     return f"SELECT * FROM __result__ WHERE ({cond}) IS NOT TRUE"
 
 
@@ -196,8 +210,11 @@ class _Assertion(BaseModel):
             "de `__result__` quand le test réussit — l'affirmation métier attendue, "
             "exprimée directement (jamais sa négation). MockSQL la négocie lui-même "
             "pour produire la requête de validation. "
-            "✓ Bon : `date = '2016-01-02'`, `amount > 0`, "
-            "`z_score = (SELECT MAX(z_score) FROM __result__)`. "
+            "✓ Bon : `date = '2016-01-02'`, `amount > 0`. "
+            "⚠️ Testée sur CHAQUE ligne : `z_score = (SELECT MAX(z_score) FROM __result__)` "
+            "n'est correcte que si `__result__` a UNE seule ligne. Sur un résultat "
+            "MULTI-lignes, viser une ligne précise (le min/max, la 1ʳᵉ) échoue sur toutes "
+            "les autres → utilise le champ `scope` pour restreindre l'univers (cf. `scope`). "
             "✗ INTERDIT : tout `!=`, `<>`, `NOT IN`, `NOT (...)` ou `IS NULL` "
             "destiné à 'vérifier ce qui ne doit PAS être là' — exprime la vérité "
             "positive à la place (au lieu de `date != '2016-01-02'`, écris "
@@ -206,6 +223,22 @@ class _Assertion(BaseModel):
             "et, si besoin d'une valeur relative, une sous-requête sur `__result__` "
             "uniquement. N'inclus pas `SELECT`/`WHERE` — seulement l'expression booléenne."
         )
+    )
+    scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "OPTIONNEL. Sélecteur de lignes : `expected_condition` n'est alors testée que "
+            "sur les lignes de `__result__` où `scope` est vrai (les autres sont ignorées). "
+            "À utiliser pour affirmer un fait sur UNE ligne précise d'un résultat "
+            "MULTI-lignes, en restant POSITIF. "
+            "Ex. « la ligne de date la plus ancienne est le dataset X » → "
+            '`scope: "date = (SELECT MIN(date) FROM __result__)"`, '
+            "`expected_condition: \"dataset_id = 'X'\"`. "
+            "Laisse `null` si la condition vaut pour TOUTES les lignes. "
+            "Un `scope` qui ne sélectionne aucune ligne fait ÉCHOUER l'assertion "
+            "(elle ne testerait rien) — choisis un sélecteur qui matche au moins une ligne. "
+            "Mêmes colonnes que `__result__` ; pas de `SELECT`/`WHERE`/`FROM` de tête."
+        ),
     )
 
 
@@ -231,12 +264,16 @@ class _AssertionsAndEvaluation(BaseModel):
     reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
     assertions: List[_Assertion] = Field(min_length=1)
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
-    reason_type: Optional[Literal["bad_data", "bad_assertions", "bad_description"]] = (
-        None
-    )
+    reason_type: Optional[
+        Literal["bad_data", "bad_assertions", "bad_description", "needs_validation"]
+    ] = None
     explanation: str
     assertion_fix: Optional[_AssertionFix] = None
     diagnostic: Optional[DiagnosticBlock] = None
+    # Rempli UNIQUEMENT si reason_type == "needs_validation" : nombre de lignes que la
+    # description suppose en sortie (cardinalité annoncée), pour construire la question de
+    # validation « le résultat produit N lignes alors que tu en attendais M ».
+    expected_row_count: Optional[int] = None
 
     @model_validator(mode="after")
     def _diagnostic_required_for_bad_data(self) -> "_AssertionsAndEvaluation":
@@ -259,10 +296,12 @@ def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
     Conserve `description` et `expected_condition` (forme positive, pour l'UI/transparence)
     et dérive `sql` — l'artefact dbt-style réellement exécuté par `_evaluate_assertions`.
     """
+    scope = getattr(a, "scope", None)
     return {
         "description": a.description,
         "expected_condition": a.expected_condition,
-        "sql": _assertion_sql_from_condition(a.expected_condition),
+        **({"scope": scope} if scope and scope.strip() else {}),
+        "sql": _assertion_sql_from_condition(a.expected_condition, scope),
     }
 
 
@@ -1411,6 +1450,7 @@ async def _generate_assertions_and_evaluate(
     test_data: list,
     result_df,
     test_description: str,
+    extra_instructions: list[str] | None = None,
 ) -> _AssertionsAndEvaluation:
     """
     Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
@@ -1433,6 +1473,9 @@ Le message suivant contient ces sections, délimitées par des balises :
 - `<query>` : la requête SQL testée.
 - `<input_data>` : les données d'entrée injectées dans DuckDB.
 - `<result_sample>` : le résultat après exécution (nombre de lignes + exemples).
+- `<user_instructions>` (optionnel) : consignes ajoutées par l'utilisateur pendant la génération.
+  Prends-les en compte dans ton verdict et tes assertions sans jamais enfreindre les règles
+  ci-dessous (notamment l'interdiction des assertions triviales et négatives).
 - `<task>` : ce que tu dois produire.
 
 **Méthode — commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :**
@@ -1506,6 +1549,16 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
 - N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
   Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
   `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`.
+- ⚠️ Chaque `expected_condition` est testée sur CHAQUE ligne de `__result__`. Donc
+  `val = (SELECT MAX(val) FROM __result__)` n'est correcte que si le résultat a UNE seule
+  ligne. Sur un résultat MULTI-lignes, viser une ligne précise (min/max, première, une
+  clé donnée) échoue à tort sur toutes les autres lignes. Dans ce cas, renseigne `scope` :
+  - `scope` (optionnel) sélectionne les lignes sur lesquelles la condition s'applique ;
+    les autres sont ignorées. La requête devient `WHERE (scope) AND ((condition) IS NOT TRUE)`.
+  - Ex. « la ligne la plus ancienne est le dataset DS_001 » sur un résultat trié multi-lignes :
+    `scope: "billing_started_at = (SELECT MIN(billing_started_at) FROM __result__)"`,
+    `expected_condition: "dataset_id = 'DS_001'"`. Reste POSITIF, pince une régression de tri.
+  - Un `scope` qui ne matche aucune ligne fait ÉCHOUER l'assertion (elle ne testerait rien).
 - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`.
 - INTERDIT — conditions triviales (toujours vraies quelle que soit la valeur du résultat) :
   ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
@@ -1523,9 +1576,10 @@ produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vér
 - `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
   mauvais types, contraintes non respectées, résultat inattendu), "bad_assertions"
   (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
-  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat), ou
+  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat),
   "bad_description" (cf. ci-dessous — la description annonce une sortie que la requête ne
-  produit pas)
+  produit pas), ou "needs_validation" (cf. ci-dessous — la description suppose un NOMBRE de
+  lignes différent du réel, mais les données d'entrée sont valides → on demande à l'humain)
 - `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
   sans noms de colonnes, de CTEs ni de mots-clés SQL.
   ✓ 'Les données couvrent correctement le scénario nominal.'
@@ -1576,12 +1630,38 @@ Les données sont valides — NE les corrige PAS, NE relance rien : c'est le nar
 description qualitative ou structurelle (« vérifie que les régions sans trajet n'apparaissent pas »),
 ni quand la description ne donne aucune valeur chiffrée précise.
 
+**Cardinalité annoncée ↔ réelle (`needs_validation`) :**
+Compare le NOMBRE de lignes que la description suppose en sortie au `row_count` réel de
+`<result_sample>`. Si la description suppose une cardinalité précise (« une seule ligne »,
+« exactement N lignes », « pour un client avec 2 cartes je m'attends à 1 ligne ») et que le
+résultat réel en produit un nombre DIFFÉRENT, **alors qu'aucune donnée n'est cassée** (lignes
+genuines, pas de type invalide, sortie non vide), NE tranche PAS toi-même : c'est peut-être la
+description qui est trop stricte, peut-être le SQL qui a dérivé. C'est une AMBIGUÏTÉ à déléguer
+à l'humain, pas une donnée à corriger.
+Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "needs_validation"`, `expected_row_count`
+= le nombre de lignes supposé par la description (entier), et `explanation` qui pointe l'écart en
+langage métier (ex. « Le scénario suppose 1 ligne mais le calcul en produit 2 — à confirmer »).
+NE génère PAS de `diagnostic`, NE corrige PAS les données.
+⚠️ N'utilise ce motif QUE pour un écart de CARDINALITÉ avec données valides. Si la sortie est
+vide (0 ligne), reste sur le cas « résultat vide » ci-dessous. Si les données sont réellement
+incohérentes (mauvais types, contrainte de jointure non satisfaite), utilise `bad_data`. Si la
+description ne suppose aucun nombre de lignes précis, n'utilise PAS ce motif.
+
 **Cas particulier — résultat vide intentionnel :** si `<test_context>` mentionne explicitement
 "plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
 Évalue si les données d'entrée sont bien construites pour produire ce vide (Bon/Excellent),
 ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data)."""
 
     # ── Human : sections balisées dans l'ordre contexte → tables → SQL → input → output → ask ──
+    user_instructions_block = ""
+    if extra_instructions:
+        numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(extra_instructions))
+        user_instructions_block = f"""
+
+<user_instructions>
+{numbered}
+</user_instructions>"""
+
     human_content = f"""<test_context>
 {test_description}
 </test_context>
@@ -1603,7 +1683,7 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
 <result_sample>
 {row_count} ligne(s) :
 {json.dumps(sample, ensure_ascii=False, default=str)}
-</result_sample>
+</result_sample>{user_instructions_block}
 
 <task>
 Produis, conformément aux règles du message système :
@@ -1743,13 +1823,38 @@ def _evaluate_assertions(
             )
             continue
         sql = raw_sql.replace("__result__", view_name)
+        scope = (a.get("scope") or "").strip().rstrip(";").strip()
         try:
+            # Garde anti-vacuité du scope : une assertion scopée dont le périmètre ne
+            # sélectionne AUCUNE ligne du résultat ne teste rien (0 ligne violante →
+            # « passe » à tort). On l'échoue explicitement plutôt que de la laisser verte.
+            if scope:
+                scope_sql = scope.replace("__result__", view_name)
+                covered = con.execute(
+                    f"SELECT COUNT(*) FROM {view_name} WHERE ({scope_sql})"
+                ).fetchone()[0]
+                if covered == 0:
+                    results.append(
+                        {
+                            "description": a.get("description", ""),
+                            "expected_condition": a.get("expected_condition", ""),
+                            "scope": a.get("scope", ""),
+                            "sql": a.get("sql", ""),
+                            "passed": False,
+                            "error": (
+                                "le périmètre (scope) ne sélectionne aucune ligne du "
+                                "résultat — l'assertion ne teste rien (vacante)"
+                            ),
+                        }
+                    )
+                    continue
             fail_df = con.execute(sql).fetchdf()
             passed = len(fail_df) == 0
             results.append(
                 {
                     "description": a.get("description", ""),
                     "expected_condition": a.get("expected_condition", ""),
+                    **({"scope": a.get("scope", "")} if scope else {}),
                     "sql": a.get("sql", ""),
                     "passed": passed,
                     "failing_rows": fail_df.to_dict(orient="records")
@@ -2096,10 +2201,15 @@ et réponds selon le format du message système (un objet `decisions` listant un
                     new_cond,
                 )
                 continue
+            # Préserve un scope existant (ou un nouveau fourni par le fixer) : sans cela
+            # une assertion scopée serait « réparée » en une forme non scopée potentiellement
+            # vacuité. La couverture du scope est revalidée par _evaluate_assertions (Garde 2).
+            new_scope = (dec.get("scope") or results[target].get("scope") or "").strip()
             new_assertion = {
                 "description": dec.get("description", results[target]["description"]),
                 "expected_condition": new_cond,
-                "sql": _assertion_sql_from_condition(new_cond),
+                **({"scope": new_scope} if new_scope else {}),
+                "sql": _assertion_sql_from_condition(new_cond, new_scope or None),
             }
             new_eval = _evaluate_assertions([new_assertion], view_name, con)
             # Garde 2 — anti-blanchiment : si la réécriture échoue toujours (ou erreur), le

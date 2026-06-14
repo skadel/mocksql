@@ -136,6 +136,7 @@ export function formatMessage(message: any): Message {
       } catch {
         newMessage.contents.suggestions = [];
       }
+      newMessage.contents.rationales = message.additional_kwargs?.rationales ?? {};
       newMessage.contents.profileAvailable = message.additional_kwargs?.profile_available ?? true;
       break;
     }
@@ -159,6 +160,15 @@ export function formatMessage(message: any): Message {
     }
 
     case 'retry_prompt': {
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
+      }
+      break;
+    }
+
+    // Le prompt de validation pilote le panneau (via test.reason_type), pas le fil :
+    // on n'affiche aucun texte ici (sinon doublon avec le bloc Valider/Corriger).
+    case 'validation_prompt': {
       if (message.additional_kwargs?.test_index !== undefined) {
         newMessage.testIndex = message.additional_kwargs.test_index;
       }

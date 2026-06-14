@@ -89,11 +89,19 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 test_description=test_description,
             )
 
+            # Consultation à chaud des « instructions supplémentaires » saisies par
+            # l'utilisateur pendant la génération (peek non-destructif : le replay de
+            # fin de run rejoue ce qui n'a pas été consommé par le conversational_agent).
+            from build_query.pending_instructions import peek_instructions
+
+            extra_instructions = peek_instructions(state["session"])
+
             eval_result = await _generate_assertions_and_evaluate(
                 duckdb_sql=sql,
                 test_data=test_data,
                 result_df=result_df,
                 test_description=test_description,
+                extra_instructions=extra_instructions,
             )
 
             async with atimed("assertion_gen:eval+fix"):
@@ -120,7 +128,23 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 pass
 
     has_failing = any(not a.get("passed") for a in assertion_results)
-    if has_failing:
+    # Désync description↔cardinalité : prioritaire sur `has_failing`. Les assertions sont
+    # au niveau ligne (conditions positives sur __result__) et passent généralement sur la
+    # vraie sortie ; l'écart est entre le NOMBRE de lignes annoncé et le réel. On ne corrige
+    # pas en boucle : on sauve l'état et on demande validation à l'utilisateur (cf.
+    # test_evaluator → VALIDATION_PROMPT, accept_validation). Voir aussi state.py.
+    if eval_result.reason_type == "needs_validation":
+        updated_test = {
+            **current_test,
+            "assertion_results": assertion_results,
+            "verdict": "Insuffisant",
+            "reason_type": "needs_validation",
+            "evaluation_explanation": eval_result.explanation,
+            "expected_row_count": eval_result.expected_row_count,
+        }
+        updated_test.pop("assertion_fix", None)
+        updated_test.pop("diagnostic", None)
+    elif has_failing:
         updated_test = {
             **current_test,
             "assertion_results": assertion_results,

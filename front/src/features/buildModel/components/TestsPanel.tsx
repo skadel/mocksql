@@ -705,12 +705,46 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
 }
 
 /* ─── SuggestionRow ──────────────────────────────────────────────── */
-function SuggestionRow({ text, tag, onAdd, onFill, onDismiss }: { text: string; tag?: string; onAdd?: () => void; onFill?: () => void; onDismiss?: () => void }) {
+function SuggestionRow({ text, tag, rationale, onAdd, onFill, onDismiss }: { text: string; tag?: string; rationale?: string; onAdd?: () => void; onFill?: () => void; onDismiss?: () => void }) {
   const tc = tag ? tagStyle(tag) : { bg: SURFACE, fg: MUTED };
+  const isProd = /^\[PROD\]\s*/i.test(text);
+  const displayText = isProd ? text.replace(/^\[PROD\]\s*/i, '') : text;
+  const [prodAnchor, setProdAnchor] = useState<HTMLElement | null>(null);
   return (
     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, p: '9px 11px', border: `1px solid ${BORDER}`, borderRadius: '10px', bgcolor: '#fafcfc' }}>
-      <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: tc.fg, flexShrink: 0 }} />
-      <Typography sx={{ flex: 1, fontSize: 12.5, color: BODY, lineHeight: 1.45 }}>{text}</Typography>
+      <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: isProd ? TEAL : tc.fg, flexShrink: 0 }} />
+      {isProd && (
+        <>
+          <Tooltip title={rationale ? 'Pourquoi ce cas vient des données réelles — cliquer' : 'Cas ancré sur les données de production'}>
+            <Chip
+              label="PROD"
+              size="small"
+              onClick={rationale ? (e) => setProdAnchor(e.currentTarget) : undefined}
+              sx={{
+                fontSize: 9.5, height: 18, fontWeight: 700, letterSpacing: 0.3,
+                bgcolor: TEAL, color: '#fff', border: 'none', flexShrink: 0,
+                cursor: rationale ? 'pointer' : 'default',
+                '& .MuiChip-label': { px: '7px' },
+              }}
+            />
+          </Tooltip>
+          <Popover
+            open={Boolean(prodAnchor)}
+            anchorEl={prodAnchor}
+            onClose={() => setProdAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'left' }}
+          >
+            <Box sx={{ p: '10px 12px', maxWidth: 320 }}>
+              <Typography sx={{ fontSize: 10, fontWeight: 700, color: TEAL, mb: 0.5, letterSpacing: 0.4 }}>
+                ANCRÉ SUR LES DONNÉES RÉELLES
+              </Typography>
+              <Typography sx={{ fontSize: 12, color: BODY, lineHeight: 1.5 }}>{rationale}</Typography>
+            </Box>
+          </Popover>
+        </>
+      )}
+      <Typography sx={{ flex: 1, fontSize: 12.5, color: BODY, lineHeight: 1.45 }}>{displayText}</Typography>
       {tag && <Chip label={tag} size="small" sx={{ fontSize: 10, height: 18, bgcolor: tc.bg, color: tc.fg, border: 'none', flexShrink: 0 }} />}
       <Box
         component="button"
@@ -748,8 +782,9 @@ function SuggestionRow({ text, tag, onAdd, onFill, onDismiss }: { text: string; 
 /* Panneau dédié des suggestions de couverture (hors fil de conversation).
  * Source : state.buildModel.suggestions (champ modèle, chargé via getMessages).
  * « Ajouter » consomme la suggestion (→ test) ; « Régénérer » en demande de nouvelles. */
-function SuggestionsSection({ suggestions, onAdd, onDismiss, onRegenerate, regenerating, highlighted, boxRef }: {
+function SuggestionsSection({ suggestions, rationales, onAdd, onDismiss, onRegenerate, regenerating, highlighted, boxRef }: {
   suggestions: string[];
+  rationales?: Record<string, string>;
   onAdd?: (text: string) => void;
   onDismiss?: (text: string) => void;
   onRegenerate?: () => void;
@@ -757,7 +792,7 @@ function SuggestionsSection({ suggestions, onAdd, onDismiss, onRegenerate, regen
   highlighted?: boolean;
   boxRef?: React.RefObject<HTMLDivElement>;
 }) {
-  if (suggestions.length === 0) return null;
+  const isEmpty = suggestions.length === 0;
   return (
     <Box
       ref={boxRef}
@@ -802,11 +837,22 @@ function SuggestionsSection({ suggestions, onAdd, onDismiss, onRegenerate, regen
           </Tooltip>
         </Box>
       </Box>
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
-        {suggestions.map((s, i) => (
-          <SuggestionRow key={i} text={s} onAdd={() => onAdd?.(s)} onDismiss={onDismiss ? () => onDismiss(s) : undefined} />
-        ))}
-      </Box>
+      {isEmpty ? (
+        <Box sx={{ textAlign: 'center', py: '14px', px: '8px' }}>
+          <Typography sx={{ fontSize: 12, color: BODY, lineHeight: 1.5 }}>
+            Plus aucune suggestion valide pour l'instant.
+          </Typography>
+          <Typography sx={{ fontSize: 11.5, color: PLACEHOLDER, mt: 0.5 }}>
+            Voulez-vous régénérer d'autres suggestions ?
+          </Typography>
+        </Box>
+      ) : (
+        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          {suggestions.map((s, i) => (
+            <SuggestionRow key={i} text={s} rationale={rationales?.[s]} onAdd={() => onAdd?.(s)} onDismiss={onDismiss ? () => onDismiss(s) : undefined} />
+          ))}
+        </Box>
+      )}
     </Box>
   );
 }
@@ -1118,6 +1164,8 @@ interface TestCardProps {
   onEditAssertions?: () => void;
   onApplyAssertions?: (assertions: { description: string; expected_condition: string }[]) => Promise<void> | void;
   onRerunTest?: () => void;
+  onValidateTest?: () => void;
+  onCorrectTest?: () => void;
   onUpload?: (data: Record<string, any[]>) => void;
 }
 
@@ -1129,7 +1177,7 @@ function TestCard({
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
-  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onUpload,
+  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onUpload,
 }: TestCardProps) {
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   const tags: string[] = test.tags ?? [];
@@ -1248,6 +1296,47 @@ function TestCard({
           </Box>
         )}
       </Box>
+
+      {/* Validation prompt — désync description↔cardinalité (données valides) : l'utilisateur tranche */}
+      {test.reason_type === 'needs_validation' && (onValidateTest || onCorrectTest) && (() => {
+        let actual = 0;
+        try { actual = (JSON.parse(test.results_json || '[]') || []).length; } catch { /* noop */ }
+        const expected = test.expected_row_count;
+        return (
+          <Box sx={{ px: 2, pb: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+            <Typography sx={{ fontSize: 12.5, color: '#8a5c00', lineHeight: 1.4 }}>
+              {expected != null
+                ? `Le résultat produit ${actual} ligne(s) alors que ce scénario en suppose ${expected}. `
+                : 'Le résultat ne correspond pas à la cardinalité supposée par la description. '}
+              Valides-tu ce résultat (la description sera réalignée) ou faut-il corriger le test ?
+            </Typography>
+            <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+              {onValidateTest && (
+                <Button
+                  variant="contained"
+                  size="small"
+                  startIcon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+                  onClick={onValidateTest}
+                  sx={{ fontSize: 12, boxShadow: 'none', bgcolor: '#23a26d', '&:hover': { boxShadow: 'none', bgcolor: '#1c8459' } }}
+                >
+                  Je valide l'état actuel
+                </Button>
+              )}
+              {onCorrectTest && (
+                <Button
+                  variant="outlined"
+                  size="small"
+                  startIcon={<AutoAwesomeIcon sx={{ fontSize: 14 }} />}
+                  onClick={onCorrectTest}
+                  sx={{ fontSize: 12, borderColor: '#d89323', color: '#8a5c00', '&:hover': { borderColor: '#b37820', bgcolor: '#fffbf0' } }}
+                >
+                  Corriger le test
+                </Button>
+              )}
+            </Box>
+          </Box>
+        );
+      })()}
 
       {/* Retry prompt — affiché quand bad_data retries épuisés */}
       {showRetryPrompt && onRerunTest && (
@@ -1677,6 +1766,8 @@ interface TestsPanelProps {
   selectedTestIndex: number | null;
   onUpload?: (uploadedData: Record<string, any[]>) => void;
   onRerunTest?: (idx: number) => void;
+  onValidateTest?: (idx: number) => void;
+  onCorrectTest?: (idx: number) => void;
   onOpenChat?: () => void;
   onSuggestionClick?: (text: string) => void;
   onDismissSuggestion?: (text: string) => void;
@@ -1690,7 +1781,7 @@ interface TestsPanelProps {
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions,
+  onUpload, onRerunTest, onValidateTest, onCorrectTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions,
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
@@ -1698,6 +1789,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
   const suggestions: string[] = useAppSelector((state) => state.buildModel.suggestions ?? []);
+  const suggestionRationales: Record<string, string> = useAppSelector((state) => state.buildModel.suggestionRationales ?? {});
   const isLoading = useAppSelector((state) => !!state.buildModel.loading);
 
   const [suggestionsHighlighted, setSuggestionsHighlighted] = useState(false);
@@ -1990,6 +2082,8 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onEditAssertions={onEditAssertions ? () => onEditAssertions(idx) : undefined}
                   onApplyAssertions={(a) => handleApplyAssertions(test.test_index, a)}
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
+                  onValidateTest={onValidateTest ? () => onValidateTest(idx) : undefined}
+                  onCorrectTest={onCorrectTest ? () => onCorrectTest(idx) : undefined}
                   onUpload={onUpload}
                   showRetryPrompt={retryBadDataTestIndex != null && retryBadDataTestIndex === test.test_index}
                 />
@@ -2006,6 +2100,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
           {/* Panneau dédié des suggestions (hors fil de conversation) */}
           <SuggestionsSection
             suggestions={suggestions}
+            rationales={suggestionRationales}
             onAdd={onSuggestionClick}
             onDismiss={onDismissSuggestion}
             onRegenerate={onRegenerateSuggestions}

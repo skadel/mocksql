@@ -11,6 +11,31 @@ export async function dismissSuggestionApi(sessionId: string, suggestion: string
 }
 
 
+// Met en file une « instruction supplémentaire » saisie pendant qu'une génération
+// est déjà en cours. Le run en vol la consulte (peek) ; le flush de fin de run rejoue
+// ce qui n'a pas été consommé. Renvoie le nombre d'instructions en attente.
+export async function queueInstructionApi(sessionId: string, text: string): Promise<{ queued: number }> {
+  const token = localStorage.getItem('jwt') || '';
+  const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/query/instruction`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify({ sessionId, text }),
+  });
+  return res.json();
+}
+
+// Récupère en fin de run les instructions non consommées en vol et vide la session.
+export async function flushInstructionsApi(sessionId: string): Promise<{ instructions: string[] }> {
+  const token = localStorage.getItem('jwt') || '';
+  const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/query/instruction/flush`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify({ sessionId }),
+  });
+  return res.json();
+}
+
+
 export async function clearHistoryApi(sessionId: string): Promise<void> {
   const token = localStorage.getItem('jwt') || '';
   await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/clearHistory`, {

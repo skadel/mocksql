@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
+from storage.test_repository import get_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
@@ -442,6 +443,18 @@ async def conversational_agent(state: QueryState):
         or "Aucun test pour l'instant."
     )
 
+    # Suggestions de couverture actives (état du modèle, panneau dédié) : on les
+    # expose à l'agent pour qu'il comprenne « fais un test de la suggestion 2 » ou
+    # « régénère les suggestions en insistant sur X » — sinon il ne sait pas de quoi
+    # l'utilisateur parle. Numérotées 1-based pour matcher l'affichage du panneau.
+    stored = get_test(state["session"]) or {}
+    current_suggestions = [s for s in (stored.get("suggestions") or []) if s]
+    suggestions_summary = (
+        "\n".join(f"{i}. {s}" for i, s in enumerate(current_suggestions, 1))
+        if current_suggestions
+        else "Aucune suggestion active pour l'instant."
+    )
+
     # Contexte injecté quand l'agent est appelé après un verdict "bad_data" de l'évaluateur
     evaluation_feedback = state.get("evaluation_feedback")
     eval_context, eval_test_idx = _build_agent_eval_context(state, existing_tests)
@@ -521,6 +534,12 @@ SQL testé (dialecte {state.get("dialect", "bigquery")}):
 
 Tests existants :
 {tests_summary}
+
+Suggestions de couverture actives (proposées à l'utilisateur dans le panneau dédié, numérotées comme à l'écran) :
+{suggestions_summary}
+
+Si l'utilisateur fait référence à une suggestion (« la suggestion 2 », « le cas que tu as proposé sur les NULL »…), appuie-toi sur cette liste pour savoir de quoi il parle, puis agis : `generate_test_data` pour en faire un nouveau test, ou étends un test existant si le scénario recoupe largement.
+Tu peux aussi régénérer les suggestions toi-même avec `generate_suggestions` ; passe dans `instructions` le commentaire de l'utilisateur (ex : « focus sur les cas limites », « propose des cas autour de la jointure ») pour orienter les nouvelles propositions.
 
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
@@ -751,6 +770,24 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         )
     elif user_input:
         messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
+
+    # Instructions supplémentaires saisies par l'utilisateur pendant la génération :
+    # consultées à chaud ici et CONSOMMÉES (marquées appliquées) pour qu'elles ne soient
+    # pas rejouées par le flush de fin de run. Cf. build_query/pending_instructions.
+    from build_query.pending_instructions import (
+        consume_instructions,
+        peek_instructions,
+    )
+
+    extra_instructions = peek_instructions(state["session"])
+    if extra_instructions:
+        instructions_block = (
+            "Instructions supplémentaires ajoutées par l'utilisateur pendant la "
+            "génération (à prendre en compte, dans l'ordre) :\n"
+            + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(extra_instructions))
+        )
+        messages_for_llm = messages_for_llm + [HumanMessage(content=instructions_block)]
+        consume_instructions(state["session"])
 
     _DEBUG_TOOLS = {"run_cte"}
     _DATA_PATCH_TOOLS = {"patch_test_field", "remove_test_row", "add_test_row"}

@@ -50,6 +50,15 @@ class DismissSuggestionRequest(BaseModel):
     suggestion: str
 
 
+class QueueInstructionRequest(BaseModel):
+    sessionId: str
+    text: str
+
+
+class FlushInstructionsRequest(BaseModel):
+    sessionId: str
+
+
 @router.post("/getMessages")
 async def get_messages(body: MessageRequest):
     if not is_initialized():
@@ -68,6 +77,7 @@ async def get_messages(body: MessageRequest):
         last_error = test.get("last_error") if test else ""
         test_results = test.get("test_cases", []) if test else []
         suggestions = test.get("suggestions", []) if test else []
+        suggestion_rationales = test.get("suggestion_rationales", {}) if test else {}
         restored_message_id = test.get("restored_message_id") if test else None
 
         # Fallback: extract from last results message in history
@@ -88,6 +98,7 @@ async def get_messages(body: MessageRequest):
             "optimized_sql": optimized_sql,
             "test_results": test_results,
             "suggestions": suggestions,
+            "suggestion_rationales": suggestion_rationales,
             "restored_message_id": restored_message_id,
             "last_error": last_error or "",
             "sql_history": [],
@@ -250,14 +261,44 @@ async def dismiss_suggestion(body: DismissSuggestionRequest):
         if suggestion not in [d.strip() for d in dismissed]:
             dismissed.append(suggestion)
 
+        rationales = {
+            k: v
+            for k, v in (test.get("suggestion_rationales") or {}).items()
+            if k.strip() != suggestion
+        }
+
         update_test(
             body.sessionId,
-            {"suggestions": suggestions, "dismissed_suggestions": dismissed},
+            {
+                "suggestions": suggestions,
+                "dismissed_suggestions": dismissed,
+                "suggestion_rationales": rationales,
+            },
         )
         return {"ok": True}
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+
+@router.post("/query/instruction")
+async def queue_instruction(body: QueueInstructionRequest):
+    """Enregistre une « instruction supplémentaire » saisie pendant qu'une génération
+    est déjà en cours. Consultée à chaud par le run en vol (peek), rejouée après coup
+    par le flush si elle n'a pas été consommée. Cf. build_query/pending_instructions."""
+    from build_query.pending_instructions import add_instruction
+
+    queued = add_instruction(body.sessionId, body.text)
+    return {"queued": queued}
+
+
+@router.post("/query/instruction/flush")
+async def flush_instructions_route(body: FlushInstructionsRequest):
+    """Renvoie les instructions non consommées en vol et vide la session — appelé en
+    fin de run par le front pour le replay."""
+    from build_query.pending_instructions import flush_instructions
+
+    return {"instructions": flush_instructions(body.sessionId)}
 
 
 @router.post("/clearHistory")
