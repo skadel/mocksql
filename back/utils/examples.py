@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, Type, List, Tuple
 import duckdb
 import sqlglot
 from pandas import DataFrame
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from sqlglot import expressions as exp
 from sqlglot.optimizer import traverse_scope, find_all_in_scope
 
@@ -238,16 +238,57 @@ def _bq_ddl_to_pydantic(model_name: str, bq_ddl_type: str):
             return Dict[str, Any]
 
         fields_def = {}
+        used_keys: set[str] = set()
+        has_alias = False
         for fname, ftype in pairs:
             sub_type = _bq_ddl_to_pydantic(f"{model_name}_{fname}", ftype)
-            fields_def[fname.lower()] = (Optional[sub_type], Field(None))
+            fname_lower = fname.lower()
+            # Même garde qu'au niveau colonne : un champ de STRUCT à underscore
+            # initial (ex. STRUCT<_dt DATE>) ferait planter create_model.
+            if fname_lower.startswith("_"):
+                key = _safe_field_name(fname_lower, used_keys)
+                fields_def[key] = (Optional[sub_type], Field(None, alias=fname_lower))
+                has_alias = True
+            else:
+                used_keys.add(fname_lower)
+                fields_def[fname_lower] = (Optional[sub_type], Field(None))
 
         if not fields_def:
             return Dict[str, Any]
 
-        return create_model(model_name, **fields_def)
+        return create_model(
+            model_name,
+            __config__=_ALIASED_MODEL_CONFIG if has_alias else None,
+            **fields_def,
+        )
 
     return type_mapping.get(bq_ddl_type.upper(), str)
+
+
+# Config partagée : `populate_by_name` accepte le nom réel ET la clé assainie en
+# entrée ; `serialize_by_alias` fait que .dict()/model_dump() ré-émet le nom réel
+# (l'alias) — indispensable car les clés du dump deviennent les noms de colonnes
+# DuckDB en aval. Sans ça, une colonne à underscore initial sortirait assainie.
+_ALIASED_MODEL_CONFIG = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
+
+def _safe_field_name(name: str, used: set[str]) -> str:
+    """Nom de champ Pydantic valide et unique pour `name`.
+
+    Pydantic rejette les noms à underscore initial (détectés comme attributs
+    privés) — fréquents en dbt (`_line_number`, `_dt`, `_feed_valid_from`). On
+    retire les underscores de tête et on garde le nom réel via un alias ; en cas
+    de collision (ex. `_dt` vs `dt`) on suffixe pour rester injectif.
+    """
+    candidate = name.lstrip("_") or "field"
+    if candidate[0].isdigit():
+        candidate = f"f_{candidate}"
+    base, i = candidate, 1
+    while candidate in used:
+        candidate = f"{base}_{i}"
+        i += 1
+    used.add(candidate)
+    return candidate
 
 
 def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]:
@@ -255,6 +296,15 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
     for table in filtered_tables_and_columns:
         table_name = table["table_name"]
         fields = {}
+        has_alias = False
+
+        # Les colonnes « normales » réservent leur nom tel quel : une clé assainie
+        # d'underscore (ex. `_dt`→`dt`) ne doit jamais écraser une vraie colonne `dt`.
+        used_keys: set[str] = {
+            c["name"].lower()
+            for c in table["columns"]
+            if not c["name"].lower().startswith("_")
+        }
 
         for column in table["columns"]:
             col_name = column["name"].lower()
@@ -266,18 +316,32 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
             else:
                 col_type = parse_field_type(column["type"])
 
-            fields[col_name] = (
-                Optional[col_type],
-                Field(None, description=col_description),
-            )
+            # Underscore initial → clé assainie + alias sur le nom réel.
+            if col_name.startswith("_"):
+                field_key = _safe_field_name(col_name, used_keys)
+                field = Field(None, alias=col_name, description=col_description)
+                has_alias = True
+            else:
+                field_key = col_name
+                field = Field(None, description=col_description)
 
-        model = create_model(table_name, **fields)
+            fields[field_key] = (Optional[col_type], field)
+
+        model = create_model(
+            table_name,
+            __config__=_ALIASED_MODEL_CONFIG if has_alias else None,
+            **fields,
+        )
         models[table_name] = (
             Optional[list[model]],
             Field(None, description="Model for table "),
         )
 
-    CombinedModel = create_model("CombinedModel", **models)
+    # serialize_by_alias sur le modèle combiné : le générateur appelle
+    # `.data.dict()` à ce niveau, et le flag doit se propager aux modèles imbriqués.
+    CombinedModel = create_model(
+        "CombinedModel", __config__=_ALIASED_MODEL_CONFIG, **models
+    )
     return CombinedModel
 
 

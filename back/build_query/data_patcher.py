@@ -344,7 +344,9 @@ async def _add_rows(
         }
     )
 
-    new_rows_dict = _convert_datetime_fields(result.dict())
+    # model_dump (≠ .dict()) honore serialize_by_alias → noms de colonnes réels
+    # (colonnes dbt à underscore initial préservées).
+    new_rows_dict = _convert_datetime_fields(result.model_dump())
     for table_name, new_rows in new_rows_dict.items():
         if new_rows:
             data.setdefault(table_name, []).extend(new_rows)

@@ -5,6 +5,10 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
 import UploadFileIcon from '@mui/icons-material/UploadFile';
+import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
+import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import DisplayTable from './DisplayTable';
 import QueryUnderstandingCard from './QueryUnderstandingCard';
 import { StyledButton } from '../../../style/StyledComponents';
@@ -174,18 +178,147 @@ const BadDataDiagnosticAccordion: React.FC<{ diagnostic: DiagnosticBlock }> = ({
   </Accordion>
 );
 
+/* ----------------------------------------------------------------------------
+ * Rendu des résultats de test — aligné sur le redesign « Chat » (design system).
+ * Chaque test = une carte `.trow` : pastille de statut (icône, pas emoji),
+ * identifiant mono, description, pastille de résultat, et une « Réflexion »
+ * imbriquée (aperçu des lignes retournées).
+ * -------------------------------------------------------------------------- */
+const MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
+
+const STATUS_CFG = {
+  pass: { bg: '#e9f7f0', color: '#1c855a' },
+  warn: { bg: '#fcf3e1', color: '#a86a00' },
+  fail: { bg: '#fbeceb', color: '#b23a32' },
+} as const;
+
+type StatusKind = keyof typeof STATUS_CFG;
+
+const StatusMarker: React.FC<{ kind: StatusKind }> = ({ kind }) => {
+  const cfg = STATUS_CFG[kind];
+  const Icon = kind === 'pass' ? CheckRoundedIcon : kind === 'warn' ? WarningAmberRoundedIcon : CloseRoundedIcon;
+  return (
+    <Box
+      sx={{
+        flexShrink: 0, mt: '1px', width: 19, height: 19, borderRadius: '999px',
+        bgcolor: cfg.bg, color: cfg.color, display: 'grid', placeItems: 'center',
+      }}
+    >
+      <Icon sx={{ fontSize: 12 }} />
+    </Box>
+  );
+};
+
+/** « Réflexion » imbriquée : aperçu des lignes (en mono) sous une carte de test. */
+const TestDataPeek: React.FC<{ caption: string; rows: Record<string, any>[] }> = ({ caption, rows }) => {
+  const [open, setOpen] = useState(false);
+  const cols = rows.length > 0 ? Object.keys(rows[0]) : [];
+  if (cols.length === 0) return null;
+  return (
+    <Box sx={{ mt: 1 }}>
+      <Box
+        onClick={() => setOpen((o) => !o)}
+        sx={{
+          display: 'inline-flex', alignItems: 'center', gap: 0.75, cursor: 'pointer',
+          color: '#6b8287', '&:hover': { color: '#3b5357' },
+        }}
+      >
+        <AutoAwesomeIcon sx={{ fontSize: 13, color: '#2bb0a8' }} />
+        <Typography component="span" sx={{ fontSize: 11.5, fontWeight: 600, color: 'inherit' }}>
+          Réflexion
+        </Typography>
+        <ExpandMoreIcon sx={{ fontSize: 13, color: '#8da0a4', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+      </Box>
+      <Collapse in={open}>
+        <Box sx={{ pt: 0.75 }}>
+          <Typography sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: '#4f676b', mb: 0.5 }}>
+            {caption}
+          </Typography>
+          <Box sx={{ overflowX: 'auto', border: '1px solid #dae2e4', borderRadius: '8px' }}>
+            <Table
+              size="small"
+              sx={{ '& td, & th': { fontFamily: MONO, fontSize: 11, whiteSpace: 'nowrap', py: '5px', px: '9px', borderColor: '#dae2e4' } }}
+            >
+              <TableHead>
+                <TableRow sx={{ bgcolor: '#f3f6f7' }}>
+                  {cols.map((c) => (
+                    <TableCell key={c} sx={{ color: '#6b8287 !important', fontWeight: '600 !important' }}>{c}</TableCell>
+                  ))}
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {rows.map((r, i) => (
+                  <TableRow key={i} sx={{ '&:last-child td': { border: 0 } }}>
+                    {cols.map((c) => (
+                      <TableCell key={c} sx={{ color: '#1f3a3e !important' }}>
+                        {r[c] === null || r[c] === undefined ? <em style={{ color: '#aab8bb' }}>null</em> : String(r[c])}
+                      </TableCell>
+                    ))}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </Box>
+        </Box>
+      </Collapse>
+    </Box>
+  );
+};
+
+const TestResultRow: React.FC<{ testResult: any; index: number }> = ({ testResult, index }) => {
+  const status = testResult.status as string | undefined;
+  const isComplete = status === 'complete';
+  const isEmpty = status === 'empty_results';
+  const expectsEmpty = isEmpty && /retourne\s+.{0,40}vide|résultat[s]?\s+(?:est\s+)?vide[s]?|0\s+ligne|aucune\s+ligne/.test(
+    (testResult.unit_test_description ?? '').toLowerCase()
+  );
+  const isSuccess = isComplete || expectsEmpty;
+
+  let rows: Record<string, any>[] = [];
+  if (isComplete) {
+    try { rows = JSON.parse(testResult.results_json ?? '[]'); } catch { rows = []; }
+  }
+  const rowCount = rows.length;
+
+  const kind: StatusKind = isSuccess ? 'pass' : isEmpty ? 'warn' : 'fail';
+  const chipLabel = isComplete ? `${rowCount} ligne${rowCount > 1 ? 's' : ''}` : isEmpty ? 'Vide' : 'Erreur';
+  const cfg = STATUS_CFG[kind];
+
+  return (
+    <Box sx={{ borderRadius: '10px', p: '10px 11px', bgcolor: '#fff', border: '1px solid #dae2e4' }}>
+      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1.1 }}>
+        <StatusMarker kind={kind} />
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography sx={{ fontFamily: MONO, fontSize: 11, fontWeight: 600, color: '#6b8287', letterSpacing: '0.02em' }}>
+            Test {(testResult.test_index ?? index) + 1}
+          </Typography>
+          {testResult.unit_test_description && (
+            <Typography sx={{ fontSize: 12, lineHeight: 1.5, color: '#3b5357', mt: '2px' }}>
+              {testResult.unit_test_description}
+            </Typography>
+          )}
+        </Box>
+        <Box
+          sx={{
+            flexShrink: 0, fontSize: 11, fontWeight: 600, borderRadius: '999px',
+            px: '9px', py: '3px', bgcolor: cfg.bg, color: cfg.color, whiteSpace: 'nowrap',
+          }}
+        >
+          {chipLabel}
+        </Box>
+      </Box>
+      {isComplete && rowCount > 0 && (
+        <TestDataPeek caption={`résultat — ${rowCount} ligne${rowCount > 1 ? 's' : ''}`} rows={rows} />
+      )}
+    </Box>
+  );
+};
+
 const MessageBody: React.FC<MessageBodyProps> = ({
   msg,
-  currentModelId,
   currentProjectId,
-  currentModelName = 'data',
-  onUpload,
   onProfileUpload,
   onPageChange,
-  onExecute,
-  onCreateClick,
-  onSuggestionClick,
-  onRequestProfile,
   debugMessages,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -305,61 +438,63 @@ const MessageBody: React.FC<MessageBodyProps> = ({
       {/* Correction de test — séparateur "Test modifié" + scénario */}
       {msg.contentType === 'generate_test_scenario' && msg.contents.text && (
         <Box>
-          {/* Séparateur visuel */}
+          {/* Séparateur visuel — accent teal (redesign Chat) */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, my: 1 }}>
-            <Box sx={{ flex: 1, height: '1px', bgcolor: '#ffe082' }} />
+            <Box sx={{ flex: 1, height: '1px', bgcolor: '#d2efec' }} />
             <Chip
               label={msg.contents.action === 'add' ? 'Nouveau test' : 'Test modifié'}
               size="small"
               sx={{
                 fontSize: 10,
                 height: 20,
-                bgcolor: '#fffde7',
-                color: '#7a5f00',
-                border: '1px solid #ffe082',
+                bgcolor: '#ecf7f6',
+                color: '#16746e',
+                border: '1px solid #d2efec',
                 fontWeight: 700,
-                letterSpacing: '0.03em',
+                letterSpacing: '0.05em',
+                textTransform: 'uppercase',
               }}
             />
-            <Box sx={{ flex: 1, height: '1px', bgcolor: '#ffe082' }} />
+            <Box sx={{ flex: 1, height: '1px', bgcolor: '#d2efec' }} />
           </Box>
 
-          {/* Réflexion collapsible */}
+          {/* Réflexion collapsible — sparkles + chevron (redesign Chat) */}
           {msg.contents.reasoning && (
             <Box sx={{ mb: 0.75 }}>
               <Box
                 onClick={() => setReasoningOpen(o => !o)}
                 sx={{
-                  display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
-                  color: '#888', fontSize: 12,
-                  '&:hover': { color: '#555' },
+                  display: 'inline-flex', alignItems: 'center', gap: 0.75, cursor: 'pointer',
+                  color: '#6b8287', '&:hover': { color: '#3b5357' },
                 }}
               >
-                <ExpandMoreIcon sx={{ fontSize: 14, transform: reasoningOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
-                Réflexion
+                <AutoAwesomeIcon sx={{ fontSize: 13, color: '#2bb0a8' }} />
+                <Typography component="span" sx={{ fontSize: 11.5, fontWeight: 600, color: 'inherit' }}>
+                  Réflexion
+                </Typography>
+                <ExpandMoreIcon sx={{ fontSize: 13, color: '#8da0a4', transform: reasoningOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
               </Box>
               <Collapse in={reasoningOpen}>
-                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: '#888', fontStyle: 'italic', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                <Typography variant="caption" sx={{ display: 'block', mt: 0.5, color: '#6b8287', fontStyle: 'italic', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
                   {msg.contents.reasoning}
                 </Typography>
               </Collapse>
             </Box>
           )}
 
-          {/* Description du scénario de correction */}
+          {/* Description du scénario de correction — carte teal (redesign Chat) */}
           <Box
             sx={{
               p: 1.25,
-              bgcolor: '#fffde7',
-              borderRadius: '8px',
-              border: '1px solid #ffe082',
-              borderLeft: '3px solid #f9a825',
+              bgcolor: '#ecf7f6',
+              borderRadius: '10px',
+              border: '1px solid #d2efec',
             }}
           >
-            <Typography sx={{ fontSize: 11, color: '#f9a825', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', mb: 0.5 }}>
+            <Typography sx={{ fontSize: 12.5, color: '#16746e', fontWeight: 700, mb: 0.5 }}>
               {msg.contents.action === 'add' ? 'Nouveau scénario ajouté' : 'Modification pour le scénario suivant'}
             </Typography>
-            <Typography variant="body2" sx={{ color: '#333', lineHeight: 1.5 }}>
+            <Typography variant="body2" sx={{ color: '#3b5357', lineHeight: 1.55 }}>
               {msg.contents.text}
             </Typography>
           </Box>
@@ -468,69 +603,13 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       ) : null}
 
-      {/* Résultats d'exécution des tests unitaires */}
+      {/* Résultats d'exécution des tests unitaires — cartes `.trow` (redesign Chat) */}
       {Array.isArray(msg.contents.res) && msg.contents.res.length > 0 &&
         (msg.contents.res as any[]).some((r) => 'results_json' in r) && (
-          <Box sx={{ mt: 1 }}>
-            {(msg.contents.res as any[]).map((testResult, i) => {
-              const status = testResult.status as string | undefined;
-              const isComplete = status === 'complete';
-              const isEmpty = status === 'empty_results';
-              const expectsEmpty = isEmpty && /retourne\s+.{0,40}vide|résultat[s]?\s+(?:est\s+)?vide[s]?|0\s+ligne|aucune\s+ligne/.test(
-                (testResult.unit_test_description ?? '').toLowerCase()
-              );
-              const isSuccess = isComplete || expectsEmpty;
-
-              let rowCount = 0;
-              if (isComplete) {
-                try { rowCount = JSON.parse(testResult.results_json ?? '[]').length; } catch { /* keep 0 */ }
-              }
-
-              const emoji = isSuccess ? '✅' : isEmpty ? '⚠️' : '❌';
-              const chipLabel = isComplete
-                ? `${rowCount} ligne${rowCount > 1 ? 's' : ''}`
-                : isEmpty ? 'Vide' : 'Erreur';
-              const chipBg = isSuccess ? '#e8f7f6' : isEmpty ? '#fff8e1' : '#fde8e8';
-              const chipColor = isSuccess ? '#1ca8a4' : isEmpty ? '#f57c00' : '#d32f2f';
-              const chipBorder = isSuccess ? '#b2e4e2' : isEmpty ? '#ffe082' : '#f5c6c6';
-
-              return (
-                <Box
-                  key={testResult.test_index ?? i}
-                  sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 0.75 }}
-                >
-                  <Typography sx={{ fontSize: 13, lineHeight: 1.4, flexShrink: 0 }}>
-                    {emoji}
-                  </Typography>
-                  <Box sx={{ flex: 1, minWidth: 0 }}>
-                    <Typography variant="caption" sx={{ fontWeight: 700, color: '#333' }}>
-                      Test {(testResult.test_index ?? i) + 1}
-                    </Typography>
-                    {testResult.unit_test_description && (
-                      <Typography
-                        variant="caption"
-                        sx={{ display: 'block', color: '#666', fontSize: 11, whiteSpace: 'normal' }}
-                      >
-                        {testResult.unit_test_description}
-                      </Typography>
-                    )}
-                  </Box>
-                  <Chip
-                    label={chipLabel}
-                    size="small"
-                    sx={{
-                      fontSize: 10,
-                      height: 18,
-                      flexShrink: 0,
-                      bgcolor: chipBg,
-                      color: chipColor,
-                      border: `1px solid ${chipBorder}`,
-                      fontWeight: 700,
-                    }}
-                  />
-                </Box>
-              );
-            })}
+          <Box sx={{ mt: 1, display: 'flex', flexDirection: 'column', gap: 0.5 }}>
+            {(msg.contents.res as any[]).map((testResult, i) => (
+              <TestResultRow key={testResult.test_index ?? i} testResult={testResult} index={i} />
+            ))}
           </Box>
       )}
       {/* Suggestions : rendues hors du fil → panneau dédié (TestsPanel). */}
@@ -545,13 +624,15 @@ const MessageBody: React.FC<MessageBodyProps> = ({
           <Box
             onClick={() => setDebugOpen(o => !o)}
             sx={{
-              display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
-              color: '#888', fontSize: 12,
-              '&:hover': { color: '#555' },
+              display: 'inline-flex', alignItems: 'center', gap: 0.75, cursor: 'pointer',
+              color: '#6b8287', '&:hover': { color: '#3b5357' },
             }}
           >
-            <ExpandMoreIcon sx={{ fontSize: 14, transform: debugOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
-            Réflexion
+            <AutoAwesomeIcon sx={{ fontSize: 13, color: '#2bb0a8' }} />
+            <Typography component="span" sx={{ fontSize: 11.5, fontWeight: 600, color: 'inherit' }}>
+              Réflexion
+            </Typography>
+            <ExpandMoreIcon sx={{ fontSize: 13, color: '#8da0a4', transform: debugOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
           </Box>
           <Collapse in={debugOpen}>
             <Box sx={{ mt: 0.5 }}>

@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
-import { Avatar, Box, Card, CardContent, Chip, Collapse, Typography } from '@mui/material';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
+import { Avatar, Box, Card, CardContent, Collapse, Typography } from '@mui/material';
+import ChevronRightIcon from '@mui/icons-material/ChevronRight';
 import { Message, RequestGroup } from '../../../utils/types';
 import { isStepMessage } from '../../../selectors/getRenderMessages';
+
+const MONO = "'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace";
 
 interface RequestGroupBubbleProps {
   group: RequestGroup;
@@ -41,28 +43,34 @@ const RequestGroupBubble: React.FC<RequestGroupBubbleProps> = ({ group, renderBo
             <React.Fragment key={m.id}>{renderBody(m)}</React.Fragment>
           ))}
 
-          {/* Étapes intermédiaires repliées par défaut */}
+          {/* Étapes intermédiaires repliées par défaut — toggle redesign Chat */}
           {steps.length > 0 && (
-            <Box sx={{ mt: finishItems.length > 0 ? 1 : 0.5 }}>
+            <Box sx={{ mt: finishItems.length > 0 ? 1.25 : 0.5, borderTop: '1px solid #dae2e4', pt: 0.5 }}>
               <Box
                 onClick={() => setStepsOpen((o) => !o)}
                 data-testid="request-steps-toggle"
                 sx={{
-                  display: 'inline-flex', alignItems: 'center', gap: 0.5, cursor: 'pointer',
-                  color: '#888', fontSize: 12,
-                  '&:hover': { color: '#555' },
+                  display: 'flex', alignItems: 'center', gap: 1, cursor: 'pointer',
+                  py: 0.75, px: '2px', color: '#4f676b', '&:hover': { color: '#0f272a' },
                 }}
               >
-                <ExpandMoreIcon sx={{ fontSize: 14, transform: stepsOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
-                Étapes
-                <Chip
-                  label={steps.length}
-                  size="small"
-                  sx={{ ml: 0.25, height: 16, fontSize: 10, fontWeight: 700, bgcolor: '#eef4f4', color: '#6b8287' }}
-                />
+                <ChevronRightIcon sx={{ fontSize: 16, color: '#8da0a4', transform: stepsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.17s' }} />
+                <Typography component="span" sx={{ fontSize: 12.5, fontWeight: 600, color: 'inherit' }}>
+                  Étapes
+                </Typography>
+                <Box sx={{ flex: 1 }} />
+                <Box
+                  sx={{
+                    fontFamily: MONO, fontSize: 11, fontWeight: 700, minWidth: 20, height: 19,
+                    px: '7px', borderRadius: '999px', bgcolor: '#f3f6f7', border: '1px solid #dae2e4',
+                    color: '#4f676b', display: 'inline-grid', placeItems: 'center',
+                  }}
+                >
+                  {steps.length}
+                </Box>
               </Box>
               <Collapse in={stepsOpen}>
-                <Box sx={{ mt: 0.5, pl: 1, borderLeft: '2px solid #e8f0f0' }}>
+                <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, pt: 0.5 }}>
                   {steps.map((m) => (
                     <React.Fragment key={m.id}>{renderBody(m)}</React.Fragment>
                   ))}
