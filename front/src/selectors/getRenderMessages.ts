@@ -1,6 +1,6 @@
 import { createSelector } from '@reduxjs/toolkit';
 import { RootState } from '../app/store';
-import { AnyRenderable, Message, MessageGroup, MsgType, RequestGroup } from '../utils/types';
+import { AnyRenderable, Message, MessageGroup, MsgType } from '../utils/types';
 
 const DEBUG_TYPES = new Set<string>([MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS]);
 

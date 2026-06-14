@@ -35,7 +35,7 @@ import {
   Tooltip,
   Typography,
 } from '@mui/material';
-import { DangerIconButton, MutedIconButton, OutlinedPrimaryButton, TealIconButton } from '../../../style/AppButtons';
+import { DangerIconButton, MutedIconButton, TealIconButton } from '../../../style/AppButtons';
 import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -115,6 +115,8 @@ function detectCoveredAxes(tests: any[]): Set<string> {
 }
 
 /* ─── CoverageGrid ────────────────────────────────────────────────── */
+// Conservé volontairement : couverture 6 axes dépriorisée (cf. CLAUDE.md), non montée mais gardée.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function CoverageGrid({ tests, onSuggestionClick }: { tests: any[]; onSuggestionClick?: (text: string) => void }) {
   const covered = useMemo(() => detectCoveredAxes(tests), [tests]);
   const n = covered.size;
@@ -206,7 +208,7 @@ function relTime(ts: number): string {
   return `il y a ${Math.floor(h / 24)} j`;
 }
 
-function CommentsSection({ testKey, comments, onAdd, onDelete }: {
+function CommentsSection({ comments, onAdd, onDelete }: {
   testKey: string;
   comments: Comment[];
   onAdd: (text: string) => void;
@@ -848,7 +850,7 @@ export interface SqlStripProps {
   hasTests?: boolean;
 }
 
-function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName, hasTests }: SqlStripProps) {
+function SqlStrip({ sql, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName, hasTests }: SqlStripProps) {
   // Démarre fermé dès qu'il y a des tests : on ne déroule le SQL que sur action explicite.
   const [open, setOpen] = useState(() => !hasTests);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
@@ -879,7 +881,7 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
       setViewMode('raw');
       setOpen(true);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [historyRestoreTrigger]);
 
   useEffect(() => {
@@ -887,7 +889,7 @@ function SqlStrip({ sql, onUpdate, disabled, hasError, optimizedSql, sqlHistory,
       prevCollapseSignal.current = collapseSignal;
       setOpen(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [collapseSignal]);
 
   const lines = sql.split('\n');
@@ -1687,8 +1689,8 @@ interface TestsPanelProps {
 
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
-  onAddTest, onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions, modelId,
+  onSelectForModification, onEditAssertions, selectedTestIndex,
+  onUpload, onRerunTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions,
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
@@ -1777,7 +1779,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     const isNowStale = staleInfo?.isStale ?? false;
     if (prevStaleRef.current && !isNowStale) setSyncedAt(Date.now());
     prevStaleRef.current = isNowStale;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [staleInfo?.isStale]);
 
   useEffect(() => {

@@ -118,7 +118,7 @@ type SetDialogAction = (isOpen: boolean) => void;
 const errorActions = (
     setProjectCreationError: SetErrorAction,
     userLoginErroAction: UserLoginErroAction,
-    setOpenLoginDialog: SetDialogAction
+    _setOpenLoginDialog: SetDialogAction
 ) => ({
   'Not authenticated': () => {
     userLoginErroAction('Vous n’êtes pas authentifié.');

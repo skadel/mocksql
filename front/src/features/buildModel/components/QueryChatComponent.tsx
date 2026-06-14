@@ -1,6 +1,6 @@
 import React, { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { useTranslation, Trans } from 'react-i18next';
+import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
@@ -71,7 +71,7 @@ const ChatComponent: React.FC = () => {
     status: 'partial' | 'failed';
     errors: Array<{ query_index: number; error: string }>;
   } | null>(null);
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   const [_validationStatus, setValidationStatus] = useState<'idle' | 'validating' | 'valid' | 'error'>('idle');
   // Tables/colonnes extraites par `validate`, affichées dans la checklist vivante pendant l'attente.
   const [understandingDraft, setUnderstandingDraft] = useState<
@@ -225,7 +225,7 @@ const ChatComponent: React.FC = () => {
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibility);
     };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [currentModelPath, sqlQuery, isSending]);
 
   const renderMessages = useAppSelector(getRenderMessages);
@@ -321,7 +321,7 @@ const ChatComponent: React.FC = () => {
       }
       setPendingFirstLoad(false);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [loading, pendingFirstLoad, error, dispatch]);
 
   // -------- Sync stored SQL + optimized SQL → local state
@@ -347,7 +347,7 @@ const ChatComponent: React.FC = () => {
   }, [loading]);
 
   // -------- Reset validation state when user edits SQL
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   useEffect(() => { setValidationStatus('idle'); setSubmitError(null); setMissingTables(null); setTablesToImport(null); setUnderstandingDraft(null); setValidationMs(null); }, [sqlQuery]);
 
   // -------- Draft localStorage (follow-up messages only)
@@ -494,14 +494,14 @@ const ChatComponent: React.FC = () => {
               if (result.profile_status !== 'complete') {
                 setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
               }
-            } catch {}
+            } catch { /* profilage best-effort */ }
             setIsAutoProfileRunning(false);
             setPendingAutoProfile(null);
             doStream();
           },
           onSkip: async () => {
             setPendingAutoProfile(null);
-            try { await skipProfilingApi({ session: sessionId }); } catch {}
+            try { await skipProfilingApi({ session: sessionId }); } catch { /* skip best-effort */ }
             doStream();
           },
           onCancel: () => {
@@ -521,9 +521,9 @@ const ChatComponent: React.FC = () => {
         setIsSending(false);
         return;
       } else if (!profileResult.profile_complete) {
-        try { await skipProfilingApi({ session: sessionId }); } catch {}
+        try { await skipProfilingApi({ session: sessionId }); } catch { /* skip best-effort */ }
       }
-    } catch {}
+    } catch { /* profilage best-effort */ }
 
     setSubmissionStep(t('loading.generating_tests'));
     setValidationStatus('valid');
@@ -543,7 +543,7 @@ const ChatComponent: React.FC = () => {
         t,
         parentMessageId: validateResult?.sql_message_id ?? '',
       }).unwrap?.();
-    } catch {}
+    } catch { /* génération best-effort */ }
 
     pendingSessionRef.current = null;
     setSubmissionStep(null);
@@ -752,7 +752,7 @@ const ChatComponent: React.FC = () => {
           context: 'sql_update',
           silent: true,
         }).unwrap?.();
-      } catch {}
+      } catch { /* mise à jour SQL best-effort */ }
       setSqlDirty(false);
       setIsSending(false);
     },
@@ -805,14 +805,14 @@ const ChatComponent: React.FC = () => {
               if (result.profile_status !== 'complete') {
                 setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
               }
-            } catch {}
+            } catch { /* profilage best-effort */ }
             setIsAutoProfileRunning(false);
             setPendingAutoProfile(null);
             doStream();
           },
           onSkip: async () => {
             setPendingAutoProfile(null);
-            try { await skipProfilingApi({ session: currentModelId }); } catch {}
+            try { await skipProfilingApi({ session: currentModelId }); } catch { /* skip best-effort */ }
             doStream();
           },
           onCancel: () => setPendingAutoProfile(null),

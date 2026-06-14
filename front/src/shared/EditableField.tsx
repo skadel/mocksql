@@ -19,9 +19,9 @@ interface Props {
   onChange: (v: string) => void;
   /** Affiche un textarea plutôt qu'un input */
   textarea?: boolean;
-  /** Affiche un spinner pendant le chargement (l'utilisateur peut continuer à taper) */
+  /** Affiche un spinner pendant le chargement (l'utilisateur peut continuer �  taper) */
   loading?: boolean;
-  /** Limite de caractères : affiche un compteur (facultatif) */
+  /** Limite de caractères� : affiche un compteur (facultatif) */
   maxLength?: number;
 }
 
@@ -109,7 +109,7 @@ const EditableField: React.FC<Props> = ({
         FormHelperTextProps={{ sx: { textAlign: "right", mt: 0.5 } }}
       />
 
-      {/* Overlay : un léger fond + pointerEvents none */}
+      {/* Overlay� : un léger fond + pointerEvents none */}
       <Fade in={loading} unmountOnExit>
         <Box
           sx={{

@@ -28,7 +28,7 @@ async function handleHttpResponse<T>(
   try {
     // Attempt to parse the response body
     responseData = await response.json();
-  } catch (error) {
+  } catch {
     responseData = null; // If parsing fails, default to null
   }
 

@@ -259,7 +259,7 @@ export const buildModelSlice = createSlice({
     setTransformationName: (state, action: PayloadAction<string>) => {
       state.name = action.payload
     },
-    resetContext: (state) => {
+    resetContext: () => {
       return initialState;
     },
     setLoading: (state, action: PayloadAction<boolean>) => {
@@ -285,7 +285,7 @@ export const buildModelSlice = createSlice({
         }
       }
     },
-    resetMessages(state, content: PayloadAction) {
+    resetMessages(state) {
       state.queryComponentGraph = {};
     },
     setLoadingMessage: (state, action: PayloadAction<string | undefined>) => {

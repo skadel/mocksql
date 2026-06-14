@@ -33,7 +33,6 @@ interface SQLQueryBarProps {
 
 const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   sqlQuery,
-  onUpdate,
   disabled,
   hasError,
   optimizedSql,
@@ -67,7 +66,7 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
       setViewMode('raw');
       setExpanded(true);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+   
   }, [historyRestoreTrigger]);
 
   const firstLine = sqlQuery.split('\n').find((l) => l.trim()) ?? '';

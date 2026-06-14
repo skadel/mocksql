@@ -104,7 +104,7 @@ export const buildAppBarSlice = createSlice({
                   state.currentModelId = undefined;
                 }
               })
-              .addCase(createModel.fulfilled, (state, action) => {
+              .addCase(createModel.fulfilled, (state) => {
                 state.loadingAppBar = false;
               })
               .addCase(chatQuery.fulfilled, (state, action) => {
