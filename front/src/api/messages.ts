@@ -107,7 +107,7 @@ export const applyAssertions = createAsyncThunk(
 export const getMessages = createAsyncThunk(
   'models/getMessages',
   async (
-    { modelId, t }: { modelId: string; t: Function },
+    { modelId, t }: { modelId: string; t: (key: string) => string },
     { rejectWithValue, dispatch }
   ) => {
     const url = `${import.meta.env.VITE_BACKEND_URL}/api/getMessages`;

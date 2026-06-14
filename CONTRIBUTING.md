@@ -68,7 +68,7 @@ make check     # style + test
 
 # Frontend
 npm test
-npx eslint src/
+npm run lint
 ```
 
 ## Pull requests

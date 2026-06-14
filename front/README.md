@@ -24,10 +24,11 @@ Le frontend proxifie automatiquement les appels `/api/*` vers le backend sur `ht
 
 | Commande | Description |
 |----------|-------------|
-| `npm start` | Dev server avec hot-reload (port 3000) |
-| `npm test` | Tests Jest |
-| `npm run build` | Build de production dans `build/` |
-| `npx eslint src/` | Lint |
+| `npm start` | Dev server Vite avec hot-reload (port 3000) |
+| `npm test` | Tests Vitest |
+| `npm run build` | Build de production (tsc + vite build) |
+| `npm run lint` | Lint (ESLint v9 flat config) |
+| `npm run lint:fix` | Lint avec auto-correction |
 | `npx prettier --write src/` | Format |
 
 ---

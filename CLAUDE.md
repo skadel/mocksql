@@ -191,12 +191,13 @@ poetry run mypy build_query/ app/
 ```bash
 cd front
 npm ci
-npm start          # dev (port 3000)
-npm test           # tests Jest
-npm run build      # build de production
+npm start          # dev Vite (port 3000)
+npm test           # tests Vitest
+npm run build      # build de production (tsc + vite build)
 
-# Linting
-npx eslint src/    # ESLint (déjà configuré via react-scripts)
+# Linting (ESLint v9 flat config — front/eslint.config.mjs)
+npm run lint       # eslint src/ — échoue sur les erreurs, tolère les warnings (dette `any` tracée)
+npm run lint:fix   # eslint src/ --fix
 
 # Formatage (prettier — à installer si absent : npm install --save-dev prettier)
 npx prettier --write src/

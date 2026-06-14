@@ -101,7 +101,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
 
         {/* Table rows */}
         <Box sx={{ mt: 1.75, display: 'flex', flexDirection: 'column', gap: 1 }}>
-          {missingTables.map((table, i) => (
+          {missingTables.map((table) => (
             <Box
               key={table}
               data-testid={`import-table-row-${table}`}

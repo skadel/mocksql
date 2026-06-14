@@ -203,7 +203,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
   );
 
   /** --- Rendu d'un message simple --- */
-  const renderSingleMessage = (msg: Message, index: number) => {
+  const renderSingleMessage = (msg: Message, _index: number) => {
     // === Affichage dédié si une erreur est présente dans le contenu ===
     const hasError = !!(msg as any)?.contents?.error;
 

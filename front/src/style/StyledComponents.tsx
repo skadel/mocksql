@@ -193,7 +193,7 @@ export const WhiteBorderTextField = styled(TextField)`
   }
 `;
 
-export const CenteredIconButton = styled(Button)(({ theme }) => ({
+export const CenteredIconButton = styled(Button)(() => ({
   backgroundColor: 'black',
   color: 'white',
   display: 'flex',

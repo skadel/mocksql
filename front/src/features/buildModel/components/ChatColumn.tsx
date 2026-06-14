@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { Alert, Box, Chip, Collapse, IconButton, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import CloseIcon from '@mui/icons-material/Close';
-import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import HistoryIcon from '@mui/icons-material/History';
 import DroppableTextField from '../../../shared/DroppableTextField';
@@ -105,7 +104,6 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   onSqlRestore,
   onRestoreState,
   restoredMessageId,
-  streamingReasoning,
   lastReasoning,
   onStopStream,
   sendMessage,

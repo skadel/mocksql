@@ -37,7 +37,7 @@ export const fetchUsers = createAsyncThunk(
   'user/fetchUsers',
   async (
     params: { query: string },
-    thunkAPI
+    _thunkAPI
   ) => {
     try {
       const token = localStorage.getItem('jwt');
