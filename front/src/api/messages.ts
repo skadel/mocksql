@@ -11,15 +11,29 @@ export async function dismissSuggestionApi(sessionId: string, suggestion: string
 }
 
 
-// Met en file une « instruction supplémentaire » saisie pendant qu'une génération
-// est déjà en cours. Le run en vol la consulte (peek) ; le flush de fin de run rejoue
-// ce qui n'a pas été consommé. Renvoie le nombre d'instructions en attente.
-export async function queueInstructionApi(sessionId: string, text: string): Promise<{ queued: number }> {
+// Traite un message saisi pendant qu'une génération est déjà en cours. Le backend
+// classe l'intention :
+//  - `instruction` : le run en vol la consulte (peek) ; le flush de fin de run rejoue
+//    ce qui n'a pas été consommé. Renvoie le nombre d'instructions en attente (`queued`).
+//  - `question` : répondue en direct (read-only, sans toucher la génération). Renvoie la
+//    question + la réponse (format LangChain) à insérer immédiatement dans le fil.
+export interface QueueInstructionResponse {
+  kind: 'instruction' | 'question';
+  queued?: number;
+  question?: any;
+  answer?: any;
+}
+export async function queueInstructionApi(
+  sessionId: string,
+  text: string,
+  dialect: string = 'bigquery',
+  parentMessageId?: string | null,
+): Promise<QueueInstructionResponse> {
   const token = localStorage.getItem('jwt') || '';
   const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/query/instruction`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-    body: JSON.stringify({ sessionId, text }),
+    body: JSON.stringify({ sessionId, text, dialect, parentMessageId: parentMessageId ?? null }),
   });
   return res.json();
 }

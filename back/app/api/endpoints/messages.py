@@ -53,6 +53,8 @@ class DismissSuggestionRequest(BaseModel):
 class QueueInstructionRequest(BaseModel):
     sessionId: str
     text: str
+    dialect: str = "bigquery"
+    parentMessageId: Optional[str] = None
 
 
 class FlushInstructionsRequest(BaseModel):
@@ -283,13 +285,36 @@ async def dismiss_suggestion(body: DismissSuggestionRequest):
 
 @router.post("/query/instruction")
 async def queue_instruction(body: QueueInstructionRequest):
-    """Enregistre une « instruction supplémentaire » saisie pendant qu'une génération
-    est déjà en cours. Consultée à chaud par le run en vol (peek), rejouée après coup
-    par le flush si elle n'a pas été consommée. Cf. build_query/pending_instructions."""
+    """Traite un message saisi pendant qu'une génération est déjà en cours.
+
+    Classe l'intention (cf. build_query/inflight_message) :
+    - **instruction** (l'utilisateur veut influencer la génération) → mise en file,
+      consultée à chaud par le run en vol (peek), rejouée par le flush si non consommée.
+    - **question** (« pourquoi ce résultat ? ») → répondue en direct par un appel LLM
+      indépendant (read-only), persistée dans le fil et renvoyée pour affichage immédiat,
+      sans toucher la génération en cours.
+    """
+    from build_query.inflight_message import (
+        answer_inflight_question,
+        classify_inflight_message,
+    )
     from build_query.pending_instructions import add_instruction
 
+    kind = await classify_inflight_message(body.sessionId, body.text, body.dialect)
+
+    if kind == "question":
+        try:
+            qa = await answer_inflight_question(
+                body.sessionId, body.text, body.dialect, body.parentMessageId
+            )
+            return {"kind": "question", **qa}
+        except Exception as exc:
+            logger.warning("inflight question answering failed: %s", exc)
+            # Repli : on dégrade en instruction plutôt que de perdre le message.
+            kind = "instruction"
+
     queued = add_instruction(body.sessionId, body.text)
-    return {"queued": queued}
+    return {"kind": "instruction", "queued": queued}
 
 
 @router.post("/query/instruction/flush")
