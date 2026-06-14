@@ -41,11 +41,21 @@ async def evaluate(state: QueryState):
 
 
 def _normalize_column_qualifiers(sql: str, dialect: str) -> str:
-    """Strip catalog/db from column refs that use the full backtick-quoted table path.
+    """Réécrit les qualificateurs de colonne `dataset.table`.col en `alias`.col.
 
-    BigQuery API rejects `dataset.table`.column as a column qualifier (treats the
-    backtick-quoted dotted identifier as an unresolved name), even though the
-    BigQuery console accepts it.  Converting to table.column fixes the dry-run.
+    BigQuery traite une table écrite en chemin pointé entre backticks
+    (``\\`dataset.table\\``` ou ``\\`project.dataset.table\\```) comme un identifiant
+    unique dont l'alias implicite est **le chemin entier**, pas le dernier segment.
+    Du coup ``\\`dataset.table\\`.col`` fonctionne dans la console mais l'API rejette
+    aussi bien ``\\`dataset.table\\`.col`` (« Unrecognized name: \\`dataset.table\\` »)
+    que le segment final ``table.col`` (« Unrecognized name: table ») dès qu'un
+    project est préfixé en amont (_qualify_two_part_refs) — le chemin implicite a
+    alors changé.
+
+    Plutôt que de deviner l'alias implicite (fragile), on donne à la table un
+    **alias explicite** (son dernier segment, désambiguïsé si collision) et on
+    réécrit chaque qualificateur de colonne vers cet alias. C'est la même
+    stratégie que le chemin DuckDB (``strip_qualifiers_with_scope``).
     """
     try:
         from sqlglot.optimizer.scope import traverse_scope
@@ -55,17 +65,45 @@ def _normalize_column_qualifiers(sql: str, dialect: str) -> str:
             return sql
         root = tree[0]
         for scope in traverse_scope(root):
-            known: set[tuple] = set()
+            # On matche sur (db, table) en IGNORANT le catalog : un qualificateur
+            # de colonne `dataset.table`.col ne porte jamais le project, alors que
+            # la table source peut avoir été enrichie d'un catalog en amont.
+            base_tables: dict[tuple, exp.Table] = {}
+            # scope.sources est indexé par nom/alias de source (les valeurs peuvent
+            # être des Scope pour les CTE/sous-requêtes, pas seulement des Table).
+            used_aliases: set[str] = set(scope.sources.keys())
             for source in scope.sources.values():
-                if isinstance(source, exp.Table):
-                    known.add((source.catalog or "", source.db or "", source.this.name))
+                if isinstance(source, exp.Table) and source.db:
+                    base_tables[(source.db, source.this.name)] = source
+
+            assigned: dict[int, str] = {}  # id(table) -> alias retenu
             for col in scope.expression.find_all(exp.Column):
                 col_db = col.text("db")
-                if col_db:
-                    key = (col.text("catalog") or "", col_db, col.text("table"))
-                    if key in known:
-                        col.set("catalog", None)
-                        col.set("db", None)
+                if not col_db:
+                    continue
+                table = base_tables.get((col_db, col.text("table")))
+                if table is None:
+                    continue
+
+                alias = table.alias or assigned.get(id(table))
+                if not alias:
+                    base = table.this.name
+                    # La clé implicite de la table (son dernier segment) est déjà
+                    # dans used_aliases : ne pas la compter comme collision avec
+                    # elle-même (`FROM x.y.tbl AS tbl` est valide).
+                    conflicts = used_aliases - {table.alias_or_name}
+                    alias = base
+                    n = 1
+                    while alias in conflicts:
+                        n += 1
+                        alias = f"{base}_{n}"
+                    used_aliases.add(alias)
+                    table.set("alias", exp.TableAlias(this=exp.to_identifier(alias)))
+                    assigned[id(table)] = alias
+
+                col.set("catalog", None)
+                col.set("db", None)
+                col.set("table", exp.to_identifier(alias))
         return root.sql(dialect=dialect)
     except Exception:
         return sql
