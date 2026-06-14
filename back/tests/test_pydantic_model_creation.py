@@ -182,6 +182,39 @@ def test_column_names_lowercased():
 
 
 # ---------------------------------------------------------------------------
+# Leading-underscore columns (dbt metadata cols : _line_number, _dt, …)
+# ---------------------------------------------------------------------------
+
+
+def test_leading_underscore_column_does_not_crash():
+    """Pydantic refuse les noms de champ à underscore initial (attribut privé).
+    Les projets dbt en débordent (`_line_number`, `_dt`, `_feed_valid_from`).
+    create_pydantic_models doit les accepter via alias, sans NameError."""
+    model = create_pydantic_models(
+        [_table("T", _col("_line_number", "INTEGER"), _col("agency_id", "STRING"))]
+    )
+    inst = model(T=[{"_line_number": 5, "agency_id": "AC"}])
+    assert len(inst.T) == 1
+
+
+def test_leading_underscore_column_roundtrips_real_name_on_dump():
+    """Le générateur fait `model.dict()` puis utilise les clés comme noms de
+    colonnes DuckDB : le dump DOIT ré-émettre `_line_number`, pas un nom assaini."""
+    model = create_pydantic_models([_table("T", _col("_line_number", "INTEGER"))])
+    dumped = model(T=[{"_line_number": 5}]).model_dump()
+    assert dumped["T"][0] == {"_line_number": 5}
+
+
+def test_underscore_and_plain_variant_coexist():
+    """`_x` et `x` dans la même table ne doivent pas s'écraser (collision d'alias)."""
+    model = create_pydantic_models(
+        [_table("T", _col("_dt", "STRING"), _col("dt", "STRING"))]
+    )
+    dumped = model(T=[{"_dt": "a", "dt": "b"}]).model_dump()
+    assert dumped["T"][0] == {"_dt": "a", "dt": "b"}
+
+
+# ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
 

@@ -46,7 +46,7 @@ const SubmissionProgress: React.FC<{ label: string }> = ({ label }) => {
       5000
     );
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+     
   }, [label, details.length]);
 
   // During validation the rolling pipeline is the primary line; elsewhere the

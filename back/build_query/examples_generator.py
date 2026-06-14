@@ -1073,7 +1073,9 @@ async def generate_examples_(
         )
         raise
 
-    filled_data = _convert_datetime_fields(generated_data.data.dict())
+    # model_dump (≠ .dict() déprécié) respecte serialize_by_alias : les colonnes
+    # à underscore initial (dbt : _line_number, _dt) ressortent sous leur nom réel.
+    filled_data = _convert_datetime_fields(generated_data.data.model_dump())
 
     logger.diag("[generator] données générées par le LLM:")
     for table_name, rows in filled_data.items():
