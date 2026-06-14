@@ -11,7 +11,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import SearchIcon from '@mui/icons-material/Search';
 import ScienceIcon from '@mui/icons-material/Science';
 import { Container } from '../../../style/StyledComponents';
-import { getLastMessage } from '../../../utils/messages';
+import { getLastMessage, formatMessage } from '../../../utils/messages';
 import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
@@ -27,7 +27,7 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage } from '../buildModelSlice';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage, appendQueryComponentMessage } from '../buildModelSlice';
 import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi, queueInstructionApi, flushInstructionsApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
@@ -690,21 +690,32 @@ const ChatComponent: React.FC = () => {
     [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
   );
 
-  // Met en file une instruction supplémentaire pendant qu'un run est déjà en cours.
-  // Elle est consultée à chaud par l'évaluateur / le conversational_agent, et rejouée
-  // en fin de run si elle n'a pas été consommée (cf. effet de complétion plus bas).
+  // Traite un message envoyé pendant qu'un run est déjà en cours. Le backend classe
+  // l'intention :
+  //  - `instruction` → mise en file (consultée à chaud par l'évaluateur / le
+  //    conversational_agent, rejouée en fin de run si non consommée — cf. effet de
+  //    complétion plus bas). On incrémente le compteur de file.
+  //  - `question` → répondue en direct sans toucher la génération : on insère la
+  //    question + la réponse dans le fil immédiatement.
   const queueInstruction = useCallback(async (text: string) => {
     const trimmed = (text ?? '').trim();
     if (!trimmed || !currentModelId) return;
     setUserInput('');
     if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const parentId = lastMessage ? lastMessage.id : null;
     try {
-      const { queued } = await queueInstructionApi(currentModelId, trimmed);
-      setQueuedCount(typeof queued === 'number' ? queued : (n) => n + 1);
+      const res = await queueInstructionApi(currentModelId, trimmed, DIALECT, parentId);
+      if (res.kind === 'question') {
+        if (res.question) dispatch(appendQueryComponentMessage(formatMessage(res.question)));
+        if (res.answer) dispatch(appendQueryComponentMessage(formatMessage(res.answer)));
+        return;
+      }
+      setQueuedCount(typeof res.queued === 'number' ? res.queued : (n) => n + 1);
     } catch {
       setQueuedCount((n) => n + 1);
     }
-  }, [currentModelId]);
+  }, [currentModelId, DIALECT, dispatch, renderMessages, selectedChildIndices]);
 
   const onSendClick = useCallback(() => {
     // Pendant une génération en cours : le message devient une instruction en file.

@@ -560,7 +560,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           inputRef={inputRef}
           placeholder={
             isLoading
-              ? 'Ajoute une instruction — elle sera prise en compte par l’agent…'
+              ? 'Ajoute une instruction, ou pose une question sur le résultat…'
               : selectedTestIndex !== null
               ? 'Comment améliorer ce test ?'
               : 'Décris un cas à couvrir, ou demande un ajustement…'
@@ -571,7 +571,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           sx={{ color: '#9aabb0', mt: 0.75, display: 'block', textAlign: 'center', fontSize: 10.5 }}
         >
           {isLoading
-            ? 'Entrée pour ajouter une instruction à la génération en cours'
+            ? 'Une instruction infléchit la génération ; une question y répond sans la toucher'
             : 'Entrée pour envoyer · Maj+Entrée pour saut de ligne'}
         </Typography>
       </Box>
