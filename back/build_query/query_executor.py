@@ -55,7 +55,10 @@ def run_query_duckdb(
         """
         params = [limit, offset]
 
+    from storage.config import apply_duckdb_extensions
+
     with duckdb.connect(db_path, read_only=False) as con:
+        apply_duckdb_extensions(con)
         q = con.execute(paginated_sql, params) if params else con.execute(paginated_sql)
         rows = q.fetchall()
         cols = [d[0] for d in q.description]

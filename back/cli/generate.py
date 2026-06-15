@@ -310,7 +310,13 @@ async def run_generate(
 ) -> None:
     import typer
 
+    import storage.config as storage_config
     from models.env_variables import validate_required_env
+
+    # Aligne storage.config (lu par apply_duckdb_extensions, etc.) sur le projet
+    # ciblé par --config, sinon il retombe sur le cwd (back/) sans mocksql.yml.
+    os.environ["MOCKSQL_BASE_DIR"] = str(config.resolve().parent)
+    storage_config.load_config.cache_clear()
 
     validate_required_env()
 
