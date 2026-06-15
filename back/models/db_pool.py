@@ -128,7 +128,11 @@ class DBPool:
     async def _create_new_connection(self) -> Any:
         import duckdb
 
-        return duckdb.connect(DUCKDB_PATH)
+        from storage.config import apply_duckdb_extensions
+
+        conn = duckdb.connect(DUCKDB_PATH)
+        apply_duckdb_extensions(conn)
+        return conn
 
     @staticmethod
     def _duckdb_sanity_check_or_fail(path: str) -> None:

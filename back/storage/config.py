@@ -143,6 +143,45 @@ def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 
 
+def get_duckdb_extensions() -> list[str]:
+    """Extensions DuckDB à charger sur chaque connexion (ex: spatial, json).
+
+    Déclarées dans mocksql.yml :
+
+        duckdb:
+          extensions:
+            - spatial
+    """
+    exts = load_config().get("duckdb", {}).get("extensions", [])
+    if isinstance(exts, str):
+        exts = [exts]
+    return [str(e).strip() for e in exts if str(e).strip()]
+
+
+def apply_duckdb_extensions(con) -> None:
+    """Installe et charge les extensions configurées sur une connexion DuckDB.
+
+    Idempotent (INSTALL/LOAD sont sûrs à rejouer). Une extension qui échoue
+    (réseau absent au premier INSTALL, nom inconnu) est journalisée en warning
+    et n'interrompt pas l'ouverture de la connexion — l'erreur de requête en
+    aval restera explicite.
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    for ext in get_duckdb_extensions():
+        try:
+            con.execute(f"INSTALL {ext}")
+            con.execute(f"LOAD {ext}")
+        except Exception as e:  # pragma: no cover - dépend de l'env réseau
+            logger.warning(
+                "Extension DuckDB '%s' non chargée: %r "
+                "(les requêtes qui en dépendent échoueront)",
+                ext,
+                e,
+            )
+
+
 def load_preprocessor_fn(fn_ref: str, config_dir: Path):
     import importlib
     import sys
