@@ -1322,13 +1322,21 @@ def strip_qualifiers_with_scope(
         # s'agisse d'un qualificateur 1-part déjà simplifié (objects.col) ou d'un
         # qualificateur multi-part (project.dataset.objects.col) qui sera nettoyé :
         # dans les deux cas, `col.table = "objects"` après le nettoyage.
+        # Lowercasé : sqlglot peut écrire le qualificateur de colonne en casse
+        # normalisée (minuscule) alors que la table garde sa casse d'origine —
+        # comparer en minuscule évite de rater le rapprochement (cf. step 6).
         col_table_names: set[str] = {
-            col.text("table")
+            col.text("table").lower()
             for col in scope.expression.find_all(exp.Column)
             if col.text("table")
         }
 
-        # Collecte les tables renommées : (catalog, db, name) pour corriger les colonnes
+        # Collecte les tables renommées : (db, name) EN MINUSCULE pour corriger les
+        # colonnes. On IGNORE le catalog (project) : un qualificateur de colonne s'écrit
+        # toujours `dataset.table`.col (jamais le project), alors que la table source a pu
+        # être enrichie d'un catalog en amont (`pipetalk-493612.dataset.table`). Comparer
+        # avec le catalog ferait rater le rapprochement. La casse est aussi normalisée
+        # (DuckDB/BigQuery sont insensibles à la casse).
         tables_being_renamed: set[tuple] = set()
 
         # 3. Récupérer toutes les tables dans ce scope
@@ -1336,7 +1344,6 @@ def strip_qualifiers_with_scope(
             if table.db and table.db != "":
                 db = table.db
                 original = table.this.name
-                catalog = table.catalog or ""
                 existing_alias = table.alias
                 if suffix:
                     new_name = (
@@ -1346,7 +1353,7 @@ def strip_qualifiers_with_scope(
                     )
                 else:
                     new_name = original
-                tables_being_renamed.add((catalog, db, original))
+                tables_being_renamed.add((db.lower(), original.lower()))
                 # 5. Supprimer project et dataset, et renommer la table
                 table.set("catalog", None)
                 table.set("db", None)
@@ -1359,7 +1366,7 @@ def strip_qualifiers_with_scope(
                 if (
                     not existing_alias
                     and new_name != original
-                    and original in col_table_names
+                    and original.lower() in col_table_names
                 ):
                     table.set(
                         "alias",
@@ -1373,9 +1380,11 @@ def strip_qualifiers_with_scope(
         for col in scope.expression.find_all(exp.Column):
             col_db = col.text("db")
             if col_db:
-                col_catalog = col.text("catalog") or ""
                 col_table = col.text("table")
-                if (col_catalog, col_db, col_table) in tables_being_renamed:
+                # Match sur (db, table) en ignorant le catalog (cf. construction de
+                # tables_being_renamed) — le qualificateur de colonne ne porte jamais
+                # le project.
+                if (col_db.lower(), col_table.lower()) in tables_being_renamed:
                     col.set("catalog", None)
                     col.set("db", None)
 

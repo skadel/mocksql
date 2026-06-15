@@ -247,8 +247,6 @@ export interface ExploreModel {
   is_tested: boolean;
   session_id?: string;
   priority_score: number;
-  complexity_score: number;
-  recent_commits: number;
   complexity_breakdown: {
     window_functions?: number;
     case_when?: number;

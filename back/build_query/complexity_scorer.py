@@ -14,9 +14,6 @@ _WEIGHTS: dict[str, float] = {
 }
 
 _COMPLEXITY_CAP = 20.0
-_COMPLEXITY_MAX_SCORE = 60.0
-_RECENCY_CAP = 10
-_RECENCY_MAX_SCORE = 40.0
 
 
 def compute_complexity_score(sql: str, dialect: str = "bigquery") -> dict:
@@ -74,10 +71,6 @@ def compute_complexity_score(sql: str, dialect: str = "bigquery") -> dict:
     return {"total": round(total, 1), "breakdown": breakdown}
 
 
-def compute_priority_score(complexity_total: float, recent_commits: int) -> float:
-    """Combine complexity and git recency into a 0–100 priority score."""
-    complexity_norm = (
-        min(complexity_total / _COMPLEXITY_CAP, 1.0) * _COMPLEXITY_MAX_SCORE
-    )
-    recency_norm = min(recent_commits / _RECENCY_CAP, 1.0) * _RECENCY_MAX_SCORE
-    return round(complexity_norm + recency_norm, 1)
+def compute_priority_score(complexity_total: float) -> float:
+    """Normalize SQL complexity into a 0–100 priority score."""
+    return round(min(complexity_total / _COMPLEXITY_CAP, 1.0) * 100.0, 1)

@@ -141,9 +141,27 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
             "reason_type": "needs_validation",
             "evaluation_explanation": eval_result.explanation,
             "expected_row_count": eval_result.expected_row_count,
+            "corrected_description": eval_result.corrected_description,
+            "corrected_name": eval_result.corrected_name,
         }
         updated_test.pop("assertion_fix", None)
         updated_test.pop("diagnostic", None)
+    elif eval_result.reason_type == "bad_description":
+        # Désync description↔valeur de sortie concrète : données valides, narratif faux. Comme
+        # needs_validation, on délègue à l'humain (Valider / Corriger) plutôt que de boucler —
+        # on porte la description corrigée pour qu'accept_validation l'applique au clic.
+        updated_test = {
+            **current_test,
+            "assertion_results": assertion_results,
+            "verdict": "Insuffisant",
+            "reason_type": "bad_description",
+            "evaluation_explanation": eval_result.explanation,
+            "corrected_description": eval_result.corrected_description,
+            "corrected_name": eval_result.corrected_name,
+        }
+        updated_test.pop("assertion_fix", None)
+        updated_test.pop("diagnostic", None)
+        updated_test.pop("expected_row_count", None)
     elif has_failing:
         updated_test = {
             **current_test,

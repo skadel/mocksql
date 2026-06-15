@@ -2321,192 +2321,14 @@ def build_profile_query(
             "No matching columns found in schema for the given used_columns."
         )
 
-    # Append join cardinality branches if a SQL query was provided
+    # Append join cardinality + derived-expression branches if a SQL query was provided.
     ctes: list[tuple[str, str]] = []
-    cte_map: dict[str, str] = {}
     if sql_query:
-        # Hoist inline FROM-clause subqueries (e.g. FROM (...) a inside a CTE body)
-        # into top-level CTEs before any further processing.  This makes local aliases
-        # like `a` globally referenceable as CTE names, fixing queries that would
-        # otherwise generate FROM `a` (invalid in BigQuery — requires dataset qualification).
-        # Duplicate aliases get unique suffixes (a → a_2) automatically.
-        try:
-            from sqlglot.optimizer.eliminate_subqueries import (
-                eliminate_subqueries as _elim_subq,
-            )
-
-            _parsed = sqlglot.parse_one(
-                sql_query, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
-            )
-            sql_query = _elim_subq(_parsed).sql(dialect=dialect)
-        except Exception:
-            pass
-
-        # Extract CTE definitions so SQL-based join branches can reference CTE names.
-        ctes = _extract_ctes(sql_query, dialect=dialect)
-        cte_map = dict(ctes)
-
-        # Also extract inline JOIN subquery aliases, e.g. JOIN (...) AS s.
-        # Merged with cte_map so _resolve_cte_source handles both transparently.
-        subquery_alias_map = _extract_subquery_aliases(sql_query, dialect=dialect)
-        full_alias_map = {**cte_map, **subquery_alias_map}
-
-        # Build CTE grain map for static inference.
-        # If cte1 has grain (a, b) and the outer join is ON (a, b), the cte1 side is
-        # definitively "one" — no need to run an expensive GROUP BY query.
-        cte_grain_map: dict = {}
-        try:
-            from utils.find_grains import determine_query_grain
-
-            _tables_and_columns = [
-                {"table_name": t["name"], "columns": t.get("columns", [])}
-                for t in schema.get("tables", [])
-            ]
-            _grain = determine_query_grain(sql_query, _tables_and_columns)
-            cte_grain_map = _grain.get("cte_grain_map") or {}
-        except Exception:
-            cte_grain_map = {}
-
-        # Group specs by (left_table, right_table, right_alias) so compound AND
-        # conditions (e.g. ON a.date = b.date AND a.merchant = b.merchant) are
-        # evaluated together, while two separate JOINs on the same physical table
-        # with different aliases (e.g. JOIN items i1 … JOIN items i2) stay distinct.
-        # Filter out literal-equality specs (e.g. table.year = 2011) — those are
-        # filters, not join key relationships: one side would have no column refs.
-        from collections import defaultdict
-
-        _grouped: dict = defaultdict(list)
-        for spec in _collect_join_specs(sql_query, dialect=dialect):
-            if spec.get("left_keys") and spec.get("right_keys"):
-                _grouped[
-                    (
-                        spec["left_table"],
-                        spec["right_table"],
-                        spec.get("right_alias", ""),
-                    )
-                ].append(spec)
-
-        for (left_table, right_table, _), pair_specs in _grouped.items():
-            all_left_keys: set = set()
-            all_right_keys: set = set()
-            for s in pair_specs:
-                all_left_keys.update(s.get("left_keys") or [])
-                all_right_keys.update(s.get("right_keys") or [])
-
-            left_is_one = _is_one_side(left_table, all_left_keys, cte_grain_map)
-            right_is_one = _is_one_side(right_table, all_right_keys, cte_grain_map)
-
-            # Resolve CTE/subquery aliases to real base table names for storage
-            l_short = left_table.split(".")[-1]
-            r_short = right_table.split(".")[-1]
-            l_real = (
-                _resolve_alias_to_table(l_short, full_alias_map, dialect)
-                if l_short in full_alias_map
-                else left_table
-            )
-            r_real = (
-                _resolve_alias_to_table(r_short, full_alias_map, dialect)
-                if r_short in full_alias_map
-                else right_table
-            )
-
-            if left_is_one is not None or right_is_one is not None:
-                # At least one CTE side has a deterministic cardinality from grain analysis.
-                # Unknown/real-table sides default to "many" (conservative).
-                l_one = bool(left_is_one)
-                r_one = bool(right_is_one)
-                if l_one and r_one:
-                    join_type = "one-to-one"
-                elif not l_one and r_one:
-                    join_type = "many-to-one"
-                elif l_one and not r_one:
-                    join_type = "one-to-many"
-                else:
-                    join_type = "many-to-many"
-                left_expr_str = " AND ".join(s["left_expr_sql"] for s in pair_specs)
-                right_expr_str = " AND ".join(s["right_expr_sql"] for s in pair_specs)
-                try:
-                    parts.append(
-                        _build_static_join_row(
-                            l_real,
-                            r_real,
-                            left_expr_str,
-                            right_expr_str,
-                            join_type,
-                            dialect,
-                        )
-                    )
-                    idx += 1
-                except Exception:
-                    pass
-            else:
-                # Both sides are real tables (or CTEs/subqueries whose grain is unknown) —
-                # measure cardinality via SQL.  One query per (left, right) pair
-                # using all compound key conditions together.
-                # For CTE/subquery sides, use lineage to resolve the real source table and
-                # apply the WHERE conditions so the profiling query runs against actual data.
-                l_src: dict | None = None
-                r_src: dict | None = None
-                if full_alias_map:
-                    all_l_keys = [
-                        k for s in pair_specs for k in (s.get("left_keys") or [])
-                    ]
-                    all_r_keys = [
-                        k for s in pair_specs for k in (s.get("right_keys") or [])
-                    ]
-                    if l_short in full_alias_map:
-                        l_src = _resolve_cte_source(
-                            l_short, all_l_keys, full_alias_map, dialect
-                        )
-                        if l_src is None:
-                            real = _resolve_alias_to_table(
-                                l_short, full_alias_map, dialect
-                            )
-                            if real != l_short:
-                                l_src = {
-                                    "source_table": real,
-                                    "source_cols": all_l_keys,
-                                    "where_sql": None,
-                                }
-                    if r_short in full_alias_map:
-                        r_src = _resolve_cte_source(
-                            r_short, all_r_keys, full_alias_map, dialect
-                        )
-                        if r_src is None:
-                            real = _resolve_alias_to_table(
-                                r_short, full_alias_map, dialect
-                            )
-                            if real != r_short:
-                                r_src = {
-                                    "source_table": real,
-                                    "source_cols": all_r_keys,
-                                    "where_sql": None,
-                                }
-                try:
-                    parts.append(
-                        _build_join_query(
-                            pair_specs,
-                            dialect,
-                            idx,
-                            l_source=l_src,
-                            r_source=r_src,
-                            cte_names=set(full_alias_map) if full_alias_map else None,
-                        )
-                    )
-                    idx += 1
-                except Exception:
-                    pass
-
-        # Derived-expression profile branches (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …)
-        derived_branches = _build_derived_expr_profile_branches(
-            sql_query,
-            used_columns,
-            dialect,
-            top_k=5,
-            start_idx=idx,
+        join_parts, derived_parts, ctes = _build_sql_relation_branches(
+            schema, used_columns, sql_query, dialect, start_idx=idx
         )
-        parts.extend(derived_branches)
-        idx += len(derived_branches)
+        parts.extend(join_parts)
+        parts.extend(derived_parts)
 
     union_sql = "\n\nUNION ALL\n\n".join(parts)
 
@@ -2518,6 +2340,209 @@ def build_profile_query(
     return union_sql
 
 
+def _cte_preamble(ctes: list[tuple[str, str]]) -> str:
+    """Return a ``WITH ...\\n\\n`` preamble for *ctes*, or ``""`` when empty."""
+    if not ctes:
+        return ""
+    cte_defs = ",\n".join(f"{name} AS ({body})" for name, body in ctes)
+    return f"WITH {cte_defs}\n\n"
+
+
+def _build_sql_relation_branches(
+    schema: dict,
+    used_columns: list[dict],
+    sql_query: str,
+    dialect: str,
+    start_idx: int = 0,
+) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """Build join-cardinality and derived-expression UNION-ALL branches for *sql_query*.
+
+    Returns ``(join_parts, derived_parts, ctes)``:
+
+    * ``join_parts``    — one SELECT per profiled JOIN relationship.
+    * ``derived_parts`` — one SELECT per profiled derived expression.
+    * ``ctes``          — ``[(name, body), ...]`` to prepend as a WITH preamble so
+                          the branches can reference CTE names that survived
+                          ``eliminate_subqueries``.
+
+    Emits no column-profile branches.  Each branch is built defensively and
+    skipped on failure, so the function never raises.  The returned parts share
+    the same 22-column schema as the column branches and can be UNION-ALL'd with
+    them (see :func:`build_profile_query`) or executed in isolation (see
+    :func:`build_profile_queries`).
+    """
+    join_parts: list[str] = []
+    derived_parts: list[str] = []
+    idx = start_idx
+
+    # Hoist inline FROM-clause subqueries (e.g. FROM (...) a inside a CTE body)
+    # into top-level CTEs before any further processing.  This makes local aliases
+    # like `a` globally referenceable as CTE names, fixing queries that would
+    # otherwise generate FROM `a` (invalid in BigQuery — requires dataset qualification).
+    # Duplicate aliases get unique suffixes (a → a_2) automatically.
+    try:
+        from sqlglot.optimizer.eliminate_subqueries import (
+            eliminate_subqueries as _elim_subq,
+        )
+
+        _parsed = sqlglot.parse_one(
+            sql_query, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+        sql_query = _elim_subq(_parsed).sql(dialect=dialect)
+    except Exception:
+        pass
+
+    # Extract CTE definitions so SQL-based join branches can reference CTE names.
+    ctes = _extract_ctes(sql_query, dialect=dialect)
+    cte_map = dict(ctes)
+
+    # Also extract inline JOIN subquery aliases, e.g. JOIN (...) AS s.
+    # Merged with cte_map so _resolve_cte_source handles both transparently.
+    subquery_alias_map = _extract_subquery_aliases(sql_query, dialect=dialect)
+    full_alias_map = {**cte_map, **subquery_alias_map}
+
+    # Build CTE grain map for static inference.
+    # If cte1 has grain (a, b) and the outer join is ON (a, b), the cte1 side is
+    # definitively "one" — no need to run an expensive GROUP BY query.
+    cte_grain_map: dict = {}
+    try:
+        from utils.find_grains import determine_query_grain
+
+        _tables_and_columns = [
+            {"table_name": t["name"], "columns": t.get("columns", [])}
+            for t in schema.get("tables", [])
+        ]
+        _grain = determine_query_grain(sql_query, _tables_and_columns)
+        cte_grain_map = _grain.get("cte_grain_map") or {}
+    except Exception:
+        cte_grain_map = {}
+
+    # Group specs by (left_table, right_table, right_alias) so compound AND
+    # conditions (e.g. ON a.date = b.date AND a.merchant = b.merchant) are
+    # evaluated together, while two separate JOINs on the same physical table
+    # with different aliases (e.g. JOIN items i1 … JOIN items i2) stay distinct.
+    # Filter out literal-equality specs (e.g. table.year = 2011) — those are
+    # filters, not join key relationships: one side would have no column refs.
+    from collections import defaultdict
+
+    _grouped: dict = defaultdict(list)
+    for spec in _collect_join_specs(sql_query, dialect=dialect):
+        if spec.get("left_keys") and spec.get("right_keys"):
+            _grouped[
+                (
+                    spec["left_table"],
+                    spec["right_table"],
+                    spec.get("right_alias", ""),
+                )
+            ].append(spec)
+
+    for (left_table, right_table, _), pair_specs in _grouped.items():
+        all_left_keys: set = set()
+        all_right_keys: set = set()
+        for s in pair_specs:
+            all_left_keys.update(s.get("left_keys") or [])
+            all_right_keys.update(s.get("right_keys") or [])
+
+        left_is_one = _is_one_side(left_table, all_left_keys, cte_grain_map)
+        right_is_one = _is_one_side(right_table, all_right_keys, cte_grain_map)
+
+        # Resolve CTE/subquery aliases to real base table names for storage
+        l_short = left_table.split(".")[-1]
+        r_short = right_table.split(".")[-1]
+        l_real = (
+            _resolve_alias_to_table(l_short, full_alias_map, dialect)
+            if l_short in full_alias_map
+            else left_table
+        )
+        r_real = (
+            _resolve_alias_to_table(r_short, full_alias_map, dialect)
+            if r_short in full_alias_map
+            else right_table
+        )
+
+        if left_is_one is not None or right_is_one is not None:
+            # At least one CTE side has a deterministic cardinality from grain analysis.
+            # Unknown/real-table sides default to "many" (conservative).
+            l_one = bool(left_is_one)
+            r_one = bool(right_is_one)
+            if l_one and r_one:
+                join_type = "one-to-one"
+            elif not l_one and r_one:
+                join_type = "many-to-one"
+            elif l_one and not r_one:
+                join_type = "one-to-many"
+            else:
+                join_type = "many-to-many"
+            left_expr_str = " AND ".join(s["left_expr_sql"] for s in pair_specs)
+            right_expr_str = " AND ".join(s["right_expr_sql"] for s in pair_specs)
+            try:
+                join_parts.append(
+                    _build_static_join_row(
+                        l_real,
+                        r_real,
+                        left_expr_str,
+                        right_expr_str,
+                        join_type,
+                        dialect,
+                    )
+                )
+                idx += 1
+            except Exception:
+                pass
+        else:
+            # Both sides are real tables (or CTEs/subqueries whose grain is unknown) —
+            # measure cardinality via SQL.  One query per (left, right) pair
+            # using all compound key conditions together.
+            # For CTE/subquery sides, use lineage to resolve the real source table and
+            # apply the WHERE conditions so the profiling query runs against actual data.
+            l_src: dict | None = None
+            r_src: dict | None = None
+            if full_alias_map:
+                all_l_keys = [k for s in pair_specs for k in (s.get("left_keys") or [])]
+                all_r_keys = [
+                    k for s in pair_specs for k in (s.get("right_keys") or [])
+                ]
+                # When _resolve_cte_source returns None (e.g. the join-key columns
+                # trace to *several* different base tables inside the CTE), do NOT
+                # flatten them onto the CTE's primary FROM table — those columns may
+                # not exist there (production crash "Unrecognized name: NATURE").
+                # Leaving the side unresolved makes _build_join_query query the CTE
+                # directly, which is always in scope via the WITH preamble.
+                if l_short in full_alias_map:
+                    l_src = _resolve_cte_source(
+                        l_short, all_l_keys, full_alias_map, dialect
+                    )
+                if r_short in full_alias_map:
+                    r_src = _resolve_cte_source(
+                        r_short, all_r_keys, full_alias_map, dialect
+                    )
+            try:
+                join_parts.append(
+                    _build_join_query(
+                        pair_specs,
+                        dialect,
+                        idx,
+                        l_source=l_src,
+                        r_source=r_src,
+                        cte_names=set(full_alias_map) if full_alias_map else None,
+                    )
+                )
+                idx += 1
+            except Exception:
+                pass
+
+    # Derived-expression profile branches (SAFE_CAST, REGEXP_EXTRACT, COALESCE, …)
+    derived_parts = _build_derived_expr_profile_branches(
+        sql_query,
+        used_columns,
+        dialect,
+        top_k=5,
+        start_idx=idx,
+    )
+
+    return join_parts, derived_parts, ctes
+
+
 def build_profile_queries(
     schema: dict,
     used_columns: list[dict],
@@ -2525,34 +2550,61 @@ def build_profile_queries(
     options: dict | None = None,
     sql_query: str | None = None,
 ) -> list[str]:
-    """Split the profile query into one query per table entry.
+    """Split the profile into independently-executable queries.
 
-    Returns a list of SQL strings — one per entry in *used_columns*.  Join and
-    derived-expression branches (which depend on *sql_query*) are appended to
-    the **first** query only so they share the same CTE context.
+    Returns a list of SQL strings, each a valid query that runs on its own so a
+    failure in one cannot affect the others.  The rows they produce share the
+    same 22-column schema, so :func:`parse_profile_query_result` processes the
+    concatenated result regardless of how they were split.
 
-    Each individual query is a valid UNION ALL that can be executed
-    independently; partial failures no longer block the other tables.
-    The rows produced by all queries share the same column schema, so
-    :func:`parse_profile_query_result` can process the concatenated result.
+    Isolation layout — each layer is shielded from the others' runtime errors:
 
-    Falls back to :func:`build_profile_query` (single query) when
-    *used_columns* has exactly one entry.
+    * **one query per table** — column-profile branches only (no join/derived);
+    * **one query for all JOIN branches** (with the CTE preamble), if any;
+    * **one query per derived-expression branch** (with the CTE preamble), if any.
+
+    Derived expressions are the most fragile branches (complex scoped
+    expressions whose validity a parser cannot fully verify), so each gets its
+    own query — a single bad expression never sinks column profiling, joins, or
+    the other expressions.
+
+    Falls back to the single combined :func:`build_profile_query` only when
+    nothing matched, to surface a clear error to the caller.
     """
-    if len(used_columns) <= 1:
+    queries: list[str] = []
+
+    # 1. Column profiles — one isolated query per table (no relation branches).
+    for entry in used_columns:
+        try:
+            q = build_profile_query(
+                schema=schema,
+                used_columns=[entry],
+                dialect=dialect,
+                options=options,
+                sql_query=None,
+            )
+        except ValueError:
+            # Table not in schema / no profilable columns — skip, don't abort.
+            continue
+        queries.append(q)
+
+    # 2. Join + derived branches as their own queries, shielded from column
+    #    profiling and from each other.
+    if sql_query:
+        join_parts, derived_parts, ctes = _build_sql_relation_branches(
+            schema, used_columns, sql_query, dialect
+        )
+        preamble = _cte_preamble(ctes)
+        if join_parts:
+            queries.append(preamble + "\n\nUNION ALL\n\n".join(join_parts))
+        for derived in derived_parts:
+            queries.append(preamble + derived)
+
+    if not queries:
+        # Nothing matched at all — fall back to the combined builder so the
+        # caller gets a single (possibly erroring) query rather than silence.
         return [build_profile_query(schema, used_columns, dialect, options, sql_query)]
 
-    queries: list[str] = []
-    for i, entry in enumerate(used_columns):
-        q = build_profile_query(
-            schema=schema,
-            used_columns=[entry],
-            dialect=dialect,
-            options=options,
-            # Join + derived branches only on the first table to avoid duplication.
-            sql_query=sql_query if i == 0 else None,
-        )
-        queries.append(q)
     return queries
 
 
@@ -2716,6 +2768,19 @@ def _build_one_derived_expr_branch(
     col_refs: list[tuple[str, str]] = expr_info.get("col_refs") or []
 
     if not source_tables:
+        return None
+
+    # Guard: a mix of qualified and unqualified column references cannot be
+    # profiled safely. The FROM/JOIN chain below is reconstructed from the
+    # *qualified* aliases only; an unqualified column may belong to a sibling
+    # table that is not in that scope (production crash
+    # "Unrecognized name: CA_FACTURE", where the expression mixed
+    # p.frais_de_gestion with unqualified ca_facture/ca_facture_matrice from
+    # sibling CTEs). Profiling a derived expression is best-effort enrichment —
+    # skip rather than emit invalid SQL.
+    has_qualified = any(alias for alias, _ in col_refs)
+    has_unqualified = any(not alias for alias, _ in col_refs)
+    if has_qualified and has_unqualified:
         return None
 
     # Determine the query-level tables to JOIN (using original aliases from the SQL)

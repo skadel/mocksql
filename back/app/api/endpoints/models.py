@@ -18,7 +18,6 @@ from storage.test_repository import (
     _read_json,
     get_model_file_hash,
     get_commits_since_sha,
-    get_recent_commits,
 )
 
 router = APIRouter()
@@ -149,8 +148,7 @@ async def explore_models():
             model_name = f["name"]
             sql = read_model_sql(model_name) or ""
             complexity = compute_complexity_score(sql)
-            recent_commits = get_recent_commits(model_name)
-            priority = compute_priority_score(complexity["total"], recent_commits)
+            priority = compute_priority_score(complexity["total"])
 
             tested = _test_path(model_name).exists()
             session_id: str | None = None
@@ -165,8 +163,6 @@ async def explore_models():
                     "is_tested": tested,
                     "session_id": session_id,
                     "priority_score": priority,
-                    "complexity_score": complexity["total"],
-                    "recent_commits": recent_commits,
                     "complexity_breakdown": complexity["breakdown"],
                 }
             )

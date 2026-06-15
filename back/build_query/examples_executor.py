@@ -274,6 +274,13 @@ class _AssertionsAndEvaluation(BaseModel):
     # description suppose en sortie (cardinalité annoncée), pour construire la question de
     # validation « le résultat produit N lignes alors que tu en attendais M ».
     expected_row_count: Optional[int] = None
+    # Rempli UNIQUEMENT si reason_type ∈ {"needs_validation", "bad_description"} : description
+    # réalignée sur la sortie réelle, proposée à l'utilisateur dans le prompt de validation.
+    # Quand il clique « Je valide l'état actuel », accept_validation l'applique tel quel (pas de
+    # 2ᵉ appel LLM). Garde le même scénario métier, n'ajuste que ce qui contredit le réel.
+    corrected_description: Optional[str] = None
+    # Titre court (3–6 mots) réaligné, optionnel, accompagnant corrected_description.
+    corrected_name: Optional[str] = None
 
     @model_validator(mode="after")
     def _diagnostic_required_for_bad_data(self) -> "_AssertionsAndEvaluation":
@@ -1625,6 +1632,9 @@ vaut 0.2 », « le résultat attendu est X ») que le résultat réel CONTREDIT 
 test ment au lecteur **même si les assertions passent** (elles ont pu être alignées sur le réel).
 Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "bad_description"`, et `explanation` qui pointe
 l'écart en langage métier (ex. « La description annonce une valeur que le calcul ne produit pas »).
+Remplis aussi `corrected_description` : la même description réécrite pour refléter fidèlement la sortie
+réelle (valeur concrète corrigée), même scénario métier, sans inventer d'autres faits — c'est ce que
+l'utilisateur appliquera s'il valide la sortie. Optionnellement `corrected_name` (titre 3–6 mots).
 Les données sont valides — NE les corrige PAS, NE relance rien : c'est le narratif qui est faux.
 ⚠️ N'utilise ce motif QUE si la description énonce une valeur concrète contredite — JAMAIS pour une
 description qualitative ou structurelle (« vérifie que les régions sans trajet n'apparaissent pas »),
@@ -1641,6 +1651,9 @@ description qui est trop stricte, peut-être le SQL qui a dérivé. C'est une AM
 Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "needs_validation"`, `expected_row_count`
 = le nombre de lignes supposé par la description (entier), et `explanation` qui pointe l'écart en
 langage métier (ex. « Le scénario suppose 1 ligne mais le calcul en produit 2 — à confirmer »).
+Remplis aussi `corrected_description` : la description réécrite pour refléter fidèlement la sortie
+réelle (notamment sa cardinalité), même scénario métier — c'est ce que l'utilisateur appliquera s'il
+valide la sortie tel quel. Optionnellement `corrected_name` (titre 3–6 mots).
 NE génère PAS de `diagnostic`, NE corrige PAS les données.
 ⚠️ N'utilise ce motif QUE pour un écart de CARDINALITÉ avec données valides. Si la sortie est
 vide (0 ligne), reste sur le cas « résultat vide » ci-dessous. Si les données sont réellement

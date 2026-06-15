@@ -67,3 +67,41 @@ def test_col_qualifier_no_alias_needed_when_no_ref():
     result = strip_qualifiers_with_scope(query, "bigquery", suffix="s1")
     assert "AS tbl" not in result
     assert "ds_tbl_s1" in result
+
+
+def test_col_qualifier_case_insensitive_match():
+    """Régression (c3.sql) : la table garde sa casse d'origine (MAJUSCULE) mais
+    `qualify_columns` écrit certains qualificateurs de colonne en minuscule. Le
+    rapprochement table↔colonne doit être insensible à la casse, sinon le
+    qualificateur `db.table` survit et DuckDB lève « Referenced table … not found »."""
+    query = (
+        "SELECT `MARKETING_RENTABILITE_PBI`.`FAITS_PRE`.id AS id "
+        "FROM `MARKETING_RENTABILITE_PBI`.`FAITS_PRE` AS faits_pre "
+        "WHERE marketing_rentabilite_pbi.faits_pre.partition_date = 1"
+    )
+    result = strip_qualifiers_with_scope(query, "bigquery", suffix="s1")
+    # plus aucun qualificateur dataset.table résiduel, quelle que soit la casse
+    assert "marketing_rentabilite_pbi" not in result.lower().replace(
+        "marketing_rentabilite_pbi_faits_pre_s1", ""
+    )
+    assert "faits_pre.partition_date" in result.lower()
+
+
+def test_col_qualifier_ignores_project_on_table():
+    """Régression (c3.sql) : la table source porte le project (`proj.ds.tbl`) mais
+    le qualificateur de colonne ne porte que `ds.tbl` (jamais le project). Le
+    rapprochement doit IGNORER le catalog, sinon `ds.tbl`.col survit → DuckDB error.
+    Reproduit la forme `dataset.table` dans un seul identifiant backtické."""
+    query = (
+        "SELECT `marketing_rentabilite_pbi.faits_pre`.`id` AS id "
+        "FROM `pipetalk-493612.marketing_rentabilite_pbi.faits_pre` AS faits_pre "
+        "WHERE `marketing_rentabilite_pbi.faits_pre`.`partition_date` = '2026-01-01'"
+    )
+    result = strip_qualifiers_with_scope(query, "bigquery", suffix="s1")
+    # le qualificateur dataset.table de la colonne est réécrit en alias
+    assert "`faits_pre`.`id`" in result
+    assert "`faits_pre`.`partition_date`" in result
+    # plus aucune référence résiduelle au dataset hors du nom de table renommé
+    assert "marketing_rentabilite_pbi" not in result.lower().replace(
+        "marketing_rentabilite_pbi_faits_pre_s1", ""
+    )

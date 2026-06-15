@@ -32,6 +32,16 @@ def test_aliases_table_when_project_prepended():
     assert "tbl.id" in out or "`tbl`.`id`" in out
 
 
+def test_case_insensitive_table_vs_col_qualifier():
+    """Régression : table en casse d'origine (MAJUSCULE) et qualificateur de colonne
+    en casse normalisée (minuscule) — le rapprochement doit être insensible à la casse,
+    sinon le qualificateur `dataset.table` n'est pas réécrit en alias."""
+    sql = "SELECT `DS.TBL`.id FROM `DS.TBL` WHERE ds.tbl.partition_date = '2026-01-01'"
+    out = _normalize_column_qualifiers(sql, "bigquery")
+    assert "ds.tbl.partition_date" not in out.lower()
+    assert "AS tbl" in out or "AS TBL" in out
+
+
 def test_no_change_when_no_dotted_qualifier():
     """Aucune réécriture si les colonnes ne portent pas de qualificateur pointé."""
     sql = "SELECT t.id FROM `ds.tbl` AS t WHERE t.x = 1"

@@ -4,7 +4,9 @@ DuckDB produit 1.0 ; bq143 : « corrélation 0.2 » alors que le réel vaut 0.0)
 être FLAGUÉ (verdict Insuffisant, `reason_type="bad_description"`) — pas blanchi en « Excellent ».
 
 Le flag ne déclenche AUCUNE boucle de correction : la donnée est valide, c'est la 3ᵉ voix
-(le narratif) qui ment. Il route donc vers la complétion comme un verdict normal.
+(le narratif) qui ment. Comme `needs_validation`, il sauve l'état et émet un VALIDATION_PROMPT
+actionnable (Valider / Corriger), puis route vers `history_saver` en attendant la décision
+de l'utilisateur — jamais vers une boucle de correction de données.
 """
 
 import pytest
@@ -33,24 +35,19 @@ def test_modele_accepte_reason_type_bad_description():
     assert ev.assertion_fix is None
 
 
-@pytest.mark.parametrize(
-    "has_existing,expected",
-    [
-        (False, "suggestions_generator"),  # 1ʳᵉ génération → suggestions puis clôture
-        (True, "final_response"),  # édition → clôture directe
-    ],
-)
-def test_bad_description_flague_sans_boucle_de_retry(has_existing, expected):
-    """`bad_description` ne matche aucune branche de retry (ni bad_data ni bad_assertions)
-    → il route vers la complétion. Garantit qu'un désync narratif ne relance JAMAIS la
-    correction de données (qui serait inutile : la donnée est bonne)."""
+@pytest.mark.parametrize("has_existing", [False, True])
+def test_bad_description_flague_sans_boucle_de_retry(has_existing):
+    """`bad_description` ne matche aucune branche de retry (ni bad_data ni bad_assertions).
+    Comme `needs_validation`, l'état est sauvé et un VALIDATION_PROMPT est émis → route vers
+    `history_saver` (attente de la décision utilisateur), jamais vers une boucle de correction
+    de données (qui serait inutile : la donnée est bonne)."""
     state = {
         "evaluation_feedback": "bad_description",
         "has_existing_tests": has_existing,
         "gen_retries": 2,
     }
     route = route_evaluator(state)
-    assert route == expected
+    assert route == "history_saver"
     assert route not in (
         "bad_data_to_agent",
         "bad_data_exhausted",
