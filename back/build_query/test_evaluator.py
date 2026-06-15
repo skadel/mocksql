@@ -98,6 +98,69 @@ Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
     }
 
 
+async def _classify_empty_intent(
+    state: QueryState, current_test: dict, sql: str
+) -> tuple[str, str]:
+    """Verdict LLM : 0 ligne est-il le comportement *voulu* de ce test ?
+
+    Appelé UNE SEULE FOIS, à la première occurrence du vide (cf. `empty_results_regen`
+    falsy dans `evaluate_tests`). Décide si l'absence de résultat est intentionnelle
+    (axe `empty`, branche d'UNION ALL volontairement vide, filtre qui exclut tout…)
+    plutôt que de classer mécaniquement tout vide en `bad_data`.
+
+    Retourne `(verdict, explanation)` :
+    - verdict ∈ {"Excellent", "Bon"} → le vide est attendu (PASS).
+    - verdict == "Insuffisant"       → le vide est inattendu ; `explanation` sert de
+      message *utilisateur* clair (le diag structurel CTE reste interne au générateur).
+
+    En cas d'échec LLM, retombe sur ("Insuffisant", "") → comportement déterministe
+    historique (la boucle de régénération prend le relais).
+    """
+    test_desc = current_test.get("unit_test_description", "")
+    input_data = current_test.get("data", {})
+    try:
+        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)[:800]
+    except Exception:
+        input_summary = str(input_data)[:800]
+
+    prompt = f"""SQL testé (dialecte {state.get("dialect", "bigquery")}) :
+{sql}
+
+Scénario du test : {test_desc}
+
+Données d'entrée injectées dans DuckDB :
+{input_summary}
+
+Résultat DuckDB : 0 ligne retournée.
+
+Le fait que la requête retourne 0 ligne est-il le comportement ATTENDU pour ce scénario ?
+- "Excellent" ou "Bon" si 0 ligne est précisément ce que le scénario veut démontrer
+  (filtre qui exclut tout, plage vide, branche d'UNION ALL non concernée, anti-jointure…).
+- "Insuffisant" si le scénario suppose des lignes en sortie et que leur absence trahit
+  des données d'entrée mal construites.
+
+Rédige `explanation` pour un utilisateur (data engineer) en une phrase claire, SANS jargon
+de CTE interne : dis pourquoi le vide est correct, ou ce qui manque dans les données pour
+que le scénario produise des lignes."""
+
+    llm = make_llm().with_structured_output(_ReevalResult)
+    try:
+        logger.diag("[evaluator] PROMPT LLM (intent vide):\n%s", prompt[:3000])
+        result = await llm.ainvoke(
+            [
+                SystemMessage(
+                    content=MOCKSQL_PRODUCT_PREAMBLE
+                    + "\n\nTu évalues ici si l'absence de résultat est le comportement voulu du test."
+                ),
+                HumanMessage(content=prompt),
+            ]
+        )
+        return result.verdict, result.explanation
+    except Exception as exc:
+        logger.warning("[evaluator] _classify_empty_intent failed: %s", exc)
+        return "Insuffisant", ""
+
+
 async def evaluate_tests(state: QueryState):
     """
     Lit le verdict pré-calculé par l'executor (embedded dans le résultat du test),
@@ -239,20 +302,54 @@ async def evaluate_tests(state: QueryState):
             from build_query.examples_generator import _format_cte_trace_hint
 
             diag = _format_cte_trace_hint(failing_cte, cte_trace)
-            display_reason = (
+            structural_reason = (
                 f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
                 if failing_cte
                 else "Les données d'entrée ne produisent aucun résultat."
             )
         elif failing_cte:
             diag = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
-            display_reason = f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
+            structural_reason = f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
         else:
             diag = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
-            display_reason = "Les données d'entrée ne produisent aucun résultat."
+            structural_reason = "Les données d'entrée ne produisent aucun résultat."
+
+        # Garde d'intention LLM — une seule fois, à la 1ʳᵉ occurrence du vide
+        # (`empty_results_regen` falsy). Sur les retries de régénération on reste sur
+        # la boucle déterministe SANS rappeler le LLM (compromis hybride : verdict LLM
+        # une fois, correction déterministe ensuite). Le diag structurel `diag` reste
+        # interne au générateur ; le message *utilisateur* porte l'explication LLM.
+        display_reason = structural_reason
+        if not state.get("empty_results_regen"):
+            verdict, explanation = await _classify_empty_intent(
+                state, current_test, sql
+            )
+            if verdict in ("Excellent", "Bon"):
+                logger.diag(
+                    "[evaluator] empty_results jugé INTENTIONNEL par le LLM (%s) → PASS",
+                    verdict,
+                )
+                return {
+                    "messages": [
+                        AIMessage(
+                            content=f"**{verdict}** — {explanation}",
+                            id=str(uuid.uuid4()),
+                            additional_kwargs={
+                                "type": MsgType.EVALUATION,
+                                "parent": last_results.id,
+                                "request_id": state.get("request_id"),
+                                "test_index": current_test.get("test_index"),
+                            },
+                        )
+                    ],
+                    "evaluation_feedback": None,
+                    "status": "complete",
+                }
+            if explanation:
+                display_reason = explanation
 
         logger.diag(
-            "[evaluator] empty_results sans contrainte structurelle → bad_data, retries=%d",
+            "[evaluator] empty_results → bad_data, retries=%d",
             gen_retries,
         )
 
