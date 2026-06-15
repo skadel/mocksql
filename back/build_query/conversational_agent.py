@@ -426,6 +426,34 @@ Tentatives de correction restantes : {retries_left}
     return eval_context, eval_test_idx
 
 
+def _format_branch_plan_hint(test_obj: dict | None) -> str:
+    """Rappel du contrat de branche (UNION ALL) déclaré à la génération.
+
+    Donne à l'agent de correction une cible explicite : diffuser le contrat
+    déclaré (must_hold / must_not_hold) contre la trace CTE, plutôt que de
+    repartir du seul signal « CTE vide ».
+    """
+    bp = (test_obj or {}).get("branch_plan")
+    if not bp:
+        return ""
+    branch = bp.get("branch", "?")
+    must_hold = bp.get("must_hold") or []
+    must_not_hold = bp.get("must_not_hold") or []
+    if not must_hold and not must_not_hold:
+        return ""
+    lines = [
+        f"\n\nContrat de branche déclaré à la génération (branche « {branch} ») — "
+        "confronte-le à la trace CTE et cible la condition NON respectée :"
+    ]
+    if must_hold:
+        lines.append("  Doivent être VRAIES (sinon la ligne ne survit pas) :")
+        lines += [f"    - {c}" for c in must_hold]
+    if must_not_hold:
+        lines.append("  Doivent rester FAUSSES (sinon la ligne est supprimée) :")
+        lines += [f"    - {c}" for c in must_not_hold]
+    return "\n".join(lines)
+
+
 async def conversational_agent(state: QueryState):
     """Conversational LLM agent: responds naturally and can call generate_test or delete_test."""
     logger.diag(
@@ -729,14 +757,18 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         not user_input and evaluation_feedback == "bad_data"
     )
     if is_auto_correct:
-        failing_uid_trigger = next(
+        failing_test_obj = next(
             (
-                t.get("test_uid", str(eval_test_idx))
+                t
                 for t in existing_tests
                 if str(t.get("test_index")) == str(eval_test_idx)
             ),
-            str(eval_test_idx),
+            None,
         )
+        failing_uid_trigger = (failing_test_obj or {}).get(
+            "test_uid", str(eval_test_idx)
+        )
+        branch_plan_hint = _format_branch_plan_hint(failing_test_obj)
         has_debug_results = any(
             get_message_type(m) in (MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS)
             for m in history
@@ -750,7 +782,7 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 f"`update_test_data` (régénération complète) que si une correction ciblée "
                 f"est impossible. Si le comportement observé (ex : 0 ligne) est en réalité "
                 f"attendu pour ce scénario, appelle `request_reevaluation` avec la justification."
-            )
+            ) + branch_plan_hint
         else:
             # Ne pas répéter ici les règles d'usage des outils : elles sont déjà
             # dans le contexte automatique du SYSTEM — la duplication allonge le
@@ -761,7 +793,7 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 f"d'usage des outils dans le contexte automatique ci-dessus). Applique "
                 f"maintenant une correction CIBLÉE de l'étape bloquante — `run_cte` "
                 f"d'abord si tu dois inspecter les valeurs réelles d'une CTE."
-            )
+            ) + branch_plan_hint
         # Mémoire des tentatives : rendu du ledger en conversation alternée
         # AI/HUMAN, inséré entre l'historique et le trigger courant.
         attempt_msgs = _render_attempt_messages(state.get("correction_attempts") or [])

@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, date
 from typing import List, Optional
@@ -7,7 +8,7 @@ from typing import List, Optional
 from langchain_core.output_parsers import PydanticOutputParser
 from langchain_core.messages import AIMessage, HumanMessage
 from models.schemas import get_schemas
-from pydantic import Field, create_model
+from pydantic import BaseModel, Field, create_model
 
 
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
@@ -982,6 +983,10 @@ async def generate_examples_(
             get_llm_model(),
         )
 
+    # branch_plan (contrat de survie de branche) seulement sur les requêtes
+    # à branches mutuellement exclusives (UNION ALL) — overhead inutile sinon.
+    multi_branch = _has_union_branches(optimized_sql)
+
     with timed("gen:pydantic"):
         # The dynamic Pydantic model depends only on the (constraint-annotated)
         # schema, whether tests already exist, and the reasoning mode — all stable
@@ -990,12 +995,16 @@ async def generate_examples_(
             json.dumps(llm_filtered_schema, sort_keys=True, default=str),
             bool(existing_tests),
             native_thinking,
+            multi_branch,
         )
         output_type = _output_type_cache.get(model_key)
         if output_type is None:
             data_model = create_pydantic_models(llm_filtered_schema)
             output_type = get_generation_output_type(
-                data_model, existing_tests, native_thinking=native_thinking
+                data_model,
+                existing_tests,
+                native_thinking=native_thinking,
+                multi_branch=multi_branch,
             )
             if len(_output_type_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
                 _output_type_cache.pop(next(iter(_output_type_cache)))
@@ -1028,6 +1037,7 @@ async def generate_examples_(
             eval_history=eval_history,
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
+            multi_branch=multi_branch,
         )
     if prompt is None:
         return None, None
@@ -1107,6 +1117,11 @@ async def generate_examples_(
         "tags": generated_data.tags,
         "data": filled_data,
     }
+    # Contrat de branche (UNION ALL) : persisté pour l'agent de correction
+    # (diff déclaré ↔ trace CTE dans la boucle bad_data).
+    branch_plan = getattr(generated_data, "branch_plan", None)
+    if branch_plan is not None:
+        generated["branch_plan"] = branch_plan.model_dump()
 
     # Determine which test_index slot this new test occupies
     target_key = _resolve_target_key(state, existing_tests)
@@ -1125,8 +1140,51 @@ async def generate_examples_(
     return {**generated, "test_index": test_index, "test_uid": test_uid}, test_index
 
 
+def _has_union_branches(sql: str) -> bool:
+    """UNION ALL entre CTE = branches potentiellement mutuellement exclusives.
+
+    Sert à n'activer le ``branch_plan`` et les consignes de sélection de branche
+    que sur les requêtes qui en ont besoin (overhead inutile sur le mono-table).
+    """
+    return bool(re.search(r"\bUNION\s+ALL\b", sql or "", re.IGNORECASE))
+
+
+class BranchPlan(BaseModel):
+    """Contrat de survie de l'unique branche ciblée (requêtes UNION ALL).
+
+    Émis AVANT ``data`` : le modèle s'engage sur le plan avant de générer les
+    lignes (plan-then-generate), et le contrat est réutilisable par l'agent de
+    correction (diff déclaré ↔ trace CTE) dans la boucle ``bad_data``.
+    """
+
+    branch: str = Field(
+        description=(
+            "Nom de l'unique branche ciblée (ex. 'OUVERTURE'). "
+            "Si le SQL n'a pas de branches mutuellement exclusives, mettre 'unique'."
+        )
+    )
+    must_hold: List[str] = Field(
+        description=(
+            "≤4 items. Conditions qui doivent être VRAIES pour que la ligne survive jusqu'au "
+            "SELECT final — une par CTE éliminatoire, avec la clé concrète. Pas de SQL. "
+            "Ex. : 'photo_m non vide pour (banque=001, collab=100001, iban=FR7600100001)'."
+        )
+    )
+    must_not_hold: List[str] = Field(
+        description=(
+            "≤4 items. Conditions qui doivent rester FAUSSES pour la MÊME clé : branches "
+            "concurrentes vides, anti-jointures non matchées. C'est ce qui empêche la "
+            "suppression de la ligne. Ex. : 'photo_m_1 vide pour cette clé', "
+            "'aucune ligne en FERMETURE/MEG pour cette clé'."
+        )
+    )
+
+
 def get_generation_output_type(
-    data_model, existing_tests, native_thinking: bool = False
+    data_model,
+    existing_tests,
+    native_thinking: bool = False,
+    multi_branch: bool = False,
 ):
     if native_thinking:
         # Le raisonnement détaillé est fait nativement (canal thinking) en amont :
@@ -1152,9 +1210,25 @@ def get_generation_output_type(
             "et indiquez combien de lignes doivent survivre à chaque étape."
         )
 
+    fields = {
+        "unit_test_build_reasoning": (str, Field(description=reasoning_desc)),
+    }
+    if multi_branch:
+        # Inséré juste après le raisonnement et AVANT data : le modèle s'engage sur
+        # la branche et son contrat de survie avant d'émettre les lignes.
+        fields["branch_plan"] = (
+            BranchPlan,
+            Field(
+                description=(
+                    "**À remplir AVANT `data`.** Contrat de survie de la branche choisie "
+                    "(énuméré, bref, exprimé en termes vérifiables sur la trace CTE)."
+                )
+            ),
+        )
+
     return create_model(
         "UnitTestData",
-        unit_test_build_reasoning=(str, Field(description=reasoning_desc)),
+        **fields,
         test_name=(
             str,
             Field(
@@ -1208,6 +1282,7 @@ async def create_appropriate_prompt(
     eval_history: list | None = None,
     native_thinking: bool = False,
     join_recipes_block: str = "",
+    multi_branch: bool = False,
 ):
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
@@ -1227,6 +1302,7 @@ async def create_appropriate_prompt(
             eval_history=eval_history,
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
+            multi_branch=multi_branch,
         )
     elif state.get("input", "").strip():
         if state.get("test_uid") or state.get("test_index") is not None:
@@ -1273,6 +1349,7 @@ async def create_appropriate_prompt(
             eval_history=eval_history,
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
+            multi_branch=multi_branch,
         )
     elif state.get("status") == "empty_results":
         failing_cte, cte_trace = _get_failing_cte_from_results(
@@ -1294,6 +1371,7 @@ async def create_appropriate_prompt(
             eval_history=eval_history,
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
+            multi_branch=multi_branch,
         )
     else:
         return None

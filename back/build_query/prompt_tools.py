@@ -517,6 +517,7 @@ def generate_data_prompt(
     eval_history: list | None = None,
     native_thinking: bool = False,
     join_recipes_block: str = "",
+    multi_branch: bool = False,
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
@@ -595,6 +596,24 @@ def generate_data_prompt(
             "survivre à chaque étape, et expliquez comment vos données le garantissent."
         )
 
+    if multi_branch:
+        # Requête à branches mutuellement exclusives (UNION ALL) : on demande un
+        # branch_plan bidirectionnel (must_hold / must_not_hold) et on distingue
+        # sélection-par-table vs sélection-par-valeur (cas des photos M/M-1).
+        reasoning_bullet += (
+            " Pour une branche inter-dépendante, citez aussi la condition qui doit rester "
+            "FAUSSE (branche concurrente vide, anti-jointure non matchée — voir `branch_plan.must_not_hold`)."
+        )
+        consigne_3 = """\
+3. **Une seule branche, sélection explicite** : quand le SQL contient plusieurs alternatives (`A OR B`, `CASE WHEN`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et renseigner `branch_plan` AVANT de générer `data`. La STRATÉGIE dépend de la façon dont la branche est sélectionnée :
+   - **Sélection par TABLE** (une table / un chemin de jointure dédié par alternative) → laisser les tables des autres branches VIDES (null).
+   - **Sélection par VALEUR** (date, statut, type sur des tables PARTAGÉES — cas des photos M/M-1) → ne vider AUCUNE table : placer la valeur dans l'intervalle qui satisfait UNIQUEMENT la branche visée (cf. #6), et garantir qu'aucune ligne ne retombe dans une autre branche pour la même clé.
+   À défaut d'instruction utilisateur, préférer la branche **sans dépendance inter-branches** (sans anti-jointure ni `NOT IN` référençant une autre branche). La description nomme la branche choisie. Les autres branches alimentent les suggestions.
+3bis. **Branches inter-dépendantes (anti-jointure croisée)** : si la branche ciblée comporte une anti-jointure contre une CTE issue d'une AUTRE branche du `UNION ALL` (`NOT IN (SELECT … FROM autre_branche)`), les autres branches doivent rester VIDES pour la clé testée — liste-le dans `branch_plan.must_not_hold`. Ne cible JAMAIS une branche dont la survie exigerait qu'une autre branche soit simultanément peuplée ET vide : une telle condition dans le blob `conditions` aplati signale une extraction bruitée (branches fusionnées) — raisonne alors CTE par CTE depuis `<query>`."""
+    else:
+        consigne_3 = """\
+3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions."""
+
     system_message_content = (
         """
 Vous êtes un data QA, expert en test de requêtes SQL et en génération de données de test JSON.
@@ -614,8 +633,9 @@ La conversation contient ces sections, délimitées par des balises. Le schéma,
 **Consignes principales :**
 """
         + consignes_1_2
+        + "\n"
+        + consigne_3
         + """
-3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions.
 4. **Clés de jointure DÉRIVÉES (le point le plus important)** : quand une clé de JOIN est le produit d'un `CASE` / `CAST` / `SAFE_CAST` / `SUBSTR` / `SPLIT` / `REGEXP`, générez la valeur SOURCE qui, APRÈS transformation, égale la clé de l'autre côté — **pas** la valeur finale.
    - `JOIN ON a.k = CASE WHEN t.reseau='BP' THEN '1' END` et `a.k` vient de `t2` → mettez `t2.k = '1'`.
    - `SUBSTR(col, 2, LEN(col)-2)` puis `SPLIT ','` : la colonne SOURCE doit inclure les caractères de bord qui seront retirés (ex. `"'PROD1'"` → après SUBSTR/TRIM → `PROD1`), pas `PROD1` brut.
