@@ -177,14 +177,6 @@ function ExploreFileRow({ model, depth }: { model: ExploreModel; depth: number }
 
       <ComplexityChips breakdown={model.complexity_breakdown} />
 
-      {model.recent_commits > 0 && (
-        <Tooltip title={`${model.recent_commits} commit(s) ces 90 derniers jours`} placement="top">
-          <Typography sx={{ fontSize: 10, color: MUTED, flexShrink: 0, letterSpacing: '-0.3px' }}>
-            {model.recent_commits}↑
-          </Typography>
-        </Tooltip>
-      )}
-
       <ScoreBadge score={model.priority_score} />
     </Box>
   );

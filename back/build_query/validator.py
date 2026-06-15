@@ -74,14 +74,18 @@ def _normalize_column_qualifiers(sql: str, dialect: str) -> str:
             used_aliases: set[str] = set(scope.sources.keys())
             for source in scope.sources.values():
                 if isinstance(source, exp.Table) and source.db:
-                    base_tables[(source.db, source.this.name)] = source
+                    # Clé EN MINUSCULE : sqlglot peut écrire la table en casse d'origine
+                    # et le qualificateur de colonne en casse normalisée — comparer en
+                    # minuscule évite de rater le rapprochement (BigQuery/DuckDB sont
+                    # insensibles à la casse).
+                    base_tables[(source.db.lower(), source.this.name.lower())] = source
 
             assigned: dict[int, str] = {}  # id(table) -> alias retenu
             for col in scope.expression.find_all(exp.Column):
                 col_db = col.text("db")
                 if not col_db:
                     continue
-                table = base_tables.get((col_db, col.text("table")))
+                table = base_tables.get((col_db.lower(), col.text("table").lower()))
                 if table is None:
                     continue
 

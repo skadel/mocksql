@@ -326,30 +326,43 @@ async def evaluate_tests(state: QueryState):
 
     eval_test_index = current_test.get("test_index")
 
-    # Désync description↔cardinalité (données valides) : on NE boucle PAS. On sauve l'état,
-    # on émet le verdict puis un VALIDATION_PROMPT actionnable (Valider / Corriger côté UI).
-    # Cf. assertion_generator (détection) et accept_validation (réalignement à la validation).
-    if reason_type == "needs_validation":
+    # Désync description↔réel (données valides) : on NE boucle PAS. On sauve l'état, on émet
+    # le verdict puis un VALIDATION_PROMPT actionnable (Valider / Corriger côté UI). Deux causes :
+    #   needs_validation → écart de CARDINALITÉ (nb de lignes annoncé ≠ réel)
+    #   bad_description  → écart de VALEUR concrète (la description ment sur une valeur de sortie)
+    # Dans les deux cas, l'évaluateur a proposé une `corrected_description` qu'accept_validation
+    # appliquera au clic. Cf. assertion_generator (détection) et accept_validation (application).
+    if reason_type in ("needs_validation", "bad_description"):
         actual_rows = 0
         try:
             actual_rows = len(json.loads(current_test.get("results_json") or "[]"))
         except Exception:
             actual_rows = 0
         expected_rows = current_test.get("expected_row_count")
-        if expected_rows is not None and actual_rows:
+        if (
+            reason_type == "needs_validation"
+            and expected_rows is not None
+            and actual_rows
+        ):
             question = (
                 f"Le résultat produit {actual_rows} ligne(s) alors que ce scénario en "
                 f"suppose {expected_rows}. Valides-tu ce résultat tel quel (la description "
                 f"sera réalignée), ou faut-il corriger le test ?"
             )
-        else:
+        elif reason_type == "needs_validation":
             question = (
                 "Le résultat ne correspond pas à la cardinalité supposée par la description. "
                 "Valides-tu ce résultat tel quel, ou faut-il corriger le test ?"
             )
+        else:  # bad_description
+            question = (
+                "La description annonce une valeur que le calcul ne produit pas. Valides-tu la "
+                "sortie réelle tel quel (la description sera réalignée), ou faut-il corriger le test ?"
+            )
         eval_msg_id = str(uuid.uuid4())
         logger.diag(
-            "[evaluator] needs_validation test=%s attendu=%s réel=%s",
+            "[evaluator] %s test=%s attendu=%s réel=%s",
+            reason_type,
             eval_test_index,
             expected_rows,
             actual_rows,
@@ -374,12 +387,13 @@ async def evaluate_tests(state: QueryState):
                         "parent": eval_msg_id,
                         "request_id": state.get("request_id"),
                         "test_index": eval_test_index,
+                        "reason_type": reason_type,
                         "expected_row_count": expected_rows,
                         "actual_row_count": actual_rows,
                     },
                 ),
             ],
-            "evaluation_feedback": "needs_validation",
+            "evaluation_feedback": reason_type,
             "status": "complete",
             "empty_results_regen": False,
         }

@@ -670,14 +670,17 @@ const ChatComponent: React.FC = () => {
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
       const lastMessageId = lastMessage ? lastMessage.id : '';
 
-      // Cible le test par son identité stable (test_uid) plutôt que par son rang.
-      const effectiveTestUid = effectiveTestIndex !== undefined
-        ? (testResults || []).find((tr: any) => String(tr.test_index) === String(effectiveTestIndex))?.test_uid
+      // `effectiveTestIndex` (= selectedTestIndex) est une position 0-based dans
+      // testResults — surtout PAS le slot 1-based `test_index`. On résout le test par
+      // position, puis on cible par son identité stable (test_uid) + son vrai test_index.
+      const anchoredTest = effectiveTestIndex !== undefined
+        ? (testResults || [])[effectiveTestIndex]
         : undefined;
+      const effectiveTestUid = anchoredTest?.test_uid;
 
       const routeHint = forcedRouteRef.current;
       forcedRouteRef.current = '';
-      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, effectiveTestIndex, undefined, assertionOnly, routeHint || undefined, effectiveTestUid);
+      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, anchoredTest?.test_index ?? effectiveTestIndex, undefined, assertionOnly, routeHint || undefined, effectiveTestUid);
       setIsSending(false);
 
       if (ok) {
@@ -872,7 +875,13 @@ const ChatComponent: React.FC = () => {
     setIsAutoProfileRunning(true);
     try {
       await refreshSchemasApi({ tables: [] });
-      const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: [], force: true });
+      // Re-derive used_columns from the current SQL (schemas just refreshed) so the
+      // reprofiling targets the columns the query actually touches. Relying on the
+      // persisted test's used_columns silently no-ops when they're absent/empty:
+      // the force branch then computes _find_missing_columns({}, []) → [] → profile_complete.
+      const validateResult = await validateQueryApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, parent_message_id: '' });
+      const usedColumns = validateResult?.used_columns ?? [];
+      const result = await checkProfileApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, used_columns: usedColumns, force: true });
       if (result.profile_error) {
         dispatch(setError(result.profile_error));
         return;
@@ -1068,7 +1077,9 @@ const ChatComponent: React.FC = () => {
 
   const handleRerunTest = useCallback((idx: number) => {
     if (isSending) return;
-    const test = (testResults || []).find((t: any) => t.test_index === idx);
+    // `idx` = position 0-based dans testResults ; `test_index` = slot 1-based backend.
+    const test = (testResults || [])[idx];
+    if (!test) return;
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
     // threadParentId ensures the rerun lands as a sibling of the original, not a child
     const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
@@ -1082,7 +1093,7 @@ const ChatComponent: React.FC = () => {
       t,
       parentMessageId,
       testUid: test?.test_uid,
-      testIndex: idx,
+      testIndex: test?.test_index,
       forceRoute: 'generator',
       silent: true,
     });
@@ -1092,7 +1103,10 @@ const ChatComponent: React.FC = () => {
   // l'ambiguïté en faveur du réel → accept_validation réaligne la description + verdict Bon.
   const handleValidateTest = useCallback((idx: number) => {
     if (isSending) return;
-    const test = (testResults || []).find((t: any) => t.test_index === idx);
+    // `idx` est la position 0-based dans testResults (cf. TestsPanel) ; `test_index`
+    // est un slot 1-based côté backend → on résout par position, jamais par valeur.
+    const test = (testResults || [])[idx];
+    if (!test) return;
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
     const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
     dispatchChatQuery({
@@ -1105,7 +1119,7 @@ const ChatComponent: React.FC = () => {
       t,
       parentMessageId,
       testUid: test?.test_uid,
-      testIndex: idx,
+      testIndex: test?.test_index,
       validateIntent: true,
       silent: true,
     });

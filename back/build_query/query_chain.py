@@ -359,10 +359,11 @@ def route_evaluator(state: QueryState):
     if feedback == "too_many_rows":
         logger.diag("[route_evaluator] → history_saver (too_many_rows)")
         return "history_saver"
-    # Désync description↔cardinalité (données valides) : pas de boucle — l'état est sauvé
-    # et un VALIDATION_PROMPT a été émis ; on attend la décision de l'utilisateur.
-    if feedback == "needs_validation":
-        logger.diag("[route_evaluator] → history_saver (needs_validation)")
+    # Désync description↔réel (données valides) : pas de boucle — l'état est sauvé et un
+    # VALIDATION_PROMPT a été émis ; on attend la décision de l'utilisateur (Valider / Corriger).
+    # needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète.
+    if feedback in ("needs_validation", "bad_description"):
+        logger.diag("[route_evaluator] → history_saver (%s)", feedback)
         return "history_saver"
     if feedback == "bad_data":
         if retries > 0:

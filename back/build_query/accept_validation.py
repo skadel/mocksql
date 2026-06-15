@@ -101,11 +101,21 @@ async def accept_validation(state: QueryState):
     except Exception:
         actual_rows = 0
 
-    realigned = await _realign_description(target, actual_rows)
-    explanation = (
-        f"Validé par toi : la description reflète désormais la sortie réelle "
-        f"({actual_rows} ligne(s))."
-    )
+    # Chemin nominal : l'évaluateur a déjà proposé une description réalignée (corrected_description)
+    # dans le VALIDATION_PROMPT — on l'applique tel quel, sans 2ᵉ appel LLM. Fallback réalignement
+    # LLM uniquement pour les tests anciens (sauvés avant ce champ) ou si le champ est vide.
+    corrected_desc = (target.get("corrected_description") or "").strip()
+    if corrected_desc:
+        realigned = _RealignedDescription(
+            unit_test_description=corrected_desc,
+            test_name=(target.get("corrected_name") or "").strip(),
+        )
+        logger.diag(
+            "[accept_validation] corrected_description appliquée (pré-calculée)"
+        )
+    else:
+        realigned = await _realign_description(target, actual_rows)
+    explanation = "Validé par toi : la description reflète désormais la sortie réelle."
 
     updated_cases = []
     for c in test.get("test_cases") or []:
@@ -118,6 +128,8 @@ async def accept_validation(state: QueryState):
             c["reason_type"] = None
             c["evaluation_explanation"] = explanation
             c.pop("expected_row_count", None)
+            c.pop("corrected_description", None)
+            c.pop("corrected_name", None)
         updated_cases.append(c)
 
     update_test(state["session"], {"test_cases": updated_cases})

@@ -25,6 +25,8 @@ from build_query.profiler import (
     describe_join,
     _build_partition_where,
     _format_day_partition_values,
+    _build_derived_expr_profile_branches,
+    build_profile_queries,
 )
 
 
@@ -2616,6 +2618,267 @@ class TestBuildProfileQueryFuncExprJoin(unittest.TestCase):
             len(c_parts),
             0,
             "No join branch should be generated for a multi-table function expression",
+        )
+
+
+# ─── build_profile_query: multi-source CTE join key ──────────────────────────
+
+
+# Mirrors the production crash "Unrecognized name: NATURE":
+# a CTE `t` whose compound join key columns trace to THREE different base tables
+# (no_contrat_commercant→DIM_CONTRAT, partition_date→FAITS_PRE, nature→DIM_NATURE).
+# _resolve_cte_source correctly returns None (keys span several sources), but the
+# old base-table fallback flattened all keys onto the CTE's primary FROM table
+# (FAITS_PRE) → SELECT ... nature ... FROM FAITS_PRE, where `nature` does not exist.
+# After fix: the CTE is queried directly (it is in scope via the WITH preamble).
+_MULTI_SRC_SCHEMA = {
+    "tables": [
+        {
+            "name": "FAITS_PRE",
+            "columns": [
+                {"name": "id_contrat", "type": "STRING"},
+                {"name": "id_nature", "type": "STRING"},
+                {"name": "partition_date", "type": "DATE"},
+            ],
+        },
+        {
+            "name": "DIM_NATURE",
+            "columns": [
+                {"name": "id_nature", "type": "STRING"},
+                {"name": "nature", "type": "STRING"},
+            ],
+        },
+        {
+            "name": "DIM_CONTRAT",
+            "columns": [
+                {"name": "id_contrat", "type": "STRING"},
+                {"name": "no_contrat_commercant", "type": "STRING"},
+            ],
+        },
+        {
+            "name": "C3",
+            "columns": [
+                {"name": "no_contrat_commercant", "type": "STRING"},
+                {"name": "partition_date", "type": "DATE"},
+                {"name": "nature", "type": "STRING"},
+            ],
+        },
+    ]
+}
+
+_MULTI_SRC_SQL = (
+    "WITH t AS ("
+    "  SELECT d.no_contrat_commercant, f.partition_date, n.nature"
+    "  FROM FAITS_PRE AS f"
+    "  JOIN DIM_NATURE AS n ON n.id_nature = f.id_nature"
+    "  JOIN DIM_CONTRAT AS d ON d.id_contrat = f.id_contrat"
+    "), "
+    "p AS (SELECT no_contrat_commercant, partition_date, nature FROM C3 WHERE nature = 'X') "
+    "SELECT * FROM t "
+    "JOIN p ON p.no_contrat_commercant = t.no_contrat_commercant"
+    "  AND p.partition_date = t.partition_date"
+    "  AND p.nature = t.nature"
+)
+
+_MULTI_SRC_USED = [
+    {"table": "C3", "used_columns": ["nature"]},
+]
+
+
+class TestBuildProfileQueryMultiSourceCteJoin(unittest.TestCase):
+    """Regression for "Unrecognized name: NATURE".
+
+    A CTE join key whose columns come from several joined base tables must not
+    be flattened onto the CTE's primary FROM table — the CTE is queried directly.
+    """
+
+    def _q(self):
+        return build_profile_query(
+            _MULTI_SRC_SCHEMA,
+            _MULTI_SRC_USED,
+            dialect="bigquery",
+            sql_query=_MULTI_SRC_SQL,
+        )
+
+    def _tp_join_parts(self, q):
+        join_parts = [p for p in q.split("UNION ALL") if "'join'" in p]
+        # The t↔p branch is the one carrying the compound merchant/date/nature key.
+        return [p for p in join_parts if "no_contrat_commercant" in p]
+
+    def test_join_branch_present(self):
+        tp_parts = self._tp_join_parts(self._q())
+        self.assertGreaterEqual(
+            len(tp_parts), 1, "Expected a join branch for the t↔p join"
+        )
+
+    def test_left_subquery_does_not_select_nature_from_faits_pre(self):
+        """The broken pattern: SELECT ... nature ... FROM `FAITS_PRE` (no nature column)."""
+        for part in self._tp_join_parts(self._q()):
+            self.assertNotIn(
+                "FAITS_PRE",
+                part,
+                "Multi-source CTE key must query the CTE `t` directly, "
+                "not the flattened primary base table FAITS_PRE",
+            )
+
+    def test_left_table_metadata_is_cte_name(self):
+        """left_table metadata for the t↔p join is the CTE name 't', not FAITS_PRE."""
+        for part in self._tp_join_parts(self._q()):
+            self.assertIn("'t'", part)
+
+
+# ─── derived-expression profiling: mixed qualified / unqualified refs ─────────
+
+
+# Mirrors the production crash "Unrecognized name: CA_FACTURE":
+# a derived expression computed in a CTE that joins three sibling CTEs.  It mixes
+# a *qualified* ref (p.frais_de_gestion → CTE p) with *unqualified* refs
+# (ca_facture → CTE u, ca_facture_matrice → CTE t).  The builder only knows the
+# qualified table (p) and would emit `... ca_facture ... FROM p`, where
+# ca_facture does not exist.  Such an expression must not be profiled.
+_DERIVED_MIXED_SQL = (
+    "WITH "
+    "t AS (SELECT id_contrat, SUM(ca) AS ca_facture_matrice FROM FAITS GROUP BY 1), "
+    "u AS (SELECT id_contrat, SUM(ca) AS ca_facture FROM FAITS GROUP BY 1), "
+    "p AS (SELECT id_contrat, frais_de_gestion FROM C3) "
+    "SELECT IF(ca_facture <> 0, p.frais_de_gestion * ca_facture_matrice / ca_facture,"
+    " p.frais_de_gestion) AS frais_ventiles "
+    "FROM t JOIN u USING (id_contrat) JOIN p USING (id_contrat)"
+)
+
+
+class TestDerivedExprMixedQualification(unittest.TestCase):
+    """Regression for "Unrecognized name: CA_FACTURE".
+
+    A derived expression mixing qualified refs (one CTE) with unqualified refs
+    (sibling CTEs) cannot be profiled against the single qualified table.
+    """
+
+    def test_mixed_qualification_expr_not_profiled(self):
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_MIXED_SQL, [], "bigquery"
+        )
+        # No branch may query a single CTE while referencing a column that lives
+        # in a sibling CTE — that is exactly the invalid pattern.
+        for b in branches:
+            lowered = b.lower()
+            self.assertFalse(
+                "ca_facture" in lowered and "from `p`" in lowered,
+                "mixed-qualification derived expr must not be profiled against CTE p",
+            )
+
+    def test_full_profile_query_parses(self):
+        schema = {
+            "tables": [
+                {
+                    "name": "FAITS",
+                    "columns": [
+                        {"name": "id_contrat", "type": "STRING"},
+                        {"name": "ca", "type": "FLOAT"},
+                    ],
+                },
+                {
+                    "name": "C3",
+                    "columns": [
+                        {"name": "id_contrat", "type": "STRING"},
+                        {"name": "frais_de_gestion", "type": "FLOAT"},
+                    ],
+                },
+            ]
+        }
+        used = [{"table": "C3", "used_columns": ["frais_de_gestion"]}]
+        q = build_profile_query(
+            schema, used, dialect="bigquery", sql_query=_DERIVED_MIXED_SQL
+        )
+        # The generated query must not reference ca_facture from a bare `FROM `p``.
+        self.assertFalse(
+            "ca_facture" in q.lower() and "from `p`" in q.lower(),
+            "profile query must not profile the mixed-qualification expression",
+        )
+        sqlglot.parse_one(q, dialect="bigquery")  # must parse
+
+
+# ─── build_profile_queries: branch isolation ─────────────────────────────────
+
+
+class TestBuildProfileQueriesIsolation(unittest.TestCase):
+    """build_profile_queries isolates join/derived branches into their own queries.
+
+    A failure in one join or derived branch must not be able to sink column
+    profiling, so column-profile branches live in their own per-table queries,
+    join branches in one query, and each derived expression in its own query.
+    """
+
+    _SCHEMA = {
+        "tables": [
+            {
+                "name": "orders",
+                "columns": [
+                    {"name": "id", "type": "STRING"},
+                    {"name": "user_id", "type": "STRING"},
+                    {"name": "raw_amount", "type": "STRING"},
+                ],
+            },
+            {
+                "name": "users",
+                "columns": [{"name": "id", "type": "STRING"}],
+            },
+        ]
+    }
+    _USED = [
+        {"table": "orders", "used_columns": ["id", "user_id", "raw_amount"]},
+        {"table": "users", "used_columns": ["id"]},
+    ]
+    _SQL = (
+        "SELECT o.id, SAFE_CAST(o.raw_amount AS FLOAT64) AS amt "
+        "FROM orders o JOIN users u ON o.user_id = u.id"
+    )
+
+    def _queries(self):
+        return build_profile_queries(
+            self._SCHEMA, self._USED, dialect="bigquery", sql_query=self._SQL
+        )
+
+    def test_column_queries_have_no_join_or_derived_branches(self):
+        """Per-table column queries must not carry join/derived branches."""
+        for q in self._queries():
+            if "'column'" in q and "'join'" not in q and "'derived_expr'" not in q:
+                continue  # a clean column-only query
+            # A query carrying a relation branch must NOT also carry column branches
+            if "'join'" in q or "'derived_expr'" in q:
+                self.assertNotIn(
+                    "'column'",
+                    q,
+                    "join/derived branches must be isolated from column profiling",
+                )
+
+    def test_each_query_parses_independently(self):
+        for q in self._queries():
+            sqlglot.parse_one(q, dialect="bigquery")
+
+    def test_join_and_derived_isolated_into_separate_queries(self):
+        queries = self._queries()
+        join_qs = [q for q in queries if "'join'" in q]
+        derived_qs = [q for q in queries if "'derived_expr'" in q]
+        # The join branch and the SAFE_CAST derived branch each get their own query.
+        self.assertEqual(len(join_qs), 1)
+        self.assertGreaterEqual(len(derived_qs), 1)
+        # And neither shares a query with the other.
+        for q in join_qs:
+            self.assertNotIn("'derived_expr'", q)
+
+    def test_one_query_per_derived_expression(self):
+        """Two distinct derived expressions → two isolated derived queries."""
+        sql = (
+            "SELECT SAFE_CAST(o.raw_amount AS FLOAT64) AS a, "
+            "REGEXP_EXTRACT(o.id, r'[0-9]+') AS b FROM orders o"
+        )
+        queries = build_profile_queries(
+            self._SCHEMA, self._USED, dialect="bigquery", sql_query=sql
+        )
+        derived_qs = [q for q in queries if "'derived_expr'" in q]
+        self.assertEqual(
+            len(derived_qs), 2, "each derived expression must be its own query"
         )
 
 
