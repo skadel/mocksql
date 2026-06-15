@@ -143,6 +143,26 @@ def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 
 
+def get_dbt_project():
+    """Retourne un `DbtProject` si un bloc `dbt:` est configuré dans mocksql.yml, sinon None.
+
+    Config attendue :
+        dbt:
+          project_dir: ../warehouse   # relatif au dossier de mocksql.yml
+          target_path: target         # optionnel (défaut: target)
+
+    Quand un projet dbt est configuré, MockSQL lit le SQL **compilé** (refs résolus,
+    macros rendues) et infère les schémas amont depuis le manifest — sans entrepôt.
+    """
+    cfg = load_config().get("dbt")
+    if not cfg or not cfg.get("project_dir"):
+        return None
+    from storage.dbt_manifest import DbtProject
+
+    project_dir = (_base_dir() / cfg["project_dir"]).resolve()
+    return DbtProject(project_dir, cfg.get("target_path", "target"))
+
+
 def get_duckdb_extensions() -> list[str]:
     """Extensions DuckDB à charger sur chaque connexion (ex: spatial, json).
 
