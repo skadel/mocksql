@@ -865,6 +865,25 @@ def _fix_bare_unnest_col_refs(sql: str, error_msg: str) -> str | None:
     return tree.sql(dialect="duckdb")
 
 
+_MISSING_EXTENSION_RE = re.compile(
+    r"but it exists in the (\w+) extension", re.IGNORECASE
+)
+
+
+def _missing_extension_hint(err: str) -> str | None:
+    """Si l'erreur DuckDB pointe une extension non chargée, renvoie un message
+    actionnable expliquant comment l'activer dans mocksql.yml. Sinon None."""
+    m = _MISSING_EXTENSION_RE.search(err or "")
+    if not m:
+        return None
+    ext = m.group(1).lower()
+    return (
+        f"Cette requête utilise une fonction de l'extension DuckDB '{ext}', "
+        f"non chargée. Active-la dans mocksql.yml :\n\n"
+        f"duckdb:\n  extensions:\n    - {ext}\n"
+    )
+
+
 async def run_query_on_test_dataset(
     query: str, session: str, project: str, dialect: str, con: duckdb.DuckDBPyConnection
 ) -> tuple[DataFrame, str]:
@@ -907,6 +926,10 @@ async def run_query_on_test_dataset(
                 raise
             current_sql = patched
         except Exception as e:
+            hint = _missing_extension_hint(str(e))
+            if hint:
+                logger.error("%s\nSQL:\n%s", hint, current_sql)
+                raise RuntimeError(hint) from e
             logger.error("Failed to run query: %s\nSQL:\n%s", e, current_sql)
             raise
 
@@ -1507,4 +1530,8 @@ def transform_timestamp(sql_query):
 
 
 def initialize_duckdb(db_path: str):
-    return duckdb.connect(db_path)
+    from storage.config import apply_duckdb_extensions
+
+    con = duckdb.connect(db_path)
+    apply_duckdb_extensions(con)
+    return con
