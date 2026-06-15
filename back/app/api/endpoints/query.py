@@ -73,7 +73,13 @@ def _qualify_two_part_refs(
             and not node.catalog
             and (node.db.lower(), node.name.lower()) in two_part_refs
         ):
-            node.set("catalog", sqlglot.exp.Identifier(this=billing_project))
+            # quoted=True : un project id peut contenir un tiret (ex. `pipetalk-493612`).
+            # Sans backticks, BigQuery lit `mon-project` comme une soustraction et le
+            # dry-run échoue. Quoter le seul segment projet est toujours valide.
+            node.set(
+                "catalog",
+                sqlglot.exp.Identifier(this=billing_project, quoted=True),
+            )
         return node
 
     return (
