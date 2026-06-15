@@ -1217,6 +1217,10 @@ async def _run_single_test_case(
         "suggestions": test_case.get("suggestions", []),
         "data": test_case.get("data", {}),
     }
+    # Contrat de branche (UNION ALL) : préservé à travers l'exécution pour que
+    # l'agent de correction (boucle bad_data) le retrouve dans les RESULTS.
+    if test_case.get("branch_plan"):
+        base["branch_plan"] = test_case["branch_plan"]
 
     try:
         # 1) Préparation et insertion des données de test
