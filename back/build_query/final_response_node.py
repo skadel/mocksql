@@ -91,12 +91,21 @@ def _fallback_message(ctx: dict) -> str:
     return head + tail
 
 
+# Types émis pendant la requête mais NON persistés dans l'historique
+# (cf. history_saver) : si final_response s'y rattache, le parent est orphelin
+# au rechargement → chaîne cassée. On les saute pour viser un message persisté.
+_NON_PERSISTED_TYPES = {MsgType.SUGGESTIONS, MsgType.EXAMPLES}
+
+
 def _parent_for_summary(state: QueryState) -> str | None:
-    """Rattache le résumé au dernier message bot de la requête courante."""
+    """Rattache le résumé au dernier message bot *persisté* de la requête courante."""
     request_id = state.get("request_id")
     messages = state.get("messages", []) or []
     for msg in reversed(messages):
-        msg_request = (getattr(msg, "additional_kwargs", {}) or {}).get("request_id")
+        kwargs = getattr(msg, "additional_kwargs", {}) or {}
+        if kwargs.get("type") in _NON_PERSISTED_TYPES:
+            continue
+        msg_request = kwargs.get("request_id")
         if request_id and msg_request == request_id:
             return msg.id
     return state.get("parent_message_id")
