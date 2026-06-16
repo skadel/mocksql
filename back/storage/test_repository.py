@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from storage.config import (
     ensure_mocksql_dir,
+    get_dbt_project,
     get_mocksql_dir,
     get_models_path,
     get_preprocessor_fn,
@@ -119,6 +120,12 @@ def list_models() -> List[Dict[str, str]]:
 
 
 def read_model_sql(model_name: str) -> Optional[str]:
+    # Mode dbt : renvoyer le SQL compilé (refs résolus, macros rendues) plutôt que le
+    # fichier brut + préprocesseur regex. Le préprocesseur reste le fallback hors-dbt.
+    dbt_project = get_dbt_project()
+    if dbt_project and dbt_project.is_dbt_model(model_name):
+        return dbt_project.compiled_sql_for_model(model_name)
+
     sql_file = get_models_path() / f"{model_name}.sql"
     if not sql_file.exists():
         return None

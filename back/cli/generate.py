@@ -333,9 +333,25 @@ async def run_generate(
     )
     preprocessor_fn = cfg.get("preprocessor_fn")
 
+    # dbt connector : si un bloc `dbt:` est configuré, MockSQL lit le SQL **compilé**
+    # (refs résolus, macros rendues) et infère les schémas amont depuis le manifest —
+    # sans jamais interroger l'entrepôt.
+    dbt_project = storage_config.get_dbt_project()
+    models_path_str = cfg.get("models_path", "./models")
+    models_base = (config.parent / models_path_str).resolve()
+    try:
+        model_name = model.resolve().relative_to(models_base).with_suffix("").as_posix()
+    except ValueError:
+        model_name = model.stem
+
     # Step 1 — read SQL (DECLARE/SET preambles are stripped inside read_sql)
     typer.echo(f"Reading {model}...")
-    sql = read_sql(model, preprocessor_fn, config.parent, dialect)
+    if dbt_project and dbt_project.is_dbt_model(model_name):
+        typer.echo(f"[dbt] SQL compilé depuis le manifest pour '{model_name}'.")
+        compiled = dbt_project.compiled_sql_for_model(model_name)
+        sql = extract_select_statement(compiled, dialect) or compiled
+    else:
+        sql = read_sql(model, preprocessor_fn, config.parent, dialect)
 
     # Step 1.5 — fail fast if the query requires generating too many rows
     from build_query.constraint_simplifier import (
@@ -360,7 +376,9 @@ async def run_generate(
 
     billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
 
-    # Step 3 — resolve schemas from cache + fetch missing
+    # Step 3 — resolve schemas via cache local + fetch BigQuery des manquants.
+    # En mode dbt, le SQL est déjà compilé (refs résolus en noms réels) ; la résolution
+    # de schéma passe par ce MÊME chemin — le connecteur dbt ne fournit pas les schémas.
     cached = load_schema_cache(cache_path)
     schemas, missing = match_refs_against_cache(refs, cached)
 
@@ -427,15 +445,9 @@ async def run_generate(
             typer.echo(f"[WARN] Profiling failed: {exc}. Continuing without profile.")
 
     # Step 4 — build state + inject schemas into in-memory cache
+    # (model_name / models_base déjà calculés en amont pour la résolution dbt)
     project_id = model.stem
     session_id = str(uuid.uuid4())
-
-    models_path_str = cfg.get("models_path", "./models")
-    models_base = (config.parent / models_path_str).resolve()
-    try:
-        model_name = model.resolve().relative_to(models_base).with_suffix("").as_posix()
-    except ValueError:
-        model_name = model.stem
 
     model_context = _load_model_context(model_name, models_base) or None
 
