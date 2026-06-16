@@ -1,120 +1,78 @@
 # Quickstart dbt
 
-MockSQL teste des fichiers `.sql` **plats et parsables**. Un projet [dbt](https://www.getdbt.com/) ne l'est pas directement : les modèles contiennent du Jinja (`{{ ref(...) }}`, `{{ config(...) }}`, `{% if is_incremental() %}`, macros `dbt_utils`…) que SQLGlot ne sait pas analyser. De plus, MockSQL a besoin du **schéma** des tables amont pour générer des données cohérentes.
+MockSQL teste des fichiers `.sql` **plats et parsables**. Un projet [dbt](https://www.getdbt.com/) ne l'est pas directement : les modèles contiennent du Jinja (`{{ ref(...) }}`, `{{ config(...) }}`, `{% if is_incremental() %}`, macros `dbt_utils`…) que SQLGlot ne sait pas analyser.
 
-La passerelle propre est la sortie de `dbt compile`, qui résout tout le Jinja en SQL pur, combinée à un **cache de schéma** bootstrapé depuis la base DuckDB matérialisée par `dbt run`.
+Le **connecteur dbt** de MockSQL fait le pont. Il a deux rôles, et deux seulement :
 
-> **Dialect** : les projets dbt-DuckDB se testent en `dialect: duckdb` (voir [Dialects supportés](quickstart.md#dialects-supportés)). Le SQL compilé contient des idiomes DuckDB natifs (`STRFTIME`, `EXTRACT`, etc.) qui s'exécutent tels quels.
+1. **Compile** — il lit le SQL **compilé** par dbt (`target/compiled/**/*.sql`), où tout le Jinja est déjà rendu : `ref()`/`source()`/`var()`/`this`/macros → SQL plat avec les **vrais noms de tables**. Ça remplace tout préprocesseur regex.
+2. **Résolution** — il retrouve le modèle dbt à partir de son chemin et fournit ce SQL compilé à MockSQL.
 
----
-
-## Vue d'ensemble
+La **récupération du schéma reste le job normal de MockSQL** : une fois le SQL compilé fourni, le flux `generate` extrait les tables référencées et importe leur schéma comme pour n'importe quelle requête (BigQuery aujourd'hui ; autres warehouses à venir). L'exécution des tests reste sur une base **DuckDB scratch** — **0 € facturé**.
 
 ```
 projet dbt
-  │  1. dbt compile + dbt run   (Jinja → SQL plat, modèles matérialisés)
+  │  dbt compile                       (Jinja → SQL plat, refs = vrais noms warehouse)
   ▼
-target/compiled/**/*.sql  +  <db>.duckdb
-  │  2. bootstrap schema_cache.json depuis le DuckDB
-  │  3. mocksql.yml (dialect: duckdb)
+target/compiled/**/*.sql  +  manifest.json
+  │  connecteur dbt (bloc `dbt:` dans mocksql.yml)
   ▼
-mocksql generate → .mocksql/tests/<model>.json
+mocksql generate ──► import schéma (warehouse) ──► génération LLM ──► exécution DuckDB
+                                                                       → .mocksql/tests/<model>.json
 ```
-
-L'exécuteur de MockSQL tourne sur une base DuckDB **scratch** remplie de données synthétiques — les vraies données dbt ne servent qu'à **bâtir le cache de schéma** (étape 2).
 
 ---
 
-## 1. Compiler et matérialiser le projet dbt
+## 1. Déclarer le projet dbt dans `mocksql.yml`
 
-Dans un environnement avec `dbt-duckdb` :
-
-```bash
-pip install dbt-duckdb
-cd mon_projet_dbt          # IMPORTANT : se placer DANS le dossier du projet
-dbt deps                   # si le projet a des packages (dbt_utils…)
-dbt compile                # résout le Jinja → target/compiled/**/*.sql
-dbt run                    # matérialise les modèles dans la base DuckDB
-```
-
-> **Piège** : `dbt` résout le chemin relatif de la base (`path: ./mon.duckdb` dans `profiles.yml`) par rapport au **répertoire d'invocation**, pas à `--project-dir`. Lancer `dbt` depuis un autre dossier crée une base vide ailleurs et `dbt run` échoue avec `Catalog Error: Table ... does not exist`. Toujours `cd` dans le projet d'abord.
-
-Après `dbt run`, tu disposes :
-- du SQL plat dans `target/compiled/<projet>/models/**/*.sql` ;
-- d'une base DuckDB (`<db>.duckdb`) contenant **toutes** les tables (sources brutes + modèles matérialisés).
-
----
-
-## 2. Bootstrap du cache de schéma depuis DuckDB
-
-Le CLI `mocksql generate` lit les schémas depuis `schema_cache.json` (sinon il interroge BigQuery). On le pré-remplit par introspection de la base DuckDB :
-
-```python
-# bootstrap_schema_cache.py
-import duckdb, json
-from pathlib import Path
-
-DUCKDB = Path("mon_projet_dbt/mon.duckdb")     # base matérialisée par dbt run
-OUT    = Path("mon_projet_dbt/.mocksql/schema_cache.json")
-
-def map_type(dt: str) -> str:
-    dt = dt.upper()
-    if any(x in dt for x in ("CHAR", "TEXT", "STRING", "UUID", "BLOB", "ENUM")): return "STRING"
-    if any(x in dt for x in ("INT", "HUGEINT")):                                 return "INTEGER"
-    if any(x in dt for x in ("DOUBLE", "FLOAT", "REAL", "DECIMAL", "NUMERIC")):  return "FLOAT"
-    if "BOOL" in dt:                                                             return "BOOLEAN"
-    # DuckDB TIMESTAMP (naïf) → BigQuery DATETIME (naïf). Mapper vers TIMESTAMP
-    # (tz-aware côté BQ) donnerait un TIMESTAMPTZ en DuckDB et casserait STRFTIME.
-    if "TIMESTAMP WITH TIME ZONE" in dt or "TIMESTAMPTZ" in dt:                  return "TIMESTAMP"
-    if "TIMESTAMP" in dt or "DATETIME" in dt:                                    return "DATETIME"
-    if dt.startswith("DATE"):                                                    return "DATE"
-    if dt.startswith("TIME"):                                                    return "TIME"
-    return "STRING"
-
-con = duckdb.connect(str(DUCKDB), read_only=True)
-tables = []
-for db, sch, tn in con.execute(
-    "select database_name, schema_name, table_name from duckdb_tables order by 1,2,3"
-).fetchall():
-    cols = con.execute(
-        "select column_name, data_type from information_schema.columns "
-        "where table_catalog=? and table_schema=? and table_name=? order by ordinal_position",
-        [db, sch, tn],
-    ).fetchall()
-    columns = [
-        {"name": c, "type": map_type(t), "mode": "NULLABLE", "description": "", "bq_ddl_type": map_type(t)}
-        for c, t in cols
-    ]
-    tables.append({"table_name": f"{db}.{sch}.{tn}", "description": "", "columns": columns})
-con.close()
-
-OUT.parent.mkdir(parents=True, exist_ok=True)
-OUT.write_text(json.dumps({"tables": tables}, indent=2), encoding="utf-8")
-print(f"{len(tables)} table(s) écrites dans {OUT}")
-```
-
-Le `table_name` doit être **qualifié comme dans le SQL compilé** : dbt-DuckDB émet `"<db>"."<schema>"."<table>"` (3 parties). Le matching du cache est insensible à la casse et accepte un suffixe (`schema.table`), donc reproduire `database.schema.table` suffit.
-
-> **Mapping de type** : le DDL interne de MockSQL est en syntaxe BigQuery, donc `bq_ddl_type` doit l'être aussi. La subtilité courante est `TIMESTAMP` : un `TIMESTAMP` DuckDB naïf doit être mappé en `DATETIME` (BQ), pas en `TIMESTAMP` (tz-aware) — sinon il revient en `TIMESTAMPTZ` côté DuckDB et les fonctions comme `STRFTIME` échouent.
-
----
-
-## 3. `mocksql.yml`
-
-Pointe `models_path` vers le SQL **compilé** (copié à plat, ou directement le sous-dossier `target/compiled/...`) :
+Ajoute un bloc `dbt:` à la config MockSQL. C'est ce qui **active le connecteur** :
 
 ```yaml
 version: "2"
-dialect: duckdb
-models_path: ./models             # SQL compilé par dbt
-duckdb_path: .mocksql/scratch.duckdb   # base scratch d'exécution (≠ base dbt)
-schema_cache: .mocksql/schema_cache.json
+dialect: bigquery                 # bigquery pour un projet dbt-BigQuery ; duckdb pour dbt-duckdb
+models_path: ./models             # le dossier models/ du projet dbt
+dbt:
+  project_dir: .                  # dossier contenant dbt_project.yml (relatif à ce mocksql.yml)
+  target_path: target             # optionnel (défaut : target)
 llm:
   provider: vertexai
-  streaming: false
 ```
 
-> `duckdb_path` est la base **scratch** où MockSQL crée les tables synthétiques. Ne pas la pointer vers la base dbt matérialisée.
+Quand `dbt:` est présent, pour tout modèle reconnu comme modèle dbt, MockSQL lit le **SQL compilé** au lieu du fichier `.sql` brut. Un éventuel `preprocessor_fn` devient inutile (le compile fait déjà le travail).
+
+> **Dialect** : `bigquery` pour un projet dbt-BigQuery (le SQL compilé garde les idiomes BQ, MockSQL les transpile vers DuckDB à l'exécution). `duckdb` pour un projet nativement dbt-duckdb.
+
+---
+
+## 2. Compiler le projet dbt
+
+Dans un environnement avec l'adaptateur dbt de ton warehouse (ex. `dbt-bigquery`) :
+
+```bash
+cd mon_projet_dbt           # IMPORTANT : se placer DANS le dossier du projet
+dbt deps                    # si le projet a des packages (dbt_utils, dbt_date…)
+dbt compile                 # Jinja → target/compiled/**/*.sql
+```
+
+`dbt compile` n'exécute rien sur le warehouse — il rend juste le Jinja. Le résultat est dans `target/compiled/<projet>/models/**/*.sql`, avec les `ref()`/`source()` résolus en **vrais noms de tables**.
+
+> **Piège `relation_name`** : le nom des tables dans le SQL compilé dépend du **profil de compile**. Compile avec le **target réel de ton warehouse** (ton `profiles.yml` habituel) pour que les refs soient les vrais noms warehouse — sinon l'import MockSQL ne les retrouvera pas.
+
+---
+
+## 3. Matérialiser les modèles parents (pour tester un mart)
+
+C'est le point clé pour les **marts** et **intermediates** : un mart référence d'**autres modèles** (`{{ ref('products') }}`), pas des tables brutes. Pour générer des données cohérentes, MockSQL importe le schéma de ces parents — **ils doivent donc exister dans le warehouse**.
+
+- Modèles **staging** : leurs refs sont des **sources réelles** → déjà présentes, rien à faire.
+- Modèles **mart / intermediate** : leurs parents sont des modèles dérivés → il faut les matérialiser :
+
+```bash
+dbt run --select +mon_mart     # construit le mart ET tous ses ancêtres
+```
+
+Une fois `dbt run` passé, les tables parentes existent et `mocksql generate` peut importer leur schéma.
+
+> Si tu sautes cette étape sur un mart, `mocksql generate` échouera à l'import avec « table not found » sur un modèle parent.
 
 ---
 
@@ -122,17 +80,68 @@ llm:
 
 ```bash
 DUCKDB_PATH=mon_projet_dbt/.mocksql/scratch.duckdb \
-mocksql generate mon_projet_dbt/models/mon_modele.sql \
+mocksql generate mon_projet_dbt/models/marts/core/sales.sql \
   --config mon_projet_dbt/mocksql.yml \
   --output mon_projet_dbt/.mocksql/tests
 ```
 
-Le cache étant pré-rempli, aucune requête BigQuery n'est émise. Chaque modèle produit un `.mocksql/tests/<model>.json` avec données d'entrée, résultats DuckDB, assertions et verdict.
+Déroulé :
+1. `[dbt] SQL compilé depuis le manifest` — le connecteur fournit le SQL plat (zéro Jinja).
+2. `Fetching schema for: …` — MockSQL importe les schémas des tables référencées depuis le warehouse.
+3. Génération LLM des données synthétiques, exécution sur DuckDB scratch, verdict.
+4. Écriture de `.mocksql/tests/<model>.json` (données d'entrée, résultats DuckDB, assertions, verdict).
+
+> `DUCKDB_PATH` est la base **scratch** où MockSQL crée les tables synthétiques — distincte de toute base dbt.
+
+### Credentials
+
+Les credentials warehouse + LLM sont lus depuis `back/.env` (via `load_dotenv()`) :
+
+```
+GOOGLE_APPLICATION_CREDENTIALS=C:\chemin\absolu\service-account.json
+VERTEX_PROJECT=mon-projet-gcp
+```
 
 ---
 
-## Limites connues
+## 5. (Optionnel) Évaluer la qualité sur tout le projet
 
-- **Un projet mocksql par projet dbt** : chaque exemple dbt a son propre `dbt_project.yml`/`profiles.yml` et sa base — ils ne se partagent pas.
-- **Logique date-relative** (`CURRENT_DATE`, fenêtres glissantes) : la génération peut produire des données hors plage et un résultat vide. C'est un signal qualité légitime, pas un bug de setup.
-- **Macros à effet d'exécution** (snapshots, `incremental` avancé) : `dbt compile` élide les branches `{% if is_incremental() %}` (faux au compile) — le test porte donc sur le chemin non-incrémental.
+Le skill `/eval-mocksql` génère les tests de tous les modèles puis les note via un juge LLM :
+
+```
+/eval-mocksql mon_projet_dbt
+```
+
+Rapport : score `données` / `test` + validité par modèle, et taux global.
+
+---
+
+## Récapitulatif workflow
+
+```bash
+# une fois
+cd mon_projet_dbt && dbt deps
+
+# à chaque changement de modèle / schéma
+dbt compile                          # met à jour le SQL compilé
+dbt run --select +mon_mart           # (marts uniquement) matérialise les parents
+mocksql generate models/.../mon_mart.sql --config mocksql.yml --output .mocksql/tests
+```
+
+---
+
+## Pièges & limites connus
+
+- **`relation_name` = profil de compile** : compiler avec le vrai target warehouse, sinon refs incohérentes (cf. §2).
+- **Marts → parents matérialisés** : un mart n'est testable que si ses modèles amont existent en base (cf. §3).
+- **Un projet mocksql par projet dbt** : chaque projet a son `dbt_project.yml`/`profiles.yml` et son `mocksql.yml`.
+- **Logique date-relative** (`CURRENT_DATE`, fenêtres glissantes) : la génération peut produire des données hors plage → résultat vide. Signal qualité légitime, pas un bug de setup.
+- **Macros à effet d'exécution** (`{% if is_incremental() %}`) : `dbt compile` élide la branche incrémentale (fausse au compile) → le test porte sur le chemin non-incrémental.
+
+---
+
+## Limitation : warehouses autres que BigQuery
+
+Aujourd'hui, l'import de schéma de MockSQL ne sait interroger que **BigQuery**. Pour un projet **dbt-duckdb** ou **sans accès warehouse**, il n'y a donc pas encore de chemin d'import automatique.
+
+En attendant les **connecteurs warehouse** (Snowflake, Databricks, DuckDB… — sur la roadmap), un contournement existe : pré-remplir manuellement `.mocksql/schema_cache.json` (clé `schema_cache` du `mocksql.yml`) par introspection de la base matérialisée par `dbt run`, en `dialect: duckdb`. C'est un palliatif, pas la méthode cible — le détail du script de bootstrap est dans l'historique git de ce fichier.
