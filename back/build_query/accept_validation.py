@@ -40,7 +40,7 @@ async def _realign_description(
     old_desc = test_case.get("unit_test_description", "")
     old_name = test_case.get("test_name", "")
     try:
-        sample = json.loads(test_case.get("results_json") or "[]")[:5]
+        sample = json.loads(test_case.get("results_json") or "[]")
     except Exception:
         sample = []
 
@@ -48,7 +48,7 @@ async def _realign_description(
 Titre actuel : {old_name}
 
 Sortie réelle de la requête : {actual_rows} ligne(s).
-Échantillon : {json.dumps(sample, ensure_ascii=False, default=str)[:800]}
+Sortie réelle complète : {json.dumps(sample, ensure_ascii=False, default=str)}
 
 L'utilisateur a VALIDÉ que cette sortie est le comportement attendu. La description
 ci-dessus suppose un nombre de lignes différent — réécris-la pour qu'elle décrive

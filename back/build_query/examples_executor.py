@@ -1470,7 +1470,10 @@ async def _generate_assertions_and_evaluate(
     """
     schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
     schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
-    sample = result_df.head(5).to_dict(orient="records")
+    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
+    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
+    # petits résultats — aucun risque de budget de prompt.
+    sample = result_df.to_dict(orient="records")
     row_count = len(result_df)
 
     # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
@@ -1749,7 +1752,10 @@ async def _generate_diagnostic(
 ) -> Optional[DiagnosticBlock]:
     """Second focused LLM call to produce a surgical DiagnosticBlock when bad_data is detected.
     Uses DiagnosticBlock directly as structured output schema — all fields required, no Optional."""
-    sample = result_df.head(5).to_dict(orient="records")
+    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
+    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
+    # petits résultats — aucun risque de budget de prompt.
+    sample = result_df.to_dict(orient="records")
     row_count = len(result_df)
 
     prompt = f"""Tu es un expert en tests SQL. Le test suivant a été jugé "bad_data" : les données d'entrée ne permettent pas de valider le scénario.
@@ -2070,7 +2076,10 @@ async def _fix_logically_failing_assertions(
     """
     schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
     schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
-    sample = result_df.head(5).to_dict(orient="records")
+    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
+    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
+    # petits résultats — aucun risque de budget de prompt.
+    sample = result_df.to_dict(orient="records")
     results = list(assertion_results)
 
     failing_indices = [

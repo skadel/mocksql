@@ -17,6 +17,22 @@ from utils.test_utils import find_current_test
 logger = logging.getLogger(__name__)
 
 
+def _format_input_for_judge(input_data) -> str:
+    """Sérialise les données d'entrée pour le juge LLM **sans troncature**.
+
+    Les données d'entrée (et la sortie) sont l'information la plus importante pour
+    juger un test : les tronquer — a fortiori au milieu d'un objet JSON — faisait
+    croire au juge que la donnée était malformée/incomplète. Il hallucinait alors un
+    « jeu de données tronqué » comme cause d'un résultat vide, alors que DuckDB avait
+    reçu les données complètes. On émet toujours le JSON complet et valide (les mocks
+    produisent de petits volumes, aucun risque de budget de prompt).
+    """
+    try:
+        return json.dumps(input_data, ensure_ascii=False, indent=2)
+    except Exception:
+        return str(input_data)
+
+
 class _ReevalResult(BaseModel):
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
     explanation: str
@@ -32,10 +48,7 @@ async def _reevaluate_empty_result(
     reason = state.get("reevaluation_context", "")
     eval_test_index = current_test.get("test_index")
 
-    try:
-        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)[:800]
-    except Exception:
-        input_summary = str(input_data)[:800]
+    input_summary = _format_input_for_judge(input_data)
 
     prompt = f"""SQL testé (dialecte {state.get("dialect", "bigquery")}) :
 {sql}
@@ -118,10 +131,7 @@ async def _classify_empty_intent(
     """
     test_desc = current_test.get("unit_test_description", "")
     input_data = current_test.get("data", {})
-    try:
-        input_summary = json.dumps(input_data, ensure_ascii=False, indent=2)[:800]
-    except Exception:
-        input_summary = str(input_data)[:800]
+    input_summary = _format_input_for_judge(input_data)
 
     prompt = f"""SQL testé (dialecte {state.get("dialect", "bigquery")}) :
 {sql}
