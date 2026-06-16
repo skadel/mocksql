@@ -217,7 +217,7 @@ class _Assertion(BaseModel):
             "les autres → utilise le champ `scope` pour restreindre l'univers (cf. `scope`). "
             "Pour valider un TRI / un ORDER BY, affirme la RELATION d'ordre (ex. la valeur "
             "triée de la 1ʳᵉ ligne ≥ celle des suivantes), ou positionne la ligne par sa "
-            "VALEUR de tri via `scope` (`scope: \"volume = (SELECT MAX(volume) FROM "
+            'VALEUR de tri via `scope` (`scope: "volume = (SELECT MAX(volume) FROM '
             "__result__)\"`) — n'épingle JAMAIS une clé technique (id, code, uuid) à une "
             "position pour 'prouver' l'ordre : c'est fragile (ça casse au moindre changement "
             "de données) et ça ne teste pas la logique de tri. "
@@ -948,6 +948,128 @@ def _single_alias_of(expr: exp.Expression) -> Optional[str]:
     return next(iter(aliases)) if len(aliases) == 1 else None
 
 
+def _extract_eq_subquery_filters(
+    where_expr: Optional[exp.Expression],
+) -> list[tuple]:
+    """Extrait les égalités top-level ``col = (SELECT …)`` du WHERE — pure (testable
+    sans DuckDB). Retourne ``[(col_node, subquery_node)]``.
+
+    Cible les blocages que la décomposition de JOIN ne couvre pas : un filtre dont
+    la valeur attendue est calculée par une sous-requête scalaire sur une CTE amont
+    (ex. bq130 : ``WHERE state_name = (SELECT state_name FROM FourthState)``).
+    """
+    if where_expr is None:
+        return []
+    body = where_expr.this if isinstance(where_expr, exp.Where) else where_expr
+    out: list[tuple] = []
+    for pred in _extract_conditions(body):
+        inner = pred
+        while isinstance(inner, exp.Paren):
+            inner = inner.this
+        if not isinstance(inner, exp.EQ):
+            continue
+        lhs, rhs = inner.this, inner.args.get("expression")
+        for col_side, sub_side in ((lhs, rhs), (rhs, lhs)):
+            col = col_side
+            sub = sub_side
+            while isinstance(col, exp.Paren):
+                col = col.this
+            while isinstance(sub, exp.Paren):
+                sub = sub.this
+            if isinstance(col, exp.Column) and isinstance(sub, exp.Subquery):
+                out.append((col, sub))
+                break
+    return out
+
+
+async def _run_scalar_filter_breakdown(
+    ctes: list, failing_idx: int, suffix: str, project: str, dialect: str, con
+) -> list:
+    """Décompose les filtres ``WHERE col = (sous-requête scalaire)`` de la CTE
+    bloquante : valeur ATTENDUE (la sous-requête) vs valeurs PRÉSENTES de la colonne.
+
+    Complément de ``_run_join_predicate_breakdown`` (qui ne couvre que les ``JOIN ON``).
+    Produit la même ligne « veut X, présent {Y} ← BLOQUANT », ce qui rend lisible le
+    mismatch — et, lu d'une tentative à l'autre via le ledger, expose une valeur
+    attendue qui *bouge* (vide non-déterministe).
+    """
+    cte = ctes[failing_idx]
+    preceding = [c for c in ctes[:failing_idx] if c["name"] != "final_query"]
+    try:
+        tree = sqlglot.parse_one(cte["code"], read=dialect)
+    except Exception:
+        return []
+    if not isinstance(tree, exp.Select):
+        return []
+    filters = _extract_eq_subquery_filters(tree.args.get("where"))
+    if not filters:
+        return []
+
+    sources: Dict[str, str] = {}
+
+    def _register(src) -> None:
+        if src is None:
+            return
+        alias = (getattr(src, "alias", "") or "") or (getattr(src, "name", "") or "")
+        if alias:
+            sources[alias.lower()] = src.sql(dialect=dialect)
+
+    from_expr = tree.args.get("from") or tree.args.get("from_")
+    if from_expr is not None:
+        _register(from_expr.this)
+    for j in tree.args.get("joins") or []:
+        _register(j.this)
+
+    with_prefix = ""
+    if preceding:
+        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding]
+        with_prefix = "WITH " + ",\n".join(with_parts) + "\n"
+
+    def _norm(v) -> str:
+        return "NULL" if v is None or v != v else str(v)
+
+    lines: list = []
+    for col, sub in filters:
+        try:
+            want_df, _ = await run_query_on_test_dataset(
+                f"{with_prefix}SELECT ({sub.this.sql(dialect=dialect)}) AS v",
+                suffix,
+                project,
+                dialect,
+                con,
+            )
+        except Exception as exc:
+            logger.debug("scalar filter breakdown (wanted) failed: %s", exc)
+            continue
+        wanted = _norm(want_df.iloc[0, 0]) if not want_df.empty else "NULL"
+
+        present: list = []
+        alias = _single_alias_of(col)
+        if alias and alias in sources:
+            try:
+                pres_df, _ = await run_query_on_test_dataset(
+                    f"{with_prefix}SELECT DISTINCT {col.sql(dialect=dialect)} AS v "
+                    f"FROM {sources[alias]} LIMIT 50",
+                    suffix,
+                    project,
+                    dialect,
+                    con,
+                )
+                present = [_norm(v) for v in pres_df.iloc[:, 0]]
+            except Exception as exc:
+                logger.debug("scalar filter breakdown (present) failed: %s", exc)
+
+        satisfiable = wanted != "NULL" and wanted in present
+        marker = "" if satisfiable else " ← BLOQUANT"
+        shown = ", ".join(present[:5])
+        more = f", … ({len(present)} valeurs)" if len(present) > 5 else ""
+        lines.append(
+            f"{col.sql(dialect=dialect)} = (sous-requête) → veut '{wanted}', "
+            f"présent {{{shown}{more}}}{marker}"
+        )
+    return lines
+
+
 async def _run_join_predicate_breakdown(
     ctes: list, failing_idx: int, suffix: str, project: str, dialect: str, con
 ) -> list:
@@ -1154,6 +1276,18 @@ async def _run_cte_trace(
                 )
                 if steps:
                     result["steps"] = steps
+            elif row_count <= 3:
+                # CTE pivot à faible cardinalité (ex. un `LIMIT 1 OFFSET n` qui
+                # alimente un filtre d'égalité en aval) : on capture sa valeur, pas
+                # juste son row_count. Sans ça, l'évolution du ledger d'une tentative
+                # à l'autre ne révèle pas qu'une valeur de jointure bouge (cause d'un
+                # vide non-déterministe). Sérialisé JSON-safe (dates → str).
+                try:
+                    result["sample"] = json.loads(
+                        json.dumps(df.to_dict(orient="records"), default=str)
+                    )
+                except Exception:
+                    pass
             trace[cte["name"]] = result
         except Exception as e:
             # Message DuckDB + SQL de l'étape : sans eux, impossible de distinguer
@@ -1303,18 +1437,31 @@ async def _run_single_test_case(
                     (i for i, c in enumerate(ctes) if c["name"] == failing_cte), None
                 )
                 if failing_idx is not None:
+                    breakdown = []
                     try:
                         breakdown = await _run_join_predicate_breakdown(
                             ctes, failing_idx, suffix, state["project"], dialect, con
                         )
-                        if breakdown:
-                            cte_trace[failing_cte]["join_breakdown"] = breakdown
                     except Exception as exc:
                         logger.debug(
                             "join predicate breakdown failed for %s: %s",
                             failing_cte,
                             exc,
                         )
+                    # Filtres `WHERE col = (sous-requête scalaire)` : non couverts par
+                    # la décomposition de JOIN (cf. bq130 — filtre sur le 4ᵉ état).
+                    try:
+                        breakdown = breakdown + await _run_scalar_filter_breakdown(
+                            ctes, failing_idx, suffix, state["project"], dialect, con
+                        )
+                    except Exception as exc:
+                        logger.debug(
+                            "scalar filter breakdown failed for %s: %s",
+                            failing_cte,
+                            exc,
+                        )
+                    if breakdown:
+                        cte_trace[failing_cte]["join_breakdown"] = breakdown
             return {
                 **base,
                 "status": "empty_results",

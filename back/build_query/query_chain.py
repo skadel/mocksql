@@ -111,18 +111,24 @@ async def _bad_data_to_agent(state: QueryState):
     update: dict = {"auto_correct": True}
     attempts = list(state.get("correction_attempts") or [])
     if attempts and attempts[-1].get("outcome") is None:
-        from build_query.examples_generator import _get_failing_cte_from_results
+        from build_query.examples_generator import (
+            _compact_cte_trace,
+            _get_failing_cte_from_results,
+        )
 
-        failing_cte, _trace = _get_failing_cte_from_results(state.get("messages", []))
+        failing_cte, trace = _get_failing_cte_from_results(state.get("messages", []))
         digest = (
             f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
             if failing_cte
             else "verdict toujours Insuffisant (bad_data)"
         )
-        attempts[-1] = {
-            **attempts[-1],
-            "outcome": {"blocking_cte": failing_cte, "digest": digest},
-        }
+        outcome: dict = {"blocking_cte": failing_cte, "digest": digest}
+        # Trace structuré complet (profil row_count de TOUTES les CTE + valeurs des
+        # pivots + mismatch jointure) : conservé par tentative pour que l'agent lise
+        # l'ÉVOLUTION (erreur 1 → erreur 2) plutôt qu'un symptôme isolé.
+        if trace:
+            outcome["cte_trace"] = _compact_cte_trace(failing_cte, trace)
+        attempts[-1] = {**attempts[-1], "outcome": outcome}
         update["correction_attempts"] = attempts
     return update
 
