@@ -439,7 +439,7 @@ async def evaluate_tests(state: QueryState):
     #   bad_description  → écart de VALEUR concrète (la description ment sur une valeur de sortie)
     # Dans les deux cas, l'évaluateur a proposé une `corrected_description` qu'accept_validation
     # appliquera au clic. Cf. assertion_generator (détection) et accept_validation (application).
-    if reason_type in ("needs_validation", "bad_description"):
+    if reason_type in ("needs_validation", "bad_description", "bad_input_description"):
         actual_rows = 0
         try:
             actual_rows = len(json.loads(current_test.get("results_json") or "[]"))
@@ -461,6 +461,24 @@ async def evaluate_tests(state: QueryState):
                 "Le résultat ne correspond pas à la cardinalité supposée par la description. "
                 "Valides-tu ce résultat tel quel, ou faut-il corriger le test ?"
             )
+        elif reason_type == "bad_input_description":
+            # Desync description ↔ données d'ENTRÉE injectées (TICKET-2). On ne réécrit
+            # JAMAIS le narratif en silence : si le test porte une prémisse utilisateur
+            # (TICKET-1), la question pointe l'attente énoncée plutôt que de proposer un
+            # simple réalignement cosmétique.
+            if current_test.get("user_premise"):
+                question = (
+                    "Les données injectées ne correspondent pas à la prémisse que tu as "
+                    "énoncée pour ce test. Valides-tu les données réelles (la description "
+                    "sera réalignée), ou faut-il corriger les données pour respecter ta "
+                    "prémisse ?"
+                )
+            else:
+                question = (
+                    "La description annonce des valeurs d'entrée qui ne correspondent pas "
+                    "aux données réellement injectées. Valides-tu les données telles quelles "
+                    "(la description sera réalignée), ou faut-il corriger le test ?"
+                )
         else:  # bad_description
             question = (
                 "La description annonce une valeur que le calcul ne produit pas. Valides-tu la "
