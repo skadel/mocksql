@@ -552,6 +552,38 @@ def expand_positional_group_by(expr: exp.Expression) -> exp.Expression:
     return expr
 
 
+def _build_identifier_case_map(parsed, tables) -> dict[str, str]:
+    """Construit une table {nom_en_lowercase -> casse_d'origine} pour restaurer la
+    casse écrite par l'utilisateur après ``normalize_identifiers`` (qui lowercase
+    tout). La casse écrite dans la requête prime sur celle du schéma."""
+    case_map: dict[str, str] = {}
+    # 1) Casse canonique du schéma (tables + colonnes) — fallback.
+    for table_name, columns in tables.items():
+        for part in str(table_name).split("."):
+            case_map.setdefault(part.lower(), part)
+        for col in columns:
+            case_map.setdefault(col.lower(), col)
+    # 2) Casse écrite par l'utilisateur — prioritaire (écrase le schéma).
+    for ident in parsed.find_all(exp.Identifier):
+        if not ident.quoted:
+            case_map[ident.this.lower()] = ident.this
+    return case_map
+
+
+def _restore_identifier_case(expr, case_map: dict[str, str]):
+    """Réapplique la casse d'origine sur les identifiants non-quotés. Indispensable
+    car ``normalize_identifiers`` lowercase tout : sur un UNPIVOT le nom de colonne
+    devient une *valeur* de sortie (`Jan` → `'Jan'`), et BigQuery préserve la casse.
+    Les identifiants inconnus de la map (alias générés par qualify) sont laissés."""
+    for ident in expr.find_all(exp.Identifier):
+        if ident.quoted:
+            continue
+        original = case_map.get(ident.this.lower())
+        if original and original != ident.this:
+            ident.set("this", original)
+    return expr
+
+
 def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
     from sqlglot.optimizer.qualify_columns import qualify_columns
@@ -561,6 +593,9 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
         schema = MappingSchema()
         for table_name, columns in tables.items():
             schema.add_table(table_name, columns, dialect=dialect)
+
+    # Casse d'origine capturée AVANT normalize_identifiers, restaurée en sortie.
+    case_map = _build_identifier_case_map(parsed, tables)
 
     with timed("validate:       normalize_identifiers"):
         parsed = normalize_identifiers(parsed, dialect=dialect)
@@ -572,8 +607,11 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
         except Exception:
             pre_optimize = parsed
         try:
-            return sqlglot.optimizer.optimize(
-                pre_optimize, schema=schema, dialect=dialect
+            return _restore_identifier_case(
+                sqlglot.optimizer.optimize(
+                    pre_optimize, schema=schema, dialect=dialect
+                ),
+                case_map,
             )
         except Exception as e:
             logger.warning(
@@ -629,7 +667,7 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
             except Exception:
                 logger.warning("optimize_query: passe '%s' ignorée (best-effort)", name)
 
-    return expr
+    return _restore_identifier_case(expr, case_map)
 
 
 def find_columns_used(data):
