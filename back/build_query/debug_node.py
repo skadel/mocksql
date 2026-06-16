@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 async def debug_test_node(state: QueryState) -> Dict[str, Any]:
-    """Execute one or more debug tools (run_cte / count_cte_steps) and emit all results."""
+    """Execute one or more run_cte debug calls and emit all results."""
     tool_call = state.get("agent_tool_call")
     args = state.get("agent_tool_args") or {}
 
