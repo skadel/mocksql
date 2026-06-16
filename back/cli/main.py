@@ -243,8 +243,26 @@ def generate(
         "--profile",
         help="Run BigQuery profiling before generation to improve data quality.",
     ),
+    overwrite: bool = typer.Option(
+        False,
+        "--overwrite",
+        help="Rebuild the whole suite from scratch (DESTRUCTIVE: drops existing tests "
+        "and assert specs). Default is additive — generate only ever adds a test.",
+    ),
+    instruction: str = typer.Option(
+        None,
+        "--instruction",
+        "-i",
+        help="Natural-language scenario for the test to add, e.g. "
+        '"un client avec deux cartes → trajet dupliqué". Additive mode only.',
+    ),
 ) -> None:
-    """Parse a SQL model, fetch missing schemas, and generate test data."""
+    """Parse a SQL model, fetch missing schemas, and generate test data.
+
+    Additive by default: if a suite already exists, generate ADDS a test (targeted
+    by -i/--instruction) and preserves existing tests + assert specs. Use --overwrite
+    to rebuild the full suite from scratch.
+    """
     import asyncio
 
     from cli.generate import run_generate
@@ -252,7 +270,55 @@ def generate(
     config = config.resolve()
     if not output_dir.is_absolute():
         output_dir = (config.parent / output_dir).resolve()
-    asyncio.run(run_generate(model, config, output_dir, profile=profile))
+    asyncio.run(
+        run_generate(
+            model,
+            config,
+            output_dir,
+            profile=profile,
+            overwrite=overwrite,
+            instruction=instruction,
+        )
+    )
+
+
+@app.command("update-test")
+def update_test(
+    model: Path = typer.Argument(..., help="Path to the .sql model file."),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the existing test to modify."
+    ),
+    instruction: str = typer.Option(
+        ...,
+        "--instruction",
+        "-i",
+        help='What to change, e.g. "ajoute une ligne : un client avec 2 cartes".',
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+    output_dir: Path = typer.Option(Path(".mocksql/tests"), "--output", "-o"),
+) -> None:
+    """Modify an existing test via the LLM (add/edit data). Preserves assert specs.
+
+    Unlike `generate` (which only ADDS a test), update-test targets one existing test
+    by test_uid and lets the agent change its data, then re-runs it. Spec assertions
+    (added via `mocksql assert`) are carried over untouched.
+    """
+    import asyncio
+
+    from cli.generate import run_generate
+
+    config = config.resolve()
+    if not output_dir.is_absolute():
+        output_dir = (config.parent / output_dir).resolve()
+    asyncio.run(
+        run_generate(
+            model,
+            config,
+            output_dir,
+            instruction=instruction,
+            update_uid=test_uid,
+        )
+    )
 
 
 @app.command()
@@ -275,20 +341,40 @@ def test(
     fail_fast: bool = typer.Option(
         False, "--fail-fast", "-x", help="Stop after the first failing test."
     ),
+    frozen: bool = typer.Option(
+        False,
+        "--frozen",
+        help="Replay the SQL snapshot frozen in the test JSON instead of the live "
+        ".sql source file (default: read from disk).",
+    ),
 ) -> None:
-    """Re-run saved test cases against DuckDB. No LLM calls. Exits 1 if any test fails."""
+    """Re-run saved test cases against DuckDB. No LLM calls. Exits 1 if any test fails.
+
+    By default the SQL is read fresh from the source .sql file (so it reflects your
+    latest edits — the basis of the agent fix loop). Use --frozen to replay the
+    snapshot stored at generate time.
+    """
     import asyncio
     import json as _json
 
     from cli.test_runner import run_tests
 
     model_filters = list(model) or None
-    exit_code, model_results = asyncio.run(run_tests(config, model_filters, fail_fast))
+    exit_code, model_results = asyncio.run(
+        run_tests(config, model_filters, fail_fast, frozen=frozen)
+    )
 
     if output_json:
         typer.echo(_json.dumps(model_results, indent=2, default=str))
     else:
         _print_test_results(model_results)
+        for mr in model_results:
+            if mr.get("sql_source") == "snapshot-fallback":
+                typer.echo(
+                    f"  [WARN] {mr['model']}: source .sql introuvable — rejoué sur le "
+                    "snapshot figé du JSON (dérive possible).",
+                    err=True,
+                )
 
     raise typer.Exit(exit_code)
 
@@ -418,6 +504,115 @@ def _print_check_results(results: list[dict]) -> None:
             typer.echo(
                 f"  {n_missing} model(s) with no tests — run `mocksql generate <model.sql>`"
             )
+
+
+assert_app = typer.Typer(
+    name="assert",
+    help="Manage assertions (specs) on a test case — list/add/update/remove.",
+    no_args_is_help=True,
+)
+app.add_typer(assert_app, name="assert")
+
+
+def _emit(payload: dict) -> None:
+    import json as _json
+
+    typer.echo(_json.dumps(payload, indent=2, ensure_ascii=False, default=str))
+
+
+@assert_app.command("list")
+def assert_list(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(..., "--test-uid", "-u", help="Target test_uid."),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """List assertions on a test case (backfills short assertion_uids)."""
+    from cli.assert_cmd import AssertError, run_list
+
+    try:
+        _emit(run_list(config.resolve(), model, test_uid))
+    except AssertError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@assert_app.command("add")
+def assert_add(
+    model: str = typer.Argument(...),
+    test_uid: str = typer.Option(..., "--test-uid", "-u"),
+    description: str = typer.Option(..., "--description", "-d", help="Human spec."),
+    sql: str = typer.Option(
+        ...,
+        "--sql",
+        "-s",
+        help="dbt-style assertion SQL: SELECT the FAILING rows (0 rows = pass). "
+        "Use __result__ as the model output table.",
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Add a spec assertion and re-run it against the live .sql to confirm red/green."""
+    import asyncio
+
+    from cli.assert_cmd import AssertError, run_add
+
+    try:
+        result = asyncio.run(
+            run_add(config.resolve(), model, test_uid, description, sql)
+        )
+        _emit(result)
+    except AssertError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@assert_app.command("update")
+def assert_update(
+    model: str = typer.Argument(...),
+    test_uid: str = typer.Option(..., "--test-uid", "-u"),
+    assertion_uid: str = typer.Option(..., "--assertion-id", "-a"),
+    description: str = typer.Option(None, "--description", "-d"),
+    sql: str = typer.Option(None, "--sql", "-s"),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Edit an existing assertion and re-run it against the live .sql."""
+    import asyncio
+
+    from cli.assert_cmd import AssertError, run_update
+
+    if description is None and sql is None:
+        typer.echo(
+            "[ERROR] Rien à modifier : passe --description et/ou --sql.", err=True
+        )
+        raise typer.Exit(1)
+    try:
+        result = asyncio.run(
+            run_update(
+                config.resolve(), model, test_uid, assertion_uid, description, sql
+            )
+        )
+        _emit(result)
+    except AssertError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@assert_app.command("remove")
+def assert_remove(
+    model: str = typer.Argument(...),
+    test_uid: str = typer.Option(..., "--test-uid", "-u"),
+    assertion_uid: str = typer.Option(..., "--assertion-id", "-a"),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Remove an assertion from a test case."""
+    from cli.assert_cmd import AssertError, run_remove
+
+    try:
+        _emit(run_remove(config.resolve(), model, test_uid, assertion_uid))
+    except AssertError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
 
 
 @app.command("refresh-schemas")

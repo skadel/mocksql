@@ -234,26 +234,169 @@ def _extract_suggestions(final_state: dict) -> list[str]:
     return []
 
 
-def _write_test_file(
-    model: Path,
-    output_dir: Path,
+def merge_test_cases(existing: list | None, generated: list | None) -> list:
+    """Fusionne les cas générés DANS les cas existants, sans rien détruire.
+
+    - Les cas existants sont préservés tels quels (avec leurs assertions-specs).
+    - Un cas généré n'est ajouté que si son test_uid n'existe pas déjà : un doublon
+      régénéré est ignoré au profit de l'existant (qui porte les specs).
+    - Un cas généré sans test_uid est toujours ajouté (impossible à dédupliquer).
+    """
+    existing = existing or []
+    generated = generated or []
+    seen = {tc.get("test_uid") for tc in existing if tc.get("test_uid")}
+    merged = list(existing)
+    for g in generated:
+        uid = g.get("test_uid")
+        if uid and uid in seen:
+            continue
+        merged.append(g)
+        if uid:
+            seen.add(uid)
+    return merged
+
+
+def apply_generation_result(
+    existing_doc: dict | None,
+    generated_cases: list,
+    *,
     sql: str,
     used_columns: list[str],
-    test_cases: list,
-    suggestions: list[str] | None = None,
-) -> Path:
-    """Write a single {stem}.json test file in the format expected by test_runner."""
-    output_dir.mkdir(parents=True, exist_ok=True)
-    out_path = output_dir / f"{model.stem}.json"
-    doc: dict = {
-        "sql": sql,
-        "used_columns": used_columns,
-        "test_cases": test_cases,
-    }
+    suggestions: list[str] | None,
+    overwrite: bool,
+) -> dict:
+    """Construit le document à écrire selon le mode.
+
+    - `overwrite` ou pas de fichier existant → suite fraîche (écrasement / bootstrap).
+    - sinon (additif, défaut) → préserve le doc existant (specs + champs annexes
+      type source_hash/query_decomposed) et n'ajoute que les nouveaux cas.
+    """
+    if overwrite or not existing_doc:
+        doc: dict = {
+            "sql": sql,
+            "used_columns": used_columns,
+            "test_cases": generated_cases,
+        }
+        if suggestions:
+            doc["suggestions"] = suggestions
+        return doc
+
+    doc = dict(existing_doc)
+    doc["test_cases"] = merge_test_cases(
+        existing_doc.get("test_cases"), generated_cases
+    )
+    doc["sql"] = sql
+    doc["used_columns"] = used_columns
     if suggestions:
         doc["suggestions"] = suggestions
+    return doc
+
+
+def _carry_specs(old: dict, new: dict) -> dict:
+    """Reporte les assertions-specs (porteuses d'assertion_uid) de l'ancien cas sur le
+    nouveau, en gardant le test_uid stable. Les specs sont préfixées et jamais dupliquées.
+    """
+    merged = dict(new)
+    merged["test_uid"] = old.get("test_uid")
+    new_assertions = list(new.get("assertion_results") or [])
+    present_spec_uids = {
+        a.get("assertion_uid") for a in new_assertions if a.get("assertion_uid")
+    }
+    old_specs = [
+        a
+        for a in (old.get("assertion_results") or [])
+        if a.get("assertion_uid") and a.get("assertion_uid") not in present_spec_uids
+    ]
+    merged["assertion_results"] = old_specs + new_assertions
+    return merged
+
+
+def replace_test_case_preserving_specs(
+    existing_cases: list | None, generated_cases: list | None, target_uid: str
+) -> list:
+    """Remplace le cas ciblé (test_uid) par sa version régénérée, en préservant ses specs.
+
+    Les autres cas sont intacts. Si l'agent n'a pas produit de cas pour `target_uid`,
+    la liste est renvoyée inchangée (no-op — le câblage CLI émet alors un warning).
+    """
+    existing_cases = existing_cases or []
+    generated_cases = generated_cases or []
+    gen_by_uid = {c.get("test_uid"): c for c in generated_cases if c.get("test_uid")}
+    updated = gen_by_uid.get(target_uid)
+    # L'executor ré-émet souvent le test modifié SANS test_uid. Si un seul cas est
+    # produit et qu'il n'a pas d'uid, c'est forcément le test ciblé (l'agent était
+    # scopé sur target_uid via state["test_uid"]) → on le rattache.
+    if (
+        updated is None
+        and len(generated_cases) == 1
+        and not generated_cases[0].get("test_uid")
+    ):
+        updated = generated_cases[0]
+    if updated is None:
+        return existing_cases
+    return [
+        _carry_specs(c, updated) if c.get("test_uid") == target_uid else c
+        for c in existing_cases
+    ]
+
+
+def apply_update_result(
+    existing_doc: dict,
+    generated_cases: list,
+    *,
+    target_uid: str,
+    sql: str,
+    used_columns: list[str],
+) -> dict:
+    """Document à écrire après un `update-test` : remplace le cas ciblé (specs préservées),
+    rafraîchit sql/used_columns, et conserve tous les champs annexes du doc existant.
+    """
+    doc = dict(existing_doc)
+    doc["test_cases"] = replace_test_case_preserving_specs(
+        existing_doc.get("test_cases"), generated_cases, target_uid
+    )
+    doc["sql"] = sql
+    doc["used_columns"] = used_columns
+    return doc
+
+
+def model_test_path(output_dir: Path, model_name: str) -> Path:
+    """Test-file path for a model, mirroring test_runner/check : {model_name}.json
+    sous output_dir. Utilise le model_name relatif (niché : demo/payment_summary),
+    pas le seul stem — sinon les modèles dbt (staging/, marts/) seraient introuvables.
+    """
+    return output_dir / f"{model_name}.json"
+
+
+def _write_test_file(
+    out_path: Path,
+    sql: str,
+    used_columns: list[str],
+    generated_cases: list,
+    suggestions: list[str] | None = None,
+    *,
+    overwrite: bool = False,
+) -> tuple[Path, int]:
+    """Write the {model_name}.json test file (additive by default, full rebuild on overwrite).
+
+    Returns (path, n_added) where n_added is the number of NEW test cases written
+    (= total in overwrite/bootstrap mode).
+    """
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    existing_doc = (
+        json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
+    )
+    before = len((existing_doc or {}).get("test_cases", [])) if not overwrite else 0
+    doc = apply_generation_result(
+        existing_doc,
+        generated_cases,
+        sql=sql,
+        used_columns=used_columns,
+        suggestions=suggestions,
+        overwrite=overwrite,
+    )
     out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
-    return out_path
+    return out_path, len(doc["test_cases"]) - before
 
 
 # ── Business context ──────────────────────────────────────────────────────────
@@ -306,7 +449,13 @@ def _run_profile_bq(
 
 
 async def run_generate(
-    model: Path, config: Path, output_dir: Path, profile: bool = False
+    model: Path,
+    config: Path,
+    output_dir: Path,
+    profile: bool = False,
+    overwrite: bool = False,
+    instruction: str | None = None,
+    update_uid: str | None = None,
 ) -> None:
     import typer
 
@@ -488,6 +637,60 @@ async def run_generate(
         state["profile"] = profile_data
         state["profile_complete"] = True
 
+    # Step 4.5 — route le conversational_agent (cf. routing : input + has_existing_tests) :
+    #   - update_uid → MODIFIE le test ciblé (specs préservées à la réécriture) ;
+    #   - sinon, mode additif (défaut) → AJOUTE un cas sans toucher aux tests/specs existants ;
+    #   - --overwrite → reconstruction complète (chemin première génération, pas de prep ici).
+    out_path = model_test_path(output_dir, model_name)
+    existing_cases: list = []
+    if out_path.exists():
+        try:
+            existing_cases = (
+                json.loads(out_path.read_text(encoding="utf-8")).get("test_cases") or []
+            )
+        except Exception:
+            existing_cases = []
+
+    def _inject_existing(input_text: str) -> None:
+        from langchain_core.messages import AIMessage
+
+        from utils.msg_types import MsgType
+
+        state["has_existing_tests"] = True
+        state["input"] = input_text
+        # retrieve_existing_tests lit en priorité un message RESULTS in-pipeline : on injecte
+        # les cas existants ainsi, faute de session persistée en base dans le flux CLI offline.
+        state["messages"] = [
+            AIMessage(
+                content=json.dumps(existing_cases, default=str),
+                additional_kwargs={"type": MsgType.RESULTS},
+            )
+        ]
+
+    if update_uid:
+        if not any(c.get("test_uid") == update_uid for c in existing_cases):
+            known = [c.get("test_uid") for c in existing_cases]
+            typer.echo(
+                f"[ERROR] test_uid '{update_uid}' introuvable. Connus : {known}",
+                err=True,
+            )
+            raise typer.Exit(1)
+        state["test_uid"] = update_uid
+        _inject_existing(instruction or "")
+        typer.echo(f"[update] test {update_uid} ciblé — specs préservées.")
+    elif existing_cases and not overwrite:
+        # suggestion_intent force l'agent à produire une ACTION de test (jamais du texte libre).
+        state["suggestion_intent"] = True
+        _inject_existing(
+            instruction
+            or "Ajoute un nouveau test couvrant un cas limite non encore couvert."
+        )
+        typer.echo(
+            f"[additif] {len(existing_cases)} test(s) existant(s) préservé(s) — "
+            f"ajout d'un cas{' ciblé' if instruction else ''} "
+            f"(--overwrite pour reconstruire à la place)."
+        )
+
     _inject_schemas_into_cache(project_id, schemas)
 
     # Qualify the SQL using the same optimize_query path as the UI validator.
@@ -535,11 +738,44 @@ async def run_generate(
     # Step 6 — write outputs
     test_cases = _extract_test_cases(final_state)
     suggestions = _extract_suggestions(final_state)
-    if test_cases:
-        out_path = _write_test_file(
-            model, output_dir, sql, state["used_columns"], test_cases, suggestions
+    if test_cases and update_uid:
+        existing_doc = json.loads(out_path.read_text(encoding="utf-8"))
+        before = next(
+            (
+                c
+                for c in existing_doc.get("test_cases", [])
+                if c.get("test_uid") == update_uid
+            ),
+            None,
         )
-        typer.echo(f"[OK] {len(test_cases)} test case(s) written to {out_path}")
+        doc = apply_update_result(
+            existing_doc,
+            test_cases,
+            target_uid=update_uid,
+            sql=sql,
+            used_columns=state["used_columns"],
+        )
+        after = next(
+            (c for c in doc["test_cases"] if c.get("test_uid") == update_uid), None
+        )
+        out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+        if before != after:
+            typer.echo(f"[OK] test {update_uid} mis à jour → {out_path}")
+        else:
+            typer.echo(
+                f"[WARN] L'agent n'a pas modifié le test {update_uid} (aucun changement)."
+            )
+    elif test_cases:
+        out_path, n_added = _write_test_file(
+            out_path,
+            sql,
+            state["used_columns"],
+            test_cases,
+            suggestions,
+            overwrite=overwrite,
+        )
+        action = "écrits (reconstruction)" if overwrite else "ajoutés"
+        typer.echo(f"[OK] {n_added} test case(s) {action} → {out_path}")
     else:
         typer.echo("[WARN] No output produced — check the SQL and schemas.")
 

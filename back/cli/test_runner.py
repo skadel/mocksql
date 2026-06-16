@@ -43,6 +43,50 @@ def _read_json(p: Path) -> dict | None:
         return None
 
 
+# ── Source SQL resolution ─────────────────────────────────────────────────────
+
+
+def resolve_run_sql(
+    cfg: dict,
+    config_path: Path,
+    model_name: str,
+    snapshot_sql: str,
+    frozen: bool,
+) -> tuple[str, str]:
+    """Résout le SQL à rejouer pour un modèle.
+
+    Retourne (sql, source) où source vaut :
+      - "frozen"            : --frozen → snapshot figé dans le JSON.
+      - "disk"              : SQL lu depuis le `.sql` source (défaut) + preprocessor.
+      - "snapshot-fallback" : source introuvable/illisible → snapshot (warning amont).
+
+    Le défaut lit le DISQUE pour que `test` reflète ce que l'utilisateur/agent a
+    réellement écrit. Le fallback évite un crash sur les suites portables
+    (examples/spider) qui n'ont pas le `.sql` source à côté.
+    """
+    if frozen:
+        return snapshot_sql, "frozen"
+
+    models_path = Path(cfg.get("models_path", "models"))
+    if not models_path.is_absolute():
+        models_path = config_path.parent / models_path
+    sql_file = models_path / f"{model_name}.sql"
+    if not sql_file.exists():
+        return snapshot_sql, "snapshot-fallback"
+
+    from cli.generate import read_sql
+
+    dialect = cfg.get("dialect", "bigquery")
+    preprocessor_fn = cfg.get("preprocessor_fn")
+    try:
+        return (
+            read_sql(sql_file, preprocessor_fn, config_path.parent, dialect),
+            "disk",
+        )
+    except Exception:
+        return snapshot_sql, "snapshot-fallback"
+
+
 # ── Schema resolution ─────────────────────────────────────────────────────────
 
 
@@ -271,6 +315,7 @@ async def run_tests(
     config_path: Path,
     model_filters: list[str] | None = None,
     fail_fast: bool = False,
+    frozen: bool = False,
 ) -> tuple[int, list[dict]]:
     """
     Replay all saved test cases from .mocksql/tests/ against DuckDB.
@@ -315,7 +360,13 @@ async def run_tests(
             if not test_doc:
                 continue
 
-            sql: str = test_doc.get("sql", "")
+            sql, sql_source = resolve_run_sql(
+                cfg=cfg,
+                config_path=config_path,
+                model_name=model_name,
+                snapshot_sql=test_doc.get("sql", ""),
+                frozen=frozen,
+            )
             used_columns_raw: list[str] = test_doc.get("used_columns") or []
             used_columns_parsed: list[dict] = []
             for raw in used_columns_raw:
@@ -349,10 +400,16 @@ async def run_tests(
                     has_failures = True
                     if fail_fast:
                         model_results.append(
-                            {"model": model_name, "cases": case_results}
+                            {
+                                "model": model_name,
+                                "cases": case_results,
+                                "sql_source": sql_source,
+                            }
                         )
                         return 1, model_results
 
-            model_results.append({"model": model_name, "cases": case_results})
+            model_results.append(
+                {"model": model_name, "cases": case_results, "sql_source": sql_source}
+            )
 
     return (1 if has_failures else 0), model_results
