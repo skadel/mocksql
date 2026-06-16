@@ -4,6 +4,12 @@ import os
 os.environ.setdefault("DB_CONNECTION_TYPE", "duckdb")
 os.environ.setdefault("DUCKDB_PATH", ":memory:")
 
+# Coupe le tracing LangSmith pendant les tests : LangChain trace TOUTE exécution de
+# chaîne (y compris les fakes RunnableLambda), ce qui pollue LangSmith sans qu'aucun
+# vrai LLM ne soit appelé. Forcé (pas setdefault) pour écraser un .env qui l'active.
+os.environ["LANGCHAIN_TRACING_V2"] = "false"
+os.environ["LANGSMITH_TRACING"] = "false"
+
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient, ASGITransport
