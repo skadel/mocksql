@@ -288,6 +288,26 @@ async def data_patcher_node(state: QueryState):
     }
 
 
+def _flatten_table_name(name: str) -> str:
+    """Forme aplatie canonique d'un nom de table : 2 dernières parties jointes par `_`,
+    comme `filter_columns`. `a.b.c` → `b_c` ; `b.c` → `b_c` ; `b_c` → `b_c`.
+    """
+    parts = name.split(".")
+    return "_".join(parts[-2:]) if len(parts) >= 2 else name
+
+
+def _scope_schema_for_tables(filtered_schema: list, tables: list) -> list:
+    """Restreint filtered_schema aux tables demandées.
+
+    Le LLM réfère souvent une table par son nom BigQuery COMPLET
+    (bigquery-public-data.chicago_taxi_trips.taxi_trips), alors que filter_columns
+    produit un nom APLATI (chicago_taxi_trips_taxi_trips). On rapproche les deux via
+    la forme aplatie (et on tolère un nom déjà aplati passé tel quel).
+    """
+    wanted = {_flatten_table_name(t) for t in tables} | set(tables)
+    return [t for t in filtered_schema if t["table_name"] in wanted]
+
+
 async def _add_rows(
     state: QueryState, test_case: dict, data: dict, tables: list, instruction: str
 ) -> dict:
@@ -296,7 +316,7 @@ async def _add_rows(
     used_columns = [json.loads(c) for c in state.get("used_columns") or []]
     filtered_schema = filter_columns(schema, used_columns)
 
-    scoped_schema = [t for t in filtered_schema if t["table_name"] in tables]
+    scoped_schema = _scope_schema_for_tables(filtered_schema, tables)
     if not scoped_schema:
         logger.warning(
             "[data_patcher] add_test_row: tables=%s introuvables dans filtered_schema (%s)",
@@ -304,6 +324,10 @@ async def _add_rows(
             [t["table_name"] for t in filtered_schema],
         )
         return data
+
+    # Noms aplatis résolus : alignent la recherche des lignes existantes (data est clé
+    # par nom aplati) sur le schéma scopé, même si le LLM a passé des noms complets.
+    tables = [t["table_name"] for t in scoped_schema]
 
     ScopedModel = create_pydantic_models(scoped_schema)
     raw_parser = PydanticOutputParser(pydantic_object=ScopedModel)
