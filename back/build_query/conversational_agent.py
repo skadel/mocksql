@@ -369,7 +369,7 @@ def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
                     else results_json
                 )
                 results_summary = json.dumps(
-                    parsed_results[:10], ensure_ascii=False, indent=2
+                    parsed_results, ensure_ascii=False, indent=2
                 )
             except Exception:
                 results_summary = str(results_json)[:500]
@@ -558,7 +558,7 @@ Tu es l'assistant conversationnel de MockSQL : tu réponds aux questions de l'ut
 SQL testé (dialecte {state.get("dialect", "bigquery")}):
 {state.get("optimized_sql") or state.get("query", "")}
 {join_recipes_block}
-Étapes inspectables avec run_cte / count_cte_steps : {cte_names_str}
+Étapes inspectables avec run_cte : {cte_names_str}
 
 Tests existants :
 {tests_summary}
@@ -574,9 +574,24 @@ et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
 Réponds en français, de manière concise et naturelle.
 
+⚠️ Ne réponds JAMAIS à l'aveugle sur ce que produit la requête. Dès qu'une question
+porte sur le comportement réel du SQL (« qu'est-ce que renvoie cette CTE ? », « pourquoi
+ce test ne retourne rien ? », « ce cas est-il bien couvert ? », « quelle valeur sort
+de … ? »), inspecte d'abord avec `run_cte` sur les données du test concerné, PUIS réponds
+en t'appuyant sur les lignes réellement observées. Ne devine pas le résultat d'une
+exécution que tu peux vérifier. `run_cte` est un outil d'inspection (ni génération ni
+correction) : l'utiliser n'enfreint pas la règle « réponds en texte » ci-dessous.
+
 Si l'utilisateur pose une simple question (explication d'un résultat, analyse de
 couverture/redondance) sans demander de modification, réponds en texte — n'appelle
-aucun outil de génération ou de correction.
+aucun outil de génération ou de correction (mais `run_cte` reste autorisé pour vérifier
+ta réponse avant de l'écrire).
+
+Quand le contexte s'y prête, TERMINE ta réponse en proposant une action concrète et
+utile : ajuster un test ou sa description, ajouter un test pour un cas voisin non couvert,
+etc. N'hésite pas à le proposer — mais n'agis pas sans l'accord de l'utilisateur, c'est à
+lui de valider. Ne propose rien si aucune action n'a de sens dans le contexte (ne force
+pas une proposition artificielle).
 
 Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
 (ex : l'utilisateur attend un tri par volume mais la requête utilise MAX() alphabétique,
@@ -716,6 +731,11 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
             MsgType.RESULTS,
             MsgType.EXAMPLES,
             MsgType.DEBUG_RUN_CTE,
+            # Verdicts de l'évaluateur : l'agent doit voir TOUT l'historique des
+            # évaluations (pas seulement la dernière, re-injectée dans le SYSTEM sur
+            # bad_data) pour répondre aux questions « pourquoi ce test est warn ? » et
+            # garder le contexte des verdicts passés sur l'ensemble des tests.
+            MsgType.EVALUATION,
         ],
     )
     user_input = state.get("input", "")
@@ -770,8 +790,7 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         )
         branch_plan_hint = _format_branch_plan_hint(failing_test_obj)
         has_debug_results = any(
-            get_message_type(m) in (MsgType.DEBUG_RUN_CTE, MsgType.DEBUG_COUNT_STEPS)
-            for m in history
+            get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history
         )
         if has_debug_results:
             trigger = (
