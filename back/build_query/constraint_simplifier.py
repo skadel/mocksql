@@ -3372,3 +3372,49 @@ def detect_fanout_risk(sql: str, dialect: str = "bigquery") -> list[str]:
         if name:
             names.append(name)
     return names
+
+
+# Statistical aggregates that return NULL on a single input row (sample/correlation
+# family). With only one row per GROUP BY group they yield NULL → a downstream filter
+# on the value drops the group → empty result (the bq143 under-population failure,
+# the mirror of detect_fanout_risk's over-population). Population variants
+# (STDDEV_POP/VAR_POP/COVAR_POP) return 0, not NULL, so they are excluded.
+_MIN_POINTS_AGGS = frozenset(
+    {
+        "CORR",
+        "COVAR_SAMP",
+        "STDDEV",  # BigQuery/DuckDB: alias of STDDEV_SAMP
+        "STDDEV_SAMP",
+        "VARIANCE",  # alias of VAR_SAMP
+        "VAR_SAMP",
+        "REGR_SLOPE",
+        "REGR_INTERCEPT",
+        "REGR_R2",
+    }
+)
+
+
+def detect_min_points_aggregates(sql: str, dialect: str = "bigquery") -> list[str]:
+    """Return the names of statistical aggregates present that need ≥2 input rows per
+    group to be non-NULL (CORR, COVAR_SAMP, STDDEV_SAMP, VAR_SAMP, REGR_*…).
+
+    These silently produce NULL on a single row; combined with a GROUP BY (one row per
+    group) and a downstream value filter, the result is empty (bq143). Returns ``[]``
+    when none are present or the SQL cannot be parsed. Deduplicated, order-stable.
+    """
+    if not sql:
+        return []
+    try:
+        tree = sqlglot.parse_one(
+            sql, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+    except Exception:
+        return []
+    if tree is None:
+        return []
+    found: list[str] = []
+    for agg in tree.find_all(exp.AggFunc):
+        name = agg.sql_name()
+        if name in _MIN_POINTS_AGGS and name not in found:
+            found.append(name)
+    return found

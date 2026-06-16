@@ -425,6 +425,37 @@ def _build_fanout_hint_block(sql: str, dialect: str = "bigquery") -> str:
     )
 
 
+def _build_min_points_agg_hint_block(sql: str, dialect: str = "bigquery") -> str:
+    """Warn the generator when the query uses a statistical aggregate that returns NULL
+    on a single input row (CORR/COVAR_SAMP/STDDEV_SAMP/VAR_SAMP/REGR_*). With one row per
+    GROUP BY group these yield NULL → a downstream value filter drops the group → empty
+    result (bq143). Steers toward ≥2 (≥3 with a magnitude filter) varied rows per group,
+    and toward a multi-sample scenario in the description."""
+    if not sql:
+        return ""
+    try:
+        from build_query.constraint_simplifier import detect_min_points_aggregates
+
+        aggs = detect_min_points_aggregates(sql, dialect)
+    except Exception:
+        return ""
+    if not aggs:
+        return ""
+    aggs_str = ", ".join(aggs)
+    return (
+        f"\n⚠️ **Agrégat statistique exigeant plusieurs points** ({aggs_str}) : ces "
+        "fonctions renvoient **NULL sur une seule ligne**. Avec une seule ligne par groupe "
+        "`GROUP BY`, le groupe vaut NULL et tout filtre aval sur cette valeur le supprime → "
+        "**résultat vide**. Génère **≥2 lignes VARIÉES par groupe** : les lignes "
+        "supplémentaires doivent varier sur la **dimension corrélée** (ex. plusieurs "
+        "ENTITÉS/échantillons distincts par valeur de GROUP BY), pas dupliquer la même "
+        "entité ni les mêmes valeurs. Si un filtre de MAGNITUDE suit (ex. "
+        "`ABS(corr) <= 0.5`), prévois **≥3 points dispersés** : 2 points donnent une "
+        "corrélation parfaite (±1) qui serait exclue. La description doit décrire un "
+        "scénario MULTI-entités, pas une entité unique.\n"
+    )
+
+
 # ── Exemple few-shot statique « clé dérivée + photos M/M-1 » (P2a) ──────────
 # Mini-requête FICTIVE concentrant les deux pièges qui vident le plus souvent
 # le résultat : (a) clé de JOIN dérivée d'un CASE — il faut générer la valeur
@@ -566,6 +597,7 @@ def generate_data_prompt(
     volume_hints_block = _build_volume_hints_block(sql, dialect)
 
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
+    min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
 
     if user_instruction:
         consignes_1_2 = """\
@@ -717,7 +749,7 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
 
     constraints_inner = (
         f"{constraints_block}{join_recipes_block}"
-        f"{unnest_block}{volume_hints_block}{fanout_hint_block}"
+        f"{unnest_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}"
     )
     constraints_section = (
         f"<constraints>\n{constraints_inner}</constraints>\n"
@@ -838,10 +870,11 @@ def update_data_prompt(
 
     volume_hints_block = _build_volume_hints_block(sql, dialect)
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
+    min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
 
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{volume_hints_block}{fanout_hint_block}{existing_test_block}
+{sql_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>

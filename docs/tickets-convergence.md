@@ -160,3 +160,42 @@ Pousse vers : affirmer la RELATION d'ordre, ou positionner la ligne par sa VALEU
 via `scope`, jamais épingler un id/code à une position.
 
 **Statut : FAIT** (consigne + garde-fou). Gain à confirmer à l'éval fdp.
+
+---
+
+## TICKET-4 · `fix` · P1 — Hint « agrégat statistique exige ≥2 points par groupe »
+
+**User story**
+> En tant qu'ingé testant une requête à `CORR`/`STDDEV`/`VAR_SAMP`/`COVAR_SAMP`/`REGR_*`,
+> je veux que les données générées produisent un résultat non vide — pas un groupe à une
+> seule ligne où l'agrégat vaut NULL et où tout se fait filtrer.
+
+**Contexte / cause** (découvert en validant l'éval spider — bq143)
+`CORR(protein, expression)` groupé par `(gene, sample_type)` : ces agrégats renvoient
+**NULL sur une seule ligne**. Le générateur mettait 1 ligne par groupe → `CORR`=NULL →
+`WHERE ABS(corr) <= 0.5` exclut NULL → CTE `pval` vide → résultat vide, et la boucle
+`bad_data` épuisait ses retries. Le détecteur existant `detect_fanout_risk` couvre le
+problème inverse (sur-population), pas la sous-population.
+
+**Implémentation**
+- `detect_min_points_aggregates` (`constraint_simplifier.py`) : détecte la famille
+  sample/corrélation qui renvoie NULL sur 1 ligne (CORR, COVAR_SAMP, STDDEV[_SAMP],
+  VAR[IANCE]_SAMP, REGR_*).
+- `_build_min_points_agg_hint_block` (`prompt_tools.py`), câblé aux prompts génération +
+  update : pousse vers ≥2 lignes variées par groupe **sur la dimension corrélée** (≥3
+  dispersées si un filtre de magnitude suit, car 2 points → ±1), et une description
+  multi-entités.
+
+**Critères d'acceptation**
+- [x] Détecteur + hint testés (`back/tests/test_min_points_aggregate_hint.py`).
+- [x] Hint **confirmé présent** dans le prompt réel (vérifié par dump complet).
+- [~] bq143 : génération nettement améliorée (1/1/1 → 5/3/5 lignes, narratif
+      mono→multi-gènes) mais **toujours vide** — le LLM garde un seul échantillon par
+      groupe. Cas extrême (≥3 échantillons distincts dispersés dans [-0.5,0.5]) au-delà de
+      flash-lite seul ; le hint aide la **classe** plus que ce cas pathologique.
+
+**Limite connue** : sur les agrégats statistiques très contraints, flash-lite reste
+insuffisant même guidé → confirme la reco CLAUDE.md (flash/pro). À re-mesurer sur la
+classe `CORR/STDDEV` avec un modèle plus capable.
+
+**Statut : FAIT** (détecteur + hint). Gain de classe à confirmer ; bq143 reste un cas dur.
