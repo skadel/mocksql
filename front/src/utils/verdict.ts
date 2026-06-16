@@ -47,7 +47,13 @@ export function verdictText(status: string | undefined, test?: any): string {
 
 export function testExecStatus(test: any): ExecStatus {
   if (test.status === 'complete') return 'pass';
-  if (test.status === 'empty_results') return testExpectsEmpty(test) ? 'pass' : 'fail';
+  if (test.status === 'empty_results') {
+    // Le juge prime : s'il a validé le test (« Bon »/« Excellent »), le résultat
+    // vide est attendu → pass. Aligne l'exec sur statusToVerdict pour éviter un
+    // header « en échec » sur une carte verte. Sinon, heuristique sur la description.
+    if (/Excellent|Bon/.test(test.evaluation ?? '')) return 'pass';
+    return testExpectsEmpty(test) ? 'pass' : 'fail';
+  }
   if (test.status === 'error') return 'fail';
   return 'pending';
 }

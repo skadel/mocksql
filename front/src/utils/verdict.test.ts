@@ -133,6 +133,21 @@ describe('testExecStatus', () => {
   it('returns fail for empty_results when test does not expect empty', () => {
     expect(testExecStatus({ status: 'empty_results', unit_test_description: 'chemin nominal' })).toBe('fail');
   });
+
+  // Régression : le juge a validé le test (« Bon »/« Excellent ») mais la description
+  // ne matche pas le regex testExpectsEmpty → exec doit suivre le verdict (pass),
+  // sinon le header affiche « 1 en échec » alors que la carte est verte « Bon ».
+  it('returns pass for empty_results when judge verdict is Bon', () => {
+    expect(testExecStatus({ status: 'empty_results', evaluation: '**Bon** — le résultat vide est attendu.' })).toBe('pass');
+  });
+
+  it('returns pass for empty_results when judge verdict is Excellent', () => {
+    expect(testExecStatus({ status: 'empty_results', evaluation: '**Excellent** — couvre le filtre sans correspondance.' })).toBe('pass');
+  });
+
+  it('still returns fail for empty_results when judge verdict is Insuffisant', () => {
+    expect(testExecStatus({ status: 'empty_results', evaluation: '**Insuffisant** — aucune ligne mais cas nominal attendu.', unit_test_description: 'chemin nominal' })).toBe('fail');
+  });
 });
 
 // ---------------------------------------------------------------------------
