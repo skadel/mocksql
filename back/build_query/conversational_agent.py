@@ -153,6 +153,32 @@ def _format_ledger_op(op: dict) -> str:
     return tool
 
 
+def _format_outcome_trace(outcome: dict) -> str:
+    """Rend le trace structuré d'une tentative (profil row_count + valeurs des CTE
+    pivots + mismatch jointure), pour que la *comparaison* d'une tentative à l'autre
+    révèle ce qui a réellement bougé (ex. une valeur de jointure non-déterministe).
+
+    Retourne une chaîne (lignes indentées) ou "" si aucun trace n'est attaché.
+    """
+    trace = outcome.get("cte_trace") or {}
+    profile = trace.get("profile") or []
+    if not profile:
+        return ""
+    lines: list[str] = []
+    profile_txt = " → ".join(f"{e.get('name')}={e.get('rows')}" for e in profile)
+    lines.append(f"  Profil CTE : {profile_txt}")
+    # Valeurs des CTE pivots (faible cardinalité) : c'est là qu'une valeur de
+    # jointure qui change d'un tour à l'autre devient visible.
+    for e in profile:
+        if e.get("sample"):
+            lines.append(
+                f"  {e.get('name')} = {json.dumps(e['sample'], ensure_ascii=False, default=str)}"
+            )
+    for bl in trace.get("mismatch") or []:
+        lines.append(f"  Blocage : {bl}")
+    return "\n".join(lines)
+
+
 def _render_attempt_messages(attempts: list) -> list[BaseMessage]:
     """Rend le ledger des tentatives en conversation alternée AI/HUMAN.
 
@@ -160,6 +186,11 @@ def _render_attempt_messages(attempts: list) -> list[BaseMessage]:
     le rendu est reconstruit à chaque round et inséré avant le trigger
     ``auto_correct``, pour que l'agent raisonne « ce levier a déjà été actionné
     sans effet → le bloqueur est ailleurs » au lieu de redécouvrir le problème.
+
+    Au-delà du digest une-ligne, chaque tentative porte son **trace d'exécution**
+    (profil row_count de toutes les CTE + valeurs des pivots + mismatch) : la lecture
+    croisée tentative N vs N+1 expose la vraie cause (ex. valeur de jointure qui bouge)
+    plutôt que de faire confiance à la seule CTE « bloquante » désignée.
     """
     msgs: list[BaseMessage] = []
     for a in attempts or []:
@@ -168,14 +199,12 @@ def _render_attempt_messages(attempts: list) -> list[BaseMessage]:
         msgs.append(AIMessage(content=f"Tentative {rnd} — {ops_txt}"))
         outcome = a.get("outcome")
         if outcome:
-            msgs.append(
-                HumanMessage(
-                    content=(
-                        f"Résultat tentative {rnd} : {outcome.get('digest', '?')}. "
-                        "Ne répète pas une tentative équivalente."
-                    )
-                )
-            )
+            trace_txt = _format_outcome_trace(outcome)
+            body = f"Résultat tentative {rnd} : {outcome.get('digest', '?')}."
+            if trace_txt:
+                body += "\n" + trace_txt
+            body += "\nNe répète pas une tentative équivalente."
+            msgs.append(HumanMessage(content=body))
     return msgs
 
 

@@ -360,3 +360,157 @@ async def test_bad_data_to_agent_completes_last_outcome():
     outcome = update["correction_attempts"][-1]["outcome"]
     assert outcome["blocking_cte"] == "temp_carte"
     assert "temp_carte" in outcome["digest"]
+
+
+# ── Trace d'exécution structuré conservé par tentative (évolution) ───────────
+
+
+def test_compact_cte_trace_keeps_profile_samples_and_mismatch():
+    from build_query.examples_generator import _compact_cte_trace
+
+    trace = {
+        "StateCases": {"row_count": 8},
+        "TopStates": {"row_count": 4},
+        "FourthState": {"row_count": 1, "sample": [{"state_name": "StateD"}]},
+        "CountyCases": {
+            "row_count": 0,
+            "join_breakdown": [
+                "state_name : veut 'StateD', présent {StateB} ← BLOQUANT"
+            ],
+        },
+    }
+    compact = _compact_cte_trace("CountyCases", trace)
+    # profil ordonné de TOUTES les CTE
+    names = [e["name"] for e in compact["profile"]]
+    assert names == ["StateCases", "TopStates", "FourthState", "CountyCases"]
+    # le sample du pivot faible-cardinalité est conservé
+    fourth = next(e for e in compact["profile"] if e["name"] == "FourthState")
+    assert fourth["sample"] == [{"state_name": "StateD"}]
+    # le row_count seul (sans sample) reste nu
+    assert "sample" not in compact["profile"][0]
+    # le mismatch de la CTE bloquante est remonté
+    assert compact["mismatch"] == [
+        "state_name : veut 'StateD', présent {StateB} ← BLOQUANT"
+    ]
+
+
+def test_render_attempt_messages_surfaces_trace_evolution():
+    """Deux tentatives où la valeur du pivot FourthState BOUGE alors que les états
+    n'ont pas changé : le rendu doit exposer les deux valeurs pour que l'agent voie
+    la cible mouvante (vide non-déterministe)."""
+    attempts = [
+        {
+            "round": 1,
+            "ops": [
+                {
+                    "tool": "patch_test_field",
+                    "table": "us_counties",
+                    "row_index": 0,
+                    "field": "state_name",
+                    "value_json": '"StateB"',
+                }
+            ],
+            "outcome": {
+                "digest": "toujours 0 ligne — étape bloquante inchangée (CountyCases)",
+                "cte_trace": {
+                    "profile": [
+                        {"name": "TopStates", "rows": 4},
+                        {
+                            "name": "FourthState",
+                            "rows": 1,
+                            "sample": [{"state_name": "StateD"}],
+                        },
+                        {"name": "CountyCases", "rows": 0},
+                    ],
+                    "mismatch": [
+                        "state_name : veut 'StateD', présent {StateB} ← BLOQUANT"
+                    ],
+                },
+            },
+        },
+        {
+            "round": 2,
+            "ops": [
+                {
+                    "tool": "patch_test_field",
+                    "table": "us_counties",
+                    "row_index": 0,
+                    "field": "state_name",
+                    "value_json": '"TargetState"',
+                }
+            ],
+            "outcome": {
+                "digest": "toujours 0 ligne — étape bloquante inchangée (CountyCases)",
+                "cte_trace": {
+                    "profile": [
+                        {"name": "TopStates", "rows": 4},
+                        {
+                            "name": "FourthState",
+                            "rows": 1,
+                            "sample": [{"state_name": "StateB"}],
+                        },
+                        {"name": "CountyCases", "rows": 0},
+                    ],
+                    "mismatch": [
+                        "state_name : veut 'StateB', présent {TargetState} ← BLOQUANT"
+                    ],
+                },
+            },
+        },
+    ]
+    msgs = _render_attempt_messages(attempts)
+    humans = [m for m in msgs if isinstance(m, HumanMessage)]
+    assert len(humans) == 2
+    # profil row_count rendu
+    assert "FourthState=1" in humans[0].content and "CountyCases=0" in humans[0].content
+    # la valeur du pivot DIFFÈRE d'une tentative à l'autre → cible mouvante visible
+    assert "StateD" in humans[0].content
+    assert "StateB" in humans[1].content
+    # mismatch « veut X, présent Y » conservé
+    assert "BLOQUANT" in humans[0].content
+
+
+@pytest.mark.asyncio
+async def test_bad_data_to_agent_persists_structured_trace():
+    results_msg = AIMessage(
+        content=json.dumps(
+            [
+                {
+                    "status": "empty_results",
+                    "failing_cte": "CountyCases",
+                    "cte_trace": {
+                        "FourthState": {
+                            "row_count": 1,
+                            "sample": [{"state_name": "StateD"}],
+                        },
+                        "CountyCases": {
+                            "row_count": 0,
+                            "join_breakdown": [
+                                "state_name : veut 'StateD', présent {StateB} ← BLOQUANT"
+                            ],
+                        },
+                    },
+                }
+            ]
+        ),
+        additional_kwargs={"type": MsgType.RESULTS},
+    )
+    state = {
+        "messages": [results_msg],
+        "correction_attempts": [
+            {
+                "round": 1,
+                "test_uid": "a3f9",
+                "ops": [{"tool": "regen"}],
+                "outcome": None,
+            }
+        ],
+    }
+    update = await _bad_data_to_agent(state)
+    outcome = update["correction_attempts"][-1]["outcome"]
+    assert "cte_trace" in outcome
+    fourth = next(
+        e for e in outcome["cte_trace"]["profile"] if e["name"] == "FourthState"
+    )
+    assert fourth["sample"] == [{"state_name": "StateD"}]
+    assert outcome["cte_trace"]["mismatch"]

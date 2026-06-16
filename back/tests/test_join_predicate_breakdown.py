@@ -12,9 +12,13 @@ réelles et nomme le prédicat fautif avec les ensembles de valeurs des deux cô
 import duckdb
 import pytest
 
+import sqlglot
+
 from build_query.examples_executor import (
+    _extract_eq_subquery_filters,
     _run_cte_trace,
     _run_join_predicate_breakdown,
+    _run_scalar_filter_breakdown,
 )
 from build_query.examples_generator import _format_cte_trace_hint
 
@@ -161,6 +165,84 @@ async def test_or_predicate_with_satisfiable_null_branch_not_blocking():
     text = "\n".join(lines)
     assert "IS NULL" in text
     assert "BLOQUANT" not in text
+
+
+# ── Filtre `WHERE col = (sous-requête scalaire)` ─────────────────────────────
+# bq130 : `WHERE state_name = (SELECT state_name FROM FourthState)` — la
+# décomposition de JOIN ne couvre pas ce blocage (valeur attendue calculée par
+# une sous-requête sur une CTE amont). `_run_scalar_filter_breakdown` nomme la
+# valeur ATTENDUE vs les valeurs PRÉSENTES.
+
+
+def test_extract_eq_subquery_filters_pure():
+    where = sqlglot.parse_one(
+        "SELECT b.county FROM cnt b "
+        "WHERE b.date >= '2020-03-01' "
+        "AND b.state_name = (SELECT state_name FROM FourthState)",
+        read="bigquery",
+    ).args.get("where")
+    filters = _extract_eq_subquery_filters(where)
+    assert len(filters) == 1
+    col, sub = filters[0]
+    assert col.sql() == "b.state_name"
+    assert "FourthState" in sub.sql()
+
+    # ordre inversé `(SELECT …) = col`
+    where_inv = sqlglot.parse_one(
+        "SELECT * FROM t b WHERE (SELECT x FROM s) = b.k", read="bigquery"
+    ).args.get("where")
+    assert len(_extract_eq_subquery_filters(where_inv)) == 1
+
+    # égalités sans sous-requête → rien
+    where_neg = sqlglot.parse_one(
+        "SELECT * FROM t WHERE a = 1 AND b = c", read="bigquery"
+    ).args.get("where")
+    assert _extract_eq_subquery_filters(where_neg) == []
+
+
+_SUB_CTES = [
+    {"name": "fourth_state", "code": "SELECT 'StateD' AS state_name"},
+    {
+        "name": "cnt",
+        "code": (
+            "SELECT b.county AS county FROM proj.ds.counties AS b "
+            "WHERE b.state_name = (SELECT state_name FROM fourth_state)"
+        ),
+    },
+    {"name": "final_query", "code": "SELECT cnt.county FROM cnt AS cnt"},
+]
+
+
+def _counties_con(state_name):
+    c = duckdb.connect()
+    c.execute(f"CREATE TABLE ds_counties_{_SUFFIX} (county TEXT, state_name TEXT)")
+    c.execute(f"INSERT INTO ds_counties_{_SUFFIX} VALUES ('LA', ?)", [state_name])
+    return c
+
+
+@pytest.mark.asyncio
+async def test_scalar_filter_breakdown_marks_value_mismatch():
+    # pivot veut 'StateD', mais la colonne ne contient que 'StateB' → BLOQUANT
+    c = _counties_con("StateB")
+    lines = await _run_scalar_filter_breakdown(
+        _SUB_CTES, 1, _SUFFIX, "proj", "bigquery", c
+    )
+    assert len(lines) == 1
+    assert "BLOQUANT" in lines[0]
+    assert "veut 'StateD'" in lines[0]
+    assert "StateB" in lines[0]
+
+
+@pytest.mark.asyncio
+async def test_scalar_filter_breakdown_satisfiable_not_blocking():
+    # la colonne contient bien 'StateD' → satisfiable, pas de marqueur
+    c = _counties_con("StateD")
+    lines = await _run_scalar_filter_breakdown(
+        _SUB_CTES, 1, _SUFFIX, "proj", "bigquery", c
+    )
+    assert len(lines) == 1
+    assert "BLOQUANT" not in lines[0]
+    assert "veut 'StateD'" in lines[0]
 
 
 @pytest.mark.asyncio

@@ -557,6 +557,37 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
     return "\n".join(lines)
 
 
+def _compact_cte_trace(failing_cte: str, cte_trace: dict) -> dict:
+    """Réduit un `cte_trace` complet à la forme compacte stockée par tentative dans
+    le ledger de correction (``correction_attempts[].outcome``).
+
+    On garde ce qui rend l'**évolution d'une tentative à l'autre** lisible sans
+    gonfler le prompt :
+      - ``profile`` : ordre de définition → ``[{name, rows, sample?}]``. ``sample``
+        n'est présent que pour les CTE pivots à faible cardinalité (cf. _run_cte_trace),
+        ce qui rend visible une valeur de jointure qui *bouge* (vide non-déterministe).
+      - ``mismatch`` : lignes de décomposition par prédicat de la CTE bloquante
+        (« veut X, présent {Y} ← BLOQUANT ») quand un JOIN est en cause.
+    """
+    profile: list[dict] = []
+    for name, info in (cte_trace or {}).items():
+        if not isinstance(info, dict):
+            continue
+        entry: dict = {"name": name, "rows": info.get("row_count", -1)}
+        if info.get("sample"):
+            entry["sample"] = info["sample"]
+        profile.append(entry)
+    mismatch = (
+        (cte_trace.get(failing_cte) or {}).get("join_breakdown")
+        if failing_cte
+        else None
+    )
+    compact: dict = {"profile": profile}
+    if mismatch:
+        compact["mismatch"] = mismatch
+    return compact
+
+
 async def retrieve_existing_tests(session_id: str, state) -> list:
     """
     Returns the current list of all tests (as dicts).
