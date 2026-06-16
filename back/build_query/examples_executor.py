@@ -1221,6 +1221,11 @@ async def _run_single_test_case(
     # l'agent de correction (boucle bad_data) le retrouve dans les RESULTS.
     if test_case.get("branch_plan"):
         base["branch_plan"] = test_case["branch_plan"]
+    # Prémisse utilisateur (TICKET-1) : tracée à la création d'un test issu d'une
+    # affirmation explicite de l'user. Préservée ici (comme branch_plan) pour que la
+    # boucle bad_data la retrouve et n'écrase pas en silence la valeur énoncée.
+    if test_case.get("user_premise"):
+        base["user_premise"] = test_case["user_premise"]
 
     try:
         # 1) Préparation et insertion des données de test

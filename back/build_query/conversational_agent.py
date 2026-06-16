@@ -789,30 +789,57 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             "test_uid", str(eval_test_idx)
         )
         branch_plan_hint = _format_branch_plan_hint(failing_test_obj)
-        has_debug_results = any(
-            get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history
+        # TICKET-1 : protection d'une prémisse utilisateur. Quand le test a été créé
+        # sur une affirmation EXPLICITE de l'utilisateur (marqueur `user_premise`),
+        # la boucle ne doit pas muter en silence la valeur énoncée pour rendre le test
+        # vert — ce serait blanchir l'attente de l'user en tautologie. On oriente alors
+        # vers la délégation (request_reevaluation / ask_clarification → VALIDATION_PROMPT)
+        # plutôt que vers un patch muet. Détection par authorship explicite (pas
+        # d'heuristique sur le texte) ; enforcement par instruction de prompt.
+        user_premise = (failing_test_obj or {}).get("user_premise")
+        premise_guard = (
+            (
+                f"\n\n⚠️ PRÉMISSE UTILISATEUR à protéger : ce test a été créé sur "
+                f"l'affirmation explicite de l'utilisateur — « {user_premise} ». NE mute "
+                f"JAMAIS en silence une valeur d'entrée qui porte cette prémisse pour "
+                f"faire passer le test. Si la correction nécessaire la contredirait, "
+                f"appelle `request_reevaluation` (si le comportement observé — ex : 0 "
+                f"ligne — est en fait correct pour ce scénario) ou `ask_clarification` "
+                f"(pour que l'utilisateur tranche : son attente est-elle fausse, ou son "
+                f"SQL ?). Ne patche pas la valeur énoncée."
+            )
+            if user_premise
+            else ""
         )
-        if has_debug_results:
+        if any(get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history):
             trigger = (
-                f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
-                f"Corrige de façon CIBLÉE le test [{failing_uid_trigger}] : utilise "
-                f"`patch_test_field` / `add_test_row` / `remove_test_row` pour ajuster "
-                f"précisément les données qui alimentent l'étape bloquante. N'emploie "
-                f"`update_test_data` (régénération complète) que si une correction ciblée "
-                f"est impossible. Si le comportement observé (ex : 0 ligne) est en réalité "
-                f"attendu pour ce scénario, appelle `request_reevaluation` avec la justification."
-            ) + branch_plan_hint
+                (
+                    f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
+                    f"Corrige de façon CIBLÉE le test [{failing_uid_trigger}] : utilise "
+                    f"`patch_test_field` / `add_test_row` / `remove_test_row` pour ajuster "
+                    f"précisément les données qui alimentent l'étape bloquante. N'emploie "
+                    f"`update_test_data` (régénération complète) que si une correction ciblée "
+                    f"est impossible. Si le comportement observé (ex : 0 ligne) est en réalité "
+                    f"attendu pour ce scénario, appelle `request_reevaluation` avec la justification."
+                )
+                + branch_plan_hint
+                + premise_guard
+            )
         else:
             # Ne pas répéter ici les règles d'usage des outils : elles sont déjà
             # dans le contexte automatique du SYSTEM — la duplication allonge le
             # prompt sans gain et crée des risques d'incohérence entre les deux.
             trigger = (
-                f"Le test [{failing_uid_trigger}] a été jugé Insuffisant : ses données "
-                f"d'entrée ne satisfont pas ses contraintes (diagnostic CTE et règles "
-                f"d'usage des outils dans le contexte automatique ci-dessus). Applique "
-                f"maintenant une correction CIBLÉE de l'étape bloquante — `run_cte` "
-                f"d'abord si tu dois inspecter les valeurs réelles d'une CTE."
-            ) + branch_plan_hint
+                (
+                    f"Le test [{failing_uid_trigger}] a été jugé Insuffisant : ses données "
+                    f"d'entrée ne satisfont pas ses contraintes (diagnostic CTE et règles "
+                    f"d'usage des outils dans le contexte automatique ci-dessus). Applique "
+                    f"maintenant une correction CIBLÉE de l'étape bloquante — `run_cte` "
+                    f"d'abord si tu dois inspecter les valeurs réelles d'une CTE."
+                )
+                + branch_plan_hint
+                + premise_guard
+            )
         # Mémoire des tentatives : rendu du ledger en conversation alternée
         # AI/HUMAN, inséré entre l'historique et le trigger courant.
         attempt_msgs = _render_attempt_messages(state.get("correction_attempts") or [])
