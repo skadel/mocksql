@@ -5,8 +5,8 @@ Utilise make_llm() du backend (Vertex AI via ChatGoogleGenerativeAI(vertexai=Tru
 si VERTEX_PROJECT est configuré — même pattern que les autres agents MockSQL.
 
 Évalue un seul test (happy path) sur 3 critères :
-  - cohérence_données  : les données injectées sont-elles plausibles ?
-  - cohérence_test     : le scénario représente-t-il un cas d'usage réel ?
+  - cohérence_données  : les données sont-elles cohérentes avec le SQL ET la description ? (pas leur réalisme)
+  - cohérence_test     : le scénario testé est-il clair et cohérent ?
   - lisibilité_métier  : la description et les suggestions sont-elles accessibles à un non-technique ?
 """
 
@@ -62,15 +62,22 @@ Suggestions générées pour ce modèle :
 
 ## Critères d'évaluation (note de 1 à 5)
 
-**cohérence_données** : Les lignes injectées en entrée sont-elles plausibles \
-et suffisantes pour que la requête retourne un résultat sensé ?
-  - 1 = données absurdes, vides ou incompatibles avec le SQL
-  - 5 = données réalistes et bien choisies pour ce cas nominal
+**cohérence_données** : Les lignes injectées sont-elles COHÉRENTES avec (a) la logique \
+SQL — elles produisent un résultat sensé, non vide pour ce scénario — ET (b) ce que la \
+DESCRIPTION du test annonce ?
+  ⚠️ Ce sont des données SYNTHÉTIQUES de test, PAS des données de production : leur \
+RÉALISME vis-à-vis du monde réel n'entre PAS en compte. Une population de 3937 pour la \
+France est parfaitement acceptable si elle est cohérente avec le SQL et la description.
+  - 1 = données incompatibles avec le SQL (résultat vide/cassé), OU qui CONTREDISENT la \
+description (la description annonce 1000 cas et une population de 67M, mais on injecte \
+8697 cas et une population de 3937)
+  - 5 = données qui font tourner la requête comme prévu ET fidèles à ce que la description \
+annonce (mêmes valeurs d'entrée, même cas) — qu'elles soient réalistes ou non
 
-**cohérence_test** : Le scénario testé représente-t-il bien un cas d'usage \
-réel et compréhensible ?
-  - 1 = scénario incompréhensible ou hors-sujet
-  - 5 = cas nominal clair, qu'un ingé data reconnaît immédiatement
+**cohérence_test** : Le scénario testé est-il clair, cohérent et bien ciblé (la \
+description, les données et les assertions racontent la même histoire) ?
+  - 1 = scénario incompréhensible, hors-sujet, ou incohérent en interne
+  - 5 = cas nominal clair et cohérent de bout en bout, qu'un ingé data reconnaît immédiatement
 
 **lisibilité_métier** : La description du scénario, les assertions de validation \
 et les suggestions sont-elles formulées dans un langage accessible à un \
