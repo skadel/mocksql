@@ -265,7 +265,13 @@ class _AssertionsAndEvaluation(BaseModel):
     assertions: List[_Assertion] = Field(min_length=1)
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
     reason_type: Optional[
-        Literal["bad_data", "bad_assertions", "bad_description", "needs_validation"]
+        Literal[
+            "bad_data",
+            "bad_assertions",
+            "bad_description",
+            "bad_input_description",
+            "needs_validation",
+        ]
     ] = None
     explanation: str
     assertion_fix: Optional[_AssertionFix] = None
@@ -274,10 +280,12 @@ class _AssertionsAndEvaluation(BaseModel):
     # description suppose en sortie (cardinalité annoncée), pour construire la question de
     # validation « le résultat produit N lignes alors que tu en attendais M ».
     expected_row_count: Optional[int] = None
-    # Rempli UNIQUEMENT si reason_type ∈ {"needs_validation", "bad_description"} : description
-    # réalignée sur la sortie réelle, proposée à l'utilisateur dans le prompt de validation.
-    # Quand il clique « Je valide l'état actuel », accept_validation l'applique tel quel (pas de
-    # 2ᵉ appel LLM). Garde le même scénario métier, n'ajuste que ce qui contredit le réel.
+    # Rempli UNIQUEMENT si reason_type ∈ {"needs_validation", "bad_description",
+    # "bad_input_description"} : description réalignée sur le réel (sortie pour les deux
+    # premiers, valeurs d'entrée injectées pour bad_input_description), proposée à
+    # l'utilisateur dans le prompt de validation. Quand il clique « Je valide l'état
+    # actuel », accept_validation l'applique tel quel (pas de 2ᵉ appel LLM). Garde le
+    # même scénario métier, n'ajuste que ce qui contredit le réel.
     corrected_description: Optional[str] = None
     # Titre court (3–6 mots) réaligné, optionnel, accompagnant corrected_description.
     corrected_name: Optional[str] = None
@@ -1651,6 +1659,20 @@ Les données sont valides — NE les corrige PAS, NE relance rien : c'est le nar
 ⚠️ N'utilise ce motif QUE si la description énonce une valeur concrète contredite — JAMAIS pour une
 description qualitative ou structurelle (« vérifie que les régions sans trajet n'apparaissent pas »),
 ni quand la description ne donne aucune valeur chiffrée précise.
+
+**Cohérence description ↔ données d'ENTRÉE injectées (`bad_input_description`) :**
+Compare les valeurs d'ENTRÉE que `<test_context>` prétend injecter aux lignes réelles de
+`<input_data>`. Si la description énonce des valeurs d'entrée CONCRÈTES (« on injecte deux claims de
+10 et 20 TiB », « un montant de 500 € ») que les données injectées CONTREDISENT (valeurs différentes),
+le test ment au lecteur sur ses propres entrées **même si les assertions passent**. Dans ce cas :
+`verdict: "Insuffisant"` + `reason_type: "bad_input_description"`, et `explanation` qui pointe l'écart
+(ex. « La description annonce 10 et 20 mais les lignes injectées portent 28.08 et 3479.61 »).
+Remplis aussi `corrected_description` : la même description réécrite pour refléter fidèlement les valeurs
+réellement injectées, même scénario métier, sans inventer d'autres faits. Optionnellement `corrected_name`.
+Les données sont valides — NE les corrige PAS, NE relance rien : c'est le narratif d'entrée qui est faux.
+⚠️ N'utilise ce motif QUE si la description énonce des valeurs d'entrée concrètes contredites par
+`<input_data>` — JAMAIS pour une description qualitative (« quelques lignes représentatives »), ni quand
+elle ne chiffre aucune valeur d'entrée précise. Distinct de `bad_description` (qui porte sur la SORTIE).
 
 **Cardinalité annoncée ↔ réelle (`needs_validation`) :**
 Compare le NOMBRE de lignes que la description suppose en sortie au `row_count` réel de

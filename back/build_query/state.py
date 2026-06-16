@@ -82,9 +82,12 @@ class QueryState(TypedDict):
     ]  # concatenated mocksql.md files (global → file-specific)
     evaluation_feedback: Optional[
         str
-    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows" | "bad_description" | "needs_validation"
+    ]  # reason set by test_evaluator when Insuffisant: "bad_data" | "bad_assertions" | "too_many_rows" | "bad_description" | "bad_input_description" | "needs_validation"
     # "bad_description" = la description annonce une sortie contredite par le résultat réel
     # (donnée valide, narratif faux) → flagué, aucune boucle de retry (route vers complétion).
+    # "bad_input_description" = la description annonce des valeurs d'ENTRÉE contredites par les
+    # données réellement injectées (donnée valide, narratif d'entrée faux) → même délégation que
+    # bad_description (VALIDATION_PROMPT), aucune boucle de retry. Cf. TICKET-2.
     # "needs_validation" = la description suppose une cardinalité (nb de lignes) que le résultat
     # ne produit pas, MAIS les données d'entrée sont valides → on NE corrige pas en boucle :
     # on sauve l'état et on demande à l'utilisateur de valider (VALIDATION_PROMPT). Cf.

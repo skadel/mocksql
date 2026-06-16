@@ -108,10 +108,30 @@ injectées sans retoucher le narratif. Observé sur fdp : `daily_verified_claims
   `bad_description`.
 
 **Critères d'acceptation**
-- [ ] Test de régression sur le cas `daily_verified_claims`.
-- [ ] Narratif d'entrée auto-généré désynchronisé → `corrected_description` reflétant les
-      valeurs réelles, sans relancer l'exécution.
-- [ ] Score lisibilité fdp des cas concernés remonte (≥ 4).
+- [x] Test de régression : routing + handling déterministes
+      (`back/tests/test_input_desync.py`) — `bad_input_description` → délégation
+      `VALIDATION_PROMPT`, pas de boucle ; jamais de réécriture muette.
+- [x] Narratif d'entrée auto-généré désynchronisé → `corrected_description` reflétant les
+      valeurs réelles, sans relancer l'exécution (chemin `accept_validation` au clic).
+- [ ] Score lisibilité fdp des cas concernés remonte (≥ 4) — **à valider à l'éval**
+      (détection LLM, comme `bad_description`).
+
+**Implémentation**
+- Nouveau `reason_type: "bad_input_description"` (`examples_executor.py` : schéma
+  `_AssertionsAndEvaluation` + section dédiée du prompt du juge comparant `<test_context>`
+  ↔ `<input_data>`).
+- Routing : `route_evaluator` + bloc de délégation de `test_evaluator` (question dédiée,
+  consciente de `user_premise`) ; mapping dans `assertion_generator`.
+- Persistance/validation : `accept_validation` applique `corrected_description` (déjà
+  agnostique au `reason_type`) ; retire `user_premise` quand l'utilisateur valide une
+  desync d'ENTRÉE (interaction T1↔T2), la conserve sur une desync de sortie.
+
+**Lien TICKET-1** : la piste « réécrire silencieusement la description » est bien évitée —
+on passe par la délégation `VALIDATION_PROMPT`, et la question pointe la prémisse
+utilisateur quand elle existe.
+
+**Statut : FAIT** côté routing/handling/détection (prompt). Reste à confirmer le gain de
+lisibilité à l'éval fdp (`daily_verified_claims`).
 
 ---
 

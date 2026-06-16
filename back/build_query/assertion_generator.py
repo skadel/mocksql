@@ -162,6 +162,23 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
         updated_test.pop("assertion_fix", None)
         updated_test.pop("diagnostic", None)
         updated_test.pop("expected_row_count", None)
+    elif eval_result.reason_type == "bad_input_description":
+        # Désync description↔valeurs d'ENTRÉE injectées (TICKET-2) : données valides,
+        # narratif d'entrée faux. Même délégation que bad_description — on porte la
+        # description corrigée pour qu'accept_validation l'applique au clic. `user_premise`
+        # (TICKET-1), s'il est présent, est conservé via `**current_test`.
+        updated_test = {
+            **current_test,
+            "assertion_results": assertion_results,
+            "verdict": "Insuffisant",
+            "reason_type": "bad_input_description",
+            "evaluation_explanation": eval_result.explanation,
+            "corrected_description": eval_result.corrected_description,
+            "corrected_name": eval_result.corrected_name,
+        }
+        updated_test.pop("assertion_fix", None)
+        updated_test.pop("diagnostic", None)
+        updated_test.pop("expected_row_count", None)
     elif has_failing:
         updated_test = {
             **current_test,

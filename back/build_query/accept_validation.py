@@ -120,6 +120,7 @@ async def accept_validation(state: QueryState):
     updated_cases = []
     for c in test.get("test_cases") or []:
         if str(c.get("test_index")) == str(test_index):
+            was_input_desync = c.get("reason_type") == "bad_input_description"
             c = dict(c)
             c["unit_test_description"] = realigned.unit_test_description
             if realigned.test_name:
@@ -130,6 +131,13 @@ async def accept_validation(state: QueryState):
             c.pop("expected_row_count", None)
             c.pop("corrected_description", None)
             c.pop("corrected_name", None)
+            # T1↔T2 : valider une desync d'entrée = l'utilisateur accepte les données
+            # réelles, donc sa prémisse d'entrée était fausse → on la retire pour que
+            # le garde bad_data ne protège plus une prémisse abandonnée. (Une validation
+            # de SORTIE — needs_validation / bad_description — ne touche pas la prémisse
+            # d'entrée, qui reste pertinente.)
+            if was_input_desync:
+                c.pop("user_premise", None)
         updated_cases.append(c)
 
     update_test(state["session"], {"test_cases": updated_cases})

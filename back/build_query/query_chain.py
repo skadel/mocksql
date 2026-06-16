@@ -361,8 +361,9 @@ def route_evaluator(state: QueryState):
         return "history_saver"
     # Désync description↔réel (données valides) : pas de boucle — l'état est sauvé et un
     # VALIDATION_PROMPT a été émis ; on attend la décision de l'utilisateur (Valider / Corriger).
-    # needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète.
-    if feedback in ("needs_validation", "bad_description"):
+    # needs_validation = écart de cardinalité ; bad_description = écart de valeur de SORTIE ;
+    # bad_input_description = écart description ↔ valeurs d'ENTRÉE injectées (TICKET-2).
+    if feedback in ("needs_validation", "bad_description", "bad_input_description"):
         logger.diag("[route_evaluator] → history_saver (%s)", feedback)
         return "history_saver"
     if feedback == "bad_data":
