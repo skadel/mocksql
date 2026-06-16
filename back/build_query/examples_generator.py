@@ -795,6 +795,34 @@ def _next_test_index(existing_tests: list) -> str:
     return str((max(existing_indices) if existing_indices else 0) + 1)
 
 
+def _resolve_user_premise(
+    state, existing_tests: list, existing_tc: Optional[dict]
+) -> Optional[str]:
+    """Prémisse utilisateur à attacher au test généré (TICKET-1), ou ``None``.
+
+    Détection par authorship EXPLICITE, sur un signal STRUCTUREL (jamais une
+    heuristique sur le texte) :
+
+    - Régénération / retry d'un test existant (``existing_tc`` fourni) : on REPORTE la
+      prémisse déjà tracée sur ce test — un round de correction ne doit pas effacer
+      l'authorship.
+    - Nouveau test issu d'une instruction EXPLICITE de l'utilisateur (chat →
+      ``generate_test_data``) : ``input`` porte la prémisse énoncée, on ne cible pas un
+      test existant, et ``existing_tests`` est non vide — ce qui écarte la génération
+      initiale en masse (« génère des tests pour ce modèle »), qui n'a pas de prémisse
+      par test. Le garde ``bad_data`` exclut un ``input`` périmé de boucle de retry.
+    """
+    if existing_tc is not None:
+        return existing_tc.get("user_premise")
+    if (
+        existing_tests
+        and state.get("input", "").strip()
+        and state.get("evaluation_feedback") != "bad_data"
+    ):
+        return state["input"].strip()
+    return None
+
+
 def _resolve_target_key(state, existing_list: list) -> Optional[str]:
     """
     Return the test_index to overwrite, or None to create a new test.
@@ -1136,6 +1164,13 @@ async def generate_examples_(
     else:
         test_index = _next_test_index(existing_tests)
         test_uid = uuid.uuid4().hex[:4]
+        existing_tc = None
+
+    # Prémisse utilisateur (TICKET-1) : tracée pour que la boucle bad_data n'écrase
+    # pas en silence une valeur que l'utilisateur a explicitement affirmée.
+    premise = _resolve_user_premise(state, existing_tests, existing_tc)
+    if premise:
+        generated["user_premise"] = premise
 
     return {**generated, "test_index": test_index, "test_uid": test_uid}, test_index
 
