@@ -148,6 +148,15 @@ Résidu de qualité non bloquant relevé par le juge fdp : `warm_storage_dataset
 `daily_filecoin_pay_operators_metrics` (échappements inutiles dans l'ID).
 
 **Critères d'acceptation**
-- [ ] Heuristique/garde dans le générateur d'assertions contre le pattern « égalité stricte
-      sur clé technique pour valider un tri ».
-- [ ] Pas de régression sur les tests fdp déjà 5/5.
+- [x] Consigne dans le générateur d'assertions contre le pattern « égalité stricte
+      sur clé technique pour valider un tri » (description du champ `expected_condition`
+      de `_Assertion`), + garde-fou anti-régression (`back/tests/test_assertion_ordering_guidance.py`).
+- [ ] Pas de régression sur les tests fdp déjà 5/5 — **à confirmer à l'éval**.
+
+**Choix de conception** : contrairement à T1/T2, le pattern n'est pas détectable de façon
+déterministe fiable (« clé technique » ? assertion qui vise un tri ?) → guidage à la
+GÉNÉRATION (instruction de prompt) plutôt qu'une heuristique pleine de faux positifs.
+Pousse vers : affirmer la RELATION d'ordre, ou positionner la ligne par sa VALEUR de tri
+via `scope`, jamais épingler un id/code à une position.
+
+**Statut : FAIT** (consigne + garde-fou). Gain à confirmer à l'éval fdp.
