@@ -21,6 +21,7 @@ import uuid
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.runnables import Runnable
 
 from build_query.prompt_tools import build_other_prompt, make_routing_prompt
 from common_vars import COMMON_HISTORY_TABLE_NAME
@@ -32,7 +33,18 @@ from utils.saver import common_history_retriever
 
 logger = logging.getLogger(__name__)
 
-_llm = make_llm()
+# Construit paresseusement : l'import du module ne doit JAMAIS instancier un client
+# Vertex AI réel (résolution de credentials, etc.). Les tests patchent ``_llm``
+# directement → ``_get_llm`` renvoie alors le fake sans rien construire.
+_llm: Runnable | None = None
+
+
+def _get_llm() -> Runnable:
+    global _llm
+    if _llm is None:
+        _llm = make_llm()
+    return _llm
+
 
 # Types d'historique pertinents pour classer et pour répondre à une question :
 # le SQL testé, les questions/réponses passées et les résultats d'exécution.
@@ -62,7 +74,7 @@ async def classify_inflight_message(session: str, text: str, dialect: str) -> st
         logger.diag("[inflight] history retrieval failed → instruction: %s", exc)
         history = []
     prompt = make_routing_prompt(dialect=dialect, history=history)
-    chain = prompt | _llm | JsonOutputParser()
+    chain = prompt | _get_llm() | JsonOutputParser()
     try:
         result = await chain.ainvoke({"input": text})
         route = result.get("route", "generator")
@@ -92,7 +104,7 @@ async def answer_inflight_question(
         history = []
 
     prompt = build_other_prompt(text, dialect, history)
-    chain = prompt | _llm
+    chain = prompt | _get_llm()
     result = await chain.ainvoke({"descriptions": "[]"})
     answer_text = getattr(result, "content", "") or ""
 
