@@ -950,7 +950,11 @@ const ChatComponent: React.FC = () => {
       }
       if (Notification.permission === 'granted') {
         const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
-        new Notification('MockSQL', { body, icon: '/favicon.ico' });
+        const notif = new Notification('MockSQL', { body, icon: '/favicon.ico' });
+        notif.onclick = () => {
+          window.focus();
+          notif.close();
+        };
       }
       // Replay des instructions supplémentaires non consommées en vol : on les
       // récupère + on vide la session, puis on relance un message de suivi (route
