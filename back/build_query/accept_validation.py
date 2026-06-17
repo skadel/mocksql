@@ -174,4 +174,17 @@ async def accept_validation(state: QueryState):
             "test_index": test_index,
         },
     )
-    return {"messages": [update_msg, eval_msg]}
+    # Reprise post-évaluation : on enchaîne sur suggestions_generator (cf. route_after_accept)
+    # plutôt que de clore sec sur history_saver. Aucun re-run DuckDB — la validation accepte
+    # les données actuelles (input + SQL inchangés), donc results_json/assertion_results déjà
+    # stockés restent valides. On hydrate juste le SQL/colonnes pour que suggestions_generator
+    # contextualise ses propositions (le flux validate n'a pas de query → pre_routing a court-circuité).
+    return {
+        "messages": [update_msg, eval_msg],
+        "revalidated": True,
+        "has_existing_tests": True,
+        "optimized_sql": (test.get("optimized_sql") or "").strip(),
+        "query": (test.get("sql") or "").strip(),
+        "used_columns": test.get("used_columns") or [],
+        "query_decomposed": test.get("query_decomposed") or "",
+    }

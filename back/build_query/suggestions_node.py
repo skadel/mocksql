@@ -23,6 +23,27 @@ from utils.test_utils import build_test_detail
 
 logger = logging.getLogger(__name__)
 
+# Plafond de suggestions actives affichées dans le panneau. En mode append (l'agent
+# « rajoute des suggestions »), au-delà de ce nombre on garde les plus récentes ; quand
+# le plafond est déjà atteint, on prévient l'utilisateur au lieu d'ajouter en silence.
+SUGGESTIONS_CAP = 5
+
+
+def _merge_suggestions(
+    new: list[str], pending: list[str], cap: int = SUGGESTIONS_CAP
+) -> list[str]:
+    """Mode append : nouvelles suggestions en tête (les plus récentes), puis celles
+    déjà en attente. Déduplique (1ʳᵉ occurrence conservée) et tronque au plafond —
+    si l'ajout dépasse ``cap``, ce sont les plus anciennes qui sont écartées."""
+    seen: set[str] = set()
+    merged: list[str] = []
+    for s in [*new, *pending]:
+        s = (s or "").strip()
+        if s and s not in seen:
+            seen.add(s)
+            merged.append(s)
+    return merged[:cap]
+
 
 # ---------------------------------------------------------------------------
 # Catalogue de pièges — sélectionné selon les constructions réellement présentes
@@ -223,6 +244,44 @@ async def generate_suggestions(state: QueryState):
         s for s in _clean(stored.get("suggestions")) if s not in _resolved
     ]
 
+    # Mode append (l'agent « rajoute des suggestions ») vs replace (bouton « Régénérer »
+    # du panneau, ou agent avec replace=True). En append, les nouvelles s'ajoutent aux
+    # existantes (plafond SUGGESTIONS_CAP) ; en replace, elles écrasent toute la liste.
+    agent_args = state.get("agent_tool_args") or {}
+    from_agent = state.get("agent_tool_call") == "generate_suggestions"
+    replace_requested = bool(agent_args.get("replace")) or bool(
+        state.get("regenerate_suggestions")
+    )
+    is_append = from_agent and not replace_requested
+
+    # Plafond atteint : on n'ajoute pas en silence — on prévient l'utilisateur et on le
+    # laisse décider (supprimer une suggestion du panneau, ou demander un remplacement).
+    if is_append and len(pending_suggestions) >= SUGGESTIONS_CAP:
+        logger.diag(
+            "[suggestions] plafond atteint (%d ≥ %d) — pas d'ajout, message utilisateur",
+            len(pending_suggestions),
+            SUGGESTIONS_CAP,
+        )
+        cap_msg = (
+            f"Tu as déjà {len(pending_suggestions)} suggestions, soit le maximum "
+            f"({SUGGESTIONS_CAP}). Supprime-en une ou deux dans le panneau, ou demande-moi "
+            "de les remplacer (« remplace les suggestions »), et je t'en proposerai de nouvelles."
+        )
+        return {
+            "messages": [
+                AIMessage(
+                    content=cap_msg,
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.OTHER,
+                        "parent": state.get("user_message_id")
+                        or state.get("parent_message_id"),
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            ]
+        }
+
     verdicts = _extract_verdicts(state)
     test_blocks = []
     for tc in test_cases:
@@ -407,6 +466,22 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
 
     if not suggestions:
         return {}
+
+    # Mode append : on fusionne les nouvelles (en tête = plus récentes) avec celles déjà
+    # en attente, dédupliqué et plafonné. Les rationales [PROD] suivent les textes retenus.
+    if is_append:
+        merged = _merge_suggestions(suggestions, pending_suggestions)
+        existing_rationales = stored.get("suggestion_rationales") or {}
+        combined_rationales = {**existing_rationales, **rationales}
+        rationales = {k: v for k, v in combined_rationales.items() if k in merged}
+        logger.diag(
+            "[suggestions] append → %d nouvelle(s) + %d en attente = %d après fusion (plafond %d)",
+            len(suggestions),
+            len(pending_suggestions),
+            len(merged),
+            SUGGESTIONS_CAP,
+        )
+        suggestions = merged
 
     # --- 3b. Persistance sur le modèle ---
     # Les suggestions sont un état du modèle (panneau dédié), pas un tour de chat :

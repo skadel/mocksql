@@ -14,7 +14,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from build_query.accept_validation import accept_validation
-from build_query.query_chain import route_evaluator
+from build_query.query_chain import route_after_accept, route_evaluator
 from build_query.test_evaluator import evaluate_tests
 from utils.msg_types import MsgType
 
@@ -187,3 +187,54 @@ async def test_accept_validation_applies_corrected_description_without_llm():
     )
     payload = json.loads(update_msg.content)
     assert payload["new_description"] == "Le total agrégé vaut 1.4M sur la période."
+
+
+# ── Reprise post-validation : suggestions régénérées, sans re-run DuckDB ──
+
+
+def test_route_after_accept_revalidated_goes_to_suggestions():
+    """Validation réussie → on reprend sur suggestions_generator (comme après l'éval)."""
+    assert route_after_accept({"revalidated": True}) == "suggestions_generator"
+
+
+def test_route_after_accept_noop_goes_to_history_saver():
+    """No-op (test introuvable / test_index absent) → clôture directe, pas de suggestions."""
+    assert route_after_accept({}) == "history_saver"
+
+
+@pytest.mark.asyncio
+async def test_accept_validation_triggers_suggestions_reprise():
+    """accept_validation pose `revalidated` et hydrate le SQL/colonnes pour que
+    suggestions_generator contextualise — sans ré-exécuter le test (pas de message RESULTS)."""
+    target = {
+        "test_index": "2",
+        "verdict": "Insuffisant",
+        "reason_type": "needs_validation",
+        "unit_test_description": "Pour un client avec 2 cartes, une seule ligne attendue.",
+        "corrected_description": "Pour un client avec 2 cartes, deux lignes sont produites.",
+        "corrected_name": "Deux cartes, deux lignes",
+        "results_json": json.dumps([{"client": "A"}, {"client": "A"}]),
+    }
+    stored = {
+        "test_cases": [target],
+        "optimized_sql": "SELECT client FROM cards",
+        "sql": "SELECT client FROM cards",
+        "used_columns": ['{"table": "cards", "used_columns": ["client"]}'],
+        "query_decomposed": "[]",
+    }
+
+    with (
+        patch("build_query.accept_validation.get_test", return_value=stored),
+        patch("build_query.accept_validation.update_test"),
+    ):
+        result = await accept_validation(
+            {"session": "sess-2", "test_index": "2", "parent_message_id": "p-2"}
+        )
+
+    assert result["revalidated"] is True
+    assert result["optimized_sql"] == "SELECT client FROM cards"
+    assert result["used_columns"] == stored["used_columns"]
+    # Aucun message RESULTS : la validation ne ré-exécute pas (résultats stockés inchangés).
+    types = [m.additional_kwargs.get("type") for m in result["messages"]]
+    assert MsgType.RESULTS not in types
+    assert route_after_accept(result) == "suggestions_generator"

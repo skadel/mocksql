@@ -96,6 +96,12 @@ class QueryState(TypedDict):
         bool
     ]  # set by the front when the user clicks « Je valide l'état actuel » on a
     # needs_validation test → routing routes to accept_validation (deterministic).
+    revalidated: Optional[
+        bool
+    ]  # set by accept_validation when it successfully validated a test → reprise post-éval :
+    # route_after_accept → suggestions_generator (au lieu de history_saver direct), pour
+    # regénérer les suggestions « comme si on reprenait après l'évaluation ». Pas de re-run
+    # DuckDB : les résultats/assertions stockés sont déjà à jour (input + SQL inchangés).
     empty_results_regen: Optional[
         bool
     ]  # set by test_evaluator: DuckDB returned 0 rows → route straight to generator

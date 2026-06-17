@@ -406,17 +406,33 @@ def route_after_suggestions(state: QueryState):
     (pas de message de clôture « j'ai généré des tests », qui serait faux) ; flux normal de
     1ʳᵉ génération → ``final_response``. Module-level pour rester testable."""
     # Régénération à la demande : bouton du panneau (regenerate_suggestions) OU
-    # l'agent conversationnel qui a appelé generate_suggestions. Dans les deux cas,
-    # pas de message de clôture « j'ai généré un test » (faux : seules les
-    # suggestions ont changé) — le panneau se rafraîchit via le message SSE.
+    # l'agent conversationnel qui a appelé generate_suggestions OU reprise post-validation
+    # (revalidated). Dans tous ces cas, pas de message de clôture « j'ai généré un test »
+    # (faux : seules les suggestions ont changé, ou un test a été validé via son propre
+    # message EVALUATION) — le panneau se rafraîchit via le message SSE.
     if (
         state.get("regenerate_suggestions")
         or state.get("agent_tool_call") == "generate_suggestions"
+        or state.get("revalidated")
     ):
         logger.diag("[route_after_suggestions] → history_saver (régénération)")
         return "history_saver"
     logger.diag("[route_after_suggestions] → final_response")
     return "final_response"
+
+
+def route_after_accept(state: QueryState):
+    """Sortie de ``accept_validation``. Sur validation réussie (``revalidated``), on reprend
+    le pipeline comme après une évaluation : régénération des suggestions de couverture, puis
+    clôture. Sur no-op (test introuvable, test_index absent), rien à faire → ``history_saver``.
+    Module-level pour rester testable (ne dépend que de ``state``)."""
+    if state.get("revalidated"):
+        logger.diag(
+            "[route_after_accept] → suggestions_generator (reprise post-validation)"
+        )
+        return "suggestions_generator"
+    logger.diag("[route_after_accept] → history_saver (no-op)")
+    return "history_saver"
 
 
 def build_query_graph():
@@ -513,7 +529,7 @@ def build_query_graph():
     builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
     builder.add_edge("update_test_node", "history_saver")
-    builder.add_edge("accept_validation", "history_saver")
+    builder.add_conditional_edges("accept_validation", route_after_accept)
     builder.add_edge("data_patcher", "executor")
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
