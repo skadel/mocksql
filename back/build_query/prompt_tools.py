@@ -8,6 +8,7 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.prompts.chat import MessageLike
 
 from build_query.converstion_history import format_history
+from build_query.lessons import format_lessons_block
 from utils.msg_types import MsgType
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE, escape_unescaped_placeholders
 from utils.saver import get_message_type
@@ -584,6 +585,11 @@ def generate_data_prompt(
         else ""
     )
 
+    # Leçons apprises de corrections passées (par table / jointure) — réinjectées
+    # pour ne pas répéter une erreur déjà corrigée sur un autre test.
+    lessons_block_str = format_lessons_block(profile, used_columns)
+    lessons_block = f"\n{lessons_block_str}\n" if lessons_block_str else ""
+
     _has_unnest = sql and "unnest" in sql.lower()
     unnest_block = (
         "\n⚠️ **Structure UNNEST détectée** : cette requête déplie des colonnes imbriquées (ARRAY/STRUCT BigQuery). "
@@ -736,6 +742,7 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
         "(format `{dataset}_{table}`, casse stricte) :\n"
         f"{schema_block_str}\n"
         f"{profile_block}"
+        f"{lessons_block}"
         "</schema>\n"
     )
 
@@ -1102,6 +1109,10 @@ def debug_failing_cte_prompt(
         if profile_block_str
         else ""
     )
+
+    lessons_block_str = format_lessons_block(profile, used_columns or [])
+    if lessons_block_str:
+        profile_section += f"\n{lessons_block_str}\n"
 
     system_message_content = f"""Vous êtes un QA engineer expert en correction de données de test SQL.
 
