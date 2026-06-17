@@ -455,6 +455,53 @@ Tentatives de correction restantes : {retries_left}
     return eval_context, eval_test_idx
 
 
+def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str | None:
+    """Phrase courte (1-2 lignes) annonçant à l'utilisateur l'action que l'agent
+    engage via ses outils, pour qu'il voie que sa demande est prise en compte.
+
+    Couvre les outils dont l'utilisateur attend une confirmation conversationnelle :
+    - `generate_test_data` / `update_test_data` : courte phrase au-dessus de la carte
+      « Nouveau test / Test modifié » (le scénario détaillé reste dans la carte) ;
+    - `data_batch` (patch/ajout/suppression de lignes) : n'affiche que le tableau
+      patché → on verbalise l'action ;
+    - `generate_suggestions` : ne rafraîchit que le panneau dédié → on l'annonce.
+    `update_test_description` / `delete_test` ont déjà leur propre confirmation →
+    retourne None (comme pour tout outil de debug/réévaluation/clarification).
+    """
+    if agent_tool_call == "generate_test_data":
+        return "C'est noté — je te prépare un nouveau test pour ce scénario."
+    if agent_tool_call == "update_test_data":
+        return "C'est noté — je corrige les données de ce test, puis je le relance."
+    if agent_tool_call == "data_batch":
+        adds = patches = removes = 0
+        for op in agent_tool_args.get("calls") or []:
+            tool = op.get("tool")
+            if tool == "add_test_row":
+                adds += 1  # une op = une ligne logique (cohérente sur le JOIN)
+            elif tool == "patch_test_field":
+                patches += 1
+            elif tool == "remove_test_row":
+                removes += 1
+        parts = []
+        if adds:
+            parts.append(f"j'ajoute {adds} ligne{'s' if adds > 1 else ''}")
+        if patches:
+            parts.append(f"j'ajuste {patches} valeur{'s' if patches > 1 else ''}")
+        if removes:
+            parts.append(f"je retire {removes} ligne{'s' if removes > 1 else ''}")
+        detail = ", ".join(parts) if parts else "j'ajuste les données"
+        return (
+            f"Je modifie les données de test pour prendre en compte ta demande "
+            f"({detail}), puis je relance l'exécution."
+        )
+    if agent_tool_call == "generate_suggestions":
+        return (
+            "Je te prépare de nouvelles suggestions de cas à tester — "
+            "elles apparaîtront dans le panneau des tests."
+        )
+    return None
+
+
 def _format_branch_plan_hint(test_obj: dict | None) -> str:
     """Rappel du contrat de branche (UNION ALL) déclaré à la génération.
 
@@ -504,8 +551,11 @@ async def conversational_agent(state: QueryState):
     # expose à l'agent pour qu'il comprenne « fais un test de la suggestion 2 » ou
     # « régénère les suggestions en insistant sur X » — sinon il ne sait pas de quoi
     # l'utilisateur parle. Numérotées 1-based pour matcher l'affichage du panneau.
+    from build_query.suggestions_node import SUGGESTIONS_CAP
+
     stored = get_test(state["session"]) or {}
     current_suggestions = [s for s in (stored.get("suggestions") or []) if s]
+    suggestions_count = len(current_suggestions)
     suggestions_summary = (
         "\n".join(f"{i}. {s}" for i, s in enumerate(current_suggestions, 1))
         if current_suggestions
@@ -592,11 +642,14 @@ SQL testé (dialecte {state.get("dialect", "bigquery")}):
 Tests existants :
 {tests_summary}
 
-Suggestions de couverture actives (proposées à l'utilisateur dans le panneau dédié, numérotées comme à l'écran) :
+Suggestions de couverture actives ({suggestions_count}/{SUGGESTIONS_CAP} — maximum {SUGGESTIONS_CAP}, proposées à l'utilisateur dans le panneau dédié, numérotées comme à l'écran) :
 {suggestions_summary}
 
 Si l'utilisateur fait référence à une suggestion (« la suggestion 2 », « le cas que tu as proposé sur les NULL »…), appuie-toi sur cette liste pour savoir de quoi il parle, puis agis : `generate_test_data` pour en faire un nouveau test, ou étends un test existant si le scénario recoupe largement.
-Tu peux aussi régénérer les suggestions toi-même avec `generate_suggestions` ; passe dans `instructions` le commentaire de l'utilisateur (ex : « focus sur les cas limites », « propose des cas autour de la jointure ») pour orienter les nouvelles propositions.
+Tu peux générer des suggestions toi-même avec `generate_suggestions` ; passe dans `instructions` le commentaire de l'utilisateur (ex : « focus sur les cas limites », « des cas qui existent en prod ») pour orienter les propositions. Règles du plafond de {SUGGESTIONS_CAP} :
+- Par défaut, les nouvelles suggestions s'AJOUTENT aux existantes (appel sans `replace`).
+- Si l'utilisateur demande de « remplacer » / « refaire » les suggestions → appelle `generate_suggestions` avec `replace=True`.
+- Si les {SUGGESTIONS_CAP} suggestions sont déjà présentes et qu'il en veut plus SANS remplacer → n'appelle pas l'outil : explique-lui qu'il a atteint le maximum de {SUGGESTIONS_CAP} et qu'il peut en supprimer dans le panneau ou demander un remplacement.
 
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
@@ -678,11 +731,16 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         return f"{test_uid}:{new_name}:{new_description}"
 
     @tool
-    def generate_suggestions(instructions: str = "") -> str:
+    def generate_suggestions(instructions: str = "", replace: bool = False) -> str:
         """Génère des suggestions de cas de tests non encore couverts. Appelle cet outil pour proposer
         des scénarios à l'utilisateur, notamment après une génération de tests ou quand il demande
-        quoi tester ensuite. Le paramètre instructions est optionnel : tu peux y préciser un axe
-        particulier (ex : 'focus sur les cas NULL', 'insiste sur les valeurs limites')."""
+        quoi tester ensuite.
+        instructions (optionnel) : axe à privilégier (ex : 'focus sur les cas NULL',
+        'insiste sur les valeurs limites', 'des cas qui existent en prod').
+        replace : False (défaut) → les nouvelles suggestions S'AJOUTENT aux existantes
+        (plafond de 5 ; au-delà, les plus anciennes sont écartées). True → REMPLACE toute la
+        liste actuelle par de nouvelles (à utiliser quand l'utilisateur demande de « remplacer »
+        ou « refaire » les suggestions)."""
         return instructions
 
     @tool
@@ -1215,6 +1273,22 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     last_msg_id = parent
 
     if agent_tool_call in ("generate_test_data", "update_test_data"):
+        # Accusé conversationnel au-dessus de la carte scénario : le scénario détaillé
+        # reste dans la carte, mais cette phrase confirme la prise en compte. Pas
+        # pendant la correction auto (update_test_data en fallback regen) → bruit.
+        ack_text = _build_tool_ack(agent_tool_call, agent_tool_args)
+        if ack_text and not is_auto_correct:
+            ack_msg = AIMessage(
+                content=ack_text,
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.OTHER,
+                    "parent": last_msg_id,
+                    "request_id": state.get("request_id"),
+                },
+            )
+            msgs_to_add.append(ack_msg)
+            last_msg_id = ack_msg.id
         scenario = (
             agent_tool_args.get("scenario")
             or agent_tool_args.get("instruction")
@@ -1253,6 +1327,28 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                     },
                 )
             )
+    elif agent_tool_call in ("data_batch", "generate_suggestions"):
+        # Accusé en langage naturel : data_batch n'affiche que le tableau patché et
+        # generate_suggestions ne rafraîchit que le panneau dédié — sans cette phrase
+        # l'utilisateur ne voit pas que sa demande a été prise en compte.
+        # Pendant la boucle de correction automatique (bad_data), data_batch tourne
+        # sans demande directe de l'utilisateur → pas d'accusé (ce serait du bruit à
+        # chaque retry) ; on n'accuse que les actions déclenchées par un input user.
+        ack_text = _build_tool_ack(agent_tool_call, agent_tool_args)
+        if ack_text and not (is_auto_correct and agent_tool_call == "data_batch"):
+            ack_msg = AIMessage(
+                content=ack_text,
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.OTHER,
+                    "parent": last_msg_id,
+                    "request_id": state.get("request_id"),
+                },
+            )
+            msgs_to_add.append(ack_msg)
+            last_msg_id = ack_msg.id
+            # Le tableau patché (data_patcher) chaîne sous l'accusé via agent_message_id.
+            update["agent_message_id"] = ack_msg.id
 
     raw_content = _plain_text(result.content)
 
