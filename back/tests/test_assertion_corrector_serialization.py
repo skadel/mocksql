@@ -90,9 +90,10 @@ async def test_correct_assertions_serializes_timestamps():
 
     # Ne doit PAS planter, et le message émis doit être du JSON valide (Timestamps sérialisés).
     assert out["messages"], "correct_assertions doit émettre un message"
-    msg = out["messages"][0]
-    # Si le message est une erreur, le test échoue : la sérialisation aurait dû réussir.
-    assert msg.additional_kwargs.get("type") == MsgType.RESULTS
+    # La correction émet un accusé conversationnel (OTHER) PUIS le test corrigé (RESULTS).
+    msg = next(
+        m for m in out["messages"] if m.additional_kwargs.get("type") == MsgType.RESULTS
+    )
     parsed = json.loads(msg.content)  # lève si le contenu n'est pas du JSON valide
     assert parsed[0]["assertion_results"][0]["failing_rows"][0]["ts"]
 

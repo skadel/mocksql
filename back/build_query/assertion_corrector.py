@@ -359,22 +359,44 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
         sql_kw = state.get("query", "").strip()
         optimized_kw = state.get("optimized_sql", "").strip()
 
+        # Accusé en langage naturel : sans lui, l'amélioration des assertions se fait
+        # en silence (seul le RESULTS est mis à jour) et l'utilisateur ne comprend pas
+        # que MockSQL a retravaillé le test. On ne l'émet qu'à la 1ʳᵉ passe (pas de
+        # nouvelle tentative dans le ledger) pour ne pas répéter à chaque retry.
+        out_messages: List[AIMessage] = []
+        results_parent = parent
+        if not correction_attempts:
+            ack_msg = AIMessage(
+                content=(
+                    "Je revois les assertions de ce test pour qu'elles vérifient "
+                    "vraiment la logique métier attendue."
+                ),
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.OTHER,
+                    "parent": parent,
+                    "request_id": state.get("request_id"),
+                },
+            )
+            out_messages.append(ack_msg)
+            results_parent = ack_msg.id  # le test corrigé chaîne sous l'accusé
+
+        out_messages.append(
+            AIMessage(
+                content=json.dumps(updated_all_tests, ensure_ascii=False, default=str),
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.RESULTS,
+                    "parent": results_parent,
+                    "request_id": state.get("request_id"),
+                    **({"sql": sql_kw} if sql_kw else {}),
+                    **({"optimized_sql": optimized_kw} if optimized_kw else {}),
+                },
+            )
+        )
+
         return {
-            "messages": [
-                AIMessage(
-                    content=json.dumps(
-                        updated_all_tests, ensure_ascii=False, default=str
-                    ),
-                    id=str(uuid.uuid4()),
-                    additional_kwargs={
-                        "type": MsgType.RESULTS,
-                        "parent": parent,
-                        "request_id": state.get("request_id"),
-                        **({"sql": sql_kw} if sql_kw else {}),
-                        **({"optimized_sql": optimized_kw} if optimized_kw else {}),
-                    },
-                )
-            ],
+            "messages": out_messages,
             "gen_retries": max(0, state.get("gen_retries", 0) - 1),
         }
     except Exception as exc:
