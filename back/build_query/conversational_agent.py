@@ -787,6 +787,28 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         return f"{test_uid}:{reason}"
 
     @tool
+    def note_lesson(
+        rule: str,
+        scope: str = "table",
+        table: str = "",
+        left_table: str = "",
+        right_table: str = "",
+    ) -> str:
+        """Mémorise une leçon RÉUTILISABLE pour ne pas répéter une erreur d'un test à l'autre.
+        Appelle cet outil — EN PLUS de ta correction — dès que tu identifies une règle
+        généralisable sur les données, qu'elle vienne :
+          - d'une correction de contrainte que tu viens de faire (ex : une clé de jointure
+            doit exister des deux côtés sinon le JOIN ne renvoie rien), ou
+          - d'une règle métier énoncée par l'utilisateur (ex : « une banque du groupe BP
+            ne peut pas avoir le champ statut NULL »).
+        rule : la leçon en UNE phrase impérative, actionnable à la génération.
+        scope : 'table' (règle sur une table) ou 'join' (règle sur une jointure entre 2 tables).
+        table : scope='table' → nom de la table concernée.
+        left_table / right_table : scope='join' → les deux tables jointes.
+        N'appelle PAS cet outil pour une particularité ponctuelle non généralisable."""
+        return rule
+
+    @tool
     def ask_clarification(question: str) -> str:
         """Pose une question de clarification à l'utilisateur avant d'agir.
         Utilise cet outil quand la demande est ambiguë ou quand tu détectes une incohérence
@@ -807,6 +829,7 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         patch_test_field,
         remove_test_row,
         add_test_row,
+        note_lesson,
     ]
     debug_tools = [run_cte] if debug_retries > 0 else []
     llm = make_llm().bind_tools(base_tools + debug_tools)
@@ -954,11 +977,33 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         messages_for_llm = messages_for_llm + [HumanMessage(content=instructions_block)]
         consume_instructions(state["session"])
 
+    # Leçons déjà notées plus tôt dans ce run (note_lesson) : les montrer pour que
+    # l'agent puisse en corriger une (la ré-émettre amendée) ou en ajouter une autre,
+    # sans redonner à l'identique une leçon déjà notée (le symptôme cible : une leçon
+    # qui s'avère mauvaise après un nouvel échec).
+    already_noted = state.get("pending_lessons") or []
+    if already_noted:
+        noted_block = "Leçons déjà notées dans ce run (`note_lesson`) :\n" + "\n".join(
+            f"- [{ln.get('scope')} {ln.get('key')}] {ln.get('rule')}"
+            for ln in already_noted
+        )
+        noted_block += (
+            "\nSi un nouvel échec montre qu'une de ces leçons est fausse ou incomplète, "
+            "ré-émets-la corrigée via `note_lesson` ; si elle est bonne mais insuffisante, "
+            "ajoute-en une autre. N'en redonne pas une identique."
+        )
+        messages_for_llm = messages_for_llm + [HumanMessage(content=noted_block)]
+
     _DEBUG_TOOLS = {"run_cte"}
     _DATA_PATCH_TOOLS = {"patch_test_field", "remove_test_row", "add_test_row"}
 
     agent_tool_call: str | None = None
     agent_tool_args: dict = {}
+    # Leçons notées par l'agent (outil note_lesson) — accumulées à travers les retries
+    # de la boucle, dédupliquées/plafonnées seulement à la persistance (history_saver).
+    # source="correction" en boucle auto (bad_data), "user" sur un chat utilisateur.
+    noted_lessons: list = []
+    lesson_source = "correction" if is_auto_correct else "user"
     new_input = state.get("input", "")
     result = None
     _UID_RETRY_MAX = 2
@@ -1065,6 +1110,28 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                     invalid_data_uids.append(uid)
                     continue
                 pending_data_calls.append({"tool": tc["name"], "args": args})
+            elif tc["name"] == "note_lesson":
+                # Annotation latérale : ne concourt pas pour l'action principale.
+                # On la collecte et on poursuit (l'agent l'émet À CÔTÉ d'un patch).
+                from build_query.lessons import make_lesson_entry
+
+                args = dict(tc["args"])
+                entry = make_lesson_entry(
+                    scope=args.get("scope", "table"),
+                    rule=args.get("rule", ""),
+                    table=args.get("table", ""),
+                    left_table=args.get("left_table", ""),
+                    right_table=args.get("right_table", ""),
+                    source=lesson_source,
+                )
+                if entry:
+                    noted_lessons.append(entry)
+                    logger.diag(
+                        "[conv_agent] note_lesson %s `%s` (source=%s)",
+                        entry["scope"],
+                        entry["key"],
+                        entry["source"],
+                    )
             elif first_action_tc is None:
                 first_action_tc = tc
 
@@ -1250,6 +1317,13 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         # Flag consommé : éviter qu'il ne fuite sur un tour suivant (ex. chat user).
         "auto_correct": False,
     }
+    # Leçons accumulées : on les empile sur celles déjà en attente dans le state
+    # (la boucle bad_data peut en noter à plusieurs tours). Dédup/plafond appliqués
+    # à la persistance (history_saver → lessons.persist_pending_lessons).
+    if noted_lessons:
+        update["pending_lessons"] = (
+            list(state.get("pending_lessons") or []) + noted_lessons
+        )
     if evaluation_feedback == "bad_data":
         current_retries = state.get("gen_retries")
         if current_retries is not None and current_retries > 0:

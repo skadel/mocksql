@@ -157,9 +157,20 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
             merged = _merge_profiles(_load_model_profile(), incoming)
             _save_model_profile(merged)
 
+    # Leçons accumulées par l'agent (note_lesson) : persistées dans le profil partagé
+    # selon leur source — "user" toujours, "correction" seulement à convergence (cf.
+    # lessons.persist_pending_lessons). Doit tourner APRÈS le merge du profil ci-dessus
+    # pour ne pas être écrasé par lui.
+    try:
+        from build_query.lessons import persist_pending_lessons
+
+        persist_pending_lessons(state)
+    except Exception as exc:  # une leçon ratée ne doit jamais casser la sauvegarde
+        logger.warning("[history_saver] persist_pending_lessons a échoué: %s", exc)
+
     # Sortie de la boucle bad_data (succès, retries épuisés, ou run sans boucle) :
-    # le ledger des tentatives ne doit pas fuiter sur le tour suivant.
-    return {"save": "success", "correction_attempts": []}
+    # ni le ledger des tentatives ni les leçons en attente ne doivent fuiter au tour suivant.
+    return {"save": "success", "correction_attempts": [], "pending_lessons": []}
 
 
 def get_history_from_state(

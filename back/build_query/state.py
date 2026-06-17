@@ -125,3 +125,10 @@ class QueryState(TypedDict):
     # an alternating AI/HUMAN conversation in conversational_agent, reset by
     # history_saver (loop exit). Also feeds the anti-no-op guard (a batch identical
     # to a past attempt is rejected without consuming a retry).
+    pending_lessons: Optional[
+        list
+    ]  # leçons formulées par l'agent (outil note_lesson) au fil du run, accumulées
+    # ici. Chaque entrée : {scope: "table"|"join", key, rule, source: "correction"|"user"}.
+    # Persistées dans le profil partagé par history_saver via lessons.persist_pending_lessons :
+    # source="user" → toujours ; source="correction" → seulement à convergence.
+    # Réinjectées dans les prompts de génération via lessons.format_lessons_block.
