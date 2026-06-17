@@ -478,9 +478,14 @@ export const buildModelSlice = createSlice({
         state.streamingReasoning = undefined;
         state.lastReasoning = undefined;
         state.retryBadDataTestIndex = undefined;
-        const { testIndex, assertionOnly } = action.meta.arg;
+        const { testIndex, assertionOnly, validateIntent } = action.meta.arg;
         state.loadingTestIndex = testIndex;
-        if (testIndex !== undefined && state.testResults?.length) {
+        // « Je valide l'état actuel » : ce n'est PAS une régénération. Les données, résultats
+        // et assertions stockés restent valides (input + SQL inchangés) — accept_validation ne
+        // ré-exécute rien. Passer le test en `pending` afficherait un loader « Exécution… » qui
+        // ne se résoudrait jamais (aucun message RESULTS ne suit). On garde donc l'état affiché ;
+        // seuls la description (UPDATE_TEST) et le verdict (EVALUATION) seront mis à jour.
+        if (testIndex !== undefined && state.testResults?.length && !validateIntent) {
           state.testResults = state.testResults.map((t: any) => {
             if (t.test_index !== testIndex) return t;
             if (assertionOnly) {
