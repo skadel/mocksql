@@ -7,6 +7,7 @@ from storage.config import (
     get_duckdb_path,
     get_langchain_api_key,
     get_langchain_tracing,
+    get_profile_cache_path,
 )
 
 load_dotenv()
@@ -57,6 +58,10 @@ def validate_required_env() -> None:
 DB_MODE = "duckdb"
 DUCKDB_PATH = get_duckdb_path()
 SCHEMA_CACHE_PATH = os.getenv("SCHEMA_CACHE_PATH", ".mocksql/schema_cache.json")
+# Profil + sample_values (valeurs brutes issues de l'entrepôt → PII) : cache local
+# SÉPARÉ et gitignoré, jamais commité. Le réplay CI n'en a pas besoin (cf. test_runner).
+# Précédence : env PROFILE_CACHE_PATH > mocksql.yml `profile_cache` > .mocksql/profile.json.
+PROFILE_CACHE_PATH = os.getenv("PROFILE_CACHE_PATH") or get_profile_cache_path()
 AUTO_SCHEMA_IMPORT = True
 AUTO_PROFILING = True
 
