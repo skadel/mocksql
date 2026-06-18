@@ -264,12 +264,17 @@ def apply_generation_result(
     used_columns: list[str],
     suggestions: list[str] | None,
     overwrite: bool,
+    path_plans: str | None = None,
 ) -> dict:
     """Construit le document à écrire selon le mode.
 
     - `overwrite` ou pas de fichier existant → suite fraîche (écrasement / bootstrap).
     - sinon (additif, défaut) → préserve le doc existant (specs + champs annexes
       type source_hash/query_decomposed) et n'ajoute que les nouveaux cas.
+
+    `path_plans` (catalogue UNION ALL) est persisté pour qu'un modèle généré en CLI
+    puis ouvert côté serveur garde le focus par branche (l'executor en a besoin pour
+    résoudre le SQL slicé d'un test focalisé).
     """
     if overwrite or not existing_doc:
         doc: dict = {
@@ -279,6 +284,8 @@ def apply_generation_result(
         }
         if suggestions:
             doc["suggestions"] = suggestions
+        if path_plans:
+            doc["path_plans"] = path_plans
         return doc
 
     doc = dict(existing_doc)
@@ -289,6 +296,8 @@ def apply_generation_result(
     doc["used_columns"] = used_columns
     if suggestions:
         doc["suggestions"] = suggestions
+    if path_plans:
+        doc["path_plans"] = path_plans
     return doc
 
 
@@ -376,6 +385,7 @@ def _write_test_file(
     suggestions: list[str] | None = None,
     *,
     overwrite: bool = False,
+    path_plans: str | None = None,
 ) -> tuple[Path, int]:
     """Write the {model_name}.json test file (additive by default, full rebuild on overwrite).
 
@@ -394,6 +404,7 @@ def _write_test_file(
         used_columns=used_columns,
         suggestions=suggestions,
         overwrite=overwrite,
+        path_plans=path_plans,
     )
     out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
     return out_path, len(doc["test_cases"]) - before
@@ -721,6 +732,25 @@ async def run_generate(
         state.get("optimized_sql") or sql, dialect
     )
 
+    # Catalogue des paths UNION ALL (la CLI ne passe pas par validate_query qui le pose
+    # en mode serveur) → focus par branche dispo aussi en CLI/éval/démo. None si pas
+    # d'union de 1er niveau exploitable (comportement inchangé).
+    try:
+        import json as _json
+
+        from build_query.path_slicer import build_path_plans
+
+        _plans = build_path_plans(
+            state.get("optimized_sql") or sql,
+            _json.loads(state["query_decomposed"] or "[]"),
+            state.get("used_columns") or [],
+            dialect,
+        )
+        state["path_plans"] = _json.dumps(_plans) if _plans else None
+    except Exception as e:
+        typer.echo(f"[WARN] build_path_plans failed ({e}), path 'all' only.")
+        state["path_plans"] = None
+
     _patch_db_calls()
 
     # Step 5 — run graph (same as UI, history_saver neutralised above)
@@ -773,6 +803,7 @@ async def run_generate(
             test_cases,
             suggestions,
             overwrite=overwrite,
+            path_plans=state.get("path_plans"),
         )
         action = "écrits (reconstruction)" if overwrite else "ajoutés"
         typer.echo(f"[OK] {n_added} test case(s) {action} → {out_path}")

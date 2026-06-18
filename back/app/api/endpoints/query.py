@@ -193,6 +193,10 @@ async def validate_query_route(body: ValidateQueryRequest):
             "sql": body.sql,
             "used_columns": used_columns,
             "optimized_sql": optimized_sql,
+            # Catalogue des paths UNION ALL (None si pas d'union de 1er niveau) : écrit
+            # ici avec optimized_sql pour qu'un changement de SQL rafraîchisse/efface le
+            # catalogue périmé (apparié à la requête validée).
+            "path_plans": result.get("path_plans"),
         }
         if source_sha:
             session_update["source_sha"] = source_sha

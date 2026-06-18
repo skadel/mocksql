@@ -15,6 +15,7 @@ from sqlglot.optimizer.simplify import simplify
 from utils.llm_errors import normalize_llm_content, loads_lenient_json
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from build_query.path_slicer import resolve_active_sql
 from build_query.state import QueryState
 from utils.examples import (
     run_query_on_test_dataset,
@@ -357,7 +358,8 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     for uc in used_columns:
         logger.debug(f"      - {uc}")
 
-    filtered_schemas = filter_schemas_by_used_columns(schemas, used_columns)
+    # filtered_schemas est résolu PAR TEST dans la boucle (active_schemas), car chaque
+    # test peut cibler un path différent → used_columns réduits différents.
 
     # Détermination de la liste de tests à exécuter
     if rerun_all:
@@ -388,17 +390,26 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     all_tests_results: List[Dict[str, Any]] = []
     with initialize_duckdb(DB_PATH) as con:
         for loop_index, test_case in enumerate(unit_tests):
+            # Résolution PAR TEST du SQL actif : une suite peut mélanger des tests
+            # focalisés sur des paths différents (chacun porte son `target_path`).
+            # resolve_active_sql retombe sur le SQL complet pour all/None/sans catalogue.
+            active_sql, active_used_columns = resolve_active_sql(
+                state, test_case.get("target_path")
+            )
+            active_schemas = filter_schemas_by_used_columns(
+                schemas, active_used_columns
+            )
             logger.debug(
-                f"\n[DEBUG] >>> Lancement test {loop_index} avec table(s) : {list(test_case.get('data', {}).keys())}"
+                f"\n[DEBUG] >>> Lancement test {loop_index} (path={test_case.get('target_path') or 'all'}) avec table(s) : {list(test_case.get('data', {}).keys())}"
             )
             test_result = await _run_single_test_case(
                 state=state,
                 test_case=test_case,
                 loop_index=loop_index,
                 session_id=session_id_duckdb,
-                query=state.get("optimized_sql"),
-                schemas=filtered_schemas,
-                used_columns=used_columns,
+                query=active_sql,
+                schemas=active_schemas,
+                used_columns=active_used_columns,
                 con=con,
                 dialect=dialect,
                 rerun_all=rerun_all,
@@ -1369,6 +1380,11 @@ async def _run_single_test_case(
     # l'agent de correction (boucle bad_data) le retrouve dans les RESULTS.
     if test_case.get("branch_plan"):
         base["branch_plan"] = test_case["branch_plan"]
+    # Path UNION ALL ciblé : préservé à travers l'exécution (persistance + dédup
+    # suggestions + affichage [Focus X]). Le juge évalue déjà le SQL slicé (active_sql),
+    # donc il n'évalue QUE la branche — pas de pénalité de couverture partielle.
+    if test_case.get("target_path"):
+        base["target_path"] = test_case["target_path"]
     # Prémisse utilisateur (TICKET-1) : tracée à la création d'un test issu d'une
     # affirmation explicite de l'user. Préservée ici (comme branch_plan) pour que la
     # boucle bad_data la retrouve et n'écrase pas en silence la valeur énoncée.

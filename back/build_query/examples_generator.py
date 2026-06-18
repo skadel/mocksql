@@ -11,6 +11,7 @@ from models.schemas import get_schemas
 from pydantic import BaseModel, Field, create_model
 
 
+from build_query.path_slicer import ALL_PATH, resolve_active_sql
 from build_query.prompt_tools import generate_data_prompt, update_data_prompt
 from build_query.state import QueryState
 from utils.examples import (
@@ -777,6 +778,11 @@ async def generate_examples(state: QueryState):
         ]
     }
 
+    # Propage le path ciblé dans le state pour que l'executor exécute le même SQL
+    # slicé (via resolve_active_sql) que celui sur lequel le test a été généré.
+    if generated_test.get("target_path"):
+        result["target_path"] = generated_test["target_path"]
+
     # Boucle bad_data : consigne la régénération complète dans le ledger des
     # tentatives, au même titre qu'un lot de patches (le round suivant doit savoir
     # qu'un regen a déjà été tenté sans effet).
@@ -899,6 +905,23 @@ async def generate_examples_(
 
     dialect = state.get("dialect", "bigquery")
     optimized_sql = state.get("optimized_sql", "")
+
+    # --- Focalisation par path (branche UNION ALL) ---------------------------------
+    # Défaut 1ʳᵉ génération (déterministe, aucune décision LLM) : focus sur la 1ʳᵉ
+    # branche. Sinon le path est piloté par le state (agent / suggestion / "all").
+    # `resolve_active_sql` rebinde le SQL + used_columns sur la branche ciblée SANS
+    # écraser `optimized_sql` du state ; retombe sur le complet pour all/None/inconnu.
+    target_path = state.get("target_path")
+    if state.get("path_plans") and not target_path and not existing_tests:
+        try:
+            _plans = json.loads(state["path_plans"])
+            target_path = next((k for k in _plans if k != ALL_PATH), None)
+        except Exception:
+            target_path = None
+    if target_path and target_path != ALL_PATH:
+        optimized_sql, used_columns = resolve_active_sql(
+            {**state, "target_path": target_path}
+        )
 
     # Fail fast if the query has an unsatisfiable HAVING threshold
     from build_query.constraint_simplifier import check_having_cardinality
@@ -1181,6 +1204,15 @@ async def generate_examples_(
     branch_plan = getattr(generated_data, "branch_plan", None)
     if branch_plan is not None:
         generated["branch_plan"] = branch_plan.model_dump()
+
+    # Path UNION ALL ciblé : tracé sur le test (persistance + dédup suggestions +
+    # contexte évaluateur). Label humain de focalisation déterministe (couverture
+    # partielle visible) ; garde anti-double-préfixe sur retry/édition du même test.
+    generated["target_path"] = target_path or ALL_PATH
+    if target_path and target_path != ALL_PATH:
+        _name = generated.get("test_name") or ""
+        if not _name.startswith("[Focus"):
+            generated["test_name"] = f"[Focus {target_path}] {_name}".strip()
 
     # Determine which test_index slot this new test occupies
     target_key = _resolve_target_key(state, existing_tests)
