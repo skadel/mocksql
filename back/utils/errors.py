@@ -54,6 +54,47 @@ def _solver_error(msg: str) -> Dict[str, Any]:
     }
 
 
+def _unknown_column_from_optimize_error(exc: OptimizeError) -> Optional[str]:
+    """Extrait le nom de colonne d'un ``OptimizeError('Unknown column: X')``.
+
+    Ce cas signale presque toujours un **schéma en cache périmé** : une table
+    consommée via ``SELECT *`` n'expose qu'une partie de ses colonnes dans le
+    cache, donc qualify_columns ne sait pas résoudre les références en aval. Le
+    SQL lui-même est valide — il ne faut donc PAS le renvoyer au solver LLM.
+    """
+    match = re.search(r"Unknown column:\s*(\S+)", str(exc))
+    return match.group(1) if match else None
+
+
+def _stale_schema_error_payload(column: str, code: str) -> Dict[str, Any]:
+    """Message terminal actionnable (pas de boucle LLM) : le cache est périmé,
+    il faut le rafraîchir avec ``refresh-schemas`` puis relancer la génération."""
+    error_id = str(uuid.uuid4())
+    user_message = (
+        f"La colonne `{column}` est référencée dans le SQL mais introuvable "
+        f"dans le schéma en cache. C'est généralement le signe d'un schéma en "
+        f"cache **périmé ou incomplet** (souvent une table lue via `SELECT *` "
+        f"dont le cache ne contient qu'une partie des colonnes).\n\n"
+        f"Rafraîchis le schéma puis relance la génération :\n"
+        f"  mocksql refresh-schemas\n\n"
+        f"(Si la colonne n'existe vraiment pas dans la table, corrige le SQL.)"
+    )
+    return {
+        "error": f"Unknown column: {column} (schéma en cache probablement périmé)",
+        "messages": [
+            AIMessage(
+                content=code,
+                id=error_id,
+                additional_kwargs={"type": "error_sql", "parent": None},
+            ),
+            HumanMessage(
+                content=user_message,
+                additional_kwargs={"type": "error", "parent": error_id},
+            ),
+        ],
+    }
+
+
 def safe_last_parent_id(state: dict) -> Optional[str]:
     """
     Essaie d'extraire l'id du dernier message dans state["messages"].
@@ -301,6 +342,9 @@ def handle_post_compile_exceptions(*, exc: Exception, code: str) -> Dict[str, An
         return _solver_error_payload(f"please fix the following error {repr(exc)}")
 
     if isinstance(exc, OptimizeError):
+        unknown_col = _unknown_column_from_optimize_error(exc)
+        if unknown_col:
+            return _stale_schema_error_payload(unknown_col, code)
         return _solver_error_payload(f"please fix the following error {repr(exc)}")
 
     # Autre exception -> 500
