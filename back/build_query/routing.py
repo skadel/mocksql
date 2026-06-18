@@ -12,7 +12,16 @@ from utils.saver import get_history_from_state, common_history_retriever
 
 logger = logging.getLogger(__name__)
 
-_llm = make_llm()
+_llm_cache = None
+
+
+def _get_llm():
+    """Instancie le LLM à la demande (pas à l'import) — évite d'exiger des
+    credentials Google au simple chargement du module (collecte pytest en CI)."""
+    global _llm_cache
+    if _llm_cache is None:
+        _llm_cache = make_llm()
+    return _llm_cache
 
 
 async def routing(state: QueryState):
@@ -168,7 +177,7 @@ async def _classify_intent(state: QueryState, input_text: str) -> str:
         dialect=state.get("dialect", ""),
         history=history,
     )
-    chain = prompt | _llm | JsonOutputParser()
+    chain = prompt | _get_llm() | JsonOutputParser()
     try:
         result = await chain.ainvoke({"input": input_text})
         detected = result.get("route", "generator")
