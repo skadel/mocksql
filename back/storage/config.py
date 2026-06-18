@@ -31,7 +31,9 @@ def get_models_path() -> Path:
     return (_base_dir() / raw).resolve()
 
 
-_GITIGNORE_CONTENT = "data/\n"
+# profile.json contient des valeurs brutes de l'entrepôt (PII) → jamais commité.
+# data/ = base DuckDB locale. Le réplay CI ne dépend d'aucun des deux.
+_GITIGNORE_CONTENT = "data/\nprofile.json\n"
 
 
 def ensure_mocksql_dir(mocksql_dir: Path) -> None:
@@ -39,6 +41,31 @@ def ensure_mocksql_dir(mocksql_dir: Path) -> None:
     gitignore = mocksql_dir / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(_GITIGNORE_CONTENT, encoding="utf-8")
+        return
+    # Projet existant : garantir que chaque entrée requise est présente (ajout
+    # idempotent) — notamment profile.json sur les .mocksql créés avant le split.
+    existing = gitignore.read_text(encoding="utf-8")
+    lines = {ln.strip() for ln in existing.splitlines()}
+    missing = [e for e in _GITIGNORE_CONTENT.split() if e not in lines]
+    if missing:
+        sep = "" if existing.endswith("\n") or not existing else "\n"
+        gitignore.write_text(
+            existing + sep + "\n".join(missing) + "\n", encoding="utf-8"
+        )
+
+
+def get_profile_cache_path() -> str:
+    """Chemin du cache profil (PII) — gitignoré, séparé du schema_cache commité.
+
+    Surchargeable via `profile_cache` dans mocksql.yml (parité avec `schema_cache`),
+    sinon `.mocksql/profile.json`. L'env `PROFILE_CACHE_PATH` reste prioritaire (géré
+    en amont dans env_variables). Résolu sous MOCKSQL_BASE_DIR comme get_models_path.
+    """
+    raw = load_config().get("profile_cache", ".mocksql/profile.json")
+    p = Path(raw)
+    if not p.is_absolute():
+        p = _base_dir() / p
+    return str(p)
 
 
 def get_duckdb_path() -> str:
