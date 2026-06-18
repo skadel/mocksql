@@ -176,6 +176,10 @@ async def pre_routing(state: QueryState):
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
     stored_used_columns = test.get("used_columns") or []
     stored_query_decomposed = test.get("query_decomposed") or ""
+    # Catalogue des paths UNION ALL : seedé dans le state sur les tours SANS
+    # re-validation (chat / agent set_target_path) pour que le générateur, l'agent et
+    # les suggestions le retrouvent. Quand le SQL change, le validateur le recalcule.
+    stored_path_plans = test.get("path_plans")
     if not stored_query_decomposed and (stored_optimised_sql or stored_sql):
         stored_query_decomposed = _lightweight_query_decomposed(
             stored_optimised_sql or stored_sql, state.get("dialect", "bigquery")
@@ -197,6 +201,7 @@ async def pre_routing(state: QueryState):
             "has_existing_tests": has_existing_tests,
             "model_context": model_context,
             "query_decomposed": stored_query_decomposed,
+            "path_plans": stored_path_plans,
         }
 
     from models.schemas import get_profile
@@ -216,6 +221,7 @@ async def pre_routing(state: QueryState):
         "has_existing_tests": has_existing_tests,
         "model_context": model_context,
         "query_decomposed": stored_query_decomposed,
+        "path_plans": stored_path_plans,
     }
 
 
@@ -305,7 +311,7 @@ def route_agent_output(state: QueryState):
         "data_batch",
     ):
         return "data_patcher"
-    if tool_call in ("generate_test_data", "update_test_data"):
+    if tool_call in ("generate_test_data", "update_test_data", "set_target_path"):
         return "generator"
     if tool_call == "delete_test":
         return "delete_test_node"

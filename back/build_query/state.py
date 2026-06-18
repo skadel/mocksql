@@ -30,6 +30,16 @@ class QueryState(TypedDict):
     request_id: str
     current_query: str  # raw faulty SQL (used by fixer on line_error)
     query_decomposed: str  # JSON-encoded CTE steps set by validator
+    target_path: Optional[
+        str
+    ]  # branche UNION ALL ciblée : nom machine (cf. path_slicer.PathSpec) | "all" | None.
+    # None/"all" = SQL complet (comportement actuel inchangé). Pose par le generator
+    # (defaut 1re gen = focus[0]) ou par l'agent (set_target_path). Persiste par test.
+    path_plans: Optional[
+        str
+    ]  # JSON {path_name: {sliced_sql, used_columns, branch_index, host_cte}} + "all".
+    # Construit UNE fois a la validation (AST pur, cf. path_slicer) ; lu par le generator
+    # et suggestions au lieu de re-slicer. Le constraints_hint (simplify) reste lazy+cache.
     user_tables: str
     used_columns: list
     used_columns_changed: bool

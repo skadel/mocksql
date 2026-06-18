@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
+from build_query.path_slicer import ALL_PATH
 from build_query.state import QueryState
 from storage.test_repository import get_test
 from utils.llm_factory import make_llm
@@ -499,6 +500,11 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
             "Je te prépare de nouvelles suggestions de cas à tester — "
             "elles apparaîtront dans le panneau des tests."
         )
+    if agent_tool_call == "set_target_path":
+        path = agent_tool_args.get("path")
+        if path in (ALL_PATH, "all"):
+            return "Je régénère ce test sur l'assemblage complet (toutes les branches du UNION ALL)."
+        return f"Je focalise ce test sur le path « {path} » et je le régénère."
     return None
 
 
@@ -618,6 +624,40 @@ async def conversational_agent(state: QueryState):
             "(sans outil)."
         )
 
+    # Focalisation par path (branches UNION ALL) : on expose à l'agent les branches
+    # disponibles + leur couverture pour qu'il sache router « passe sur le path X »,
+    # « teste l'assemblage complet », ou un clic de suggestion « Tester le path X ».
+    valid_paths: set[str] = set()
+    if state.get("path_plans"):
+        try:
+            valid_paths = set(json.loads(state["path_plans"]).keys())
+        except Exception:
+            valid_paths = set()
+    path_note = ""
+    if valid_paths:
+        _covered = {
+            t.get("target_path") for t in existing_tests if t.get("target_path")
+        }
+        _branch_lines = "\n".join(
+            f"- {name}" + (" (couvert)" if name in _covered else " (non couvert)")
+            for name in valid_paths
+            if name != ALL_PATH
+        )
+        path_note = (
+            "\n\nFOCALISATION PAR PATH (UNION ALL) — ce SQL a des branches indépendantes. "
+            'Un test est soit focalisé sur UNE branche (couverture partielle, titre "[Focus X]"), '
+            'soit sur "all" (assemblage complet de toutes les branches).\n'
+            f"Branches disponibles :\n{_branch_lines}\n"
+            "Utilise `set_target_path(test_uid, path)` pour (re)focaliser un test. Intentions :\n"
+            "- path précis demandé → ce nom de branche.\n"
+            '- « tous les paths » / « assemblage complet » → "all".\n'
+            '- ambigu / « je ne sais pas » → "all" (défaut sûr, ne devine PAS une branche).\n'
+            "- « peu importe » → la PREMIÈRE branche non couverte ci-dessus.\n"
+            "Un clic sur une suggestion « Tester le path X » d'une branche non couverte → "
+            "`set_target_path(path=X)` SANS test_uid (nouveau test). Pour re-focaliser un "
+            "test EXISTANT sur une autre branche → passe son test_uid."
+        )
+
     # Recettes de jointure (clés dérivées) : sans elles, face à un écart du type
     # `code_produit = ROD` vs données `PROD1`, l'agent interprète l'écart comme une
     # inversion de lignes et patche à côté jusqu'à épuisement des retries (incident
@@ -686,7 +726,7 @@ le doute, n'agis PAS à l'aveugle : appelle `ask_clarification` pour demander le
 des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test) et
 `add_test_row` / `update_test_data` / `update_test_description` (test existant).
 
-{reasoning_note}{debug_budget_note}{suggestion_note}{eval_context}"""
+{reasoning_note}{debug_budget_note}{suggestion_note}{path_note}{eval_context}"""
 
     # Build uid→test lookup (test_uid is assigned by retrieve_existing_tests above)
     uid_to_test: dict = {t["test_uid"]: t for t in existing_tests if t.get("test_uid")}
@@ -701,6 +741,7 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         "patch_test_field",
         "remove_test_row",
         "add_test_row",
+        "set_target_path",
     }
 
     @tool
@@ -809,6 +850,16 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         return rule
 
     @tool
+    def set_target_path(path: str, test_uid: str = "") -> str:
+        """Focalise un test sur une branche d'un UNION ALL (ou "all" = assemblage complet).
+        path : nom exact d'une branche disponible, ou "all" pour le SQL complet.
+        test_uid : LAISSER VIDE pour créer un NOUVEAU test focalisé sur ce path — cas d'un
+          clic sur une suggestion « Tester le path X » d'une branche non couverte. Renseigner
+          l'uid d'un test EXISTANT pour le RE-focaliser sur une autre branche.
+        Le test est (re)généré sur la branche : données + titre [Focus X]."""
+        return f"{test_uid}:{path}"
+
+    @tool
     def ask_clarification(question: str) -> str:
         """Pose une question de clarification à l'utilisateur avant d'agir.
         Utilise cet outil quand la demande est ambiguë ou quand tu détectes une incohérence
@@ -832,7 +883,9 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         note_lesson,
     ]
     debug_tools = [run_cte] if debug_retries > 0 else []
-    llm = make_llm().bind_tools(base_tools + debug_tools)
+    # set_target_path n'est exposé que sur les SQL à branches UNION ALL (catalogue présent).
+    path_tools = [set_target_path] if valid_paths else []
+    llm = make_llm().bind_tools(base_tools + debug_tools + path_tools)
     history = get_history_from_state(
         state,
         msg_type=[
@@ -1295,6 +1348,24 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             if uid and uid in uid_to_test:
                 tc_args["test_index"] = uid_to_test[uid]["test_index"]
 
+        # Validate set_target_path's `path` against the available branches: an
+        # unknown path is fed back to the LLM (same pattern as an invalid uid).
+        if tc_name == "set_target_path":
+            chosen = tc_args.get("path", "")
+            if chosen not in valid_paths:
+                if uid_retries < _UID_RETRY_MAX:
+                    uid_retries += 1
+                    error_feedback = (
+                        f"Le path '{chosen}' n'existe pas. Paths disponibles : "
+                        f"{', '.join(sorted(valid_paths)) or 'aucun'}."
+                    )
+                    messages_for_llm = messages_for_llm + [
+                        result,
+                        HumanMessage(content=error_feedback),
+                    ]
+                    continue
+                break  # retries épuisés → no-op
+
         agent_tool_call = tc_name
         agent_tool_args = tc_args
         logger.diag("[conv_agent] outil sélectionné: %s args=%s", tc_name, tc_args)
@@ -1302,6 +1373,9 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             new_input = tc_args.get("scenario", new_input)
         elif tc_name == "update_test_data":
             new_input = tc_args.get("instruction", new_input)
+        elif tc_name == "set_target_path":
+            _verb = "Régénère ce test" if tc_args.get("test_uid") else "Génère un test"
+            new_input = f"{_verb} focalisé sur le path {tc_args.get('path')}."
         break
 
     # When triggered automatically after executor (bad_data), parent is the last message
@@ -1342,6 +1416,16 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     elif agent_tool_call == "generate_test_data":
         update["test_uid"] = None
         update["test_index"] = None
+    # set_target_path : pose le path ciblé ; le generator (re)génère sur la branche
+    # (resolve_active_sql lit state["target_path"]). uid présent → re-focalise ce test ;
+    # uid vide → NOUVEAU test focalisé (clic suggestion d'une branche non couverte).
+    elif agent_tool_call == "set_target_path":
+        update["target_path"] = agent_tool_args.get("path")
+        if agent_tool_args.get("test_uid"):
+            update["test_uid"] = agent_tool_args["test_uid"]
+        else:
+            update["test_uid"] = None
+            update["test_index"] = None
 
     msgs_to_add = []
     last_msg_id = parent
@@ -1401,6 +1485,23 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                     },
                 )
             )
+    elif agent_tool_call == "set_target_path":
+        # Accusé en langage naturel (« Je focalise sur le path X… ») au-dessus du test
+        # régénéré par le generator, qui chaîne dessous via agent_message_id.
+        ack_text = _build_tool_ack(agent_tool_call, agent_tool_args)
+        if ack_text:
+            ack_msg = AIMessage(
+                content=ack_text,
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.OTHER,
+                    "parent": last_msg_id,
+                    "request_id": state.get("request_id"),
+                },
+            )
+            msgs_to_add.append(ack_msg)
+            last_msg_id = ack_msg.id
+            update["agent_message_id"] = ack_msg.id
     elif agent_tool_call in ("data_batch", "generate_suggestions"):
         # Accusé en langage naturel : data_batch n'affiche que le tableau patché et
         # generate_suggestions ne rafraîchit que le panneau dédié — sans cette phrase

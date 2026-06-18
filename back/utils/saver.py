@@ -88,6 +88,13 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
     if query_decomposed:
         file_updates["query_decomposed"] = query_decomposed
 
+    # Catalogue des paths UNION ALL (dérivé de la validation, comme query_decomposed).
+    # Persisté seulement s'il est présent — ne jamais clobberer avec None sur un tour
+    # de chat où il n'aurait pas été seedé. resolve_active_sql reste défensif si périmé.
+    path_plans = state.get("path_plans")
+    if path_plans:
+        file_updates["path_plans"] = path_plans
+
     file_updates["last_error"] = state.get("error") or ""
 
     if file_updates:

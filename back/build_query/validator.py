@@ -12,6 +12,7 @@ from sqlglot import MappingSchema
 from sqlglot import expressions as exp
 from sqlglot.optimizer.scope import traverse_scope
 
+from build_query.path_slicer import build_path_plans
 from build_query.state import QueryState
 from common_vars import get_tables_mapping
 from models.env_variables import DUCKDB_PATH, BQ_TEST_PROJECT
@@ -151,6 +152,20 @@ async def validate_query(code, project, dialect, parent, state):
     formatted_used_columns = [json.dumps(x) for x in used_columns]
     used_columns_changed = has_used_column_changed(formatted_used_columns, state)
 
+    # Catalogue des paths UNION ALL (AST pur sur le SQL déjà validé/décomposé — pas de
+    # re-dry-run ni ré-extraction de colonnes). None si pas d'UNION ALL de 1er niveau
+    # exploitable → comportement inchangé. Recalculé à chaque validation (donc à jour
+    # si le SQL change). `optimized_sql` reste la requête COMPLÈTE (jamais le slicé).
+    try:
+        path_plans = build_path_plans(optimized_sql, ctes, used_columns, dialect)
+    except Exception:
+        logger.warning(
+            "build_path_plans a échoué (sql=%s) — fallback path 'all'",
+            optimized_sql,
+            exc_info=True,
+        )
+        path_plans = None
+
     return {
         "status": "success",
         "query_decomposed": json.dumps(ctes),
@@ -158,6 +173,7 @@ async def validate_query(code, project, dialect, parent, state):
         "used_columns_changed": used_columns_changed,
         "literals": literals,
         "optimized_sql": optimized_sql,
+        "path_plans": json.dumps(path_plans) if path_plans else None,
     }
 
 

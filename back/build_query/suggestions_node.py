@@ -12,6 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
+from build_query.path_slicer import ALL_PATH
 from build_query.prompt_tools import _format_profile_block
 from build_query.state import QueryState
 from storage.test_repository import get_test, update_test
@@ -210,6 +211,48 @@ def _format_test_block(tc: dict, verdict: str | None, max_rows: int = 3) -> str:
     return "\n".join(parts)
 
 
+def _build_path_suggestions(
+    state: QueryState, test_cases: list[dict]
+) -> tuple[list[str], dict[str, str]]:
+    """Suggestions DÉTERMINISTES « Tester le path X » pour les branches UNION ALL non
+    couvertes + le path ``all`` (assemblage complet). ``([], {})`` si pas de catalogue.
+
+    Un path est couvert dès qu'un test porte ce ``target_path`` (inclut le test
+    fraîchement généré via ``state['target_path']``, pas encore persisté). Cliquer une
+    de ces suggestions → l'agent pose ``target_path`` (cf. conversational_agent)."""
+    raw = state.get("path_plans")
+    if not raw:
+        return [], {}
+    try:
+        plans = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return [], {}
+    if not isinstance(plans, dict):
+        return [], {}
+
+    covered = {tc.get("target_path") for tc in test_cases if tc.get("target_path")}
+    if state.get("target_path"):
+        covered.add(state["target_path"])
+
+    texts: list[str] = []
+    rationales: dict[str, str] = {}
+    for name in plans:
+        if name in covered:
+            continue
+        if name == ALL_PATH:
+            text = "Tester l'assemblage complet (toutes les branches du UNION ALL)"
+            rat = (
+                "Le test d'assemblage complet attrape les bugs de frontière du UNION ALL "
+                "(coercition de types, colonnes désalignées entre branches)."
+            )
+        else:
+            text = f"Tester le path {name}"
+            rat = f"La branche « {name} » du UNION ALL n'est couverte par aucun test."
+        texts.append(text)
+        rationales[text] = rat
+    return texts, rationales
+
+
 async def generate_suggestions(state: QueryState):
     """Génère des suggestions de cas de tests non encore couverts et les émet comme message SUGGESTIONS."""
 
@@ -402,6 +445,10 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
         "et laisse le champ `rationale` vide pour toutes les suggestions."
     )
 
+    # Initialisés ici pour survivre à un échec LLM : les suggestions de path
+    # (déterministes) doivent rester émises même si le LLM ne produit rien.
+    suggestions: list[str] = []
+    rationales: dict[str, str] = {}
     try:
         try:
             _formatted = prompt_template.format_messages(
@@ -461,10 +508,13 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
         )
 
     except Exception as e:
-        print(f"Erreur LLM lors de la génération des suggestions: {e}")
-        return {}
+        logger.warning("Erreur LLM lors de la génération des suggestions: %s", e)
+        suggestions, rationales = [], {}
 
-    if not suggestions:
+    # Suggestions de path (UNION ALL) — déterministes, robustes à un échec LLM.
+    path_suggestions, path_rationales = _build_path_suggestions(state, test_cases)
+
+    if not suggestions and not path_suggestions:
         return {}
 
     # Mode append : on fusionne les nouvelles (en tête = plus récentes) avec celles déjà
@@ -482,6 +532,18 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
             SUGGESTIONS_CAP,
         )
         suggestions = merged
+
+    # Path en tête (priorité couverture des branches), dédupliqué + plafonné.
+    if path_suggestions:
+        seen: set[str] = set()
+        combined: list[str] = []
+        for s in [*path_suggestions, *suggestions]:
+            if s and s not in seen:
+                seen.add(s)
+                combined.append(s)
+        suggestions = combined[:SUGGESTIONS_CAP]
+        rationales = {**path_rationales, **rationales}
+        rationales = {k: v for k, v in rationales.items() if k in suggestions}
 
     # --- 3b. Persistance sur le modèle ---
     # Les suggestions sont un état du modèle (panneau dédié), pas un tour de chat :
