@@ -17,7 +17,10 @@ from build_query.assertion_generator import generate_assertions
 from build_query.final_response_node import final_response
 from build_query.examples_executor import run_on_examples
 from build_query.examples_generator import generate_examples
-from build_query.suggestions_node import generate_suggestions
+from build_query.suggestions_node import (
+    generate_single_suggestion,
+    generate_suggestions,
+)
 from build_query.test_evaluator import evaluate_tests
 from build_query.profile_checker import _normalize_profile
 from build_query.routing import routing
@@ -398,8 +401,23 @@ def route_evaluator(state: QueryState):
                 retries,
             )
             return "assertion_corrector"
-    # Suggestions auto-générées une seule fois : à la 1ʳᵉ génération (0 → N tests).
+    # 1ʳᵉ génération : boucle multi-tests puis suggestions de couverture.
+    # L'utilisateur a demandé N tests au total (tests_target) ; le nominal compte pour 1,
+    # on auto-construit N-1 tests supplémentaires depuis des suggestions uniques. Tant qu'il
+    # reste des tests à construire → generate_single_suggestion (qui enchaîne sur le
+    # conversational_agent). Sinon, dernière étape : suggestions_generator (panneau, pas de
+    # boucle). Ce point n'est atteint qu'une fois le test courant RÉGLÉ (les branches
+    # bad_data / needs_validation / etc. ci-dessus sont prioritaires).
     if not state.get("has_existing_tests"):
+        target = state.get("tests_target") or 1
+        built = state.get("auto_tests_built") or 0
+        if built < target - 1:
+            logger.diag(
+                "[route_evaluator] → generate_single_suggestion (boucle %d/%d)",
+                built + 1,
+                target - 1,
+            )
+            return "generate_single_suggestion"
         logger.diag(
             "[route_evaluator] → suggestions_generator (1ʳᵉ génération, feedback=%s)",
             feedback,
@@ -472,6 +490,7 @@ def build_query_graph():
     add_timed_node("bad_data_to_agent", _bad_data_to_agent)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
     add_timed_node("suggestions_generator", generate_suggestions)
+    add_timed_node("generate_single_suggestion", generate_single_suggestion)
     add_timed_node("final_response", final_response)
     add_timed_node("history_saver", history_saver)
     add_timed_node("other", _handle_other)
@@ -550,6 +569,10 @@ def build_query_graph():
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_conditional_edges("suggestions_generator", route_after_suggestions)
+    # Boucle multi-tests : la suggestion unique enchaîne sur le conversational_agent, qui
+    # construit le test (generate_test_data → generator → executor → test_evaluator), puis
+    # route_evaluator décide de reboucler ou de clore via suggestions_generator.
+    builder.add_edge("generate_single_suggestion", "conversational_agent")
     builder.add_edge("final_response", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

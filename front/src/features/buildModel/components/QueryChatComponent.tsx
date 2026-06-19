@@ -4,7 +4,7 @@ import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
-import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, Tooltip, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, ToggleButton, ToggleButtonGroup, Tooltip, Typography } from '@mui/material';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import { isStaleSchemaError } from '../../../utils/staleSchema';
@@ -12,6 +12,7 @@ import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import DownloadIcon from '@mui/icons-material/Download';
 import SearchIcon from '@mui/icons-material/Search';
 import ScienceIcon from '@mui/icons-material/Science';
+import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import { Container } from '../../../style/StyledComponents';
 import { getLastMessage, formatMessage } from '../../../utils/messages';
 import MissingTablesAlert from './MissingTablesAlert';
@@ -62,12 +63,22 @@ const ChatComponent: React.FC = () => {
   const [tablesToImport, setTablesToImport] = useState<string[] | null>(null);
   const [isImporting, setIsImporting] = useState(false);
   const [importError, setImportError] = useState<string | null>(null);
+  // Wizard du popup : étape 'count' (choix du nombre de tests, toujours en premier) puis,
+  // si le profil manque (needsProfiling), étape 'profiling'. onConfirm/onSkip reçoivent le
+  // nombre de tests choisi (lu au moment du clic, pas figé à la création du closure).
   const [pendingAutoProfile, setPendingAutoProfile] = useState<{
     profileRequest: ProfileRequest | null;
-    onConfirm: () => Promise<void>;
-    onSkip: () => Promise<void>;
+    needsProfiling: boolean;
+    step: 'count' | 'profiling';
+    // Estimation grosse-maille (minutes) de la durée de génération — affichée pour
+    // prévenir l'utilisateur avant de lancer (« peut prendre ~N min, notif à la fin »).
+    estimatedMinutes?: number;
+    onConfirm: (testsTarget: number) => Promise<void>;
+    onSkip: (testsTarget: number) => Promise<void>;
     onCancel: () => void;
   } | null>(null);
+  // Nombre de tests à générer d'emblée (1–3, total). Réinitialisé à 1 à chaque ouverture.
+  const [testsTarget, setTestsTarget] = useState(1);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
   const [autoProfileWarning, setAutoProfileWarning] = useState<{
     status: 'partial' | 'failed';
@@ -434,7 +445,7 @@ const ChatComponent: React.FC = () => {
   const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
     setSubmissionStep(t('loading.validating_sql'));
     const validateStart = performance.now();
-    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
+    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string; estimated_minutes?: number } | null = null;
     try {
       validateResult = await validateQueryApi({ sql, project: '', dialect: DIALECT, session: sessionId, parent_message_id: '' });
     } catch {
@@ -482,15 +493,19 @@ const ChatComponent: React.FC = () => {
         setValidationStatus('valid');
         navigate(`/models/${sessionId}`);
         dispatch(setCurrentId(sessionId));
-        const doStream = () => {
+        const doStream = (testsTargetN: number) => {
           setPendingFirstLoad(true);
           isGeneratingRef.current = true;
-          dispatchChatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '' });
+          dispatchChatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '', testsTarget: testsTargetN });
         };
         let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
+        setTestsTarget(1);
         setPendingAutoProfile({
           profileRequest: null,
-          onConfirm: async () => {
+          needsProfiling: true,
+          step: 'count',
+          estimatedMinutes: validateResult?.estimated_minutes,
+          onConfirm: async (n) => {
             const req = resolvedReq;
             if (!req) return;
             setIsAutoProfileRunning(true);
@@ -502,12 +517,12 @@ const ChatComponent: React.FC = () => {
             } catch { /* profilage best-effort */ }
             setIsAutoProfileRunning(false);
             setPendingAutoProfile(null);
-            doStream();
+            doStream(n);
           },
-          onSkip: async () => {
+          onSkip: async (n) => {
             setPendingAutoProfile(null);
             try { await skipProfilingApi({ session: sessionId }); } catch { /* skip best-effort */ }
-            doStream();
+            doStream(n);
           },
           onCancel: () => {
             setPendingAutoProfile(null);
@@ -530,28 +545,50 @@ const ChatComponent: React.FC = () => {
       }
     } catch { /* profilage best-effort */ }
 
-    setSubmissionStep(t('loading.generating_tests'));
+    // Génération effective, paramétrée par le nombre de tests choisi dans le popup.
+    const runGeneration = async (testsTargetN: number) => {
+      setSubmissionStep(t('loading.generating_tests'));
+      navigate(`/models/${sessionId}`);
+      dispatch(setCurrentId(sessionId));
+      setPendingFirstLoad(true);
+      try {
+        isGeneratingRef.current = true;
+        await dispatchChatQuery({
+          userInput: '',
+          sessionId,
+          project: '',
+          dialect: DIALECT,
+          query: sql,
+          ChangedMessageId: '',
+          t,
+          parentMessageId: validateResult?.sql_message_id ?? '',
+          testsTarget: testsTargetN,
+        }).unwrap?.();
+      } catch { /* génération best-effort */ }
+      pendingSessionRef.current = null;
+      setSubmissionStep(null);
+      setIsSending(false);
+    };
+
+    // Profil complet ou non auto-profilable : pas d'étape profiling, mais on demande tout de
+    // même le nombre de tests via un popup à une seule étape avant de générer.
     setValidationStatus('valid');
-    navigate(`/models/${sessionId}`);
-    dispatch(setCurrentId(sessionId));
-    setPendingFirstLoad(true);
-
-    try {
-      isGeneratingRef.current = true;
-      await dispatchChatQuery({
-        userInput: '',
-        sessionId,
-        project: '',
-        dialect: DIALECT,
-        query: sql,
-        ChangedMessageId: '',
-        t,
-        parentMessageId: validateResult?.sql_message_id ?? '',
-      }).unwrap?.();
-    } catch { /* génération best-effort */ }
-
+    setTestsTarget(1);
+    setPendingAutoProfile({
+      profileRequest: null,
+      needsProfiling: false,
+      step: 'count',
+      estimatedMinutes: validateResult?.estimated_minutes,
+      onConfirm: async (n) => { setPendingAutoProfile(null); await runGeneration(n); },
+      onSkip: async (n) => { setPendingAutoProfile(null); await runGeneration(n); },
+      onCancel: () => {
+        setPendingAutoProfile(null);
+        dispatch(resetContext());
+        dispatch(setCurrentId(''));
+        navigate('/');
+      },
+    });
     pendingSessionRef.current = null;
-    setSubmissionStep(null);
     setIsSending(false);
   }, [dispatch, navigate, t]);
 
@@ -834,8 +871,12 @@ const ChatComponent: React.FC = () => {
         doStream();
       } else if (result.auto_profile_available && result.missing_columns?.length) {
         let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
+        // Re-profilage d'un modèle existant : pas de boucle multi-tests (réservée à la 1ʳᵉ
+        // génération), donc on saute l'étape « nombre de tests » et on va direct au profiling.
         setPendingAutoProfile({
           profileRequest: null,
+          needsProfiling: true,
+          step: 'profiling',
           onConfirm: async () => {
             const req = resolvedReq;
             if (!req) return;
@@ -1748,6 +1789,63 @@ const ChatComponent: React.FC = () => {
               </Typography>
             </Box>
 
+            {/* Étape 1 du wizard : nombre de tests à générer d'emblée (1–3, total). */}
+            {pendingAutoProfile.step === 'count' && (
+              <Box sx={{ mb: 1 }}>
+                <Typography variant="body2" sx={{ color: '#555', mb: 1.5 }}>
+                  Combien de tests veux-tu générer d'emblée ? MockSQL construit le test du chemin
+                  nominal, puis enchaîne les suivants à partir de cas non encore couverts.
+                </Typography>
+                <ToggleButtonGroup
+                  exclusive
+                  value={testsTarget}
+                  onChange={(_, v) => { if (v) setTestsTarget(v); }}
+                  sx={{ display: 'flex', gap: 1 }}
+                >
+                  {[1, 2, 3].map((n) => (
+                    <ToggleButton
+                      key={n}
+                      value={n}
+                      sx={{
+                        flex: 1,
+                        border: '1px solid #d8e6e5 !important',
+                        borderRadius: '8px !important',
+                        textTransform: 'none',
+                        fontWeight: 700,
+                        color: '#1ca8a4',
+                        '&.Mui-selected': { bgcolor: '#1ca8a4', color: 'white', '&:hover': { bgcolor: '#159e9a' } },
+                      }}
+                    >
+                      {n} test{n > 1 ? 's' : ''}
+                    </ToggleButton>
+                  ))}
+                </ToggleButtonGroup>
+                {pendingAutoProfile.estimatedMinutes != null && (
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'flex-start',
+                      gap: 1,
+                      mt: 2,
+                      bgcolor: '#f5fbfb',
+                      border: '1px solid #cfeceb',
+                      borderRadius: 2,
+                      px: 1.5,
+                      py: 1.25,
+                    }}
+                  >
+                    <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
+                    <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
+                      Le travail peut prendre ~{pendingAutoProfile.estimatedMinutes}{' '}
+                      minute{pendingAutoProfile.estimatedMinutes > 1 ? 's' : ''} — tu peux fermer
+                      l'onglet, je te préviens par notification dès que c'est terminé.
+                    </Typography>
+                  </Box>
+                )}
+              </Box>
+            )}
+
+            {pendingAutoProfile.step === 'profiling' && (<>
             {/* Sans / Avec comparison */}
             <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1.5, mb: 2 }}>
               <Box sx={{ bgcolor: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 2, p: 2 }}>
@@ -1833,6 +1931,7 @@ const ChatComponent: React.FC = () => {
                 </Typography>
               </Box>
             )}
+            </>)}
           </DialogContent>
           <DialogActions sx={{ px: 3, pb: 2, gap: 1 }}>
             <Button
@@ -1843,40 +1942,62 @@ const ChatComponent: React.FC = () => {
             >
               Annuler
             </Button>
-            <Button
-              variant="text"
-              onClick={() => pendingAutoProfile.onSkip()}
-              disabled={isAutoProfileRunning}
-              sx={{ textTransform: 'none', color: '#bbb', fontSize: 12, '&:hover': { bgcolor: 'transparent', color: '#888' } }}
-            >
-              {t('profiling.skip_label')}
-            </Button>
-            <Button
-              variant="contained"
-              onClick={pendingAutoProfile.onConfirm}
-              disabled={isAutoProfileRunning || pendingAutoProfile.profileRequest === null}
-              startIcon={
-                !isAutoProfileRunning && pendingAutoProfile.profileRequest === null
-                  ? <CircularProgress size={14} sx={{ color: 'white' }} />
-                  : undefined
-              }
-              sx={{
-                textTransform: 'none',
-                bgcolor: '#1ca8a4',
-                '&:hover': { bgcolor: '#159e9a' },
-                '&.Mui-disabled': {
-                  bgcolor: pendingAutoProfile.profileRequest === null ? '#1ca8a4' : undefined,
-                  color: pendingAutoProfile.profileRequest === null ? 'white' : undefined,
-                  opacity: pendingAutoProfile.profileRequest === null ? 0.85 : undefined,
-                },
-              }}
-            >
-              {isAutoProfileRunning
-                ? t('loading.profiling_short')
-                : pendingAutoProfile.profileRequest === null
-                  ? 'Estimation…'
-                  : t('action.run_profiling')}
-            </Button>
+            {pendingAutoProfile.step === 'profiling' && (
+              <Button
+                variant="text"
+                onClick={() => pendingAutoProfile.onSkip(testsTarget)}
+                disabled={isAutoProfileRunning}
+                sx={{ textTransform: 'none', color: '#bbb', fontSize: 12, '&:hover': { bgcolor: 'transparent', color: '#888' } }}
+              >
+                {t('profiling.skip_label')}
+              </Button>
+            )}
+            {pendingAutoProfile.step === 'count' ? (
+              <Button
+                variant="contained"
+                onClick={() => {
+                  // Étape suivante si profiling requis (le calcul de la requête tourne déjà en
+                  // fond), sinon génération directe avec le nombre de tests choisi.
+                  if (pendingAutoProfile.needsProfiling) {
+                    setPendingAutoProfile((prev) => prev ? { ...prev, step: 'profiling' } : prev);
+                  } else {
+                    pendingAutoProfile.onConfirm(testsTarget);
+                  }
+                }}
+                sx={{ textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' } }}
+              >
+                {pendingAutoProfile.needsProfiling
+                  ? 'Continuer'
+                  : `Générer ${testsTarget} test${testsTarget > 1 ? 's' : ''}`}
+              </Button>
+            ) : (
+              <Button
+                variant="contained"
+                onClick={() => pendingAutoProfile.onConfirm(testsTarget)}
+                disabled={isAutoProfileRunning || pendingAutoProfile.profileRequest === null}
+                startIcon={
+                  !isAutoProfileRunning && pendingAutoProfile.profileRequest === null
+                    ? <CircularProgress size={14} sx={{ color: 'white' }} />
+                    : undefined
+                }
+                sx={{
+                  textTransform: 'none',
+                  bgcolor: '#1ca8a4',
+                  '&:hover': { bgcolor: '#159e9a' },
+                  '&.Mui-disabled': {
+                    bgcolor: pendingAutoProfile.profileRequest === null ? '#1ca8a4' : undefined,
+                    color: pendingAutoProfile.profileRequest === null ? 'white' : undefined,
+                    opacity: pendingAutoProfile.profileRequest === null ? 0.85 : undefined,
+                  },
+                }}
+              >
+                {isAutoProfileRunning
+                  ? t('loading.profiling_short')
+                  : pendingAutoProfile.profileRequest === null
+                    ? 'Estimation…'
+                    : t('action.run_profiling')}
+              </Button>
+            )}
           </DialogActions>
         </Dialog>
       )}

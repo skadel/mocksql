@@ -340,6 +340,7 @@ export interface ChatQueryParams {
   suggestionIntent?: boolean;
   regenerateSuggestions?: boolean;
   validateIntent?: boolean;  // « Je valide l'état actuel » sur un test needs_validation
+  testsTarget?: number;      // N tests à générer d'emblée (1–3, total) — boucle multi-tests
 }
 
 

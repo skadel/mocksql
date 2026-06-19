@@ -32,8 +32,10 @@ def get_models_path() -> Path:
 
 
 # profile.json contient des valeurs brutes de l'entrepôt (PII) → jamais commité.
-# data/ = base DuckDB locale. Le réplay CI ne dépend d'aucun des deux.
-_GITIGNORE_CONTENT = "data/\nprofile.json\n"
+# data/ = base DuckDB locale. cache/ = dérivé-du-SQL + runtime des tests (optimized_sql,
+# query_decomposed, results_json, status…), recalculable → hors du fichier de test commité.
+# Le réplay CI ne dépend d'aucun des trois.
+_GITIGNORE_CONTENT = "data/\nprofile.json\ncache/\n"
 
 
 def ensure_mocksql_dir(mocksql_dir: Path) -> None:
