@@ -1823,7 +1823,12 @@ def _resolve_cte_source(
         if not source_table:
             return None
 
-        # Extract WHERE conditions from the CTE body (strip table aliases)
+        # Extract WHERE conditions from the CTE body, keeping only predicates
+        # that reference the resolved source table. When the CTE itself JOINs
+        # another table, its WHERE can constrain columns of that joined-in
+        # table — those columns are absent from the single-table profiling
+        # subquery, so such conjuncts must be dropped (else BigQuery raises
+        # "Unrecognized name: <col>"). Surviving conditions get aliases stripped.
         where_sql: str | None = None
         try:
             tree = sqlglot.parse_one(
@@ -1831,11 +1836,52 @@ def _resolve_cte_source(
             )
             where_node = tree.args.get("where")
             if where_node:
-                where_expr = where_node.this.copy()
-                for col_node in where_expr.find_all(exp.Column):
-                    if col_node.table:
-                        col_node.replace(exp.Column(this=col_node.this.copy()))
-                where_sql = where_expr.sql(dialect=dialect)
+                # Classify every FROM/JOIN qualifier (alias + bare name) as
+                # belonging to the source table ("self") or to another table.
+                self_quals: set[str] = set()
+                foreign_quals: set[str] = set()
+                src_short = source_table.split(".")[-1].lower()
+
+                def _classify(tbl: exp.Table) -> None:
+                    bucket = (
+                        self_quals if tbl.name.lower() == src_short else foreign_quals
+                    )
+                    if tbl.alias:
+                        bucket.add(tbl.alias.lower())
+                    bucket.add(tbl.name.lower())
+
+                _from = get_from(tree)
+                if _from is not None and isinstance(_from.this, exp.Table):
+                    _classify(_from.this)
+                for _join in tree.args.get("joins") or []:
+                    if isinstance(_join.this, exp.Table):
+                        _classify(_join.this)
+
+                def _conjuncts(node: exp.Expression) -> list[exp.Expression]:
+                    if isinstance(node, exp.And):
+                        return _conjuncts(node.left) + _conjuncts(node.right)
+                    return [node]
+
+                def _references_foreign(conj: exp.Expression) -> bool:
+                    return any(
+                        (c.table or "").lower() in foreign_quals
+                        and (c.table or "").lower() not in self_quals
+                        for c in conj.find_all(exp.Column)
+                    )
+
+                kept = [
+                    c.copy()
+                    for c in _conjuncts(where_node.this)
+                    if not _references_foreign(c)
+                ]
+                if kept:
+                    combined: exp.Expression = kept[0]
+                    for extra in kept[1:]:
+                        combined = exp.And(this=combined, expression=extra)
+                    for col_node in combined.find_all(exp.Column):
+                        if col_node.table:
+                            col_node.replace(exp.Column(this=col_node.this.copy()))
+                    where_sql = combined.sql(dialect=dialect)
         except Exception:
             pass
 

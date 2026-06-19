@@ -1562,6 +1562,35 @@ class TestResolveCteSource(unittest.TestCase):
         if result["where_sql"]:
             self.assertNotIn("id.", result["where_sql"])
 
+    def test_where_drops_joined_table_conditions(self):
+        """CTE with a JOIN: WHERE predicates on the joined-in table are dropped.
+
+        Only conditions on the resolved source table survive — the profiling
+        subquery scans that single table, so a predicate on a joined-in table's
+        column (absent from that table) would raise "Unrecognized name".
+        """
+        cte_map = self._cte_map(
+            tmp_contrat_actif=(
+                "SELECT acomp.no_contrat, acomp.cd_banque "
+                "FROM acquereur.dashboard AS acomp "
+                "INNER JOIN refcomm ON acomp.no_contrat = refcomm.no_contrat "
+                "WHERE acomp.dt_extraction >= '2026-01-01' "
+                "AND (refcomm.dt_ouverture < '2026-02-01' "
+                "OR refcomm.dt_cloture IS NULL)"
+            )
+        )
+        result = _resolve_cte_source(
+            "tmp_contrat_actif", ["no_contrat", "cd_banque"], cte_map
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result["source_table"], "acquereur.dashboard")
+        # Source-table condition is kept (alias stripped)…
+        self.assertIn("dt_extraction", result["where_sql"])
+        # …joined-in table conditions are dropped — those columns are absent
+        # from the single-table profiling subquery.
+        self.assertNotIn("dt_ouverture", result["where_sql"])
+        self.assertNotIn("dt_cloture", result["where_sql"])
+
     def test_unknown_cte_returns_none(self):
         """Querying a CTE name not in the map returns None."""
         result = _resolve_cte_source("nonexistent", ["col"], {})
