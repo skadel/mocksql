@@ -2620,6 +2620,118 @@ class TestBuildProfileQueryFuncExprJoin(unittest.TestCase):
             "No join branch should be generated for a multi-table function expression",
         )
 
+    def test_func_expr_on_base_table_strips_dangling_alias(self):
+        """JOIN ON TRIM(alias.col) where alias is a *base* table (not a CTE).
+
+        Regression for the BigQuery error "Unrecognized name: acomp": the join
+        key expression keeps the table qualifier (``TRIM(acomp.cd_pays_bin)``)
+        but the profiling subquery scans the bare base table, which has no
+        ``acomp`` alias in scope. The qualifier must be stripped from *every*
+        column inside the expression, not only when the whole key is a bare
+        column.
+        """
+        schema = {
+            "tables": [
+                {
+                    "name": "acquereur",
+                    "columns": [{"name": "cd_pays_bin", "type": "STRING"}],
+                },
+                {
+                    "name": "pays",
+                    "columns": [{"name": "code_pays_alpha_3", "type": "STRING"}],
+                },
+            ]
+        }
+        sql = (
+            "SELECT * FROM acquereur AS acomp "
+            "JOIN pays AS p "
+            "  ON TRIM(acomp.cd_pays_bin) = TRIM(p.code_pays_alpha_3)"
+        )
+        used = [
+            {"table": "acquereur", "used_columns": ["cd_pays_bin"]},
+            {"table": "pays", "used_columns": ["code_pays_alpha_3"]},
+        ]
+        q = build_profile_query(schema, used, sql_query=sql, dialect="bigquery")
+        # The executable key expressions must reference the bare columns.
+        self.assertIn("TRIM(cd_pays_bin)", q)
+        self.assertIn("TRIM(code_pays_alpha_3)", q)
+        # The dangling alias must only survive in the metadata string literal
+        # ('TRIM(acomp.cd_pays_bin)'), never in an executable subquery.
+        self.assertLessEqual(
+            q.count("TRIM(acomp.cd_pays_bin)"),
+            1,
+            "alias-qualified expr must not appear in an executable subquery",
+        )
+
+    def test_inverted_on_with_func_expr_assigns_sides_correctly(self):
+        """ON TRIM(b.y) = TRIM(a.x) — right table written first, both wrapped.
+
+        Regression: the swap that decides which side is left/right keyed off the
+        top node being a bare column. With function wrappers it couldn't tell,
+        skipped the swap, and emitted ``SELECT TRIM(x) FROM B`` (A's column read
+        from B) → "Unrecognized name". Each key must be profiled against its own
+        source table.
+        """
+        schema = {
+            "tables": [
+                {"name": "A", "columns": [{"name": "x", "type": "STRING"}]},
+                {"name": "B", "columns": [{"name": "y", "type": "STRING"}]},
+            ]
+        }
+        used = [
+            {"table": "A", "used_columns": ["x"]},
+            {"table": "B", "used_columns": ["y"]},
+        ]
+        sql = "SELECT * FROM A AS a JOIN B AS b ON TRIM(b.y) = TRIM(a.x)"
+        q = build_profile_query(schema, used, sql_query=sql, dialect="bigquery")
+        # A's column profiled against A, B's against B.
+        self.assertIn("TRIM(x) AS join_key, COUNT(*) AS cnt FROM `A`", q)
+        self.assertIn("TRIM(y) AS join_key, COUNT(*) AS cnt FROM `B`", q)
+        # The broken pattern: A's column x read from table B.
+        self.assertNotIn("TRIM(x) AS join_key, COUNT(*) AS cnt FROM `B`", q)
+
+    def test_same_pair_joined_in_two_scopes_does_not_double_composite_key(self):
+        """The same physical pair joined in two CTEs must not double the key.
+
+        Production repro: ``DS_ACOMP`` → ``refcomm`` is joined on ``(k1, k2)`` in
+        two separate CTEs (once with operands inverted). Grouping by
+        (left_table, right_table, alias) merged all four conditions into one
+        branch → ``CONCAT(k1, k2, k1, k2)``, a wrong composite key that profiles
+        bogus cardinality. Identical conditions must be deduplicated.
+        """
+        schema = {
+            "tables": [
+                {
+                    "name": "A",
+                    "columns": [
+                        {"name": "k1", "type": "STRING"},
+                        {"name": "k2", "type": "STRING"},
+                    ],
+                },
+                {
+                    "name": "base_r",
+                    "columns": [
+                        {"name": "k1", "type": "STRING"},
+                        {"name": "k2", "type": "STRING"},
+                    ],
+                },
+            ]
+        }
+        used = [
+            {"table": "A", "used_columns": ["k1", "k2"]},
+            {"table": "base_r", "used_columns": ["k1", "k2"]},
+        ]
+        sql = (
+            "WITH r AS (SELECT k1, k2 FROM base_r), "
+            "c1 AS (SELECT a.k1 FROM A AS a JOIN r AS r ON a.k1 = r.k1 AND a.k2 = r.k2), "
+            "c2 AS (SELECT a.k1 FROM A AS a JOIN r AS r ON r.k1 = a.k1 AND r.k2 = a.k2) "
+            "SELECT c1.k1 FROM c1 JOIN c2 ON c1.k1 = c2.k1"
+        )
+        q = build_profile_query(schema, used, sql_query=sql, dialect="bigquery")
+        # The composite key for the A→r pair must list each condition once.
+        self.assertNotIn("'a.k1 AND a.k2 AND a.k1 AND a.k2'", q)
+        self.assertIn("'a.k1 AND a.k2'", q)
+
 
 # ─── build_profile_query: multi-source CTE join key ──────────────────────────
 

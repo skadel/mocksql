@@ -1133,10 +1133,24 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
             elif isinstance(node, exp.EQ):
                 left = node.left
                 right = node.right
-                left_tbl = resolve(left.table) if isinstance(left, exp.Column) else ""
-                right_tbl = (
-                    resolve(right.table) if isinstance(right, exp.Column) else ""
-                )
+
+                def _side_table(e: exp.Expression) -> str:
+                    """Resolve the table for one side of the EQ.
+
+                    A bare column uses its own qualifier; a wrapped expression
+                    (TRIM(a.x), SUBSTR(...)) falls back to the single distinct
+                    table among its inner columns. Returns "" when unqualified or
+                    ambiguous, so the swap can fall back to other heuristics.
+                    """
+                    if isinstance(e, exp.Column):
+                        return resolve(e.table) if e.table else ""
+                    inner = {
+                        resolve(c.table) for c in e.find_all(exp.Column) if c.table
+                    }
+                    return next(iter(inner)) if len(inner) == 1 else ""
+
+                left_tbl = _side_table(left)
+                right_tbl = _side_table(right)
 
                 # Determine which side belongs to which table.
                 # right_table is the JOIN node's table; the other side is the FROM/left table.
@@ -1828,8 +1842,15 @@ def _build_join_query(
             return exp.Column(this=exp.to_identifier(src_cols[i], quoted=True))
         raw = spec[f"{side}_expr_sql"]
         node = sqlglot.parse_one(raw) if raw else exp.Star()
-        if isinstance(node, exp.Column) and node.table:
-            node = exp.Column(this=node.this)
+        # Strip table/db/catalog qualifiers from *every* column in the expression
+        # so it stays valid against the bare FROM table (which has no alias). A
+        # plain `a.id` and a wrapped `TRIM(a.col)` are both handled — the latter
+        # otherwise leaves a dangling `a.` and triggers "Unrecognized name: a".
+        for col in node.find_all(exp.Column):
+            if col.args.get("table"):
+                col.set("table", None)
+                col.set("db", None)
+                col.set("catalog", None)
         return node
 
     l_key_nodes = [
@@ -2439,6 +2460,21 @@ def _build_sql_relation_branches(
             ].append(spec)
 
     for (left_table, right_table, _), pair_specs in _grouped.items():
+        # Deduplicate identical conditions: the same physical pair joined in two
+        # scopes (e.g. two CTEs, one with operands inverted) contributes the same
+        # key twice, doubling the composite key into CONCAT(k1, k2, k1, k2) and
+        # profiling bogus cardinality. Conditions are already side-normalised by
+        # _collect_join_specs, so equality of (left_expr_sql, right_expr_sql) is
+        # enough to detect duplicates regardless of original operand order.
+        _seen_conditions: set = set()
+        _unique_specs: list = []
+        for s in pair_specs:
+            _ckey = (s["left_expr_sql"], s["right_expr_sql"])
+            if _ckey not in _seen_conditions:
+                _seen_conditions.add(_ckey)
+                _unique_specs.append(s)
+        pair_specs = _unique_specs
+
         all_left_keys: set = set()
         all_right_keys: set = set()
         for s in pair_specs:
