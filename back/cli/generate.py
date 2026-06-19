@@ -18,6 +18,7 @@ from cli.schema_cache import (
     save_schema_cache,
 )
 from storage.config import load_preprocessor_fn
+from storage.test_files import read_test_doc, write_test_doc
 from utils.sqlglot_ast import get_from
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
 from utils.sql_code import (
@@ -487,9 +488,7 @@ def _write_test_file(
     (= total in overwrite/bootstrap mode).
     """
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    existing_doc = (
-        json.loads(out_path.read_text(encoding="utf-8")) if out_path.exists() else None
-    )
+    existing_doc = read_test_doc(out_path) if out_path.exists() else None
     before = len((existing_doc or {}).get("test_cases", [])) if not overwrite else 0
     doc = apply_generation_result(
         existing_doc,
@@ -500,7 +499,7 @@ def _write_test_file(
         overwrite=overwrite,
         path_plans=path_plans,
     )
-    out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+    write_test_doc(out_path, doc)
     return out_path, len(doc["test_cases"]) - before
 
 
@@ -749,12 +748,7 @@ async def run_generate(
     out_path = model_test_path(output_dir, model_name)
     existing_cases: list = []
     if out_path.exists():
-        try:
-            existing_cases = (
-                json.loads(out_path.read_text(encoding="utf-8")).get("test_cases") or []
-            )
-        except Exception:
-            existing_cases = []
+        existing_cases = (read_test_doc(out_path) or {}).get("test_cases") or []
 
     def _inject_existing(input_text: str) -> None:
         from langchain_core.messages import AIMessage
@@ -872,7 +866,19 @@ async def run_generate(
 
     typer.echo(f"Generating tests for {project_id} ({len(schemas)} table(s))...")
     graph = build_query_graph()
+    import time as _time
+
+    _t0 = _time.perf_counter()
     final_state = await graph.ainvoke(state, config={"recursion_limit": 50})
+    _elapsed = _time.perf_counter() - _t0
+
+    # Collecte grosse-maille pour l'estimateur de durée (best-effort, n'échoue jamais).
+    # On ne logue que les générations « pleines » (pas update/additif ciblé) pour ne pas
+    # mélanger des durées de natures différentes.
+    if not update_uid and not existing_cases:
+        from build_query.gen_time_estimator import extract_features, log_timing
+
+        log_timing(extract_features(sql, state.get("used_columns"), dialect), _elapsed)
 
     if final_state.get("error"):
         err = final_state["error"]
@@ -883,7 +889,7 @@ async def run_generate(
     test_cases = _extract_test_cases(final_state)
     suggestions = _extract_suggestions(final_state)
     if test_cases and update_uid:
-        existing_doc = json.loads(out_path.read_text(encoding="utf-8"))
+        existing_doc = read_test_doc(out_path)
         before = next(
             (
                 c
@@ -902,7 +908,7 @@ async def run_generate(
         after = next(
             (c for c in doc["test_cases"] if c.get("test_uid") == update_uid), None
         )
-        out_path.write_text(json.dumps(doc, indent=2, default=str), encoding="utf-8")
+        write_test_doc(out_path, doc)
         if before != after:
             typer.echo(f"[OK] test {update_uid} mis à jour → {out_path}")
         else:

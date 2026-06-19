@@ -12,7 +12,6 @@ JSON et la ré-exécution.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +23,7 @@ from cli.assertions import (
     update_assertion,
 )
 from cli.test_runner import run_tests
+from storage.test_files import read_test_doc, write_test_doc
 
 
 class AssertError(Exception):
@@ -40,13 +40,14 @@ def _load_doc(config_path: Path, model: str) -> tuple[Path, dict[str, Any]]:
         raise AssertError(
             f"Aucun test pour le modèle '{model}'. Lance `mocksql generate {model}.sql`."
         )
-    return path, json.loads(path.read_text(encoding="utf-8"))
+    doc = read_test_doc(path)
+    if doc is None:
+        raise AssertError(f"Fichier de test illisible : {path}")
+    return path, doc
 
 
 def _save_doc(path: Path, doc: dict[str, Any]) -> None:
-    path.write_text(
-        json.dumps(doc, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
-    )
+    write_test_doc(path, doc)
 
 
 def _require_test_case(doc: dict[str, Any], test_uid: str) -> dict[str, Any]:

@@ -1,5 +1,4 @@
 import hashlib
-import json
 import os
 import re
 import subprocess
@@ -15,6 +14,7 @@ from storage.config import (
     get_preprocessor_fn,
     load_preprocessor_fn,
 )
+from storage.test_files import read_test_doc, write_test_doc
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -43,16 +43,13 @@ def _test_path(model_name: str) -> Path:
 
 
 def _read_json(p: Path) -> Optional[Dict[str, Any]]:
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    # Définition (commitée) + cache sidecar (gitignoré) fusionnés de façon
+    # transparente — le dict renvoyé a la même forme qu'avant le split.
+    return read_test_doc(p)
 
 
 def _write_json(p: Path, data: Dict[str, Any]) -> None:
-    p.write_text(
-        json.dumps(data, indent=2, ensure_ascii=False, default=str), encoding="utf-8"
-    )
+    write_test_doc(p, data)
 
 
 def _migrate_old_structure() -> None:

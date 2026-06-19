@@ -31,7 +31,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent
+      parentMessageId, userTables, profileResult, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, testsTarget
     } = params;
 
     if (!userInput && !query && !userTables && !profileResult && !validateIntent) return;
@@ -125,6 +125,7 @@ export const chatQuery = createAsyncThunk(
             request_id,
             gen_retries: 10,
             debug_retries: 3,
+            tests_target: testsTarget ?? 1,
             used_columns: [],
             used_columns_changed: false,
             optimize: true,
@@ -353,6 +354,7 @@ export interface ValidateQueryResult {
   query_decomposed?: string;
   optimized_sql?: string;
   sql_message_id?: string;
+  estimated_minutes?: number;
 }
 
 export const validateQueryApi = async (params: ValidateQueryParams): Promise<ValidateQueryResult> => {

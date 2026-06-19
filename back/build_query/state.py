@@ -76,6 +76,14 @@ class QueryState(TypedDict):
     has_existing_tests: Optional[
         bool
     ]  # set by pre_routing: True if test_cases already exist
+    tests_target: Optional[
+        int
+    ]  # N tests requested by the user at first generation (1–3, default 1). N = total tests,
+    # so N-1 extra tests are auto-built from single suggestions after the nominal one.
+    auto_tests_built: Optional[
+        int
+    ]  # counter of auto-built tests in this run (excludes the nominal test); drives the
+    # loop-continuation decision in route_evaluator (built < tests_target - 1).
     regenerate_suggestions: Optional[
         bool
     ]  # True when the user explicitly asks for fresh coverage suggestions (panel button):

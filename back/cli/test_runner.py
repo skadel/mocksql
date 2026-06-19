@@ -37,10 +37,11 @@ def _load_schema_cache(cache_path: str) -> list[dict]:
 
 
 def _read_json(p: Path) -> dict | None:
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    # Définition commitée + cache sidecar (absent en CI/clone) fusionnés ; `used_columns`
+    # est ré-encodé en list[str] côté mémoire → le `json.loads` plus bas reste valide.
+    from storage.test_files import read_test_doc
+
+    return read_test_doc(p)
 
 
 # ── Source SQL resolution ─────────────────────────────────────────────────────

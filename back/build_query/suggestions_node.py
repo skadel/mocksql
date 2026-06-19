@@ -253,6 +253,110 @@ def _build_path_suggestions(
     return texts, rationales
 
 
+# Prompt compact pour la génération d'UNE suggestion enchaînée immédiatement en test
+# (boucle multi-tests). Réutilise les helpers de formatage (_format_test_block,
+# _select_pitfalls, _format_profile_block) et le modèle structuré TestSuggestionsOutput.
+_SINGLE_SUGGESTION_SYSTEM = (
+    MOCKSQL_PRODUCT_PREAMBLE
+    + """
+
+Tu agis comme l'expert en tests unitaires SQL de MockSQL (dialecte: {dialect}). Tu identifies
+LE cas de test le plus utile **non encore couvert** par les tests existants : celui où le
+résultat est contre-intuitif, ambigu, ou où l'ingénieur pourrait se tromper sur ce que la
+requête retourne réellement. Une seule suggestion, la plus pertinente."""
+)
+
+
+async def generate_single_suggestion(state: QueryState):
+    """Boucle multi-tests : génère UNE suggestion (au lieu de 3 pour le panneau) et prépare
+    immédiatement sa construction en test via le chemin clic-suggestion existant.
+
+    Ne persiste rien dans le panneau et n'émet pas de message SUGGESTIONS : on pose
+    ``input`` (le texte de la suggestion) + ``suggestion_intent`` pour que le
+    ``conversational_agent`` produise un nouveau test, et on incrémente ``auto_tests_built``
+    (le compteur que ``route_evaluator`` lit pour décider de continuer ou de clore via le
+    ``suggestions_generator``). Fallback : si le LLM ne rend rien, on pose tout de même
+    ``suggestion_intent`` avec une consigne générique — le garde-fou ``route_agent_output``
+    garantit qu'un test sort quand même."""
+    built = (state.get("auto_tests_built") or 0) + 1
+    base = {"auto_tests_built": built, "suggestion_intent": True}
+
+    test_cases = await retrieve_existing_tests(state["session"], state)
+
+    sql = (state.get("optimized_sql") or state.get("query", "")).strip()
+    dialect = state.get("dialect", "bigquery")
+    profile = state.get("profile")
+    used_columns = state.get("used_columns") or []
+    profile_block = _format_profile_block(profile, used_columns) if profile else ""
+
+    verdicts = _extract_verdicts(state)
+    existing = "\n\n".join(
+        f"Test {tc.get('test_index')} — {tc.get('test_name') or ''}\n"
+        + _format_test_block(tc, verdicts.get(tc.get("test_index")))
+        for tc in test_cases
+    )
+    existing_block = existing or "Aucun test existant pour le moment."
+    pitfalls_block = _select_pitfalls(sql, dialect)
+    profile_section = (
+        f"Profil statistique réel des données :\n{profile_block}"
+        if profile_block
+        else ""
+    )
+
+    prompt_template = ChatPromptTemplate.from_messages(
+        [
+            ("system", _SINGLE_SUGGESTION_SYSTEM),
+            (
+                "user",
+                """Requête SQL à analyser :
+<sql>
+{sql}
+</sql>
+
+Tests déjà générés (à ne PAS reproduire — propose un cas distinct) :
+<tests_existants>
+{existing_block}
+</tests_existants>
+
+{profile_section}
+
+Pièges classiques pertinents pour ce SQL :
+{pitfalls_block}
+
+Génère exactement 1 suggestion de cas de test non couvert, formulée en langage métier
+(commence par un verbe, décris un symptôme métier observable — pas de fonction SQL ni de
+détail d'implémentation). Renseigne aussi `analyse_des_manques` en une phrase.""",
+            ),
+        ]
+    )
+
+    suggestion_text = ""
+    try:
+        llm = make_llm()
+        structured_llm = llm.with_structured_output(TestSuggestionsOutput)
+        result = await (prompt_template | structured_llm).ainvoke(
+            {
+                "dialect": dialect,
+                "sql": sql,
+                "existing_block": existing_block,
+                "profile_section": profile_section,
+                "pitfalls_block": pitfalls_block,
+            }
+        )
+        items = result.suggestions or []
+        if items:
+            suggestion_text = (items[0].text or "").strip()
+        logger.diag("[single_suggestion] tour %d → %r", built, suggestion_text[:120])
+    except Exception as e:  # pragma: no cover — best-effort, fallback ci-dessous
+        logger.warning("Erreur LLM lors de la génération d'une suggestion: %s", e)
+
+    base["input"] = suggestion_text or (
+        "Génère un nouveau test couvrant un cas limite non encore couvert par les tests "
+        "existants (valeurs NULL, plage vide, ex æquo, ou format de sortie)."
+    )
+    return base
+
+
 async def generate_suggestions(state: QueryState):
     """Génère des suggestions de cas de tests non encore couverts et les émet comme message SUGGESTIONS."""
 
