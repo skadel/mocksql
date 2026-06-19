@@ -36,7 +36,7 @@
     "query_validated_in": "Query validated in {{seconds}} s",
     "step_tables": "tables",
     "step_columns": "columns",
-    "step_constraints": "Extracting conditions and used columns…",
+    "step_preparing": "Preparing generation…",
     "step_generation": "Generating tests",
     "evaluating_tests": "Evaluating verdicts…",
     "correcting_data": "Correcting test data…",
