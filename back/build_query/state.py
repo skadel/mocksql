@@ -88,6 +88,10 @@ class QueryState(TypedDict):
         bool
     ]  # True when the user explicitly asks for fresh coverage suggestions (panel button):
     # routing → suggestions_generator directly, and skip final_response (no "tests generated" msg)
+    coverage_gap_analysis: Optional[
+        str
+    ]  # `analyse_des_manques` from suggestions_generator: short gap analysis woven into
+    # final_response so the closing message tells the user what's uncovered and points to the panel
     agent_tool_call: Optional[
         str
     ]  # tool called by conversational_agent: "generate_test" | "delete_test" | None

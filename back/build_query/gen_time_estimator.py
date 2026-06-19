@@ -19,7 +19,6 @@ Deux usages :
 from __future__ import annotations
 
 import json
-import math
 import statistics
 from pathlib import Path
 from typing import Any
@@ -154,7 +153,7 @@ def estimate_minutes(
     features: dict[str, int],
     path: Path = _TIMINGS_PATH,
 ) -> int:
-    """Estime la durée (minutes, arrondie au supérieur, plancher 1).
+    """Estime la durée (minutes, arrondie à la minute la plus proche, plancher 1).
 
     Moyenne des durées observées dans le même bucket ; à défaut, moyenne
     globale ; à défaut (dataset vide), ``_DEFAULT_MINUTES``.
@@ -172,4 +171,4 @@ def estimate_minutes(
         return _DEFAULT_MINUTES
 
     avg_sec = statistics.mean(pool)
-    return max(1, math.ceil(avg_sec / 60))
+    return max(1, round(avg_sec / 60))

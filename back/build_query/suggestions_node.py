@@ -553,6 +553,7 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
     # (déterministes) doivent rester émises même si le LLM ne produit rien.
     suggestions: list[str] = []
     rationales: dict[str, str] = {}
+    gap_analysis = ""
     try:
         try:
             _formatted = prompt_template.format_messages(
@@ -588,9 +589,10 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
                 "prod_instruction_block": prod_instruction_block,
             }
         )
+        gap_analysis = (result.analyse_des_manques or "").strip()
         logger.diag(
             "[suggestions] analyse_des_manques:\n%s",
-            result.analyse_des_manques[:1500],
+            gap_analysis[:1500],
         )
         items = result.suggestions[:3]
         # Aplatissement : on conserve `suggestions` en list[str] (dedup / consommation /
@@ -676,7 +678,10 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
                 parent_id = m.id
 
     # --- 5. Retour au state LangGraph ---
+    # `coverage_gap_analysis` est consommé par final_response (1ʳᵉ génération) pour tisser
+    # l'analyse des manques dans le message de clôture et pointer vers le panneau.
     return {
+        "coverage_gap_analysis": gap_analysis,
         "messages": [
             AIMessage(
                 content=json.dumps(suggestions, ensure_ascii=False),
@@ -689,5 +694,5 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
                     "rationales": rationales,
                 },
             )
-        ]
+        ],
     }

@@ -116,16 +116,32 @@ async def final_response(state: QueryState):
     ctx = _collect_run_context(state)
     parent_id = _parent_for_summary(state)
 
-    system = SystemMessage(
-        content=(
-            "Tu es l'assistant MockSQL qui aide à tester des requêtes SQL. "
-            "Tu viens de finir une opération sur les tests d'un utilisateur. "
-            "Réponds-lui directement, en français, en 1 à 2 phrases courtes, "
-            "ton chaleureux et professionnel. Dis ce que tu as fait "
-            "(créé / modifié / généré le(s) test(s)) et si tout s'exécute bien. "
-            "Ne répète pas le SQL, ne liste pas de suggestions, ne mets pas de titre."
+    # Analyse des manques produite par suggestions_generator (1ʳᵉ génération) : on la tisse
+    # dans le message de clôture pour expliquer ce qui n'est pas couvert et renvoyer au
+    # panneau Suggestions. Absente sur les éditions (pas de suggestions auto) → bloc ignoré.
+    gap_analysis = (state.get("coverage_gap_analysis") or "").strip()
+
+    system_lines = [
+        "Tu es l'assistant MockSQL qui aide à tester des requêtes SQL. "
+        "Tu viens de finir une opération sur les tests d'un utilisateur. "
+        "Réponds-lui directement, en français, ton chaleureux et professionnel. "
+        "Dis ce que tu as fait (créé / modifié / généré le(s) test(s)) et si tout "
+        "s'exécute bien. Ne répète pas le SQL, ne mets pas de titre.",
+    ]
+    if gap_analysis:
+        system_lines.append(
+            "Une analyse de couverture est fournie : après avoir annoncé les tests, "
+            "ajoute 1 à 2 phrases qui résument en langage métier ce qui n'est pas encore "
+            "couvert (reformule l'analyse, ne la recopie pas mot pour mot), puis précise "
+            "que tu as déposé des suggestions de tests pour renforcer la couverture dans "
+            "le panneau Suggestions. Reste sous 4 phrases au total. Ne liste pas les "
+            "suggestions une par une."
         )
-    )
+    else:
+        system_lines.append(
+            "Réponds en 1 à 2 phrases courtes. Ne liste pas de suggestions."
+        )
+    system = SystemMessage(content=" ".join(system_lines))
     facts = [
         f"Action réalisée : test {ctx['action']}.",
         f"Nombre de tests concernés : {ctx['n_tests'] or 1}.",
@@ -135,17 +151,24 @@ async def final_response(state: QueryState):
         facts.append(f"Scénario visé : {ctx['scenario']}")
     if ctx["verdict_line"]:
         facts.append(f"Verdict d'évaluation : {ctx['verdict_line']}")
+    if gap_analysis:
+        facts.append(f"Analyse de couverture (manques identifiés) : {gap_analysis}")
     human = HumanMessage(content="\n".join(facts))
 
+    panel_pointer = (
+        " J'ai aussi déposé des suggestions pour renforcer la couverture dans le panneau Suggestions."
+        if gap_analysis
+        else ""
+    )
     try:
         llm = make_llm()
         result = await llm.ainvoke([system, human])
         text = _coerce_text(result.content).strip()
         if not text:
-            text = _fallback_message(ctx)
+            text = _fallback_message(ctx) + panel_pointer
     except Exception as exc:  # noqa: BLE001 — clôture best-effort, jamais bloquante
         logger.diag("[final_response] LLM indisponible, fallback templaté : %s", exc)
-        text = _fallback_message(ctx)
+        text = _fallback_message(ctx) + panel_pointer
 
     return {
         "messages": [

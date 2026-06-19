@@ -510,7 +510,7 @@ const ChatComponent: React.FC = () => {
             if (!req) return;
             setIsAutoProfileRunning(true);
             try {
-              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: sessionId });
+              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: sessionId, partition_limit: req.partition_limit });
               if (result.profile_status !== 'complete') {
                 setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
               }
@@ -882,7 +882,7 @@ const ChatComponent: React.FC = () => {
             if (!req) return;
             setIsAutoProfileRunning(true);
             try {
-              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: currentModelId });
+              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: currentModelId, partition_limit: req.partition_limit });
               if (result.profile_status !== 'complete') {
                 setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
               }
@@ -931,7 +931,7 @@ const ChatComponent: React.FC = () => {
       }
       if (!result.missing_columns?.length) return;
       const { profile_request } = await buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns });
-      const refreshResult = await autoProfileApi({ profile_sql: profile_request.profile_query, profile_queries: profile_request.profile_queries, project: '', session: currentModelId });
+      const refreshResult = await autoProfileApi({ profile_sql: profile_request.profile_query, profile_queries: profile_request.profile_queries, project: '', session: currentModelId, partition_limit: profile_request.partition_limit });
       if (refreshResult.profile_status !== 'complete') {
         setAutoProfileWarning({ status: refreshResult.profile_status, errors: refreshResult.errors ?? [] });
       }

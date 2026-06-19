@@ -24,6 +24,7 @@ from build_query.profiler import (
     _collect_join_specs,
     describe_join,
     _build_partition_where,
+    build_partition_window,
     _format_day_partition_values,
     _build_derived_expr_profile_branches,
     build_profile_queries,
@@ -2327,6 +2328,135 @@ class TestBuildPartitionWhere(unittest.TestCase):
         )
         self.assertEqual(_format_day_partition_values(["202401", "bad"]), [])
         self.assertEqual(_format_day_partition_values([]), [])
+
+
+class TestBuildPartitionWindow(unittest.TestCase):
+    """Unit tests for build_partition_window."""
+
+    def test_exact_window_from_prefetched_values(self):
+        w = build_partition_window(
+            {
+                "type": "time",
+                "field": "event_date",
+                "granularity": "DAY",
+                "values": ["20240115", "20240113", "20240114"],
+            },
+            3,
+        )
+        self.assertEqual(w["exact"], True)
+        self.assertEqual(w["field"], "event_date")
+        self.assertEqual(w["limit"], 3)
+        # min/max sorted regardless of input order
+        self.assertEqual(w["min"], "2024-01-13")
+        self.assertEqual(w["max"], "2024-01-15")
+        self.assertEqual(w["values"], ["2024-01-13", "2024-01-14", "2024-01-15"])
+
+    def test_inexact_window_ingestion_time_no_values(self):
+        w = build_partition_window({"type": "time", "field": None}, 2)
+        self.assertEqual(w["exact"], False)
+        self.assertEqual(w["field"], "_PARTITIONDATE")
+        self.assertEqual(w["limit"], 2)
+        self.assertNotIn("min", w)
+        self.assertNotIn("max", w)
+
+    def test_non_day_granularity_is_inexact(self):
+        w = build_partition_window(
+            {
+                "type": "time",
+                "field": "event_month",
+                "granularity": "MONTH",
+                "values": ["202401", "202312"],
+            },
+            3,
+        )
+        self.assertEqual(w["exact"], False)
+        self.assertNotIn("min", w)
+
+    def test_range_partition_returns_none(self):
+        self.assertIsNone(
+            build_partition_window({"type": "range", "field": "region_id"}, 3)
+        )
+
+    def test_no_limit_returns_none(self):
+        self.assertIsNone(build_partition_window({"type": "time", "field": "d"}, 0))
+        self.assertIsNone(build_partition_window({"type": "time", "field": "d"}, None))
+
+    def test_empty_partition_returns_none(self):
+        self.assertIsNone(build_partition_window({}, 3))
+
+    def test_attached_to_profile_schema_output(self):
+        """profile_schema attaches partition_window to time-partitioned tables."""
+
+        def _exec(sql):
+            if "row_count" in sql:
+                return [{"row_count": 2}]
+            if "total_count" in sql:
+                return [{"total_count": 2, "null_count": 0, "distinct_count": 2}]
+            if "duplicate" in sql:
+                return [{"duplicate_value_count": 0}]
+            if "MIN" in sql:
+                return [{"min_value": "2024-01-13", "max_value": "2024-01-15"}]
+            if "date_regularity" in sql:
+                return [{"date_regularity": "daily"}]
+            return [{"val": "x", "cnt": 1}]
+
+        schema = {
+            "tables": [
+                {
+                    "name": "project.dataset.events",
+                    "columns": [{"name": "event_date", "type": "DATE"}],
+                    "partition": {
+                        "type": "time",
+                        "field": "event_date",
+                        "granularity": "DAY",
+                        "values": ["20240115", "20240114", "20240113"],
+                    },
+                }
+            ]
+        }
+        prof = profile_schema(schema, _exec)
+        win = prof["tables"]["project.dataset.events"]["partition_window"]
+        self.assertEqual(win["exact"], True)
+        self.assertEqual(win["min"], "2024-01-13")
+        self.assertEqual(win["max"], "2024-01-15")
+
+    def test_attached_to_parse_profile_query_result(self):
+        """parse_profile_query_result attaches partition_window from the schema."""
+        schema = {
+            "tables": [
+                {
+                    "name": "project.dataset.events",
+                    "columns": [{"name": "event_date", "type": "DATE"}],
+                    "partition": {
+                        "type": "time",
+                        "field": "event_date",
+                        "granularity": "DAY",
+                        "values": ["20240115", "20240114"],
+                    },
+                }
+            ]
+        }
+        rows = [
+            {
+                "row_type": "column",
+                "table_name": "project.dataset.events",
+                "col_name": "event_date",
+                "total_count": 2,
+                "null_count": 0,
+                "non_null_count": 2,
+                "distinct_count": 2,
+                "dup_count": 0,
+                "min_val": "2024-01-14",
+                "max_val": "2024-01-15",
+                "top_values": "2024-01-14|||2024-01-15",
+            }
+        ]
+        used = [{"table": "project.dataset.events", "used_columns": ["event_date"]}]
+        p = parse_profile_query_result(rows, schema, used)
+        win = p["tables"]["project.dataset.events"]["partition_window"]
+        self.assertEqual(win["exact"], True)
+        self.assertEqual(win["min"], "2024-01-14")
+        self.assertEqual(win["max"], "2024-01-15")
 
 
 class TestBuildProfileQueryPartitioned(unittest.TestCase):
