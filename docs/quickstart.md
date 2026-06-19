@@ -1,17 +1,17 @@
 # Quickstart
 
-## Prérequis
+## Prerequisites
 
 - Python 3.11+
 - [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
-- Poetry (`pip install poetry`) — pour le développement depuis les sources
-- Node.js 18+ — uniquement pour builder le frontend
+- Poetry (`pip install poetry`) — for development from source
+- Node.js 18+ — only to build the frontend
 
 ---
 
-## 1. Authentification Google Cloud
+## 1. Google Cloud authentication
 
-MockSQL utilise les credentials applicatifs Google pour les appels Vertex AI et BigQuery :
+MockSQL uses Google application credentials for Vertex AI and BigQuery calls:
 
 ```bash
 gcloud auth application-default login
@@ -20,25 +20,25 @@ gcloud config set project <PROJECT_ID>
 
 ---
 
-## 2. Permissions IAM
+## 2. IAM permissions
 
-Le compte utilisé doit disposer des rôles suivants :
+The account in use must have the following roles:
 
-| Rôle | Utilité |
+| Role | Purpose |
 |------|---------|
-| `roles/bigquery.dataViewer` | Lecture du schéma des tables |
-| `roles/bigquery.user` | Lancement des jobs / dry-run |
-| `roles/aiplatform.user` | Appels aux modèles Vertex AI (Gemini) |
+| `roles/bigquery.dataViewer` | Read table schemas |
+| `roles/bigquery.user` | Run jobs / dry-run |
+| `roles/aiplatform.user` | Call Vertex AI models (Gemini) |
 
-> **Activation Gemini (étape unique par projet)**
-> Les rôles IAM ne suffisent pas : ouvrez le [Model Garden](https://console.cloud.google.com/vertex-ai/model-garden), cherchez un modèle Gemini et acceptez les conditions d'utilisation. Cette opération est unique par projet GCP et ne peut pas être réalisée via `gcloud`.
+> **Enabling Gemini (one-time step per project)**
+> IAM roles are not enough: open the [Model Garden](https://console.cloud.google.com/vertex-ai/model-garden), search for a Gemini model and accept the terms of use. This is a one-time operation per GCP project and cannot be done via `gcloud`.
 
-### Option A — Compte utilisateur (développement local)
+### Option A — User account (local development)
 
 ```bash
 for ROLE in roles/bigquery.dataViewer roles/bigquery.user roles/aiplatform.user; do
   gcloud projects add-iam-policy-binding <PROJECT_ID> \
-    --member='user:<votre-email@domaine.com>' \
+    --member='user:<your-email@domain.com>' \
     --role="${ROLE}"
 done
 ```
@@ -62,65 +62,65 @@ gcloud iam service-accounts keys create ~/keys/mocksql-sa.json \
   --iam-account="${SA_EMAIL}"
 ```
 
-En local, dans le `.env` à la racine de votre projet (voir section suivante) :
+Locally, in the `.env` at your project root (see next section):
 ```dotenv
-GOOGLE_APPLICATION_CREDENTIALS=/chemin/vers/mocksql-sa.json
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/mocksql-sa.json
 ```
 
-En CI/CD, injecter `GOOGLE_APPLICATION_CREDENTIALS` comme variable d'environnement secrète.
+In CI/CD, inject `GOOGLE_APPLICATION_CREDENTIALS` as a secret environment variable.
 
-> **Erreur fréquente** : `Forbidden: Access Denied: bigquery.jobs.create` → le rôle `bigquery.user` est manquant.
+> **Common error**: `Forbidden: Access Denied: bigquery.jobs.create` → the `bigquery.user` role is missing.
 
 ---
 
-## 3. Installation CLI
+## 3. CLI installation
 
 ```bash
 pip install mocksql
 ```
 
-### Variables d'environnement
+### Environment variables
 
-MockSQL lit la configuration GCP depuis les variables d'environnement. La priorité est :
+MockSQL reads its GCP configuration from environment variables. The priority is:
 
 ```
-variable système / CI  >  fichier .env local  >  erreur
+system / CI variable  >  local .env file  >  error
 ```
 
-`mocksql.yml` décrit la structure du projet (chemins, dialect) — pas les credentials ni les projets GCP, qui changent selon l'environnement.
+`mocksql.yml` describes the project structure (paths, dialect) — not the credentials or GCP projects, which change per environment.
 
-#### En développement local
+#### In local development
 
-Créez un `.env` **gitignorée** à la racine de votre projet :
+Create a **gitignored** `.env` at your project root:
 
 ```dotenv
-# .env — ne pas committer
+# .env — do not commit
 VERTEX_PROJECT=my-project-dev
 GOOGLE_CLOUD_LOCATION=us-central1
 
-# Optionnel — défaut : VERTEX_PROJECT
+# Optional — default: VERTEX_PROJECT
 BQ_TEST_PROJECT=my-project-dev
 
-# Optionnel : service account explicite (sinon : Application Default Credentials)
-# GOOGLE_APPLICATION_CREDENTIALS=/chemin/vers/service_account.json
+# Optional: explicit service account (otherwise: Application Default Credentials)
+# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service_account.json
 ```
 
-MockSQL charge ce fichier automatiquement au démarrage (`load_dotenv()`). Ajoutez `.env` à votre `.gitignore` :
+MockSQL loads this file automatically at startup (`load_dotenv()`). Add `.env` to your `.gitignore`:
 
 ```
 .env
 ```
 
-#### En CI/CD (GitHub Actions, Cloud Build…)
+#### In CI/CD (GitHub Actions, Cloud Build…)
 
-Injectez les variables directement — elles ont priorité sur le `.env` local :
+Inject the variables directly — they take priority over the local `.env`:
 
 ```yaml
 # GitHub Actions
 env:
   VERTEX_PROJECT: my-project-preprod
   GOOGLE_CLOUD_LOCATION: us-central1
-  BQ_TEST_PROJECT: my-project-preprod   # si différent de VERTEX_PROJECT
+  BQ_TEST_PROJECT: my-project-preprod   # if different from VERTEX_PROJECT
 ```
 
 ```yaml
@@ -132,76 +132,76 @@ env:
   - GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
-`GOOGLE_CLOUD_LOCATION` est obligatoire pour les appels Vertex AI. Le chemin DuckDB se configure via `duckdb_path` dans `mocksql.yml` (défaut : `data/mocksql.duckdb`).
+`GOOGLE_CLOUD_LOCATION` is required for Vertex AI calls. The DuckDB path is configured via `duckdb_path` in `mocksql.yml` (default: `data/mocksql.duckdb`).
 
 ### `mocksql init`
 
-Initialise un projet et génère `mocksql.yml` :
+Initializes a project and generates `mocksql.yml`:
 
 ```bash
 mocksql init
-# ou dans un sous-dossier
-mocksql init --path ./mon_projet
+# or in a subfolder
+mocksql init --path ./my_project
 ```
 
-Exemple de `mocksql.yml` généré :
+Example generated `mocksql.yml`:
 
 ```yaml
 version: "2"
 dialect: bigquery          # bigquery | postgres | duckdb
 models_path: ./models
-duckdb_path: data/mocksql.duckdb   # chemin de la base DuckDB locale
+duckdb_path: data/mocksql.duckdb   # path to the local DuckDB database
 llm:
   provider: vertexai       # vertexai | openai
-  model: gemini-2.0-flash  # override du modèle par défaut (optionnel)
+  model: gemini-2.0-flash  # override the default model (optional)
   streaming: false
 schema_cache: .mocksql/schema_cache.json
 ```
 
-#### Dialects supportés
+#### Supported dialects
 
-Le `dialect` décrit le SQL **source** : il pilote la validation (dry-run) et l'optimisation. L'exécution des tests se fait **toujours sur DuckDB en local**.
+The `dialect` describes the **source** SQL: it drives validation (dry-run) and optimization. Test execution **always happens on DuckDB locally**.
 
-| Dialect | Source | Validation (dry-run) | Schéma |
+| Dialect | Source | Validation (dry-run) | Schema |
 |---------|--------|----------------------|--------|
-| `bigquery` | BigQuery | dry-run BigQuery | fetch BigQuery → cache |
-| `postgres` | PostgreSQL | dry-run Postgres | fetch Postgres → cache |
-| `duckdb` | DuckDB / dbt-DuckDB | dry-run DuckDB local | cache pré-rempli (voir [quickstart-dbt.md](quickstart-dbt.md)) |
+| `bigquery` | BigQuery | BigQuery dry-run | fetch BigQuery → cache |
+| `postgres` | PostgreSQL | Postgres dry-run | fetch Postgres → cache |
+| `duckdb` | DuckDB / dbt-DuckDB | local DuckDB dry-run | pre-filled cache (see [quickstart-dbt.md](quickstart-dbt.md)) |
 
-> En `dialect: duckdb`, MockSQL n'interroge aucune source distante : le cache de schéma doit être pré-rempli (bootstrap depuis une base DuckDB). C'est le mode utilisé pour les projets **dbt-DuckDB** — voir **[quickstart-dbt.md](quickstart-dbt.md)**.
+> In `dialect: duckdb`, MockSQL queries no remote source: the schema cache must be pre-filled (bootstrapped from a DuckDB database). This is the mode used for **dbt-DuckDB** projects — see **[quickstart-dbt.md](quickstart-dbt.md)**.
 
-**Clés `llm`** :
+**`llm` keys**:
 
-| Clé | Défaut | Description |
-|-----|--------|-------------|
-| `provider` | `vertexai` | Backend LLM (`vertexai` ou `openai`) |
-| `model` | `gemini-2.0-flash-lite` | Prioritaire sur `DEFAULT_MODEL_NAME` |
-| `streaming` | `false` | Streaming token par token |
+| Key | Default | Description |
+|-----|---------|-------------|
+| `provider` | `vertexai` | LLM backend (`vertexai` or `openai`) |
+| `model` | `gemini-2.0-flash-lite` | Takes priority over `DEFAULT_MODEL_NAME` |
+| `streaming` | `false` | Token-by-token streaming |
 
 ### `mocksql generate`
 
 ```bash
 mocksql generate models/orders.sql
-# avec options
+# with options
 mocksql generate models/orders.sql --config mocksql.yml --output .mocksql/tests
 ```
 
-Les schémas sont mis en cache dans `.mocksql/schema_cache.json` — les runs suivants n'interrogent plus BigQuery.
+Schemas are cached in `.mocksql/schema_cache.json` — subsequent runs no longer query BigQuery.
 
-**Outputs** dans `.mocksql/tests/` :
-- `<model>_data.json` — données de test (tables d'entrée)
-- `<model>_results.json` — résultats d'exécution DuckDB
+**Outputs** in `.mocksql/tests/`:
+- `<model>_data.json` — test data (input tables)
+- `<model>_results.json` — DuckDB execution results
 
-### Préprocesseur SQL (variables et templates)
+### SQL preprocessor (variables and templates)
 
-Si tes fichiers `.sql` contiennent des variables non-parsables (`@start_date`, `{{ ds }}`, macros dbt…) :
+If your `.sql` files contain non-parsable variables (`@start_date`, `{{ ds }}`, dbt macros…):
 
 ```yaml
 # mocksql.yml
-preprocessor_fn: "preprocessors:replace_vars"   # module:fonction, relatif au mocksql.yml
+preprocessor_fn: "preprocessors:replace_vars"   # module:function, relative to mocksql.yml
 ```
 
-`preprocessors.py` à côté de `mocksql.yml` :
+`preprocessors.py` next to `mocksql.yml`:
 
 ```python
 import re
@@ -211,7 +211,7 @@ def replace_vars(sql: str) -> str:
     return re.sub(r"@(\w+)", lambda m: defaults.get(m.group(1), "NULL"), sql)
 ```
 
-### Exemple complet
+### Full example
 
 ```bash
 mocksql generate examples/jaffle_shop/models/orders.sql \
@@ -222,23 +222,22 @@ mocksql generate examples/jaffle_shop/models/orders.sql \
 
 ## 4. Web UI
 
-MockSQL distribue deux wheels distincts :
+MockSQL ships two distinct wheels:
 
-| Package | Contenu |
-|---------|---------|
-| `mocksql` | CLI uniquement |
-| `mocksql-ui` | CLI + serveur web + assets React |
+| Package | Contents |
+|---------|----------|
+| `mocksql` | CLI only |
+| `mocksql-ui` | CLI + web server + React assets |
 
 ```bash
 # CLI + UI
 pip install mocksql mocksql-ui
 ```
 
-Assurez-vous que les variables d'environnement GCP sont définies (voir [section 3](#3-installation-cli)) puis :
+Make sure the GCP environment variables are set (see [section 3](#3-cli-installation)) then:
 
 ```bash
 mocksql ui                  # http://localhost:8080/static/
 mocksql ui --port 4000
 mocksql ui --no-browser
 ```
-

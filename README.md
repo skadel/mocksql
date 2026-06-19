@@ -5,88 +5,88 @@
 [![PyPI version](https://img.shields.io/pypi/v/mocksql)](https://pypi.org/project/mocksql/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Couche de tests unitaires native pour les data engineers.** MockSQL prend un fichier `.sql`, génère automatiquement des données de test via LLM, les exécute localement sur DuckDB (0 € facturé sur BigQuery), attribue un verdict argumenté à chaque test, et suggère les cas limites non couverts.
+**A native unit-testing layer for data engineers.** MockSQL takes a `.sql` file, automatically generates test data via LLM, runs it locally on DuckDB (zero cost on BigQuery), assigns an argued verdict to each test, and suggests the edge cases you haven't covered.
 
-MockSQL ne passe pas le SQL brut au LLM. Il parse d'abord la requête avec **SQLGlot** pour extraire les colonnes utilisées, les filtres, les JOINs — puis fournit ces contraintes au LLM comme contexte structuré. Les données générées sont ensuite exécutées sur **DuckDB** : si un CTE retourne 0 lignes, MockSQL identifie lequel et relance automatiquement la génération jusqu'à obtenir des résultats non-vides. Une fois les tests générés, un **chat contextuel** permet de les affiner, en ajouter ou en modifier directement en langage naturel — ancré sur un test spécifique ou sur l'ensemble du modèle.
+MockSQL never hands raw SQL to the LLM. It first parses the query with **SQLGlot** to extract the used columns, filters, and JOINs — then feeds those constraints to the LLM as structured context. The generated data is then executed on **DuckDB**: if a CTE returns 0 rows, MockSQL identifies which one and automatically re-runs generation until it gets non-empty results. Once the tests are generated, a **contextual chat** lets you refine, add, or edit them directly in natural language — anchored to a specific test or to the whole model.
 
-Les bibliothèques de mocking SQL existantes vous demandent d'**écrire les données de test à la main**. MockSQL prend le contrepied :
+Existing SQL mocking libraries ask you to **write the test data by hand**. MockSQL takes the opposite approach:
 
-| | Bibliothèques de mocking SQL | MockSQL |
+| | SQL mocking libraries | MockSQL |
 |---|---|---|
-| Données de test | Écrites manuellement | **Générées automatiquement** par LLM |
-| Couverture | Aucune détection | **6 axes** (NULL, vide, ex æquo…) + suggestions |
-| Qualité du test | Pas d'évaluation | **Verdict LLM** (bon / insuffisant / incorrect) |
-| Interface | Bibliothèque Python | **UI dédiée** (GenerateView → TestsView) |
-| Moteur SQL | Un connecteur par DB | **DuckDB unifié** — aucun coût BigQuery |
+| Test data | Written manually | **Auto-generated** by LLM |
+| Coverage | No detection | **6 axes** (NULL, empty, ties…) + suggestions |
+| Test quality | No evaluation | **LLM verdict** (good / weak / incorrect) |
+| Interface | Python library | **Dedicated UI** (GenerateView → TestsView) |
+| SQL engine | One connector per DB | **Unified DuckDB** — no BigQuery cost |
 
-MockSQL se décline en deux modes :
-- **CLI** (`mocksql`) — usage standalone directement sur tes fichiers `.sql` locaux
-- **Web Hub** — interface complète avec historique, verdicts, couverture et collaboration
+MockSQL comes in two modes:
+- **CLI** (`mocksql`) — standalone use directly on your local `.sql` files
+- **Web Hub** — full interface with history, verdicts, coverage, and collaboration
 
 ---
 
-## Démarrage rapide
+## Quick start
 
 ```bash
 pip install mocksql
-export VERTEX_PROJECT=<votre-projet-gcp>
+export VERTEX_PROJECT=<your-gcp-project>
 
 mocksql init
 mocksql generate models/my_model.sql
 ```
 
-Pour le setup complet (GCP, IAM, Web UI, développement) → **[docs/quickstart.md](docs/quickstart.md)**
+For the full setup (GCP, IAM, Web UI, development) → **[docs/quickstart.md](docs/quickstart.md)**
 
 ---
 
-## Projets dbt
+## dbt projects
 
-MockSQL teste des `.sql` plats ; un projet dbt utilise du Jinja (`{{ ref }}`, macros…). La passerelle est `dbt compile` (Jinja → SQL pur) + un cache de schéma bootstrapé depuis la base DuckDB :
+MockSQL tests flat `.sql` files; a dbt project uses Jinja (`{{ ref }}`, macros…). The bridge is `dbt compile` (Jinja → pure SQL) plus a schema cache bootstrapped from the DuckDB database:
 
 ```bash
-cd mon_projet_dbt
-dbt compile && dbt run        # Jinja résolu + tables matérialisées
-# bootstrap du schema_cache depuis la base DuckDB, puis :
-mocksql generate models/mon_modele.sql --config mocksql.yml
+cd my_dbt_project
+dbt compile && dbt run        # Jinja resolved + tables materialized
+# bootstrap the schema_cache from the DuckDB database, then:
+mocksql generate models/my_model.sql --config mocksql.yml
 ```
 
-Recette complète (compile, bootstrap du cache, `dialect: duckdb`) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
+Full recipe (compile, cache bootstrap, `dialect: duckdb`) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
 
 ---
 
-## Structure du projet
+## Project structure
 
 ```
 back/       # FastAPI + LangGraph + CLI
   cli/      # mocksql CLI (main.py, generate.py)
-  ui/       # package mocksql-ui (serveur + assets React)
+  ui/       # mocksql-ui package (server + React assets)
 front/      # React 18 + TypeScript + Redux (Web Hub)
-examples/   # Exemples de projets MockSQL
+examples/   # Example MockSQL projects
 docs/       # Documentation
-  quickstart.md               # Setup complet (GCP, IAM, CLI, Web UI)
-  quickstart-dbt.md           # Tester un projet dbt-DuckDB
-  workflow-query-generation.md  # Flux frontend → backend → DuckDB
+  quickstart.md               # Full setup (GCP, IAM, CLI, Web UI)
+  quickstart-dbt.md           # Testing a dbt-DuckDB project
+  workflow-query-generation.md  # Flow frontend → backend → DuckDB
 ```
 
 ---
 
-## Contribuer
+## Contributing
 
 ```bash
-make check-all   # back (style + tests) + front (vitest) — validation complète
+make check-all   # back (style + tests) + front (vitest) — full validation
 ```
 
-Backend seul :
+Backend only:
 
 ```bash
 cd back
-make style    # lint + format check + code mort (vulture)
-make format   # auto-format et auto-fix
+make style    # lint + format check + dead code (vulture)
+make format   # auto-format and auto-fix
 make test     # pytest
 make check    # style + test
 ```
 
-Hook pre-commit (recommandé) :
+Pre-commit hook (recommended):
 
 ```bash
 pip install pre-commit && pre-commit install
