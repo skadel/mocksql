@@ -56,7 +56,7 @@ def build_cte_dependency_graph(
     s'il est présent, est inclus comme n'importe quel autre nœud.
 
     `dependencies` de `query_decomposed` n'est jamais peuplé en amont (cf.
-    query_chain.py / validator.py) — d'où le recalcul ici (spec §6.1).
+    query_chain.py / validator.py) — d'où le recalcul ici.
 
     Limitation connue (MVP) : un `WITH` imbriqué dans le `code` d'une CTE dont un
     nom local entrerait en collision avec un nom de CTE de premier niveau pourrait
@@ -231,8 +231,8 @@ def build_required_dependency_graph(
 
     Une arête `parent → child` n'existe que si `child` est consommée par `parent`
     sur un chemin requis (FROM / INNER / OUTER forçant), pas via un LEFT JOIN
-    optionnel ni un anti-join. Base de la classification bloquante (§7) et de la
-    réduction du périmètre d'isolation (§6.3).
+    optionnel ni un anti-join. Base de la classification bloquante et de la
+    réduction du périmètre d'isolation.
     """
     names = {c["name"] for c in query_decomposed}
     lower_to_canon = {n.lower(): n for n in names}
@@ -326,7 +326,7 @@ def reduce_used_columns(
     (convention du projet, cf. CLAUDE.md). On filtre par nom de table (insensible
     à la casse), sur la closure du graphe requis → les tables LEFT-optionnelles /
     anti-jointes sont exclues de la génération. Sous-ensemble du `used_columns`
-    complet → prompt de génération plus court (spec §6.3).
+    complet → prompt de génération plus court.
     """
     sources = _required_source_tables(failing_cte, query_decomposed, dialect)
     return [
@@ -343,7 +343,7 @@ def isolate_cte(
     dialect: str = "bigquery",
     schema: dict | None = None,
 ) -> dict:
-    """Isole `failing_cte` pour la génération focalisée (spec §5.1 / §6.2-6.3).
+    """Isole `failing_cte` pour la génération focalisée.
 
     Retourne `{"focus_sql", "focus_used_columns", "sub_ctes"}`.
 
@@ -381,7 +381,7 @@ def classify_blocking_ctes(
     cte_trace: dict | None,
     dialect: str = "bigquery",
 ) -> list[str]:
-    """CTEs **vides ET réellement bloquantes**, en ordre topologique (spec §7).
+    """CTEs **vides ET réellement bloquantes**, en ordre topologique.
 
     Une CTE vide ne bloque le résultat que si elle est **atteignable depuis le
     résultat final par des arêtes requises** : `FROM` / `INNER` / `CROSS` / OUTER
