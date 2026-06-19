@@ -71,7 +71,7 @@ function tagStyle(tag: string) {
 }
 
 /* ─── coverage ────────────────────────────────────────────────────── */
-// v15 coverage axes (cf. design-v15-spec §4 + data.js:coverageAxes).
+// v15 coverage axes (cf. data.js:coverageAxes).
 // Drops happy/equal/types ; adds bornes/doublons/volumetrie.
 const COVERAGE_AXES = [
   { key: 'null',       label: 'Valeurs NULL',      hint: 'colonnes manquantes / vides' },
@@ -86,7 +86,7 @@ const AXIS_KEYS = new Set(COVERAGE_AXES.map((a) => a.key));
 
 // Coverage prefers backend-declared axes (the v15 model: each test carries
 // `axes: string[]`). Until the backend tags them, we fall back to regex
-// heuristics over the test title + tags. See design-v15-spec §4.
+// heuristics over the test title + tags.
 function detectCoveredAxes(tests: any[]): Set<string> {
   const covered = new Set<string>();
 
@@ -1091,7 +1091,7 @@ function SqlStrip({ sql, disabled, hasError, optimizedSql, sqlHistory, onHistory
 
 /* ─── TestCard ───────────────────────────────────────────────────── */
 /* ─── DecisionBlock ────────────────────────────────────────────────────
- * v15 « décision métier figée » (design-v15-spec §5). Optional: only renders
+ * v15 « décision métier figée ». Optional: only renders
  * when the backend attaches a `decision` to the test. Masked otherwise.
  * Fields: question, decision, decidedBy[{initials,color}], decidedAt, inProdShare.
  */

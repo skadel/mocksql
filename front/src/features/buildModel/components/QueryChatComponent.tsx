@@ -6,6 +6,8 @@ import { v4 as uuidv4 } from 'uuid';
 import { throttle } from 'lodash';
 import { Alert, Box, Button, Chip, CircularProgress, Dialog, DialogActions, DialogContent, DialogTitle, IconButton, InputAdornment, LinearProgress, TextField, Tooltip, Typography } from '@mui/material';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
+import { isStaleSchemaError } from '../../../utils/staleSchema';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import DownloadIcon from '@mui/icons-material/Download';
 import SearchIcon from '@mui/icons-material/Search';
@@ -86,8 +88,8 @@ const ChatComponent: React.FC = () => {
   const [previewLoading, setPreviewLoading] = useState(false);
   const sqlFiles = useSqlFileLoader();
   const [fileSearch, setFileSearch] = useState('');
-  // v15 mode toggle. Integration mode is a stub (design-v15-spec §8): the
-  // tab is visible with a "Bientôt" badge but does not change the flow.
+  // v15 mode toggle. Integration mode is a stub: the tab is visible with a
+  // "Bientôt" badge but does not change the flow.
   const [genMode, setGenMode] = useState<'unit' | 'integration'>('unit');
 
   const [historyRestoreTrigger, setHistoryRestoreTrigger] = useState(0);
@@ -900,6 +902,64 @@ const ChatComponent: React.FC = () => {
     }
   }, [currentModelId, sqlQuery, dispatch]);
 
+  // Schéma en cache périmé (erreur "Unknown column … schéma probablement périmé") :
+  // ré-importe le schéma depuis BigQuery — ciblé sur les seules tables de la
+  // requête courante — puis reprend le flux normal (profilage différentiel des
+  // colonnes nouvellement découvertes, puis régénération).
+  const handleRefreshSchemasAndRetry = useCallback(async () => {
+    if (!currentModelId || !sqlQuery.trim()) return;
+    setIsAutoProfileRunning(true);
+    try {
+      // Dérive les tables de la requête (refs BQ 3-parties) pour ne rafraîchir
+      // que celles-ci. Si la dérivation échoue, tables=[] → refresh global (fallback).
+      const validateResult = await validateQueryApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, parent_message_id: '' });
+      const tables = Array.from(new Set(
+        (validateResult?.used_columns ?? [])
+          .map((c: any) => [c.project, c.database, c.table].filter(Boolean).join('.'))
+          .filter((t: string) => t.split('.').length === 3)
+      ));
+      await refreshSchemasApi({ tables });
+    } catch (e) {
+      console.error('[handleRefreshSchemasAndRetry]', e);
+      dispatch(setError('Erreur lors du rafraîchissement du schéma.'));
+      setIsAutoProfileRunning(false);
+      return;
+    }
+    setIsAutoProfileRunning(false);
+    // Reprend le flux standard : check de profil différentiel + auto-profilage des
+    // colonnes manquantes (les nouvelles colonnes du schéma rafraîchi) puis stream.
+    await handleRequestProfile();
+  }, [currentModelId, sqlQuery, dispatch, handleRequestProfile]);
+
+  // Variante pour la phase « entry » (GenerateView) : ici currentModelId est vide
+  // (uiPhase === 'entry'), donc on ne peut pas passer par handleRequestProfile.
+  // On rafraîchit le schéma (ciblé sur les tables du SQL prévisualisé si possible)
+  // puis on relance la génération comme le bouton « Générer les tests ».
+  const handleRefreshSchemasFromEntry = useCallback(async () => {
+    setSubmitError(null);
+    try {
+      let tables: string[] = [];
+      const sql = previewSql || '';
+      if (sql.trim()) {
+        try {
+          const validateResult = await validateQueryApi({ sql, project: '', dialect: DIALECT, session: '', parent_message_id: '' });
+          tables = Array.from(new Set(
+            (validateResult?.used_columns ?? [])
+              .map((c: any) => [c.project, c.database, c.table].filter(Boolean).join('.'))
+              .filter((t: string) => t.split('.').length === 3)
+          ));
+        } catch { /* dérivation best-effort → fallback refresh global */ }
+      }
+      await refreshSchemasApi({ tables });
+    } catch (e) {
+      console.error('[handleRefreshSchemasFromEntry]', e);
+      setSubmitError('Erreur lors du rafraîchissement du schéma.');
+      return;
+    }
+    forceNewRef.current = true;
+    handleFileSubmit();
+  }, [previewSql, handleFileSubmit]);
+
   const handleClearHistory = async () => {
     if (!currentModelId) return;
     await clearHistoryApi(currentModelId);
@@ -1156,7 +1216,18 @@ const ChatComponent: React.FC = () => {
               severity="error"
               sx={{ borderRadius: '12px', mb: 1 }}
               onClose={() => setSubmitError(null)}
-              action={isRetryableError(submitError) && lastChatQueryArgsRef.current ? (
+              action={isStaleSchemaError(submitError) ? (
+                <Button
+                  size="small"
+                  color="inherit"
+                  variant="outlined"
+                  startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                  onClick={() => { setSubmitError(null); handleRefreshSchemasAndRetry(); }}
+                  sx={{ whiteSpace: 'nowrap', textTransform: 'none', ml: 1 }}
+                >
+                  Rafraîchir le schéma
+                </Button>
+              ) : isRetryableError(submitError) && lastChatQueryArgsRef.current ? (
                 <Button size="small" color="inherit" onClick={handleRetry} sx={{ whiteSpace: 'nowrap', ml: 1 }}>
                   Réessayer
                 </Button>
@@ -1166,7 +1237,23 @@ const ChatComponent: React.FC = () => {
             </Alert>
           )}
           {lastError && !lastErrorDismissed && !submitError && (
-            <Alert severity="warning" sx={{ borderRadius: '12px', mb: 1 }} onClose={() => setLastErrorDismissed(true)}>
+            <Alert
+              severity="warning"
+              sx={{ borderRadius: '12px', mb: 1 }}
+              onClose={() => setLastErrorDismissed(true)}
+              action={isStaleSchemaError(lastError) ? (
+                <Button
+                  size="small"
+                  color="inherit"
+                  variant="outlined"
+                  startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                  onClick={handleRefreshSchemasAndRetry}
+                  sx={{ whiteSpace: 'nowrap', textTransform: 'none', ml: 1 }}
+                >
+                  Rafraîchir le schéma
+                </Button>
+              ) : undefined}
+            >
               {lastError}
             </Alert>
           )}
@@ -1446,7 +1533,23 @@ const ChatComponent: React.FC = () => {
               <SubmissionProgress label={submissionStep} />
             )}
             {submitError && (
-              <Alert severity="error" sx={{ borderRadius: '12px', mt: 2 }} onClose={() => setSubmitError(null)}>
+              <Alert
+                severity="error"
+                sx={{ borderRadius: '12px', mt: 2 }}
+                onClose={() => setSubmitError(null)}
+                action={isStaleSchemaError(submitError) ? (
+                  <Button
+                    size="small"
+                    color="inherit"
+                    variant="outlined"
+                    startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                    onClick={handleRefreshSchemasFromEntry}
+                    sx={{ whiteSpace: 'nowrap', textTransform: 'none', ml: 1 }}
+                  >
+                    Rafraîchir le schéma
+                  </Button>
+                ) : undefined}
+              >
                 {submitError}
               </Alert>
             )}
@@ -1527,6 +1630,7 @@ const ChatComponent: React.FC = () => {
             sqlQuery={sqlQuery}
             onClearHistory={handleClearHistory}
             onRequestProfile={handleRequestProfile}
+            onRefreshSchemas={handleRefreshSchemasAndRetry}
             focusTrigger={addTestTrigger}
           />
           </Box>

@@ -45,6 +45,7 @@ interface MessageDisplayProps {
   sqlHistory?: SqlHistoryEntry[];
   onSqlRestore?: (entry: SqlHistoryEntry) => void;
   onRequestProfile?: () => void;
+  onRefreshSchemas?: () => void;
 }
 
 const SqlChangeDivider: React.FC<{ entry: SqlHistoryEntry; onRestore?: (e: SqlHistoryEntry) => void }> = ({ entry, onRestore }) => {
@@ -75,7 +76,7 @@ const SqlChangeDivider: React.FC<{ entry: SqlHistoryEntry; onRestore?: (e: SqlHi
   );
 };
 
-const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMessages, onRestoreState, restoredMessageId, alwaysFix, onAlwaysFixChange, sqlHistory, onSqlRestore, onRequestProfile }) => {
+const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMessages, onRestoreState, restoredMessageId, alwaysFix, onAlwaysFixChange, sqlHistory, onSqlRestore, onRequestProfile, onRefreshSchemas }) => {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const { queryComponentGraph, selectedChildIndices } = useAppSelector((state) => state.buildModel);
@@ -190,6 +191,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
       onCreateClick={handleCreateClick}
       onSuggestionClick={(text) => sendMessage(text, undefined, getLastDisplayedMessageId())}
       onRequestProfile={onRequestProfile}
+      onRefreshSchemas={onRefreshSchemas}
       debugMessages={
         ((msg as any).children || [])
           .map((id: string) => queryComponentGraph[id])
