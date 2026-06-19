@@ -1,6 +1,6 @@
 import React, { useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
+import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SearchIcon from '@mui/icons-material/Search';
 import DownloadIcon from '@mui/icons-material/Download';
@@ -9,10 +9,12 @@ import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import DisplayTable from './DisplayTable';
 import QueryUnderstandingCard from './QueryUnderstandingCard';
 import { StyledButton } from '../../../style/StyledComponents';
 import { getVerdictInfo } from '../../../utils/verdict';
+import { isStaleSchemaError } from '../../../utils/staleSchema';
 import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
 
 type MessageBodyProps = {
@@ -33,6 +35,7 @@ type MessageBodyProps = {
   onCreateClick?: (id: string) => void;
   onSuggestionClick?: (text: string) => void;
   onRequestProfile?: () => void;
+  onRefreshSchemas?: () => void;
   debugMessages?: Message[];
 };
 
@@ -326,6 +329,7 @@ const MessageBody: React.FC<MessageBodyProps> = ({
   currentProjectId,
   onProfileUpload,
   onPageChange,
+  onRefreshSchemas,
   debugMessages,
 }) => {
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -661,7 +665,24 @@ const MessageBody: React.FC<MessageBodyProps> = ({
 
       {/* Erreur */}
       {msg.contents.error && (
-        <Alert severity="error" sx={{ mt: 2 }}>
+        <Alert
+          severity="error"
+          sx={{ mt: 2 }}
+          action={
+            onRefreshSchemas && isStaleSchemaError(msg.contents.error) ? (
+              <Button
+                size="small"
+                color="error"
+                variant="outlined"
+                startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                onClick={onRefreshSchemas}
+                sx={{ whiteSpace: 'nowrap', textTransform: 'none' }}
+              >
+                Rafraîchir le schéma
+              </Button>
+            ) : undefined
+          }
+        >
           {msg.contents.error}
         </Alert>
       )}

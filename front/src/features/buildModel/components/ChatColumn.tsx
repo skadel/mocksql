@@ -1,15 +1,18 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Alert, Box, Chip, Collapse, IconButton, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
+import { Alert, Box, Button, Chip, Collapse, IconButton, LinearProgress, Stack, Tooltip, Typography } from '@mui/material';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
 import CloseIcon from '@mui/icons-material/Close';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import HistoryIcon from '@mui/icons-material/History';
+import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined';
 import DroppableTextField from '../../../shared/DroppableTextField';
 
 import MessageDisplay from './MessageDisplay';
 import HistoryDrawer from './HistoryDrawer';
 import { AnyRenderable, Message, MessageGroup, RequestGroup, SqlHistoryEntry } from '../../../utils/types';
+import { isStaleSchemaError } from '../../../utils/staleSchema';
 
 function DbIcon() {
   return (
@@ -80,6 +83,7 @@ interface ChatColumnProps {
   sqlQuery: string;
   onClearHistory: () => void;
   onRequestProfile?: () => void;
+  onRefreshSchemas?: () => void;
   focusTrigger?: number;
 }
 
@@ -112,6 +116,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   sqlQuery,
   onClearHistory,
   onRequestProfile,
+  onRefreshSchemas,
   focusTrigger,
 }) => {
   const { t } = useTranslation();
@@ -121,6 +126,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   const inputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const confirmClearTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (lastReasoning) setReasoningOpen(false);
@@ -268,6 +275,39 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
             <HistoryIcon sx={{ fontSize: 16 }} />
           </Box>
         )}
+        {renderMessages.length > 0 && !isLoading && (
+          <Tooltip
+            title={confirmClear ? 'Cliquer à nouveau pour vider' : 'Vider la conversation (les tests sont conservés)'}
+            arrow
+          >
+            <Box
+              component="button"
+              onClick={() => {
+                if (confirmClear) {
+                  if (confirmClearTimer.current) clearTimeout(confirmClearTimer.current);
+                  setConfirmClear(false);
+                  onClearHistory();
+                } else {
+                  setConfirmClear(true);
+                  confirmClearTimer.current = setTimeout(() => setConfirmClear(false), 3000);
+                }
+              }}
+              sx={{
+                flexShrink: 0, width: 30, height: 30, borderRadius: '8px', border: 'none',
+                bgcolor: confirmClear ? 'rgba(220,38,38,.1)' : 'transparent',
+                color: confirmClear ? '#dc2626' : '#9aabb0', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                transition: 'color .15s, background-color .15s',
+                '&:hover': {
+                  bgcolor: confirmClear ? 'rgba(220,38,38,.16)' : 'rgba(19,35,41,.06)',
+                  color: confirmClear ? '#dc2626' : '#3b5357',
+                },
+              }}
+            >
+              <DeleteSweepOutlinedIcon sx={{ fontSize: 16 }} />
+            </Box>
+          </Tooltip>
+        )}
       </Box>
 
       <HistoryDrawer
@@ -398,6 +438,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           sqlHistory={sqlHistory}
           onSqlRestore={onSqlRestore}
           onRequestProfile={onRequestProfile}
+          onRefreshSchemas={onRefreshSchemas}
         />
 
         {isLoading && (() => {
@@ -522,7 +563,24 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
         )}
 
         {error && (
-          <Alert severity="error" sx={{ borderRadius: '12px', my: 1, fontSize: 12 }}>
+          <Alert
+            severity="error"
+            sx={{ borderRadius: '12px', my: 1, fontSize: 12 }}
+            action={
+              onRefreshSchemas && isStaleSchemaError(error) ? (
+                <Button
+                  size="small"
+                  color="error"
+                  variant="outlined"
+                  startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                  onClick={onRefreshSchemas}
+                  sx={{ whiteSpace: 'nowrap', textTransform: 'none' }}
+                >
+                  Rafraîchir le schéma
+                </Button>
+              ) : undefined
+            }
+          >
             {error}
           </Alert>
         )}
