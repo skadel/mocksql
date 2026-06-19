@@ -331,6 +331,28 @@ class TestExtractRealTableRefs:
         """
         assert names(sql) == {"project.dataset.orders"}
 
+    def test_cte_referenced_in_nested_subqueries(self):
+        # Régression : une CTE top-level référencée dans des sous-requêtes
+        # dérivées profondément imbriquées (sans PIVOT). sqlglot ne propage pas
+        # scope.ctes dans ces scopes imbriqués → la CTE `fcis` était retournée
+        # comme une vraie table à importer.
+        sql = """
+        WITH FCIS AS (
+            SELECT cd_bin FROM `proj.ds.ref_fcis`
+        )
+        SELECT bin9, fcis.cd_bin
+        FROM (
+            SELECT bin9, fcis.cd_bin AS b
+            FROM (
+                SELECT DISTINCT substr(no_carte, 1, 9) AS bin9
+                FROM `proj.ds.cartes`
+            ) c
+            LEFT JOIN fcis ON c.bin9 = fcis.cd_bin
+        ) c2
+        LEFT JOIN fcis ON c2.bin9 = fcis.cd_bin
+        """
+        assert names(sql) == {"proj.ds.ref_fcis", "proj.ds.cartes"}
+
     def test_cte_uppercase_unpivot_chain(self):
         # CTE uppercase + UNPIVOT (double workaround : PIVOT bug + casse)
         sql = """

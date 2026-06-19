@@ -62,17 +62,14 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
 
     real_tables: list[sg.exp.Table] = []
 
-    # 1. Collecte de TOUTES les CTEs définies dans la requête
-    # Cette approche globale contourne le bug SQLglot avec UNPIVOT qui ne propage
-    # pas correctement les CTEs entre scopes.
-    all_cte_names = _extract_all_cte_names(parsed)
+    # 1. Collecte de TOUTES les CTEs définies dans la requête (nom → nœud CTE)
+    # Cette approche globale contourne les bugs SQLglot où scope.ctes est vide
+    # dans certains scopes (UNPIVOT/PIVOT, sous-requêtes dérivées imbriquées)
+    # même quand des CTEs y sont référencées.
+    all_ctes = _extract_all_ctes(parsed)
 
     # 2. Analyse des sources de données par scope avec filtrage robuste
     for scope in traverse_scope(parsed):
-        # Détecte si le scope contient un PIVOT/UNPIVOT pour activer le fallback global.
-        # Bug SQLglot : scope.ctes est vide dans ces scopes même quand des CTEs y sont référencées.
-        scope_has_pivot = bool(scope.expression.find(sg.exp.Pivot))
-
         active_cte_names = _extract_scope_cte_names(scope)
 
         for source in scope.sources.values():
@@ -88,9 +85,7 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
                 continue
 
             # Gestion des artefacts (PIVOT/UNPIVOT) et du masquage (shadowing)
-            if _is_cte_reference(
-                source, active_cte_names, all_cte_names, scope_has_pivot
-            ):
+            if _is_cte_reference(source, active_cte_names, all_ctes):
                 continue
 
             if not _is_duplicate_table(source, real_tables):
@@ -99,21 +94,23 @@ def extract_real_table_refs(sql: str, dialect: str) -> list[sg.exp.Table]:
     return real_tables
 
 
-def _extract_all_cte_names(parsed: sg.exp.Expression) -> set[str]:
+def _extract_all_ctes(parsed: sg.exp.Expression) -> dict[str, sg.exp.CTE]:
     """
-    Extrait tous les noms de CTEs définis dans la requête complète.
+    Extrait toutes les CTEs définies dans la requête complète (nom minuscule → nœud).
 
-    Workaround pour le bug SQLglot où les CTEs dans UNPIVOT ne sont pas
-    correctement propagées dans les scopes.
+    Workaround pour les bugs SQLglot où les CTEs ne sont pas propagées dans
+    certains scopes (UNPIVOT/PIVOT, sous-requêtes dérivées imbriquées). Le nœud
+    CTE est conservé pour distinguer une vraie référence de CTE d'un masquage
+    (une vraie table partageant le nom d'une CTE à l'intérieur de sa définition).
     """
-    all_cte_names = set()
+    all_ctes: dict[str, sg.exp.CTE] = {}
 
     for with_stmt in parsed.find_all(sg.exp.With):
         for cte in with_stmt.expressions:
             if isinstance(cte, sg.exp.CTE) and cte.alias:
-                all_cte_names.add(cte.alias.lower())
+                all_ctes[cte.alias.lower()] = cte
 
-    return all_cte_names
+    return all_ctes
 
 
 def _extract_scope_cte_names(scope) -> set[str]:
@@ -137,29 +134,45 @@ def _extract_scope_cte_names(scope) -> set[str]:
 def _is_cte_reference(
     source: sg.exp.Table,
     active_cte_names: set[str],
-    all_cte_names: set[str],
-    scope_has_pivot: bool,
+    all_ctes: dict[str, sg.exp.CTE],
 ) -> bool:
     """
     Détermine si une table est une référence à une CTE.
 
     Stratégie hybride :
     - Vérification normale via scope.ctes (cas standard).
-    - Fallback global via all_cte_names uniquement si le scope contient un PIVOT/UNPIVOT :
-      SQLglot ne propage pas scope.ctes dans ces scopes (bug connu).
-      Le fallback global ne s'applique PAS aux scopes sans PIVOT/UNPIVOT pour éviter
-      de filtrer une vraie table qui partage son nom avec une CTE (shadowing).
+    - Fallback global via all_ctes : SQLglot laisse scope.ctes vide dans
+      certains scopes (PIVOT/UNPIVOT, sous-requêtes dérivées imbriquées) même
+      quand une CTE top-level y est référencée. Une référence non qualifiée dont
+      le nom correspond à une CTE est donc traitée comme une référence de CTE…
+    - …SAUF si elle est lexicalement à l'intérieur de la définition de cette même
+      CTE : là, le nom désigne une vraie table masquée (une CTE ne peut pas se
+      référencer elle-même de façon non récursive). C'est le seul cas où une
+      référence non qualifiée homonyme d'une CTE pointe vers une vraie table.
     """
     is_unqualified = not source.db and not source.catalog
+    if not is_unqualified:
+        return False
+
     source_name_lower = source.name.lower()
 
-    if is_unqualified and source_name_lower in active_cte_names:
+    if source_name_lower in active_cte_names:
         return True
 
-    # Fallback PIVOT/UNPIVOT : scope.ctes est vide même quand des CTEs sont référencées
-    if scope_has_pivot and is_unqualified and source_name_lower in all_cte_names:
+    cte_node = all_ctes.get(source_name_lower)
+    if cte_node is not None and not _is_within(source, cte_node):
         return True
 
+    return False
+
+
+def _is_within(node: sg.exp.Expression, ancestor: sg.exp.Expression) -> bool:
+    """Vrai si ``node`` est un descendant de ``ancestor`` (ou est ``ancestor``)."""
+    current: sg.exp.Expression | None = node
+    while current is not None:
+        if current is ancestor:
+            return True
+        current = current.parent
     return False
 
 
