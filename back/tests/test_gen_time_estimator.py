@@ -49,9 +49,9 @@ def test_estimate_empty_dataset_returns_default(tmp_path):
 def test_estimate_averages_same_bucket(tmp_path):
     p = tmp_path / "timings.jsonl"
     f = extract_features(_SQL, _USED)
-    log_timing(f, 350.0, p)  # moyenne 380s → ceil(6.33) = 7 min
+    log_timing(f, 350.0, p)  # moyenne 380s → round(6.33) = 6 min
     log_timing(f, 410.0, p)
-    assert estimate_minutes(f, p) == 7
+    assert estimate_minutes(f, p) == 6
 
 
 def test_estimate_falls_back_to_global_when_bucket_empty(tmp_path):

@@ -872,12 +872,17 @@ def profile_schema(
 
         # Compute partition WHERE once per table
         pw: str | None = None
+        window: dict | None = None
         if partition_limit:
+            tbl_partition = table.get("partition") or {}
             pw = _build_partition_where(
-                table_name, table.get("partition") or {}, dialect, partition_limit
+                table_name, tbl_partition, dialect, partition_limit
             )
             if pw:
                 logger.diag("[profiler] partition_where for %s: %s", table_name, pw)
+                # Record the scanned window so downstream prompts don't mistake the
+                # min/max dates for the table's full history (cf. build_partition_window).
+                window = build_partition_window(tbl_partition, partition_limit)
 
         # Row count (restricted to recent partitions when available)
         rc_q = exp.select(exp.alias_(exp.Count(this=exp.Star()), "row_count")).from_(
@@ -949,11 +954,24 @@ def profile_schema(
             "columns": col_profiles,
             "correlations": correlations,
         }
+        if window:
+            result["tables"][table_name]["partition_window"] = window
 
     return result
 
 
 # ─── Join profiling ───────────────────────────────────────────────────────────
+
+
+def _join_pair_key(left: str, right: str) -> frozenset:
+    """Order-independent join identity: the set of unqualified, lowercased table
+    names. ``a JOIN b`` and ``b JOIN a`` collapse to the same key, so a join is
+    matched by *which tables* it relates, regardless of side or qualification."""
+
+    def _short(t: str) -> str:
+        return (t or "").split(".")[-1].lower()
+
+    return frozenset({_short(left), _short(right)})
 
 
 def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]:
@@ -1487,6 +1505,77 @@ def _build_partition_where(
 
     tbl_q = _table_expr(table).sql(dialect=dialect)
     return f"{col_q} IN (SELECT DISTINCT {col_q} FROM {tbl_q} ORDER BY {col_q} DESC LIMIT {limit})"
+
+
+def build_partition_window(partition: dict, limit: int | None) -> dict | None:
+    """Describe the partition window a profile was restricted to.
+
+    Mirrors :func:`_build_partition_where`: only **time-partitioned** tables
+    produce a window (range partitioning and non-partitioned tables return
+    ``None``).  The returned metadata lets the generator/agents distinguish
+    "the warehouse only has data for the last 3 days" from "the *profiling*
+    only scanned the last 3 partitions" — without it, min/max dates from the
+    profile would be misread as the table's full temporal extent.
+
+    When the partition dict carries pre-fetched ``values`` (the last-N
+    partition ids captured at schema-import from INFORMATION_SCHEMA.PARTITIONS),
+    the window is **exact** and carries the real ``min`` / ``max`` dates.
+    Otherwise — ingestion-time partitioning or values not pre-fetched — only
+    the field and the limit are recorded (``exact: False``): the profile
+    scanned the last *limit* partitions but their exact dates are unknown here.
+
+    Returns ``None`` when *limit* is falsy (profiling the whole table) or the
+    table is not time-partitioned.
+
+    Examples:
+        Exact window from pre-fetched day partitions:
+
+        >>> w = build_partition_window(
+        ...     {"type": "time", "field": "event_date", "granularity": "DAY",
+        ...      "values": ["20240115", "20240113", "20240114"]},
+        ...     3,
+        ... )
+        >>> w["exact"], w["min"], w["max"], w["limit"]
+        (True, '2024-01-13', '2024-01-15', 3)
+        >>> w["field"]
+        'event_date'
+
+        Ingestion-time partitioning with no pre-fetched values → inexact:
+
+        >>> w2 = build_partition_window({"type": "time", "field": None}, 2)
+        >>> w2["exact"], w2["field"], w2["limit"]
+        (False, '_PARTITIONDATE', 2)
+        >>> "min" in w2
+        False
+
+        Range partitioning / no limit → no window:
+
+        >>> build_partition_window({"type": "range", "field": "region_id"}, 3) is None
+        True
+        >>> build_partition_window({"type": "time", "field": "d"}, 0) is None
+        True
+        >>> build_partition_window({}, 3) is None
+        True
+    """
+    if not limit or not partition or partition.get("type") != "time":
+        return None
+
+    field = partition.get("field") or "_PARTITIONDATE"
+    granularity: str = partition.get("granularity", "DAY")
+    window: dict = {"field": field, "granularity": granularity, "limit": limit}
+
+    values: list[str] = partition.get("values") or []
+    if values and granularity == "DAY":
+        date_strs = sorted(_format_day_partition_values(values))
+        if date_strs:
+            window["values"] = date_strs
+            window["min"] = date_strs[0]
+            window["max"] = date_strs[-1]
+            window["exact"] = True
+            return window
+
+    window["exact"] = False
+    return window
 
 
 def _build_col_query(
@@ -2220,6 +2309,7 @@ def build_profile_query(
     dialect: str = "bigquery",
     options: dict | None = None,
     sql_query: str | None = None,
+    exclude_join_pairs: set[frozenset] | None = None,
 ) -> str:
     """Build a single UNION ALL SQL query that profiles every used column.
 
@@ -2339,19 +2429,26 @@ def build_profile_query(
             )
             idx += 1
 
+    # Append join cardinality + derived-expression branches if a SQL query was provided.
+    # Done before the emptiness guard so a request with no column branches (all
+    # columns already profiled) but missing joins still produces a valid query.
+    ctes: list[tuple[str, str]] = []
+    if sql_query:
+        join_parts, derived_parts, ctes = _build_sql_relation_branches(
+            schema,
+            used_columns,
+            sql_query,
+            dialect,
+            start_idx=idx,
+            exclude_join_pairs=exclude_join_pairs,
+        )
+        parts.extend(join_parts)
+        parts.extend(derived_parts)
+
     if not parts:
         raise ValueError(
             "No matching columns found in schema for the given used_columns."
         )
-
-    # Append join cardinality + derived-expression branches if a SQL query was provided.
-    ctes: list[tuple[str, str]] = []
-    if sql_query:
-        join_parts, derived_parts, ctes = _build_sql_relation_branches(
-            schema, used_columns, sql_query, dialect, start_idx=idx
-        )
-        parts.extend(join_parts)
-        parts.extend(derived_parts)
 
     union_sql = "\n\nUNION ALL\n\n".join(parts)
 
@@ -2377,6 +2474,7 @@ def _build_sql_relation_branches(
     sql_query: str,
     dialect: str,
     start_idx: int = 0,
+    exclude_join_pairs: set[frozenset] | None = None,
 ) -> tuple[list[str], list[str], list[tuple[str, str]]]:
     """Build join-cardinality and derived-expression UNION-ALL branches for *sql_query*.
 
@@ -2498,6 +2596,11 @@ def _build_sql_relation_branches(
             else right_table
         )
 
+        # Skip joins already covered by the stored profile (matched by the
+        # order-independent table-set key) so re-profiling only targets new joins.
+        if exclude_join_pairs and _join_pair_key(l_real, r_real) in exclude_join_pairs:
+            continue
+
         if left_is_one is not None or right_is_one is not None:
             # At least one CTE side has a deterministic cardinality from grain analysis.
             # Unknown/real-table sides default to "many" (conservative).
@@ -2587,6 +2690,7 @@ def build_profile_queries(
     dialect: str = "bigquery",
     options: dict | None = None,
     sql_query: str | None = None,
+    exclude_join_pairs: set[frozenset] | None = None,
 ) -> list[str]:
     """Split the profile into independently-executable queries.
 
@@ -2630,7 +2734,11 @@ def build_profile_queries(
     #    profiling and from each other.
     if sql_query:
         join_parts, derived_parts, ctes = _build_sql_relation_branches(
-            schema, used_columns, sql_query, dialect
+            schema,
+            used_columns,
+            sql_query,
+            dialect,
+            exclude_join_pairs=exclude_join_pairs,
         )
         preamble = _cte_preamble(ctes)
         if join_parts:
@@ -2641,7 +2749,16 @@ def build_profile_queries(
     if not queries:
         # Nothing matched at all — fall back to the combined builder so the
         # caller gets a single (possibly erroring) query rather than silence.
-        return [build_profile_query(schema, used_columns, dialect, options, sql_query)]
+        return [
+            build_profile_query(
+                schema,
+                used_columns,
+                dialect,
+                options,
+                sql_query,
+                exclude_join_pairs=exclude_join_pairs,
+            )
+        ]
 
     return queries
 
@@ -3093,6 +3210,7 @@ def parse_profile_query_result(
     rows: list[dict],
     schema: dict,
     used_columns: list[dict],
+    options: dict | None = None,
 ) -> dict:
     """Convert the flat row list from :func:`build_profile_query` into a Profile dict.
 
@@ -3167,6 +3285,8 @@ def parse_profile_query_result(
         >>> p["joins"]
         []
     """
+    options = options or {}
+    partition_limit: int | None = options.get("partition_limit", 3)
     norm = normalize_schema(schema)
     type_map: dict[str, dict[str, str]] = {
         tbl: {
@@ -3290,6 +3410,11 @@ def parse_profile_query_result(
             "columns": col_profiles,
             "correlations": [],  # not available from single-query profile
         }
+        window = build_partition_window(
+            norm["tables_by_name"][table].get("partition") or {}, partition_limit
+        )
+        if window:
+            profile["tables"][table]["partition_window"] = window
 
     profile["fk_candidates"] = detect_fk_candidates(profile, used_columns)
 

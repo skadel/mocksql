@@ -873,9 +873,10 @@ async def run_generate(
     _elapsed = _time.perf_counter() - _t0
 
     # Collecte grosse-maille pour l'estimateur de durée (best-effort, n'échoue jamais).
-    # On ne logue que les générations « pleines » (pas update/additif ciblé) pour ne pas
-    # mélanger des durées de natures différentes.
-    if not update_uid and not existing_cases:
+    # On ne logue que les générations « pleines » (1ʳᵉ génération ou --overwrite), pas
+    # les update/additif ciblés dont la durée est de nature différente. NB : existing_cases
+    # est peuplé même en --overwrite (lecture du fichier avant écrasement), d'où le `or overwrite`.
+    if not update_uid and (overwrite or not existing_cases):
         from build_query.gen_time_estimator import extract_features, log_timing
 
         log_timing(extract_features(sql, state.get("used_columns"), dialect), _elapsed)

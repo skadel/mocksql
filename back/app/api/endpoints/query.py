@@ -330,6 +330,7 @@ async def build_profile_request_route(body: BuildProfileRequestBody):
         "profile_queries": request.get("profile_queries", []),
         "missing_columns": request.get("missing_columns", []),
         "expected_joins": request.get("expected_joins", []),
+        "partition_limit": request.get("partition_limit", 3),
     }
     billing_tb = request.get("profile_billing_tb")
     if billing_tb is not None:
@@ -356,6 +357,9 @@ class AutoProfileRequest(BaseModel):
     project: str
     user: str = "local"
     session: str
+    # The partition window the profile SQL was built with (echoed from
+    # /build-profile-request). Defaults to 3 to match the build-side default.
+    partition_limit: int = 3
 
 
 @router.post("/auto-profile")
@@ -368,6 +372,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         _merge_profiles,
         _save_model_profile,
         enrich_joins_with_cte_context,
+        enrich_tables_with_partition_window,
     )
 
     billing_project = BQ_TEST_PROJECT
@@ -404,6 +409,23 @@ async def auto_profile_route(body: AutoProfileRequest):
     incoming_profile = _normalize_profile(raw_profile)
     if not incoming_profile:
         return {"saved": False, "profile_status": "failed", "errors": errors}
+
+    # Tag each table with the partition window the profile was restricted to, so
+    # the generator/agents read min/max dates as the *profiling scope*, not the
+    # table's full history.
+    try:
+        from models.schemas import get_schemas
+
+        _schemas = await get_schemas(project_id=body.project)
+        incoming_profile = enrich_tables_with_partition_window(
+            incoming_profile, _schemas or [], body.partition_limit
+        )
+    except Exception as _pw_exc:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "[auto-profile] partition-window enrichment failed: %s", _pw_exc
+        )
 
     # Enrich join entries with their CTE SQL (phase 1) so the profile is self-contained
     if incoming_profile.get("joins"):

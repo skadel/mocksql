@@ -3,7 +3,11 @@ import json
 from typing import Optional
 
 
-from build_query.profiler import build_profile_query, build_profile_queries
+from build_query.profiler import (
+    _join_pair_key,
+    build_profile_query,
+    build_profile_queries,
+)
 from build_query.state import QueryState
 from storage.test_repository import get_test
 
@@ -140,6 +144,9 @@ def _merge_profiles(base: Optional[dict], incoming: Optional[dict]) -> dict:
             incoming_derived = tbl_data.get("derived_expressions")
             if incoming_derived is not None:
                 merged["tables"][tbl]["derived_expressions"] = incoming_derived
+            incoming_window = tbl_data.get("partition_window")
+            if incoming_window is not None:
+                merged["tables"][tbl]["partition_window"] = incoming_window
 
     # Accumulate joins: deduplicate by the four-key signature, keep all variants
     existing_join_keys: set[tuple] = {
@@ -207,6 +214,38 @@ def enrich_joins_with_cte_context(
                 j[f"{side}_cte_sql"] = cte_sql
         enriched.append(j)
     return enriched
+
+
+def enrich_tables_with_partition_window(
+    profile: Optional[dict], schemas: list, partition_limit: int | None = 3
+) -> Optional[dict]:
+    """Attach ``partition_window`` metadata to each profiled table.
+
+    Sourced from the stored schema's ``partition`` info — the flat profile rows
+    don't carry it, so the server path (`/auto-profile`) enriches here at
+    storage time. Lets the generator distinguish "the warehouse only holds the
+    last 3 days" from "profiling only scanned the last 3 partitions".
+    """
+    if not profile or not profile.get("tables"):
+        return profile
+    from build_query.profiler import build_partition_window
+
+    part_by_name: dict[str, dict] = {}
+    for s in schemas:
+        full = s.get("table_name") or s.get("name", "")
+        part = s.get("partition")
+        if full and part:
+            part_by_name[full] = part
+            part_by_name[full.split(".")[-1]] = part
+
+    for tbl_key, tbl_data in profile["tables"].items():
+        part = part_by_name.get(tbl_key) or part_by_name.get(tbl_key.split(".")[-1])
+        if not part:
+            continue
+        window = build_partition_window(part, partition_limit)
+        if window:
+            tbl_data["partition_window"] = window
+    return profile
 
 
 def _to_profiler_schema(schemas: list) -> dict:
@@ -357,6 +396,30 @@ def _find_missing_columns(profile: dict, used_columns: list) -> list:
     return missing
 
 
+def _find_missing_joins(profile: dict, expected_joins: list) -> list:
+    """
+    Returns the expected join pairs whose table-set is not yet in the profile.
+
+    Matching is order-independent: the key is the set of tables used in the join
+    (``a JOIN b`` is considered covered by an already-profiled ``b JOIN a``), so
+    a join already present in ``profile["joins"]`` is excluded from what needs
+    re-profiling.
+    """
+    profiled_keys = {
+        _join_pair_key(j.get("left_table", ""), j.get("right_table", ""))
+        for j in profile.get("joins", [])
+    }
+    missing = []
+    for exp_join in expected_joins or []:
+        key = _join_pair_key(
+            exp_join.get("left_table", ""), exp_join.get("right_table", "")
+        )
+        if key not in profiled_keys:
+            missing.append(exp_join)
+
+    return missing
+
+
 async def _estimate_profile_bytes(sql: str, billing_project: str) -> Optional[float]:
     """Dry-run the profile SQL on BigQuery and return estimated bytes processed (as TB)."""
     try:
@@ -372,11 +435,17 @@ async def _estimate_profile_bytes(sql: str, billing_project: str) -> Optional[fl
 
 async def check_profile(state: QueryState) -> dict:
     """
-    Check whether the stored profile covers all used_columns.
+    Check whether the stored profile covers all used_columns *and* every join.
+
+    A column is "covered" when it appears under its table in ``profile["tables"]``.
+    A join is "covered" when a profiled join relates the same set of tables
+    (order-independent — see :func:`_find_missing_joins`). Anything already
+    covered is excluded from what gets re-profiled.
 
     Returns:
     - {"profile_complete": True, "profile": ...}               if complete or skipped
-    - {"profile_complete": False, "profile": ..., "missing_columns": [...]}  if not
+    - {"profile_complete": False, "profile": ..., "missing_columns": [...],
+       "missing_joins": [...]}                                  if not
     """
     session_id = state.get("session", "")
     used_columns = state.get("used_columns") or []
@@ -391,25 +460,51 @@ async def check_profile(state: QueryState) -> dict:
         "joins": [],
     }
 
-    # 2. No used_columns → nothing to check
-    if not used_columns:
+    # 2. Find which joins still need profiling (table-set key, order-independent)
+    sql_query = state.get("optimized_sql") or state.get("query") or ""
+    dialect = state.get("dialect", "bigquery")
+    expected_joins = _extract_expected_join_pairs(sql_query, dialect)
+    missing_joins = _find_missing_joins(profile, expected_joins)
+
+    # 3. No columns to check and no missing joins → nothing to do
+    if not used_columns and not missing_joins:
         return {"profile_complete": True, "profile": profile}
 
-    # 3. Find which columns still need profiling
+    # 4. Find which columns still need profiling
     missing = _find_missing_columns(profile, used_columns)
 
-    if not missing:
+    if not missing and not missing_joins:
         return {"profile_complete": True, "profile": profile}
 
-    return {"profile_complete": False, "profile": profile, "missing_columns": missing}
+    return {
+        "profile_complete": False,
+        "profile": profile,
+        "missing_columns": missing,
+        "missing_joins": missing_joins,
+    }
 
 
-async def build_profile_request(state: QueryState, missing: list) -> dict:
+async def build_profile_request(
+    state: QueryState, missing: list, profile: Optional[dict] = None
+) -> dict:
     """
-    Build the profile SQL request for the given missing columns.
+    Build the profile SQL request for the given missing columns and joins.
+
+    Joins already present in the stored profile (matched by table-set, regardless
+    of order) are excluded from the generated SQL — only new joins are profiled.
 
     Returns profile_sql, missing_columns (resolved), expected_joins, profile_billing_tb.
     """
+    if profile is None:
+        profile = _normalize_profile(_load_model_profile()) or {
+            "tables": {},
+            "joins": [],
+        }
+    exclude_join_pairs = {
+        _join_pair_key(j.get("left_table", ""), j.get("right_table", ""))
+        for j in profile.get("joins", [])
+    }
+
     project_id = state["project"]
     schemas = state.get("schemas") or []
     if not schemas:
@@ -431,6 +526,7 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
         dialect=dialect,
         sql_query=sql_query,
         options=profiler_options,
+        exclude_join_pairs=exclude_join_pairs,
     )
     queries = build_profile_queries(
         schema=profiler_schema,
@@ -438,8 +534,13 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
         dialect=dialect,
         sql_query=sql_query,
         options=profiler_options,
+        exclude_join_pairs=exclude_join_pairs,
     )
-    expected_joins = _extract_expected_join_pairs(sql_query or "", dialect)
+    # Only the not-yet-profiled joins are profiled, so validation must expect
+    # exactly those (not the joins already covered by the stored profile).
+    expected_joins = _find_missing_joins(
+        profile, _extract_expected_join_pairs(sql_query or "", dialect)
+    )
 
     profile_billing_tb: Optional[float] = None
     if dialect == "bigquery" and queries:
@@ -463,6 +564,9 @@ async def build_profile_request(state: QueryState, missing: list) -> dict:
         "missing_columns": missing_resolved,
         "expected_joins": expected_joins,
         "profile_billing_tb": profile_billing_tb,
+        # Echoed back so /auto-profile records the same window the SQL scanned,
+        # instead of defaulting to 3.
+        "partition_limit": partition_limit,
     }
 
 
@@ -479,7 +583,9 @@ async def check_and_request_profile(state: QueryState):
     if checked["profile_complete"]:
         return checked
 
-    request = await build_profile_request(state, checked["missing_columns"])
+    request = await build_profile_request(
+        state, checked["missing_columns"], profile=checked.get("profile")
+    )
     return {
         "profile_complete": False,
         "profile": checked["profile"],

@@ -216,6 +216,30 @@ def _dedup_and_parts(expr: str) -> str:
     return " AND ".join(uniq)
 
 
+def _format_partition_window(window: Optional[dict]) -> str:
+    """Return a one-line note warning that a table's profile is partition-scoped.
+
+    Returns ``""`` when *window* is falsy. The note tells the generator that the
+    min/max/cardinalities below reflect only the last N partitions scanned at
+    profiling time — NOT the table's full history. Without it, a min date of
+    "2026-06-17" would be misread as "this table has no older data".
+    """
+    if not window:
+        return ""
+    field = window.get("field", "")
+    limit = window.get("limit")
+    n = f"{limit} dernières partitions" if limit else "dernières partitions"
+    if window.get("exact") and window.get("min") and window.get("max"):
+        scope = f"{field} : {window['min']} → {window['max']}"
+    else:
+        scope = field
+    return (
+        f"⚠️ profilé sur les {n} uniquement ({scope}) — "
+        "min/max/cardinalités ci-dessous = cette fenêtre de profilage, "
+        "PAS l'historique complet de la table"
+    )
+
+
 def _format_profile_block(
     profile: Optional[dict],
     used_columns: list,
@@ -313,7 +337,11 @@ def _format_profile_block(
             stat_str = f" ({', '.join(de_parts)})" if de_parts else ""
             col_lines.append(f"    - expr `{de_sql}`{stat_str}")
         if col_lines:
-            lines.append(f"  table `{short_key}`:")
+            win_note = _format_partition_window(tbl_data.get("partition_window"))
+            if win_note:
+                lines.append(f"  table `{short_key}` — {win_note}:")
+            else:
+                lines.append(f"  table `{short_key}`:")
             lines.extend(col_lines)
 
     joins = profile.get("joins", [])
