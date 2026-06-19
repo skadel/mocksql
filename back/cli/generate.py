@@ -18,6 +18,7 @@ from cli.schema_cache import (
     save_schema_cache,
 )
 from storage.config import load_preprocessor_fn
+from utils.sqlglot_ast import get_from
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
 from utils.sql_code import (
     extract_real_table_refs,
@@ -124,6 +125,99 @@ def find_used_columns_missing_from_schema(
         if missing:
             problems.append((tbl["table_name"], missing))
     return problems
+
+
+def diagnose_stale_schema_from_qualify_error(
+    sql: str, schemas: list[dict], dialect: str, error_msg: str
+) -> list[str]:
+    """Diagnostique un cache périmé derrière une qualify-error « Unknown column: X ».
+
+    Quand la qualification échoue sur une colonne ``X`` introuvable, on cherche une
+    table **étoilée** (``SELECT * FROM <table>``) dont le schéma en cache ne contient
+    PAS ``X`` : c'est la signature d'un schéma tronqué/périmé (le ``SELECT *`` ne
+    s'étend qu'aux quelques colonnes connues, donc une référence ``alias.X`` en aval
+    ne se résout pas). Renvoie le(s) ``table_name`` complet(s) fautif(s), sinon ``[]``.
+
+    Sert à transformer le fallback silencieux « using raw SQL » (qui produit un test
+    cassé — la table DuckDB n'a pas la colonne) en échec fail-fast actionnable
+    (``refresh-schemas``). Faible risque de faux positif : on ne signale que si la
+    colonne est à la fois irrésoluble (qualify a planté dessus) ET absente d'une table
+    étoilée en scope.
+    """
+    import re
+
+    m = re.search(
+        r"unknown column:\s*([A-Za-z_][A-Za-z0-9_]*)", error_msg or "", re.IGNORECASE
+    )
+    if not m:
+        return []
+    col = m.group(1).lower()
+
+    try:
+        parsed = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return []
+
+    # Qualifieurs (alias/table) sous lesquels ``col`` est référencée — sert à épingler
+    # la VRAIE table étoilée fautive (``ref_comm.col``) et à ne pas signaler les autres
+    # tables étoilées qui n'ont simplement jamais eu cette colonne.
+    col_qualifiers = {
+        c.table.lower()
+        for c in parsed.find_all(sqlglot.exp.Column)
+        if c.name.lower() == col and c.table
+    }
+
+    # Tables étoilées : (alias_or_name, clé base db.table). La clé du nœud FROM varie
+    # selon la version de sqlglot ("from"/"from_") et la table n'est pas forcément en
+    # .this (alias) → find_all (un SELECT * sur un JOIN étend toutes les tables).
+    starred: list[tuple[str, str]] = []
+    for select in parsed.find_all(sqlglot.exp.Select):
+        has_star = any(
+            isinstance(p, sqlglot.exp.Star)
+            or (
+                isinstance(p, sqlglot.exp.Column)
+                and isinstance(p.this, sqlglot.exp.Star)
+            )
+            for p in select.expressions
+        )
+        if not has_star:
+            continue
+        from_ = get_from(select)
+        if from_ is None:
+            continue
+        for t in from_.find_all(sqlglot.exp.Table):
+            key = ".".join(p for p in [t.db, t.name] if p).lower()
+            if key:
+                starred.append(((t.alias or t.name).lower(), key))
+    if not starred:
+        return []
+
+    schema_cols = {}
+    schema_full = {}
+    for tbl in schemas:
+        parts = tbl["table_name"].split(".")
+        key = ".".join(parts[-2:]).lower() if len(parts) >= 2 else parts[-1].lower()
+        schema_cols[key] = {c["name"].lower() for c in tbl.get("columns", [])}
+        schema_full[key] = tbl["table_name"]
+
+    missing = [
+        (alias, key)
+        for alias, key in starred
+        if key in schema_cols and col not in schema_cols[key]
+    ]
+    # Si ``col`` est qualifiée quelque part, on épingle la table dont l'alias matche
+    # (précision) ; sinon (référence nue) on garde tous les candidats étoilés.
+    if col_qualifiers:
+        pinned = [(a, k) for a, k in missing if a in col_qualifiers]
+        if pinned:
+            missing = pinned
+
+    culprits: list[str] = []
+    for _alias, key in missing:
+        full = schema_full[key]
+        if full not in culprits:
+            culprits.append(full)
+    return culprits
 
 
 def build_initial_state(
@@ -716,6 +810,26 @@ async def run_generate(
         qualified_ast = optimize_query(parsed_ast, tables_mapping, dialect=dialect)
         state["optimized_sql"] = qualified_ast.sql(dialect=dialect, pretty=True)
     except Exception as e:
+        # Une « Unknown column » due à une table étoilée au schéma tronqué = cache
+        # périmé : on échoue tôt (sinon le repli SQL brut fabrique un test cassé — la
+        # table DuckDB n'a pas la colonne) avec la commande de refresh ciblée.
+        stale = diagnose_stale_schema_from_qualify_error(sql, schemas, dialect, str(e))
+        if stale:
+            typer.echo(
+                "[ERROR] Schéma en cache incomplet : une table lue en `SELECT *` ne "
+                "contient pas une colonne utilisée par la requête (cache périmé).",
+                err=True,
+            )
+            for tn in stale:
+                typer.echo(f"  - {tn}", err=True)
+            refreshable = [tn for tn in stale if len(tn.split(".")) == 3]
+            typer.echo("\nRafraîchis le schéma puis relance la génération :", err=True)
+            if refreshable:
+                hint = " ".join(f"-t {tn}" for tn in refreshable)
+                typer.echo(f"  mocksql refresh-schemas {hint}", err=True)
+            else:
+                typer.echo("  mocksql refresh-schemas", err=True)
+            raise typer.Exit(1)
         typer.echo(f"[WARN] SQL qualification failed ({e}), using raw SQL.")
         # Repli sur le SQL brut : qualify n'a pas tourné, donc le GROUP BY positionnel
         # survit. On le binde au moins aux colonnes du SELECT pour éviter un

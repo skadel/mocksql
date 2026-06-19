@@ -18,6 +18,8 @@ from typing import Any, Callable, Optional
 import sqlglot
 from sqlglot import expressions as exp
 
+from utils.sqlglot_ast import get_from
+
 try:
     import utils.logger  # noqa: F401 — registers DIAG level (15)
 except ImportError:
@@ -1039,7 +1041,7 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
                 if alias:
                     m[alias] = alias
 
-        from_clause = select.args.get("from") or select.args.get("from_")
+        from_clause = get_from(select)
         if from_clause:
             _register(from_clause.this)
         for join in select.args.get("joins") or []:
@@ -1081,7 +1083,7 @@ def _collect_join_specs(sql_query: str, dialect: str = "bigquery") -> list[dict]
         # Local primary FROM table (fallback when l_expr has no table qualifier).
         local_primary: str = primary_table
         if _scope is not None:
-            _local_from = _scope.args.get("from") or _scope.args.get("from_")
+            _local_from = get_from(_scope)
             if _local_from:
                 _lf_node = _local_from.this
                 if isinstance(_lf_node, exp.Table):

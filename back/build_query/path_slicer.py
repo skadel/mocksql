@@ -14,10 +14,12 @@ devenues orphelines après le slice. **Ne pas** utiliser ``build_isolated_sql`` 
 tronque en ``SELECT * FROM cte`` ; le path-slicing remplace l'opérande ``UNION`` *en
 place* et garde tout l'aval de la CTE hôte intact.
 
-Cadrage v1 (spec / plan tests-par-path) : seul un UNION ALL de **premier niveau**
-(``distinct=False``) dans **une** CTE ou la requête finale. Imbriqués / multiples /
-``UNION DISTINCT`` → ``list_union_paths`` renvoie ``[]`` (le système retombe sur le
-comportement actuel : path ``all`` implicite).
+Cadrage v1 (spec / plan tests-par-path) : un UNION ALL de **premier niveau**
+(``distinct=False``). Quand plusieurs en portent un, la **requête finale** est
+prioritaire (ses branches sont les vraies sorties) et les unions internes aux CTE
+sont ignorées ; à défaut d'union finale, il faut un host unique. Imbriqués /
+``UNION DISTINCT`` / plusieurs unions internes sans union finale → ``list_union_paths``
+renvoie ``[]`` (le système retombe sur le comportement actuel : path ``all`` implicite).
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import sqlglot
 from sqlglot import exp
 
 from build_query.cte_graph import build_cte_dependency_graph, transitive_deps
+from utils.sqlglot_ast import get_from, strip_with
 
 ALL_PATH = "all"
 
@@ -67,10 +70,7 @@ def _unwrap(node: exp.Expression) -> exp.Expression:
 
 def _strip_with(expr: exp.Expression) -> exp.Expression:
     """Copie de ``expr`` sans sa clause ``WITH`` (clé ``with`` ou ``with_``)."""
-    body = expr.copy()
-    body.args.pop("with", None)
-    body.args.pop("with_", None)
-    return body
+    return strip_with(expr)
 
 
 def _top_union(expr: exp.Expression) -> exp.Union | None:
@@ -108,7 +108,7 @@ def _branch_name(branch: exp.Expression, index: int) -> str:
     """Nom machine d'une branche = source primaire de son FROM, sinon ``branch_N``."""
     sel = _unwrap(branch)
     if isinstance(sel, exp.Select):
-        from_ = sel.args.get("from") or sel.args.get("from_")
+        from_ = get_from(sel)
         if from_ is not None and isinstance(from_.this, exp.Table):
             name = from_.this.name
             if name:
@@ -117,8 +117,15 @@ def _branch_name(branch: exp.Expression, index: int) -> str:
 
 
 def _find_host(query_decomposed: list[dict], dialect: str):
-    """Le couple ``(host_name, union_node)`` s'il y a **exactement un** UNION ALL de
-    1er niveau et aucune branche imbriquée ; sinon ``None``."""
+    """Le couple ``(host_name, union_node, branches)`` de l'UNION ALL de 1er niveau à
+    focaliser, ou ``None``.
+
+    Sélection de l'hôte quand plusieurs CTE/la requête finale portent un UNION ALL de
+    1er niveau : la requête **finale** est prioritaire (ses branches sont les vraies
+    sorties du modèle) et les unions internes aux CTE sont ignorées. À défaut d'union
+    finale, il faut un host **unique** non ambigu ; plusieurs unions internes → ``None``.
+    Une branche elle-même un UNION (imbriqué) → ``None`` (hors scope v1).
+    """
     hosts: list[tuple[str, exp.Union]] = []
     for node in query_decomposed:
         parsed = _parse(node.get("code", ""), dialect)
@@ -127,9 +134,15 @@ def _find_host(query_decomposed: list[dict], dialect: str):
         union = _top_union(parsed)
         if union is not None:
             hosts.append((node["name"], union))
-    if len(hosts) != 1:
+    if not hosts:
         return None
-    host_name, union = hosts[0]
+    final = next((h for h in hosts if h[0] == "final_query"), None)
+    if final is not None:
+        host_name, union = final
+    elif len(hosts) == 1:
+        host_name, union = hosts[0]
+    else:
+        return None
     branches = _flatten_union(union)
     # Branche elle-même un UNION (imbriqué) → hors scope v1.
     if any(_top_union(b) is not None for b in branches):

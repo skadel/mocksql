@@ -4,6 +4,7 @@ import uuid
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from langchain_core.messages import AIMessage
+from utils.sqlglot_ast import pop_with
 from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.accept_validation import accept_validation
@@ -62,7 +63,10 @@ def _lightweight_query_decomposed(sql: str, dialect: str) -> str:
                         "sources": [],
                     }
                 )
-        final_ast.ctes.clear()
+        # Retire la clause WITH entière : `ctes.clear()` vide la liste mais laisse le
+        # nœud `With` (→ `WITH ` orphelin non re-parsable) et `set("with", None)` est un
+        # no-op quand la clé est `with_` (sqlglot ≥ 30). pop_with gère les deux clés.
+        pop_with(final_ast)
         final_code = final_ast.sql(dialect=dialect, pretty=True)
 
         # Extract inline subqueries (FROM (SELECT ...) AS alias) as inspectable steps
