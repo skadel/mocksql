@@ -15,6 +15,7 @@ from sqlglot.optimizer.simplify import simplify
 from utils.llm_errors import normalize_llm_content, loads_lenient_json
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from utils.sqlglot_ast import get_from, set_from
 from build_query.path_slicer import resolve_active_sql
 from build_query.state import QueryState
 from utils.examples import (
@@ -573,7 +574,7 @@ def _decompose_cte_in_steps(cte_sql_code: str, dialect: str) -> List[Dict[str, s
     parsed = sqlglot.parse_one(cte_sql_code, read=dialect)
 
     # Récupération des parties importantes
-    from_expr = parsed.args.get("from_")  # exp.From
+    from_expr = get_from(parsed)  # exp.From
     joins_expr = parsed.args.get("joins") or []
     where_expr = parsed.args.get("where")
 
@@ -596,7 +597,7 @@ def _decompose_cte_in_steps(cte_sql_code: str, dialect: str) -> List[Dict[str, s
 
         # FROM
         if from_part is not None:
-            query_exp.set("from", from_part)
+            set_from(query_exp, from_part)
 
         # JOINS
         if joins_part:
@@ -836,9 +837,7 @@ def _build_count_steps_query(
     Returns (full_sql, labels) where labels[i] describes the i-th SELECT column.
     """
     tree = sqlglot.parse_one(cte_code, read=dialect)
-    from_expr: Optional[exp.Expression] = tree.args.get("from") or tree.args.get(
-        "from_"
-    )
+    from_expr: Optional[exp.Expression] = get_from(tree)
     joins: List[exp.Expression] = tree.args.get("joins") or []
     where: Optional[exp.Expression] = tree.args.get("where")
 
@@ -1025,7 +1024,7 @@ async def _run_scalar_filter_breakdown(
         if alias:
             sources[alias.lower()] = src.sql(dialect=dialect)
 
-    from_expr = tree.args.get("from") or tree.args.get("from_")
+    from_expr = get_from(tree)
     if from_expr is not None:
         _register(from_expr.this)
     for j in tree.args.get("joins") or []:
@@ -1102,7 +1101,7 @@ async def _run_join_predicate_breakdown(
         return []
     if not isinstance(tree, exp.Select):
         return []
-    from_expr = tree.args.get("from") or tree.args.get("from_")
+    from_expr = get_from(tree)
     joins = tree.args.get("joins") or []
     if from_expr is None or not joins:
         return []

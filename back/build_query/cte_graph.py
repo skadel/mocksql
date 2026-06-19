@@ -6,7 +6,8 @@ réseau, aucune dépendance au state LangGraph. Elles opèrent sur `query_decomp
 fallback `_lightweight_query_decomposed`) et, pour la classification, sur le
 `cte_trace` produit par l'executor (`{cte_name: {"row_count": N, ...}}`).
 
-Voir docs/spec-focused-cte-generation.md §6.1 (DAG) et §7 (classification bloquante).
+Le module construit le DAG des dépendances entre CTEs puis classifie chaque CTE
+comme bloquante (résultat vide qui propage en aval) ou non.
 
 Étape 0 du plan d'implémentation : zéro impact sur le chemin de prod tant que ces
 fonctions ne sont pas câblées dans le graphe.
@@ -19,8 +20,11 @@ import re
 import sqlglot
 from sqlglot import exp
 
-# Le `final_query` produit par `_lightweight_query_decomposed` conserve un `WITH`
-# vide (les CTEs ont été détachées) — non re-parsable tel quel. On le retire.
+from utils.sqlglot_ast import get_from
+
+# Filet de sécurité historique : un `final_query` produit avec un `WITH` vide
+# (CTEs détachées) n'est pas re-parsable tel quel. La source ne devrait plus en
+# produire (cf. _lightweight_query_decomposed / pop_with), mais on garde le strip.
 _EMPTY_WITH = re.compile(r"^\s*WITH\s+(?=SELECT\b)", re.IGNORECASE)
 
 
@@ -39,7 +43,7 @@ def _parse(code: str, dialect: str) -> exp.Expression | None:
 
 def _select_from(select: exp.Select) -> exp.Expression | None:
     """Clause FROM d'un SELECT, tolérante aux variations de clé sqlglot (`from`/`from_`)."""
-    return select.args.get("from") or select.args.get("from_")
+    return get_from(select)
 
 
 def build_cte_dependency_graph(
