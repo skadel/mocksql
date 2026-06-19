@@ -458,7 +458,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
                     {dots}
                     <Typography variant="caption" sx={{ color: '#6b8287' }}>
-                      {loading_message || t('loading.step_constraints')}
+                      {loading_message || t('loading.step_preparing')}
                     </Typography>
                   </Box>
                 </Stack>
