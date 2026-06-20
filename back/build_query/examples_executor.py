@@ -83,6 +83,11 @@ def _has_negative_form(expr: exp.Expression) -> bool:
         # `!=` / `<>` et son équivalent NULL-safe `X IS DISTINCT FROM Y` (= `!=`).
         if isinstance(node, (exp.NEQ, exp.NullSafeNEQ)):
             return True
+        # `NOT LIKE` / `NOT ILIKE` : selon la version de sqlglot, parsé soit en
+        # `Not(Like(...))` (capté par la branche `exp.Not` ci-dessous), soit en
+        # `Like(..., negate=True)` (sqlglot ≥ 30.8) — sans nœud `Not` à détecter ici.
+        if isinstance(node, (exp.Like, exp.ILike)) and node.args.get("negate"):
+            return True
         if isinstance(node, exp.Not):
             inner = node.this
             # `X IS NOT NULL` = Not(Is(..., Null)) sans parenthèses → toléré.
