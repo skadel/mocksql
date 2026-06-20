@@ -866,20 +866,7 @@ async def run_generate(
 
     typer.echo(f"Generating tests for {project_id} ({len(schemas)} table(s))...")
     graph = build_query_graph()
-    import time as _time
-
-    _t0 = _time.perf_counter()
     final_state = await graph.ainvoke(state, config={"recursion_limit": 50})
-    _elapsed = _time.perf_counter() - _t0
-
-    # Collecte grosse-maille pour l'estimateur de durée (best-effort, n'échoue jamais).
-    # On ne logue que les générations « pleines » (1ʳᵉ génération ou --overwrite), pas
-    # les update/additif ciblés dont la durée est de nature différente. NB : existing_cases
-    # est peuplé même en --overwrite (lecture du fichier avant écrasement), d'où le `or overwrite`.
-    if not update_uid and (overwrite or not existing_cases):
-        from build_query.gen_time_estimator import extract_features, log_timing
-
-        log_timing(extract_features(sql, state.get("used_columns"), dialect), _elapsed)
 
     if final_state.get("error"):
         err = final_state["error"]

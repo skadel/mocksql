@@ -38,7 +38,22 @@ import { relativeDate } from '../../../utils/dates';
 
 // Dialect is read from the current project — fallback to bigquery for backward compat.
 
+// ETA grosse-maille de la durée de génération. La génération fabrique des données
+// synthétiques colonne par colonne : plus il y a de colonnes (× le nombre de tests
+// demandés), plus c'est long. Formule : arrondi( (nb_colonnes / COLS_PER_MINUTE) × nb_tests ),
+// plancher 1 min. COLS_PER_MINUTE est le seul knob à ajuster si l'estimation dérive.
+const COLS_PER_MINUTE = 10;
 
+// Compte les colonnes utilisées toutes tables confondues. `used_columns` est une liste
+// d'entrées { ..., used_columns: [] } (string JSON ou objet selon la source).
+const countUsedColumns = (usedColumns: unknown[] | undefined): number =>
+  (usedColumns ?? []).reduce<number>((sum, uc) => {
+    const obj = typeof uc === 'string' ? (() => { try { return JSON.parse(uc); } catch { return null; } })() : uc;
+    return sum + (Array.isArray((obj as any)?.used_columns) ? (obj as any).used_columns.length : 0);
+  }, 0);
+
+const estimateGenerationMinutes = (nUsedCols: number, testsTarget: number): number =>
+  Math.max(1, Math.round((nUsedCols / COLS_PER_MINUTE) * Math.max(1, testsTarget)));
 
 const ChatComponent: React.FC = () => {
   const { t } = useTranslation();
@@ -70,9 +85,10 @@ const ChatComponent: React.FC = () => {
     profileRequest: ProfileRequest | null;
     needsProfiling: boolean;
     step: 'count' | 'profiling';
-    // Estimation grosse-maille (minutes) de la durée de génération — affichée pour
-    // prévenir l'utilisateur avant de lancer (« peut prendre ~N min, notif à la fin »).
-    estimatedMinutes?: number;
+    // Nombre de colonnes utilisées (toutes tables confondues) — sert à estimer
+    // grosse-maille la durée de génération dans le popup : plus il y a de colonnes
+    // à fabriquer, plus c'est long. Cf. estimateGenerationMinutes().
+    nUsedCols?: number;
     onConfirm: (testsTarget: number) => Promise<void>;
     onSkip: (testsTarget: number) => Promise<void>;
     onCancel: () => void;
@@ -445,7 +461,7 @@ const ChatComponent: React.FC = () => {
   const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
     setSubmissionStep(t('loading.validating_sql'));
     const validateStart = performance.now();
-    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string; estimated_minutes?: number } | null = null;
+    let validateResult: { valid: boolean; error?: string; missing_tables?: string[]; used_columns?: string[]; optimized_sql?: string; auto_import_available?: boolean; tables_to_import?: string[]; sql_message_id?: string } | null = null;
     try {
       validateResult = await validateQueryApi({ sql, project: '', dialect: DIALECT, session: sessionId, parent_message_id: '' });
     } catch {
@@ -504,7 +520,7 @@ const ChatComponent: React.FC = () => {
           profileRequest: null,
           needsProfiling: true,
           step: 'count',
-          estimatedMinutes: validateResult?.estimated_minutes,
+          nUsedCols: countUsedColumns(usedColumns),
           onConfirm: async (n) => {
             const req = resolvedReq;
             if (!req) return;
@@ -578,7 +594,7 @@ const ChatComponent: React.FC = () => {
       profileRequest: null,
       needsProfiling: false,
       step: 'count',
-      estimatedMinutes: validateResult?.estimated_minutes,
+      nUsedCols: countUsedColumns(usedColumns),
       onConfirm: async (n) => { setPendingAutoProfile(null); await runGeneration(n); },
       onSkip: async (n) => { setPendingAutoProfile(null); await runGeneration(n); },
       onCancel: () => {
@@ -1820,7 +1836,9 @@ const ChatComponent: React.FC = () => {
                     </ToggleButton>
                   ))}
                 </ToggleButtonGroup>
-                {pendingAutoProfile.estimatedMinutes != null && (
+                {pendingAutoProfile.nUsedCols != null && (() => {
+                  const eta = estimateGenerationMinutes(pendingAutoProfile.nUsedCols, testsTarget);
+                  return (
                   <Box
                     sx={{
                       display: 'flex',
@@ -1836,12 +1854,13 @@ const ChatComponent: React.FC = () => {
                   >
                     <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
                     <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
-                      Le travail peut prendre ~{pendingAutoProfile.estimatedMinutes}{' '}
-                      minute{pendingAutoProfile.estimatedMinutes > 1 ? 's' : ''} — tu peux fermer
+                      Le travail peut prendre ~{eta}{' '}
+                      minute{eta > 1 ? 's' : ''} — tu peux fermer
                       l'onglet, je te préviens par notification dès que c'est terminé.
                     </Typography>
                   </Box>
-                )}
+                  );
+                })()}
               </Box>
             )}
 
