@@ -1850,31 +1850,12 @@ const ChatComponent: React.FC = () => {
                     </ToggleButton>
                   ))}
                 </ToggleButtonGroup>
-                {pendingAutoProfile.nUsedCols != null && (() => {
-                  const eta = estimateGenerationMinutes(pendingAutoProfile.nUsedCols, testsTarget);
-                  return (
-                  <Box
-                    sx={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: 1,
-                      mt: 2,
-                      bgcolor: '#f5fbfb',
-                      border: '1px solid #cfeceb',
-                      borderRadius: 2,
-                      px: 1.5,
-                      py: 1.25,
-                    }}
-                  >
-                    <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
-                    <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
-                      Le travail peut prendre ~{eta}{' '}
-                      minute{eta > 1 ? 's' : ''} — garde cet onglet ouvert (tu peux passer
-                      à autre chose), je te préviens par notification dès que c'est terminé.
-                    </Typography>
-                  </Box>
-                  );
-                })()}
+                {pendingAutoProfile.nUsedCols != null && (
+                  <EtaNotice
+                    eta={estimateGenerationMinutes(pendingAutoProfile.nUsedCols, testsTarget)}
+                    launchesNow={!pendingAutoProfile.needsProfiling}
+                  />
+                )}
               </Box>
             )}
 
@@ -1951,6 +1932,13 @@ const ChatComponent: React.FC = () => {
                   </IconButton>
                 </Tooltip>
               </Box>
+            )}
+
+            {pendingAutoProfile.nUsedCols != null && !isAutoProfileRunning && (
+              <EtaNotice
+                eta={estimateGenerationMinutes(pendingAutoProfile.nUsedCols, testsTarget)}
+                launchesNow
+              />
             )}
 
             {isAutoProfileRunning && (
@@ -2037,6 +2025,42 @@ const ChatComponent: React.FC = () => {
     </Container>
   );
 };
+
+// Bandeau de durée estimée. `launchesNow` distingue l'écran dont le bouton lance
+// réellement la génération (→ promesse « tu peux passer à autre chose ») de l'écran
+// intermédiaire encore en attente d'une confirmation (→ on ne promet rien, sinon
+// l'utilisateur s'absente alors qu'une étape requiert toujours son attention).
+const EtaNotice: React.FC<{ eta: number; launchesNow: boolean }> = ({ eta, launchesNow }) => (
+  <Box
+    sx={{
+      display: 'flex',
+      alignItems: 'flex-start',
+      gap: 1,
+      mt: 2,
+      bgcolor: '#f5fbfb',
+      border: '1px solid #cfeceb',
+      borderRadius: 2,
+      px: 1.5,
+      py: 1.25,
+    }}
+  >
+    <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
+    <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
+      {launchesNow ? (
+        <>
+          Le travail peut prendre ~{eta} minute{eta > 1 ? 's' : ''} — garde cet onglet
+          ouvert (tu peux passer à autre chose), je te préviens par notification dès que
+          c'est terminé.
+        </>
+      ) : (
+        <>
+          Le travail prendra ~{eta} minute{eta > 1 ? 's' : ''}. Une dernière étape de
+          confirmation reste avant le lancement.
+        </>
+      )}
+    </Typography>
+  </Box>
+);
 
 const AutoProfileWarningBanner: React.FC<{
   status: 'partial' | 'failed';
