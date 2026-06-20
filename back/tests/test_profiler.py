@@ -3069,6 +3069,113 @@ class TestDerivedExprMixedQualification(unittest.TestCase):
         sqlglot.parse_one(q, dialect="bigquery")  # must parse
 
 
+# ─── derived-expression profiling: alias reused across nested scopes ──────────
+
+
+# Mirrors the production crash "Unrecognized name: CREPREPAI; Did you mean
+# CREPREPAI_2?": a BIN-fallback query that nests the same subquery alias
+# (CREPREPAI) at every level, each LEFT JOINing the same table (fcis) on a
+# shorter prefix.  eliminate_subqueries turns these into CTEs CREPREPAI,
+# CREPREPAI_2 … CREPREPAI_6, all of whose bodies re-alias their predecessor as
+# CREPREPAI.  The derived expression `ifnull(CREPREPAI.fcis_bin, fcis.cd_bin)`
+# must be profiled against the single CTE that actually carries fcis_bin (the
+# one resolved from the reused alias) JOINed to fcis — never a reconstructed
+# multi-CTE join graph referencing an unresolved bare `CREPREPAI`.
+_DERIVED_REUSED_ALIAS_SQL = (
+    "WITH base AS (SELECT NO_CARTE FROM SRC) "
+    "SELECT c.bin9, ifnull(c.fcis_bin, fcis.cd_bin) AS fcis_bin "
+    "FROM ("
+    "  SELECT c.bin9, ifnull(c.fcis_bin, fcis.cd_bin) AS fcis_bin "
+    "  FROM ("
+    "    SELECT c.bin9, fcis.cd_bin AS fcis_bin "
+    "    FROM (SELECT DISTINCT substr(NO_CARTE, 1, 9) AS bin9 FROM base) c "
+    "    LEFT JOIN FCIS fcis ON c.bin9 = fcis.cd_bin AND length(fcis.cd_bin) = 9"
+    "  ) c "
+    "  LEFT JOIN FCIS fcis ON substr(c.bin9, 1, 8) = fcis.cd_bin "
+    "    AND length(fcis.cd_bin) = 8"
+    ") c "
+    "LEFT JOIN FCIS fcis ON substr(c.bin9, 1, 7) = fcis.cd_bin "
+    "  AND length(fcis.cd_bin) = 7"
+)
+
+
+class TestDerivedExprReusedAlias(unittest.TestCase):
+    """Regression for "Unrecognized name: CREPREPAI; Did you mean CREPREPAI_2?".
+
+    When the same subquery alias is reused at every nesting level, every
+    generated CTE references that one alias.  The derived-expression branch must
+    bind the alias to the single in-scope CTE that carries the column and JOIN it
+    to the matching table — and must not emit a bare alias that is out of scope.
+    """
+
+    @staticmethod
+    def _assert_no_forward_join_refs(sql: str) -> None:
+        """Fail if any JOIN's ON predicate references a table alias that is not
+        the FROM table or a *previously* joined table.
+
+        This is the exact signature of the bug: an ON condition on `CREPREPAI`
+        emitted on a JOIN that runs before the JOIN introducing `CREPREPAI`.
+        sqlglot's scope resolver treats all joined sources as in-scope
+        regardless of order, so the ordering must be checked by hand.
+        """
+        from utils.sqlglot_ast import get_from
+
+        parsed = sqlglot.parse_one(sql, dialect="bigquery")
+        for select in parsed.find_all(sqlglot.exp.Select):
+            from_ = get_from(select)
+            if not from_:
+                continue
+            available: set[str] = set()
+            primary = from_.this
+            if isinstance(primary, (sqlglot.exp.Table, sqlglot.exp.Subquery)):
+                if primary.alias:
+                    available.add(primary.alias)
+                elif isinstance(primary, sqlglot.exp.Table):
+                    available.add(primary.name)
+            for join in select.args.get("joins") or []:
+                # A JOIN's ON may legitimately reference the table the JOIN itself
+                # introduces, so register it before checking the predicate.
+                tgt = join.this
+                if isinstance(tgt, (sqlglot.exp.Table, sqlglot.exp.Subquery)):
+                    if tgt.alias:
+                        available.add(tgt.alias)
+                    elif isinstance(tgt, sqlglot.exp.Table):
+                        available.add(tgt.name)
+                on = join.args.get("on")
+                if on is not None:
+                    for col in on.find_all(sqlglot.exp.Column):
+                        if col.table and col.table not in available:
+                            raise AssertionError(
+                                f"JOIN ON references {col.table!r} before it is "
+                                f"introduced; available so far: {sorted(available)}"
+                            )
+
+    def test_reused_alias_derived_branch_is_in_scope(self):
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_REUSED_ALIAS_SQL, [], "bigquery"
+        )
+        # The ifnull(...) expression yields exactly one derived branch.
+        ifnull_branches = [b for b in branches if "ifnull" in b.lower()]
+        self.assertEqual(len(ifnull_branches), 1)
+        b = ifnull_branches[0]
+        sqlglot.parse_one(b, dialect="bigquery")  # must parse
+        # No JOIN ON condition may reference a table alias introduced by a later
+        # JOIN (the bug emitted ON conditions on `CREPREPAI` before that alias
+        # was joined → BigQuery "Unrecognized name: CREPREPAI").
+        self._assert_no_forward_join_refs(b)
+
+    def test_forward_join_ref_detector_catches_the_bug(self):
+        """The detector must flag the original broken pattern (guard the guard)."""
+        broken = (
+            "SELECT 1 AS _v FROM `fcis` AS fcis "
+            "JOIN `CREPREPAI_2` AS CREPREPAI_2 "
+            "  ON fcis.cd_bin = SUBSTRING(CREPREPAI.bin9, 1, 8) "
+            "JOIN `CREPREPAI` AS CREPREPAI ON fcis.cd_bin = CREPREPAI.bin9"
+        )
+        with self.assertRaises(AssertionError):
+            self._assert_no_forward_join_refs(broken)
+
+
 # ─── build_profile_queries: branch isolation ─────────────────────────────────
 
 
