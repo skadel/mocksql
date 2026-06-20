@@ -427,8 +427,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
         }}
       >
         <MessageDisplay
-          sendMessage={(input, msgId, parentMsgId, userTables, profileResult) =>
-            sendMessage(input, sqlQuery, msgId, parentMsgId, userTables, false, undefined, profileResult)
+          sendMessage={(input, msgId, parentMsgId, userTables) =>
+            sendMessage(input, sqlQuery, msgId, parentMsgId, userTables, false)
           }
           renderMessages={renderMessages}
           onRestoreState={onRestoreState}

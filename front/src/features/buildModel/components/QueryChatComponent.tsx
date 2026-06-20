@@ -24,7 +24,7 @@ import ArtefactHeader from './ArtefactHeader';
 import { drawerWidth } from '../../appBar/components/DrawerComponent';
 import { createModel, createTestApi, fetchModelSql, fetchModels } from '../../../api/models';
 import SqlEditor from '../../../shared/SqlEditor';
-import { chatQuery, stopStream, validateQueryApi, checkProfileApi, buildProfileRequestApi, skipProfilingApi, importMissingTablesApi, autoProfileApi, refreshSchemasApi } from '../../../api/query';
+import { chatQuery, stopStream, validateQueryApi, checkProfileApi, buildProfileRequestApi, skipProfilingApi, importMissingTablesApi, autoProfileApi, refreshSchemasApi, getProfileMetaApi } from '../../../api/query';
 import { useLocalStorageState } from '../../../hooks/useLocalStorageState';
 import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
@@ -96,6 +96,10 @@ const ChatComponent: React.FC = () => {
   // Nombre de tests à générer d'emblée (1–3, total). Réinitialisé à 1 à chaque ouverture.
   const [testsTarget, setTestsTarget] = useState(1);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
+  // Timestamp ISO du dernier profilage (profil global, partagé entre modèles) — affiché
+  // sous forme « profilé il y a N j » à côté du bouton Rafraîchir pour donner une raison
+  // concrète de cliquer.
+  const [profiledAt, setProfiledAt] = useState<string | null>(null);
   const [autoProfileWarning, setAutoProfileWarning] = useState<{
     status: 'partial' | 'failed';
     errors: Array<{ query_index: number; error: string }>;
@@ -405,13 +409,12 @@ const ChatComponent: React.FC = () => {
       userTables?: Record<string, Record<string, any>[]>,
       create: boolean = false,
       testIndex?: number,
-      profileResult?: string,
       isAssertionOnly?: boolean,
       forceRoute?: string,
       testUid?: string
     ): Promise<boolean> => {
       const text = (input ?? '').trim();
-      if (!text && !userTables && !currentSqlQuery && !profileResult) return false;
+      if (!text && !userTables && !currentSqlQuery) return false;
 
       let session = currentModelId;
 
@@ -443,7 +446,6 @@ const ChatComponent: React.FC = () => {
           t,
           parentMessageId,
           userTables,
-          profileResult,
           testUid,
           testIndex,
           assertionOnly: isAssertionOnly,
@@ -735,7 +737,7 @@ const ChatComponent: React.FC = () => {
 
       const routeHint = forcedRouteRef.current;
       forcedRouteRef.current = '';
-      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, anchoredTest?.test_index ?? effectiveTestIndex, undefined, assertionOnly, routeHint || undefined, effectiveTestUid);
+      const ok = await sendMessage(text, sqlQuery, '', lastMessageId, undefined, false, anchoredTest?.test_index ?? effectiveTestIndex, assertionOnly, routeHint || undefined, effectiveTestUid);
       setIsSending(false);
 
       if (ok) {
@@ -956,8 +958,19 @@ const ChatComponent: React.FC = () => {
       dispatch(setError('Erreur lors du rafraîchissement du profil.'));
     } finally {
       setIsAutoProfileRunning(false);
+      // Re-lit la fraîcheur après le profilage pour rafraîchir « profilé il y a … ».
+      getProfileMetaApi().then((m) => setProfiledAt(m.profiled_at)).catch(() => {});
     }
   }, [currentModelId, sqlQuery, dispatch]);
+
+  // Charge la fraîcheur du profil à l'ouverture d'un modèle (profil global).
+  useEffect(() => {
+    let cancelled = false;
+    getProfileMetaApi()
+      .then((m) => { if (!cancelled) setProfiledAt(m.profiled_at); })
+      .catch(() => { if (!cancelled) setProfiledAt(null); });
+    return () => { cancelled = true; };
+  }, [currentModelId]);
 
   // Schéma en cache périmé (erreur "Unknown column … schéma probablement périmé") :
   // ré-importe le schéma depuis BigQuery — ciblé sur les seules tables de la
@@ -1708,6 +1721,7 @@ const ChatComponent: React.FC = () => {
               sqlDirty={sqlDirty}
               onRefreshProfile={handleRefreshProfile}
               refreshing={isAutoProfileRunning}
+              profiledAt={profiledAt}
             />
             {autoProfileWarning && (
               <AutoProfileWarningBanner

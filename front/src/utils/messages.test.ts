@@ -181,24 +181,6 @@ describe('formatMessage', () => {
     });
   });
 
-  describe('contentType: profile_query', () => {
-    it('parses profileRequest fields from content', () => {
-      const payload = {
-        message: 'Profil manquant',
-        profile_query: 'SELECT * FROM t',
-        missing_columns: [{ table: 't', used_columns: ['id'] }],
-      };
-      const msg = formatMessage({
-        type: 'ai', id: '1',
-        content: JSON.stringify(payload),
-        additional_kwargs: { type: MsgType.PROFILE_QUERY },
-      });
-      expect(msg.contents.profileRequest?.message).toBe('Profil manquant');
-      expect(msg.contents.profileRequest?.profile_query).toBe('SELECT * FROM t');
-      expect(msg.contents.profileRequest?.missing_columns).toEqual(payload.missing_columns);
-    });
-  });
-
   describe('contentType: evaluation', () => {
     it('sets text from content', () => {
       const msg = formatMessage({

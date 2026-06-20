@@ -1,10 +1,8 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { Accordion, AccordionDetails, AccordionSummary, Alert, Box, Button, Chip, Collapse, Stack, Table, TableBody, TableCell, TableHead, TableRow, Typography } from '@mui/material';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import SearchIcon from '@mui/icons-material/Search';
-import DownloadIcon from '@mui/icons-material/Download';
-import UploadFileIcon from '@mui/icons-material/UploadFile';
 import CheckRoundedIcon from '@mui/icons-material/CheckRounded';
 import WarningAmberRoundedIcon from '@mui/icons-material/WarningAmberRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
@@ -12,7 +10,6 @@ import AutoAwesomeIcon from '@mui/icons-material/AutoAwesome';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import DisplayTable from './DisplayTable';
 import QueryUnderstandingCard from './QueryUnderstandingCard';
-import { StyledButton } from '../../../style/StyledComponents';
 import { getVerdictInfo } from '../../../utils/verdict';
 import { isStaleSchemaError } from '../../../utils/staleSchema';
 import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
@@ -29,7 +26,6 @@ type MessageBodyProps = {
     type: Message['type'] | undefined,
     uploadedData: Record<string, any[]>
   ) => void;
-  onProfileUpload?: (messageId: string, parent: string | undefined, jsonContent: string) => void;
   onPageChange?: (page: number, project: string, sql: string, msgId: string, limit?: number) => void;
   onExecute?: (id: string) => void;
   onCreateClick?: (id: string) => void;
@@ -327,36 +323,12 @@ const TestResultRow: React.FC<{ testResult: any; index: number }> = ({ testResul
 const MessageBody: React.FC<MessageBodyProps> = ({
   msg,
   currentProjectId,
-  onProfileUpload,
   onPageChange,
   onRefreshSchemas,
   debugMessages,
 }) => {
-  const fileInputRef = useRef<HTMLInputElement>(null);
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
-
-  const handleDownloadSQL = (sql: string) => {
-    const blob = new Blob([sql], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'profile_query.sql';
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleProfileFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      const content = ev.target?.result as string;
-      onProfileUpload?.((msg as any).id, (msg as any).parent, content);
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
 
   return (
     <>
@@ -374,59 +346,6 @@ const MessageBody: React.FC<MessageBodyProps> = ({
           Demande de modification des tests
         </Typography>
       )}
-
-      {/* Profile request */}
-      {msg.contents.profileRequest && (() => {
-        const pr = msg.contents.profileRequest!;
-        return (
-          <Box sx={{ mt: 0.5 }}>
-            <Typography variant="body2" sx={{ mb: 1.5, color: '#444', whiteSpace: 'pre-wrap' }}>
-              {pr.message}
-            </Typography>
-
-            {/* Missing columns grouped by table */}
-            <Stack gap={1} sx={{ mb: 1.5 }}>
-              {pr.missing_columns.map((entry) => (
-                <Box key={entry.table}>
-                  <Typography variant="caption" sx={{ fontWeight: 700, color: '#555', display: 'block', mb: 0.5 }}>
-                    {entry.table}
-                  </Typography>
-                  <Stack direction="row" flexWrap="wrap" gap={0.75}>
-                    {entry.used_columns.map((col) => (
-                      <Chip
-                        key={col}
-                        label={col}
-                        size="small"
-                        sx={{ bgcolor: '#fff8e1', border: '1px solid #ffe082', fontSize: 11 }}
-                      />
-                    ))}
-                  </Stack>
-                </Box>
-              ))}
-            </Stack>
-
-            {/* Actions */}
-            <Stack direction="row" gap={1.5} flexWrap="wrap">
-              <StyledButton onClick={() => handleDownloadSQL(pr.profile_query)} sx={{ fontSize: 12, px: 1, py: 0.5, '& .MuiSvgIcon-root': { fontSize: 16 } }}>
-                <DownloadIcon sx={{ mr: 0.5, fontSize: 16 }} />
-                Télécharger la requête SQL
-              </StyledButton>
-
-              <StyledButton onClick={() => fileInputRef.current?.click()} sx={{ fontSize: 12, px: 1, py: 0.5, '& .MuiSvgIcon-root': { fontSize: 16 } }}>
-                <UploadFileIcon sx={{ mr: 0.5, fontSize: 16 }} />
-                Uploader les résultats JSON
-              </StyledButton>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".json,application/json"
-                style={{ display: 'none' }}
-                onChange={handleProfileFileChange}
-              />
-            </Stack>
-          </Box>
-        );
-      })()}
 
       {/* Evaluation card */}
       {msg.contentType === 'evaluation' && msg.contents.text && (

@@ -34,8 +34,7 @@ interface MessageDisplayProps {
     userInput: string,
     messageId: string | undefined,
     parentMessageId: string | undefined,
-    userTables?: Record<string, Record<string, any>[]> | undefined,
-    profileResult?: string
+    userTables?: Record<string, Record<string, any>[]> | undefined
   ) => void;
   renderMessages: AnyRenderable[];
   onRestoreState?: (sql?: string, optimizedSql?: string, messageId?: string, testResults?: any[]) => void;
@@ -149,14 +148,6 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
     await sendMessage('', messageId, parent, uploadedData);
   };
 
-  const handleProfileUpload = async (
-    messageId: string,
-    parent: string | undefined,
-    jsonContent: string
-  ) => {
-    await sendMessage('', messageId, parent, undefined, jsonContent);
-  };
-
   const handleCreateClick = async (id: string) => {
     if (currentModelId && currentProjectId) {
       const resultAction = await dispatch(fetchUniqueColumns({ modelId: currentModelId, currentProjectId, id }));
@@ -185,7 +176,6 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
       currentProjectId={currentProjectId}
       currentModelName={currentModel?.name || 'data'}
       onUpload={handleUpload}
-      onProfileUpload={handleProfileUpload}
       onPageChange={handlePageChange}
       onExecute={undefined}
       onCreateClick={handleCreateClick}

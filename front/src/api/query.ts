@@ -31,10 +31,10 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, profileResult, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, testsTarget
+      parentMessageId, userTables, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, testsTarget
     } = params;
 
-    if (!userInput && !query && !userTables && !profileResult && !validateIntent) return;
+    if (!userInput && !query && !userTables && !validateIntent) return;
     dispatch(setLoading(true));
 
     // For silent ops (sql_update, rerun test), reuse parentMessageId so bot responses
@@ -43,15 +43,7 @@ export const chatQuery = createAsyncThunk(
     const request_id = uuidv4();
 
     if (!silent) {
-      if (profileResult) {
-        dispatch(addTextMessage({
-          id: userMessageId,
-          type: 'user',
-          contents: { text: '📊 Résultats de profiling uploadés' },
-          parent: ChangedMessageId,
-          children: [],
-        }));
-      } else if (userTables) {
+      if (userTables) {
         dispatch(addTextMessage({
           id: userMessageId,
           type: 'user',
@@ -113,7 +105,6 @@ export const chatQuery = createAsyncThunk(
             validated_sql: '',
             optimized_sql: '',
             user_tables: userTables ? JSON.stringify(userTables) : '',
-            profile_result: profileResult || '',
             dialect: 'bigquery',
             schemas: [],
             session: sessionId,
@@ -383,7 +374,6 @@ export interface CheckProfileParams {
   used_columns: any[];
   missing_columns?: any[];
   expected_joins?: any[];
-  profile_result?: string;
   force?: boolean;
 }
 
@@ -393,6 +383,24 @@ export interface CheckProfileResult {
   auto_profile_available?: boolean;
   missing_columns?: any[];
 }
+
+export interface ProfileMetaResult {
+  profiled_at: string | null;
+}
+
+export const getProfileMetaApi = async (): Promise<ProfileMetaResult> => {
+  const token = localStorage.getItem('jwt') || '';
+  const response = await fetch(
+    `${import.meta.env.VITE_BACKEND_URL}/api/profile-meta`,
+    {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${token}` },
+    }
+  );
+  const data = await response.json();
+  if (!response.ok) throw data;
+  return data;
+};
 
 export const checkProfileApi = async (params: CheckProfileParams): Promise<CheckProfileResult> => {
   const token = localStorage.getItem('jwt') || '';
@@ -440,30 +448,6 @@ export const buildProfileRequestApi = async (params: BuildProfileRequestParams):
   const data = await response.json();
   if (!response.ok) throw data;
   return data;
-};
-
-export interface SaveProfileParams {
-  session: string;
-  project: string;
-  user?: string;
-  profile_result: string;
-}
-
-export const saveProfileApi = async (params: SaveProfileParams): Promise<void> => {
-  const token = localStorage.getItem('jwt') || '';
-  const response = await fetch(
-    `${import.meta.env.VITE_BACKEND_URL}/api/save-profile`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify(params),
-    }
-  );
-  const data = await response.json();
-  if (!response.ok) throw data;
 };
 
 export interface SkipProfilingParams {

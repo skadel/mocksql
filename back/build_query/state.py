@@ -51,7 +51,6 @@ class QueryState(TypedDict):
     test_index: Optional[
         int
     ]  # legacy slot/order number; fallback target if no test_uid
-    profile_result: Optional[str]  # JSON uploaded by user after running profile query
     profile_complete: Optional[
         bool
     ]  # set by profile_checker: True if all columns profiled

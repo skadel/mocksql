@@ -1,5 +1,5 @@
 import React from 'react';
-import { Box, Button, Chip, CircularProgress, IconButton, Tooltip, Typography } from '@mui/material';
+import { Box, Button, Chip, CircularProgress, Tooltip, Typography } from '@mui/material';
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ScienceIcon from '@mui/icons-material/Science';
@@ -11,9 +11,25 @@ interface ArtefactHeaderProps {
   sqlDirty?: boolean;
   onRefreshProfile?: () => void;
   refreshing?: boolean;
+  profiledAt?: string | null;
 }
 
-const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile, refreshing }) => {
+// Fraîcheur du profil en langage naturel : « à l'instant », « il y a 3 h », « il y a 5 j ».
+const formatProfiledAt = (iso?: string | null): string | null => {
+  if (!iso) return null;
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return null;
+  const diffMin = Math.floor((Date.now() - then) / 60000);
+  if (diffMin < 1) return "profilé à l'instant";
+  if (diffMin < 60) return `profilé il y a ${diffMin} min`;
+  const diffH = Math.floor(diffMin / 60);
+  if (diffH < 24) return `profilé il y a ${diffH} h`;
+  const diffD = Math.floor(diffH / 24);
+  return `profilé il y a ${diffD} j`;
+};
+
+const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile, refreshing, profiledAt }) => {
+  const freshness = formatProfiledAt(profiledAt);
   return (
     <Box
       sx={{
@@ -51,23 +67,37 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
       )}
 
       <Box sx={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
+        {onRefreshProfile && !refreshing && (
+          <Typography sx={{ fontSize: 11, color: freshness ? '#9aacb0' : '#a86a00' }}>
+            {freshness ?? 'jamais profilé'}
+          </Typography>
+        )}
         {onRefreshProfile && (
-          <Tooltip title="Rafraîchir le schéma et le profil des tables" arrow placement="top">
-            <IconButton
+          <Tooltip title="Re-scanne le schéma et le profil des tables sources (pas un rechargement de page ni une relance des tests)" arrow placement="top">
+            <Button
               size="small"
+              variant="text"
               onClick={onRefreshProfile}
               disabled={rerunning || refreshing}
+              startIcon={
+                <RefreshIcon sx={{
+                  fontSize: 14,
+                  animation: refreshing ? 'spin 0.8s linear infinite' : 'none',
+                  '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
+                }} />
+              }
               sx={{
+                fontSize: 12,
                 color: refreshing ? '#1ca8a4' : '#6b8287',
+                textTransform: 'none',
+                fontWeight: 500,
+                py: 0.5,
+                px: 1.25,
                 '&:hover': { color: '#1ca8a4', bgcolor: '#ecf7f6' },
               }}
             >
-              <RefreshIcon sx={{
-                fontSize: 16,
-                animation: refreshing ? 'spin 0.8s linear infinite' : 'none',
-                '@keyframes spin': { from: { transform: 'rotate(0deg)' }, to: { transform: 'rotate(360deg)' } },
-              }} />
-            </IconButton>
+              {refreshing ? 'Rafraîchissement…' : 'Rafraîchir le schéma'}
+            </Button>
           </Tooltip>
         )}
         <Button

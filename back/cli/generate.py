@@ -257,7 +257,6 @@ def build_initial_state(
         "reasoning": "",
         "current_query": "",
         "test_index": None,
-        "profile_result": None,
         "profile_complete": None,
         "profile": None,
         "profile_billing_tb": None,

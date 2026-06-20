@@ -323,54 +323,6 @@ def _extract_expected_join_pairs(sql: str, dialect: str) -> list[dict]:
         return []
 
 
-def _validate_profile_result(
-    incoming_profile: dict,
-    expected_columns: list,
-    expected_joins: list,
-) -> tuple[list, list]:
-    """
-    Validate that incoming_profile covers the expected columns and join profiles.
-
-    Args:
-        incoming_profile: normalized profile dict from the user's uploaded result
-        expected_columns: list of {"table", "used_columns"} that were requested
-        expected_joins:   list of {"left_table", "right_table"} pairs from the SQL
-
-    Returns:
-        (still_missing_cols, missing_join_pairs):
-        - still_missing_cols: entries not yet covered by incoming_profile
-        - missing_join_pairs: {"left_table", "right_table"} pairs absent from the result
-        Both empty means the result is valid.
-    """
-    still_missing_cols = _find_missing_columns(incoming_profile, expected_columns)
-
-    incoming_joins = incoming_profile.get("joins", [])
-    missing_join_pairs: list[dict] = []
-
-    if expected_joins:
-        for exp_join in expected_joins:
-            left, right = exp_join["left_table"], exp_join["right_table"]
-            found = any(
-                j.get("left_table") == left and j.get("right_table") == right
-                for j in incoming_joins
-            )
-            if not found:
-                missing_join_pairs.append(exp_join)
-    elif expected_columns:
-        # Fallback when expected_joins not provided: check at least one join exists
-        requested_tables: set[str] = set()
-        for entry in expected_columns:
-            if isinstance(entry, str):
-                entry = json.loads(entry)
-            requested_tables.add(entry["table"])
-        if len(requested_tables) > 1 and not incoming_joins:
-            missing_join_pairs = [
-                {"left_table": t, "right_table": ""} for t in sorted(requested_tables)
-            ]
-
-    return still_missing_cols, missing_join_pairs
-
-
 def _find_missing_columns(profile: dict, used_columns: list) -> list:
     """
     Returns list of {"table": str, "used_columns": [str]} for columns
