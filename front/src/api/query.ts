@@ -354,7 +354,6 @@ export interface ValidateQueryResult {
   query_decomposed?: string;
   optimized_sql?: string;
   sql_message_id?: string;
-  estimated_minutes?: number;
 }
 
 export const validateQueryApi = async (params: ValidateQueryParams): Promise<ValidateQueryResult> => {

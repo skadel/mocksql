@@ -44,20 +44,6 @@ class ValidateQueryRequest(BaseModel):
     parent_message_id: str = ""
 
 
-def _estimate_generation_minutes(sql: str, used_columns: list, dialect: str) -> int:
-    """Estimation grosse-maille (minutes) de la durée de génération, pour l'ETA UI.
-
-    Best-effort : toute erreur retombe sur le défaut de l'estimateur — un échec
-    d'estimation ne doit jamais faire échouer la validation.
-    """
-    from build_query.gen_time_estimator import estimate_minutes, extract_features
-
-    try:
-        return estimate_minutes(extract_features(sql, used_columns, dialect))
-    except Exception:
-        return estimate_minutes(extract_features("", None, dialect))
-
-
 def _extract_validate_error(result: dict) -> str:
     if result.get("error"):
         return str(result["error"])
@@ -125,9 +111,6 @@ async def validate_query_route(body: ValidateQueryRequest):
             "optimized_sql": cached_session["optimized_sql"],
             "sql_message_id": "",
             "sql_history_id": "",
-            "estimated_minutes": _estimate_generation_minutes(
-                body.sql, cached_session["used_columns"], body.dialect
-            ),
         }
 
     # Pre-check: verify all tables referenced in the query exist in the schema.
@@ -228,9 +211,6 @@ async def validate_query_route(body: ValidateQueryRequest):
         "optimized_sql": optimized_sql,
         "sql_message_id": "",
         "sql_history_id": "",
-        "estimated_minutes": _estimate_generation_minutes(
-            body.sql, used_columns, body.dialect
-        ),
     }
 
 
