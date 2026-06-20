@@ -211,28 +211,156 @@ def _format_test_block(tc: dict, verdict: str | None, max_rows: int = 3) -> str:
     return "\n".join(parts)
 
 
-def _build_path_suggestions(
-    state: QueryState, test_cases: list[dict]
-) -> tuple[list[str], dict[str, str]]:
-    """Suggestions DÉTERMINISTES « Tester le path X » pour les branches UNION ALL non
-    couvertes + le path ``all`` (assemblage complet). ``([], {})`` si pas de catalogue.
-
-    Un path est couvert dès qu'un test porte ce ``target_path`` (inclut le test
-    fraîchement généré via ``state['target_path']``, pas encore persisté). Cliquer une
-    de ces suggestions → l'agent pose ``target_path`` (cf. conversational_agent)."""
+def _parse_path_plans(state: QueryState) -> dict:
+    """``path_plans`` (catalogue UNION ALL) en dict, ``{}`` si absent/illisible."""
     raw = state.get("path_plans")
     if not raw:
-        return [], {}
+        return {}
     try:
         plans = json.loads(raw) if isinstance(raw, str) else raw
     except Exception:
-        return [], {}
-    if not isinstance(plans, dict):
-        return [], {}
+        return {}
+    return plans if isinstance(plans, dict) else {}
 
+
+def _covered_paths(state: QueryState, test_cases: list[dict]) -> set:
+    """Paths déjà couverts : un test porte ce ``target_path`` (inclut le test fraîchement
+    généré via ``state['target_path']``, pas encore persisté)."""
     covered = {tc.get("target_path") for tc in test_cases if tc.get("target_path")}
     if state.get("target_path"):
         covered.add(state["target_path"])
+    return covered
+
+
+def _humanize_branch_name(name: str) -> str:
+    """Fallback lisible d'un nom machine de branche : ``pr_segmentation_bp`` → « Segmentation
+    Bp ». Utilisé quand le label fonctionnel LLM n'est pas disponible."""
+    cleaned = re.sub(r"[_\-]+", " ", name or "").strip()
+    return " ".join(w.capitalize() for w in cleaned.split()) or (name or "")
+
+
+class _BranchLabel(BaseModel):
+    path: str = Field(
+        description="Le nom machine EXACT de la branche, repris tel quel depuis l'entrée."
+    )
+    label: str = Field(
+        description=(
+            "Groupe nominal court (3-7 mots) qui complète la phrase « Tester ___ », en "
+            "langage métier compréhensible par un non-développeur. Décris CE QUE PRODUIT la "
+            "branche (le sous-ensemble métier qu'elle calcule), pas sa mécanique SQL. "
+            "Jamais de nom de table/colonne brut, de fonction SQL ni de jargon. "
+            "Ex. : « la segmentation des porteurs côté BP », « les ouvertures de compte du mois »."
+        )
+    )
+
+
+class _BranchLabelsOutput(BaseModel):
+    labels: list[_BranchLabel] = Field(
+        description="Un label fonctionnel par branche fournie en entrée."
+    )
+
+
+async def _label_branches(
+    uncovered: list[str],
+    plans: dict,
+    dialect: str,
+    model_context: str | None = None,
+    profile: dict | None = None,
+) -> dict[str, str]:
+    """Label fonctionnel par branche non couverte (best-effort LLM, ``{}`` si échec).
+
+    Reformule un nom machine opaque (``pr_segmentation_bp``) en un groupe nominal métier
+    (« la segmentation des porteurs côté BP ») à partir du ``sliced_sql`` de la branche, pour
+    que la suggestion « Tester … » soit compréhensible. Quand un profil réel est fourni, on
+    injecte par branche les distributions des colonnes qu'elle utilise (``plan.used_columns``)
+    — les ``top_values`` de la colonne discriminante révèlent souvent les catégories métier
+    (ex. OUVERTURE/FERMETURE) et précisent le label. Échec LLM → l'appelant retombe sur
+    ``_humanize_branch_name``."""
+    branch_blocks = []
+    for name in uncovered:
+        plan = plans.get(name) or {}
+        sliced = (plan.get("sliced_sql") or "").strip()
+        if not sliced:
+            continue
+        # Borne la taille : un label n'a besoin que de l'intention de la branche, pas du SQL entier.
+        if len(sliced) > 2500:
+            sliced = sliced[:2500] + "\n-- … (tronqué)"
+        block = f"Branche « {name} » :\n<sql>\n{sliced}\n</sql>"
+        if profile:
+            prof = _format_profile_block(profile, plan.get("used_columns") or [])
+            if prof:
+                if len(prof) > 1500:
+                    prof = prof[:1500] + "\n… (tronqué)"
+                block += (
+                    f"\nDistributions réelles des colonnes de cette branche :\n{prof}"
+                )
+        branch_blocks.append(block)
+    if not branch_blocks:
+        return {}
+
+    context_block = (
+        f"\n\nContexte métier du projet :\n{model_context.strip()}"
+        if model_context and model_context.strip()
+        else ""
+    )
+    prompt_template = ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                MOCKSQL_PRODUCT_PREAMBLE
+                + (
+                    "\n\nTu nommes en langage métier les branches d'un UNION ALL SQL "
+                    f"(dialecte {dialect}). Pour chaque branche, produis un groupe nominal "
+                    "court qui dit CE QU'ELLE CALCULE pour le métier, jamais sa mécanique SQL "
+                    "ni un nom de table brut. Le label doit compléter naturellement « Tester ___ ». "
+                    "Quand des distributions réelles sont fournies, sers-toi des valeurs "
+                    "fréquentes de la colonne discriminante (le filtre propre à la branche) pour "
+                    "nommer la catégorie métier réellement produite — sans citer la valeur brute."
+                ),
+            ),
+            (
+                "user",
+                "Voici les branches à nommer." + context_block + "\n\n{branches}",
+            ),
+        ]
+    )
+    try:
+        llm = make_llm()
+        structured_llm = llm.with_structured_output(_BranchLabelsOutput)
+        result = await (prompt_template | structured_llm).ainvoke(
+            {"branches": "\n\n".join(branch_blocks)}
+        )
+        labels = {
+            item.path.strip(): item.label.strip()
+            for item in (result.labels or [])
+            if item.path and item.path.strip() and item.label and item.label.strip()
+        }
+        # Ne garde que les branches réellement demandées (le LLM peut renvoyer des extras).
+        labels = {k: v for k, v in labels.items() if k in uncovered}
+        logger.diag("[path_labels] %r", labels)
+        return labels
+    except Exception as e:  # pragma: no cover — best-effort, fallback humanize
+        logger.warning("Erreur LLM lors du labeling des branches UNION ALL: %s", e)
+        return {}
+
+
+def _build_path_suggestions(
+    state: QueryState, test_cases: list[dict], labels: dict[str, str] | None = None
+) -> tuple[list[str], dict[str, str]]:
+    """Suggestions DÉTERMINISTES de couverture des branches UNION ALL non couvertes + le
+    path ``all`` (assemblage complet). ``([], {})`` si pas de catalogue.
+
+    ``labels`` : libellés fonctionnels {nom_machine → label} (cf. ``_label_branches``).
+    Quand un label existe, le texte devient « Tester <label> » (compréhensible) au lieu de
+    « Tester le path <nom_machine> » ; sinon fallback sur ``_humanize_branch_name``.
+    Cliquer une de ces suggestions → l'agent pose ``target_path`` (cf. conversational_agent,
+    qui remappe le label vers le nom machine via le ``label`` stocké dans ``path_plans``)."""
+    plans = _parse_path_plans(state)
+    if not plans:
+        return [], {}
+    labels = labels or {}
+
+    covered = _covered_paths(state, test_cases)
 
     texts: list[str] = []
     rationales: dict[str, str] = {}
@@ -246,8 +374,9 @@ def _build_path_suggestions(
                 "(coercition de types, colonnes désalignées entre branches)."
             )
         else:
-            text = f"Tester le path {name}"
-            rat = f"La branche « {name} » du UNION ALL n'est couverte par aucun test."
+            label = labels.get(name) or f"la branche « {_humanize_branch_name(name)} »"
+            text = f"Tester {label}"
+            rat = f"{label[:1].upper()}{label[1:]} n'est couverte par aucun test."
         texts.append(text)
         rationales[text] = rat
     return texts, rationales
@@ -617,8 +746,29 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
         logger.warning("Erreur LLM lors de la génération des suggestions: %s", e)
         suggestions, rationales = [], {}
 
-    # Suggestions de path (UNION ALL) — déterministes, robustes à un échec LLM.
-    path_suggestions, path_rationales = _build_path_suggestions(state, test_cases)
+    # Suggestions de path (UNION ALL) — déterministes, robustes à un échec LLM. Les noms
+    # machine des branches (table source du FROM, ex. pr_segmentation_bp) sont reformulés en
+    # labels fonctionnels via le LLM ; ces labels sont persistés dans path_plans pour que
+    # l'agent remappe ensuite le clic « Tester <label> » vers le bon target_path.
+    plans = _parse_path_plans(state)
+    covered = _covered_paths(state, test_cases)
+    uncovered = [n for n in plans if n != ALL_PATH and n not in covered]
+    branch_labels: dict[str, str] = {}
+    if uncovered:
+        branch_labels = await _label_branches(
+            uncovered, plans, dialect, state.get("model_context"), profile
+        )
+        if branch_labels:
+            for name, lbl in branch_labels.items():
+                if isinstance(plans.get(name), dict):
+                    plans[name]["label"] = lbl
+            update_test(
+                state["session"],
+                {"path_plans": json.dumps(plans, ensure_ascii=False)},
+            )
+    path_suggestions, path_rationales = _build_path_suggestions(
+        state, test_cases, branch_labels
+    )
 
     if not suggestions and not path_suggestions:
         return {}

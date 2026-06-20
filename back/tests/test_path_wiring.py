@@ -19,10 +19,24 @@ def test_path_suggestions_exclude_covered_include_uncovered_and_all():
     # 'weekly' par un test existant → seuls les non couverts + all restent.
     tests = [{"target_path": "daily"}]
     texts, rationales = _build_path_suggestions(state, tests)
-    assert any("weekly" in t for t in texts)
+    # Sans label fonctionnel : fallback humanisé du nom machine (« Weekly »),
+    # jamais le nom machine brut opaque.
+    assert any("Weekly" in t for t in texts)
+    assert not any("weekly" in t for t in texts)  # le nom machine brut n'est pas exposé
     assert any("assemblage complet" in t for t in texts)
-    assert not any("daily" in t for t in texts)  # couvert → pas reproposé
+    assert not any("daily" in t.lower() for t in texts)  # couvert → pas reproposé
     assert all(t in rationales for t in texts)
+
+
+def test_path_suggestions_use_functional_label_when_available():
+    state = {"path_plans": json.dumps(_PLANS), "target_path": "daily"}
+    tests = [{"target_path": "daily"}]
+    labels = {"weekly": "les agrégats hebdomadaires"}
+    texts, rationales = _build_path_suggestions(state, tests, labels)
+    # Le label fonctionnel remplace le nom machine dans le texte ET la rationale.
+    assert "Tester les agrégats hebdomadaires" in texts
+    assert any("agrégats hebdomadaires" in r for r in rationales.values())
+    assert not any("weekly" in t.lower() for t in texts)
 
 
 def test_path_suggestions_all_covered_returns_only_remaining():
