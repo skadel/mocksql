@@ -628,34 +628,48 @@ async def conversational_agent(state: QueryState):
     # disponibles + leur couverture pour qu'il sache router « passe sur le path X »,
     # « teste l'assemblage complet », ou un clic de suggestion « Tester le path X ».
     valid_paths: set[str] = set()
+    plans_dict: dict = {}
     if state.get("path_plans"):
         try:
-            valid_paths = set(json.loads(state["path_plans"]).keys())
+            plans_dict = json.loads(state["path_plans"]) or {}
+            valid_paths = set(plans_dict.keys())
         except Exception:
+            plans_dict = {}
             valid_paths = set()
     path_note = ""
     if valid_paths:
         _covered = {
             t.get("target_path") for t in existing_tests if t.get("target_path")
         }
+
+        def _branch_line(name: str) -> str:
+            # Le label fonctionnel (persisté par suggestions_node) permet à l'agent de
+            # remapper un clic « Tester <label> » vers ce nom machine de branche.
+            plan = plans_dict.get(name)
+            label = plan.get("label") if isinstance(plan, dict) else None
+            label_part = f" — « {label} »" if label else ""
+            cov = " (couvert)" if name in _covered else " (non couvert)"
+            return f"- {name}{label_part}{cov}"
+
         _branch_lines = "\n".join(
-            f"- {name}" + (" (couvert)" if name in _covered else " (non couvert)")
-            for name in valid_paths
-            if name != ALL_PATH
+            _branch_line(name) for name in valid_paths if name != ALL_PATH
         )
         path_note = (
             "\n\nFOCALISATION PAR PATH (UNION ALL) — ce SQL a des branches indépendantes. "
             'Un test est soit focalisé sur UNE branche (couverture partielle, titre "[Focus X]"), '
             'soit sur "all" (assemblage complet de toutes les branches).\n'
-            f"Branches disponibles :\n{_branch_lines}\n"
-            "Utilise `set_target_path(test_uid, path)` pour (re)focaliser un test. Intentions :\n"
+            "Branches disponibles (nom machine — « label fonctionnel ») :\n"
+            f"{_branch_lines}\n"
+            "Utilise `set_target_path(test_uid, path)` pour (re)focaliser un test. `path` est "
+            "TOUJOURS le nom machine ci-dessus, jamais le label. Intentions :\n"
             "- path précis demandé → ce nom de branche.\n"
             '- « tous les paths » / « assemblage complet » → "all".\n'
             '- ambigu / « je ne sais pas » → "all" (défaut sûr, ne devine PAS une branche).\n'
             "- « peu importe » → la PREMIÈRE branche non couverte ci-dessus.\n"
-            "Un clic sur une suggestion « Tester le path X » d'une branche non couverte → "
-            "`set_target_path(path=X)` SANS test_uid (nouveau test). Pour re-focaliser un "
-            "test EXISTANT sur une autre branche → passe son test_uid."
+            "Un clic de suggestion « Tester <label fonctionnel> » d'une branche non couverte → "
+            "retrouve le nom machine dont le label correspond et appelle `set_target_path(path=ce_nom)` "
+            "SANS test_uid (nouveau test). Pour re-focaliser un test EXISTANT sur une autre "
+            "branche → passe son test_uid."
         )
 
     # Recettes de jointure (clés dérivées) : sans elles, face à un écart du type
