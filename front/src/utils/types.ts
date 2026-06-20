@@ -10,7 +10,6 @@ export interface DisplayTableMeta {
 }
 
 export const MsgType = {
-  PROFILE_QUERY: 'profile_query',
   DEBUG_RUN_CTE: 'debug_run_cte',
   DEBUG_COUNT_STEPS: 'debug_count_steps',
   BAD_DATA_DIAGNOSTIC: 'bad_data_diagnostic',
@@ -80,7 +79,6 @@ export interface MessageContents {
   real_res?: any[];
   meta?: DisplayTableMeta;
   error?: string;
-  profileRequest?: ProfileRequest;
   suggestions?: string[];
   /** Explications [PROD] ancrées sur le profil, indexées par texte de suggestion. */
   rationales?: Record<string, string>;
@@ -330,7 +328,6 @@ export interface ChatQueryParams {
   user?: string;
   parentMessageId?: string;
   userTables?: Record<string, Record<string, any>[]>;
-  profileResult?: string;
   testUid?: string;       // stable test identity to target (preferred over testIndex)
   testIndex?: number;
   context?: 'sql_update';

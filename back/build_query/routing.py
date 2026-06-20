@@ -27,7 +27,6 @@ def _get_llm():
 async def routing(state: QueryState):
     """
     Simplified routing:
-    - profile_result provided → profile_checker (store and check coverage)
     - user_tables provided → executor (re-run tests with custom data)
     - query provided → parser → generator (parse SQL, then generate tests)
     - chat input only → classify intent; if off-topic → other, else → generator
@@ -37,11 +36,6 @@ async def routing(state: QueryState):
     if state.get("validate_intent"):
         logger.diag("[routing] → accept_validation (validate_intent présent)")
         return {"route": "accept_validation"}
-
-    profile_result = state.get("profile_result")
-    if profile_result:
-        logger.diag("[routing] → profile_checker (profile_result présent)")
-        return {"route": "profile_checker"}
 
     # Régénération explicite des suggestions (bouton du panneau) : court-circuite l'agent
     # conversationnel pour aller directement régénérer, sans appel LLM de routage.

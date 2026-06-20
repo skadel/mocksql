@@ -201,8 +201,14 @@ def save_profile(profile: Dict[str, Any]) -> None:
     global _profile_cache
     raw = _load_profile_raw()
     raw["profile"] = profile
+    raw["profiled_at"] = datetime.now().astimezone().isoformat()
     _save_profile_raw(raw)
     _profile_cache = profile
+
+
+def get_profiled_at() -> Optional[str]:
+    """Return the ISO timestamp of the last profiling run, or None if never profiled."""
+    return _load_profile_raw().get("profiled_at")
 
 
 def get_sample_values() -> Dict[str, List[Any]]:

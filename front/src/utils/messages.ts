@@ -51,17 +51,6 @@ export function formatMessage(message: any): Message {
   } as Message & { contentType?: string | null; analysisStep?: number | null };
 
   switch (messageContentType) {
-    case MsgType.PROFILE_QUERY: {
-      const parsed = JSON.parse(message.content);
-      newMessage.contents.profileRequest = {
-        message: parsed.message,
-        profile_query: parsed.profile_query,
-        profile_queries: parsed.profile_queries,
-        missing_columns: parsed.missing_columns,
-      };
-      break;
-    }
-
     case 'examples': {
       const rawTables = JSON.parse(message.content);
       // Generator now emits a single test dict; normalise to array for consumers.

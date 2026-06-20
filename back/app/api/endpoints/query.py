@@ -273,6 +273,18 @@ async def check_profile_route(body: CheckProfileRequest):
     }
 
 
+@router.get("/profile-meta")
+async def profile_meta_route():
+    """Return metadata about the stored profile (freshness timestamp).
+
+    Used by the UI to show "profilé il y a N j" next to the refresh button,
+    giving a concrete reason to re-scan the schema/profile.
+    """
+    from models.schemas import get_profiled_at
+
+    return {"profiled_at": get_profiled_at()}
+
+
 class BuildProfileRequestBody(BaseModel):
     sql: str
     project: str
