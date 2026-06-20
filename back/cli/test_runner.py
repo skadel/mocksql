@@ -167,22 +167,30 @@ def _infer_schema_from_rows(table_name: str, rows: list[dict]) -> dict:
     }
 
 
-def _resolve_schemas(
+def _resolve_model_schemas(
     used_columns_raw: list[str],
     schema_cache: list[dict],
-    data: dict,
+    test_cases: list[dict],
 ) -> list[dict]:
-    """Return schemas: prefer cache lookup, fall back to type inference from data."""
+    """Résout un jeu de schémas STABLE pour tous les cas d'un modèle.
+
+    Les cas d'un même modèle partagent le même SQL → le même schéma. On crée donc les
+    tables DuckDB une seule fois par modèle. Avec un schema_cache, le schéma est identique
+    quel que soit le cas. Sans cache (fallback inference), on UNIONNE les lignes de tous les
+    cas par table pour que la table couvre chaque colonne vue dans n'importe quel cas
+    (une colonne NULL dans un cas mais typée dans un autre est ainsi correctement résolue).
+    """
     if used_columns_raw and schema_cache:
         schemas = _schemas_from_cache(used_columns_raw, schema_cache)
         if schemas:
             return schemas
-    # Fallback: infer from data values (works without schema cache)
-    return [
-        _infer_schema_from_rows(tname, rows)
-        for tname, rows in data.items()
-        if isinstance(rows, list) and rows
-    ]
+    merged: dict[str, list] = {}
+    for tc in test_cases:
+        data = tc.get("data") or {}
+        for tname, rows in data.items():
+            if isinstance(rows, list) and rows:
+                merged.setdefault(tname, []).extend(rows)
+    return [_infer_schema_from_rows(t, r) for t, r in merged.items() if r]
 
 
 # ── Assertion SQL remapping ───────────────────────────────────────────────────
@@ -211,18 +219,22 @@ def _remap_assertion_sql(sql: str, data_keys: list[str], case_suffix: str) -> st
 async def _run_one_case(
     test_case: dict,
     sql: str,
-    schemas: list[dict],
+    duckdb_schemas: list[dict],
     used_columns_parsed: list[dict],
     dialect: str,
     suffix: str,
     con,
+    precompiled_sql: str,
 ) -> dict:
-    from build_query.examples_executor import _evaluate_assertions
-    from utils.examples import (
-        create_test_tables,
-        execute_queries,
-        run_query_on_test_dataset,
-    )
+    """Rejoue UN cas dans les tables déjà créées par modèle (cf. `_setup_model`).
+
+    Les tables et le SQL transpilé sont partagés par tous les cas du modèle : ici on se
+    contente de vider les tables, d'insérer les données du cas, d'exécuter le SQL
+    pré-transpilé, puis d'évaluer les assertions. `suffix` est le suffixe STABLE du modèle
+    (pas de `test_index` concaténé) — il est commun à toutes les tables et au SQL.
+    """
+    from build_query.assertion_eval import _evaluate_assertions
+    from utils.examples import execute_queries, run_query_on_test_dataset
     from utils.insert_examples import insert_examples, replace_missing_with_null
 
     test_index = str(test_case.get("test_index", "0"))
@@ -231,7 +243,6 @@ async def _run_one_case(
         or test_case.get("test_name")
         or f"Test {test_index}"
     )
-    case_suffix = f"{suffix}{test_index}"
     data: dict = test_case.get("data") or {}
     saved_assertions = [
         a for a in (test_case.get("assertion_results") or []) if a.get("sql")
@@ -255,35 +266,37 @@ async def _run_one_case(
         }
 
     try:
-        test_data = replace_missing_with_null(data, schemas)
-        duckdb_schemas = create_test_tables(
-            tables=schemas, suffix=case_suffix, overwrite=True, con=con, dialect=dialect
-        )
+        # Vide les tables partagées avant d'insérer les données de CE cas (les lignes du
+        # cas précédent ne doivent pas fuiter).
+        for sch in duckdb_schemas:
+            con.execute(f'DELETE FROM "{sch["table_name"]}"')
+
+        test_data = replace_missing_with_null(data, duckdb_schemas)
         insert_stmts = list(
             insert_examples(
                 data_dict=test_data,
                 schemas=duckdb_schemas,
-                suffix=case_suffix,
+                suffix=suffix,
                 used_columns=used_columns_parsed or None,
             )
         )
         execute_queries(insert_stmts, con)
 
         result_df, _ = await run_query_on_test_dataset(
-            sql, case_suffix, "cli", dialect, con
+            sql, suffix, "cli", dialect, con, precompiled_sql=precompiled_sql
         )
 
         remapped_assertions = [
             {
                 **a,
                 "sql": _remap_assertion_sql(
-                    a.get("sql", ""), list(data.keys()), case_suffix
+                    a.get("sql", ""), list(data.keys()), suffix
                 ),
             }
             for a in saved_assertions
         ]
 
-        view_name = f"__result__{case_suffix}"
+        view_name = f"__result__{suffix}"
         con.register(view_name, result_df)
         try:
             assertion_results = _evaluate_assertions(
@@ -307,6 +320,29 @@ async def _run_one_case(
             "error": str(exc),
             "assertions": [],
         }
+
+
+async def _setup_model(
+    schemas: list[dict],
+    sql: str,
+    dialect: str,
+    suffix: str,
+    con,
+) -> tuple[list[dict], str]:
+    """Crée les tables DuckDB et transpile le SQL UNE FOIS par modèle.
+
+    Tous les cas d'un modèle partagent le même schéma et le même SQL : on évite ainsi de
+    re-parser le DDL et le SQL via sqlglot à chaque cas (le poste dominant après les
+    imports). Retourne (duckdb_schemas, precompiled_sql).
+    """
+    from utils.examples import create_test_tables, fix_duck_db_sql, parse_test_query
+
+    duckdb_schemas = create_test_tables(
+        tables=schemas, suffix=suffix, overwrite=True, con=con, dialect=dialect
+    )
+    duckdb_sql = await parse_test_query(sql, suffix, dialect)
+    precompiled_sql = fix_duck_db_sql(duckdb_sql, dialect)
+    return duckdb_schemas, precompiled_sql
 
 
 # ── Main entrypoint ───────────────────────────────────────────────────────────
@@ -378,23 +414,55 @@ async def run_tests(
 
             test_cases: list[dict] = test_doc.get("test_cases") or []
             case_results: list[dict] = []
-            # Unique suffix per model to avoid table collisions between models
+            # Unique suffix per model to avoid table collisions between models. Stable
+            # across all cases of the model → tables created once, SQL transpiled once.
             model_suffix = (
                 f"{session_prefix}_{re.sub(r'[^a-z0-9]', '_', model_name.lower())}"
             )
 
-            for tc in test_cases:
-                data: dict = tc.get("data") or {}
-                schemas = _resolve_schemas(used_columns_raw, schema_cache, data)
-                result = await _run_one_case(
-                    test_case=tc,
-                    sql=sql,
+            # Setup partagé : tables + SQL transpilé une seule fois pour tout le modèle.
+            schemas = _resolve_model_schemas(used_columns_raw, schema_cache, test_cases)
+            duckdb_schemas: list[dict] = []
+            precompiled_sql = ""
+            setup_error: str | None = None
+            try:
+                duckdb_schemas, precompiled_sql = await _setup_model(
                     schemas=schemas,
-                    used_columns_parsed=used_columns_parsed,
+                    sql=sql,
                     dialect=dialect,
                     suffix=model_suffix,
                     con=con,
                 )
+            except Exception as exc:
+                setup_error = str(exc)
+
+            for tc in test_cases:
+                if setup_error is not None:
+                    # Le setup modèle a échoué (DDL/transpile) : tous les cas exécutables
+                    # remontent l'erreur, les cas vides restent des skips.
+                    result = await _run_one_case(
+                        test_case=tc,
+                        sql=sql,
+                        duckdb_schemas=[],
+                        used_columns_parsed=used_columns_parsed,
+                        dialect=dialect,
+                        suffix=model_suffix,
+                        con=con,
+                        precompiled_sql=precompiled_sql,
+                    )
+                    if result["status"] not in ("skip",):
+                        result = {**result, "status": "error", "error": setup_error}
+                else:
+                    result = await _run_one_case(
+                        test_case=tc,
+                        sql=sql,
+                        duckdb_schemas=duckdb_schemas,
+                        used_columns_parsed=used_columns_parsed,
+                        dialect=dialect,
+                        suffix=model_suffix,
+                        con=con,
+                        precompiled_sql=precompiled_sql,
+                    )
                 case_results.append(result)
 
                 if result["status"] in ("fail", "error"):

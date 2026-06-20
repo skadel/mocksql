@@ -885,7 +885,12 @@ def _missing_extension_hint(err: str) -> str | None:
 
 
 async def run_query_on_test_dataset(
-    query: str, session: str, project: str, dialect: str, con: duckdb.DuckDBPyConnection
+    query: str,
+    session: str,
+    project: str,
+    dialect: str,
+    con: duckdb.DuckDBPyConnection,
+    precompiled_sql: str | None = None,
 ) -> tuple[DataFrame, str]:
     """
     Run a query on the test dataset in DuckDB.
@@ -896,13 +901,20 @@ async def run_query_on_test_dataset(
         project (str): The project name for query context.
         dialect (str): bigquery, postgres ...
         con (DuckDBPyConnection): The connection to the duckdb database
+        precompiled_sql (str | None): DuckDB SQL déjà transpilé (suffixe injecté). Quand
+            fourni, on saute `parse_test_query` + `fix_duck_db_sql` — utilisé par le replay
+            (`mocksql test`) qui transpile une seule fois par modèle puis substitue le
+            suffixe par cas, au lieu de re-parser le SQL identique à chaque cas (sqlglot).
 
     Returns:
         tuple[DataFrame, str]: The result of the query execution as a Pandas DataFrame,
             and the DuckDB SQL that was actually executed.
     """
-    duckdb_sql = await parse_test_query(query, session, dialect)
-    current_sql = fix_duck_db_sql(duckdb_sql, dialect)
+    if precompiled_sql is not None:
+        current_sql = precompiled_sql
+    else:
+        duckdb_sql = await parse_test_query(query, session, dialect)
+        current_sql = fix_duck_db_sql(duckdb_sql, dialect)
 
     for _ in range(10):
         try:
