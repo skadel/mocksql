@@ -1855,8 +1855,8 @@ const ChatComponent: React.FC = () => {
                     <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
                     <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
                       Le travail peut prendre ~{eta}{' '}
-                      minute{eta > 1 ? 's' : ''} — tu peux fermer
-                      l'onglet, je te préviens par notification dès que c'est terminé.
+                      minute{eta > 1 ? 's' : ''} — garde cet onglet ouvert (tu peux passer
+                      à autre chose), je te préviens par notification dès que c'est terminé.
                     </Typography>
                   </Box>
                   );
