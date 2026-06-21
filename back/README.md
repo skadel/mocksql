@@ -11,11 +11,13 @@
 ```bash
 python -m venv .venv
 source .venv/bin/activate   # Windows : .\.venv\Scripts\activate
-pip install poetry && poetry install
+pip install poetry && poetry install --all-extras
 
 cp .env.example .env        # compléter les variables (voir README racine §3)
 uvicorn server:app --port 8080 --reload
 ```
+
+> Les connecteurs sources (BigQuery, Snowflake) sont des **extras** optionnels, exclus de l'install de base pour l'alléger. `poetry install` seul n'installe que le cœur (génération + DuckDB) ; ajoutez `--all-extras` (ou `--extras "bigquery snowflake"`) pour travailler sur le profiling/import.
 
 ---
 

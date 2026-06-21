@@ -375,8 +375,9 @@ def _find_missing_joins(profile: dict, expected_joins: list) -> list:
 async def _estimate_profile_bytes(sql: str, billing_project: str) -> Optional[float]:
     """Dry-run the profile SQL on BigQuery and return estimated bytes processed (as TB)."""
     try:
-        from google.cloud import bigquery as _bq
+        from utils.optional_deps import import_bigquery
 
+        _bq = import_bigquery()
         client = _bq.Client(project=billing_project)
         job_config = _bq.QueryJobConfig(dry_run=True, use_query_cache=False)
         job = await asyncio.to_thread(client.query, sql, job_config)
