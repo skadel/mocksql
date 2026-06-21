@@ -1309,6 +1309,57 @@ def _alias_unnamed_final_projections(tree: exp.Expression) -> None:
                     col.set("this", exp.to_identifier(renames[col.name]))
 
 
+def _fix_unnest_with_offset(tree: exp.Expression) -> exp.Expression:
+    """Rends ``UNNEST(arr) WITH OFFSET AS offset`` (BigQuery) exécutable sur DuckDB.
+
+    sqlglot transpile ``WITH OFFSET AS offset`` en ``WITH ORDINALITY`` mais **perd
+    le nom de la colonne** : DuckDB nomme la colonne d'ordinalité ``ordinality`` et
+    la référence ``offset`` échoue ("Referenced column offset not found"). De plus,
+    l'``OFFSET`` BigQuery est 0-based alors que l'``ORDINALITY`` DuckDB est 1-based.
+
+    On réécrit chaque ``UNNEST`` porteur d'un offset nommé en sous-requête corrélée
+    qui réexpose un ``offset`` 0-based sous son nom d'origine :
+
+        ... CROSS JOIN UNNEST(arr) WITH OFFSET AS offset
+        →
+        ... CROSS JOIN (
+              SELECT u._ord_N - 1 AS offset
+              FROM UNNEST(arr) WITH ORDINALITY AS u(_uval_N, _ord_N)
+            ) AS _unnest_off_N
+
+    La valeur dépliée n'est pas projetée — cohérent avec l'expansion ``SELECT *``
+    de sqlglot qui n'expose que ``offset`` (et non l'élément du tableau). DuckDB
+    résout la corrélation sur ``arr`` via un lateral implicite (jointure virgule).
+    """
+    n = 0
+    for unnest_node in list(tree.find_all(exp.Unnest)):
+        offset = unnest_node.args.get("offset")
+        if not isinstance(offset, exp.Identifier):
+            continue
+        n += 1
+        offset_name = offset.name
+        ord_id, val_id = f"_ord_{n}", f"_uval_{n}"
+        synth_alias = f"_unnest_off_{n}"
+        inner = exp.Unnest(
+            expressions=[unnest_node.expressions[0].copy()],
+            alias=exp.TableAlias(
+                this=exp.to_identifier("u"),
+                columns=[exp.to_identifier(val_id), exp.to_identifier(ord_id)],
+            ),
+            offset=True,
+        )
+        zero_based = exp.alias_(
+            exp.Sub(this=exp.column(ord_id, "u"), expression=exp.Literal.number(1)),
+            offset_name,
+        )
+        subquery = exp.Subquery(
+            this=exp.Select(expressions=[zero_based]).from_(inner),
+            alias=exp.TableAlias(this=exp.to_identifier(synth_alias)),
+        )
+        unnest_node.replace(subquery)
+    return tree
+
+
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
@@ -1316,6 +1367,7 @@ async def parse_test_query(query, suffix, dialect):
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     _qualify_group_order_by_aliases(tree)
     _fix_group_by_strict_mode(tree)
+    _fix_unnest_with_offset(tree)
     _alias_unnamed_final_projections(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
