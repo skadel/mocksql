@@ -2725,6 +2725,7 @@ def _build_sql_relation_branches(
         dialect,
         top_k=5,
         start_idx=idx,
+        schema=schema,
     )
 
     return join_parts, derived_parts, ctes
@@ -2857,6 +2858,7 @@ def _build_derived_expr_profile_branches(
     dialect: str,
     top_k: int = 5,
     start_idx: int = 0,
+    schema: dict | None = None,
 ) -> list[str]:
     """Build UNION ALL branches profiling derived expressions found in *sql_query*.
 
@@ -2889,6 +2891,21 @@ def _build_derived_expr_profile_branches(
     expressions = detect_select_derived_expressions(sql_query, dialect)
     if not expressions:
         return []
+
+    # Index of known base-table columns, keyed by both full and short (last
+    # segment) table name, all lowercased. Used to skip a derived branch whose
+    # expression references a column that does NOT exist on its resolved base
+    # table (e.g. a PIVOT output column like ``Nb_ope`` that only exists in a
+    # CTE) — running it against the base table would 400 "Unrecognized name".
+    # CTE-sourced columns are not indexed here, so they are never falsely
+    # rejected (the CTE preamble defines them).
+    schema_cols: dict[str, set[str]] = {}
+    for tbl in (schema or {}).get("tables", []):
+        cols = {str(c.get("name", "")).lower() for c in tbl.get("columns", [])}
+        name = str(tbl.get("name", ""))
+        if name:
+            schema_cols[name.lower()] = cols
+            schema_cols.setdefault(name.split(".")[-1].lower(), cols)
 
     # Build {alias: full_table_name} from the SQL for query construction.
     # This is separate from 'source_tables' (which uses resolved lineage) and is
@@ -2933,6 +2950,7 @@ def _build_derived_expr_profile_branches(
                 str_t,
                 top_k,
                 idx,
+                schema_cols,
             )
             if branch:
                 parts.append(branch)
@@ -2953,6 +2971,7 @@ def _build_one_derived_expr_branch(
     str_t: str,
     top_k: int,
     idx: int,
+    schema_cols: dict[str, set[str]] | None = None,
 ) -> str | None:
     """Build one UNION ALL row for a single derived expression.
 
@@ -2961,6 +2980,11 @@ def _build_one_derived_expr_branch(
 
     ``expr_info`` has keys: ``expr_sql`` (str), ``source_tables`` (list[str] of
     resolved base-table names), ``col_refs`` (list[(alias, col_name)]).
+
+    ``schema_cols`` maps lowercased base-table name (full or short) → set of its
+    lowercased column names. When provided, a branch is skipped if it references
+    a column absent from its resolved base table — guarding against expressions
+    whose columns are CTE/PIVOT outputs that don't exist on the base table.
     """
     expr_sql = expr_info["expr_sql"]
     # source_tables: base-table names resolved via lineage (for table_name column)
@@ -2970,6 +2994,24 @@ def _build_one_derived_expr_branch(
 
     if not source_tables:
         return None
+
+    # Skip when an unqualified column doesn't exist on the inferred base table.
+    # Such a column is a CTE/PIVOT-derived output (e.g. ``Nb_ope`` produced by a
+    # PIVOT) — running the raw expression against the base table 400s with
+    # "Unrecognized name". Only applied to the unqualified case resolved to a
+    # single base table; qualified refs (and CTE sources not in schema_cols) are
+    # left untouched, trusting the WITH preamble.
+    if schema_cols and len(source_tables) == 1:
+        unqualified_cols = [col for alias, col in col_refs if not alias]
+        if unqualified_cols:
+            src = source_tables[0]
+            known = schema_cols.get(src.lower()) or schema_cols.get(
+                src.split(".")[-1].lower()
+            )
+            if known is not None and any(
+                col.lower() not in known for col in unqualified_cols
+            ):
+                return None
 
     # Guard: a mix of qualified and unqualified column references cannot be
     # profiled safely. The FROM/JOIN chain below is reconstructed from the

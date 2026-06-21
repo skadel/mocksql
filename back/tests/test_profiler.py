@@ -3069,6 +3069,70 @@ class TestDerivedExprMixedQualification(unittest.TestCase):
         sqlglot.parse_one(q, dialect="bigquery")  # must parse
 
 
+# ─── derived-expression profiling: column absent from base table (PIVOT) ──────
+
+
+# Mirrors the production crash "Unrecognized name: Nb_ope": a PIVOT produces
+# output columns (Nb_ope, …) consumed by a downstream CTE as unqualified refs
+# (coalesce(Nb_ope, 0)). The unqualified-column path resolves the source to the
+# single base table, but Nb_ope does not exist there (the base table only has
+# indicateur/valeur) — profiling the raw expression against the base table 400s.
+_DERIVED_PIVOT_OUTPUT_SQL = (
+    "WITH piv AS ("
+    "  SELECT libelle, Nb_ope FROM `DS.base`"
+    "  PIVOT (SUM(valeur) FOR indicateur IN ('Nb_ope'))"
+    "), "
+    "m AS (SELECT COALESCE(Nb_ope, 0) AS nb_ope, COALESCE(libelle, 'x') AS lib FROM piv) "
+    "SELECT * FROM m"
+)
+
+
+class TestDerivedExprPivotOutputColumn(unittest.TestCase):
+    """Regression for "Unrecognized name: Nb_ope".
+
+    A derived expression whose unqualified column is a PIVOT/CTE output absent
+    from the resolved base table must be skipped, not emitted as invalid SQL.
+    """
+
+    _SCHEMA = {
+        "tables": [
+            {
+                "name": "DS.base",
+                "columns": [
+                    {"name": "libelle", "type": "STRING"},
+                    {"name": "indicateur", "type": "STRING"},
+                    {"name": "valeur", "type": "FLOAT"},
+                ],
+            }
+        ]
+    }
+
+    def test_pivot_output_column_branch_skipped(self):
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_PIVOT_OUTPUT_SQL, [], "bigquery", schema=self._SCHEMA
+        )
+        # No branch may profile coalesce(Nb_ope, …) — that column isn't on DS.base.
+        for b in branches:
+            self.assertNotIn("Nb_ope", b)
+
+    def test_real_base_column_still_profiled(self):
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_PIVOT_OUTPUT_SQL, [], "bigquery", schema=self._SCHEMA
+        )
+        # libelle IS a real base column → its COALESCE must still be profiled.
+        self.assertTrue(
+            any("libelle" in b for b in branches),
+            "valid base-column derived expression should still be profiled",
+        )
+
+    def test_without_schema_no_validation(self):
+        # No schema → cannot validate; behaviour is unchanged (branch emitted).
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_PIVOT_OUTPUT_SQL, [], "bigquery", schema=None
+        )
+        self.assertTrue(any("Nb_ope" in b for b in branches))
+
+
 # ─── derived-expression profiling: alias reused across nested scopes ──────────
 
 
