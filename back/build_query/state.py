@@ -83,6 +83,12 @@ class QueryState(TypedDict):
         int
     ]  # counter of auto-built tests in this run (excludes the nominal test); drives the
     # loop-continuation decision in route_evaluator (built < tests_target - 1).
+    resume_batch: Optional[
+        bool
+    ]  # set by pre_routing when a first-gen multi-test batch was interrupted (tests exist on
+    # disk but fewer than tests_target). Routes straight to generate_single_suggestion to
+    # build the missing tests (skips rebuilding the nominal) and lets route_evaluator keep
+    # looping even though has_existing_tests is True.
     regenerate_suggestions: Optional[
         bool
     ]  # True when the user explicitly asks for fresh coverage suggestions (panel button):

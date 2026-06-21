@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from typing import Any, Dict
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from langchain_core.messages import AIMessage
@@ -163,6 +164,39 @@ async def _bad_data_exhausted(state: QueryState):
     }
 
 
+def _should_resume_batch(state: QueryState, test: dict) -> tuple[bool, int, int]:
+    """Décide si ce run reprend une boucle multi-tests interrompue.
+
+    Scénario : l'utilisateur a demandé N tests (``tests_target``, persisté sur le modèle dès
+    le début de la boucle), une coupure (réseau, crash LLM) est survenue après K<N tests
+    déjà checkpointés sur disque. Un simple re-run de la MÊME requête (sans saisie chat, sans
+    intention concurrente) doit alors construire les N-K tests restants au lieu de repartir de
+    zéro (ce qui dupliquerait le nominal) ou de clore direct via ``final_response``.
+
+    Retourne ``(resume, target, existing)`` — ``resume`` vrai seulement si la requête est
+    inchangée, des tests existent mais en nombre insuffisant, et aucun autre flux n'est
+    demandé (chat, suggestion, assertion, validation, rerun_all)."""
+    if state.get("input") or state.get("user_tables"):
+        return False, 0, 0
+    if any(
+        state.get(flag)
+        for flag in (
+            "suggestion_intent",
+            "assertion_only",
+            "rerun_only",
+            "regenerate_suggestions",
+            "validate_intent",
+            "rerun_all_tests",
+        )
+    ):
+        return False, 0, 0
+    # target = objectif persisté du batch (source de vérité), à défaut celui de la requête.
+    target = test.get("tests_target") or state.get("tests_target") or 1
+    existing = len(test.get("test_cases") or [])
+    resume = 0 < existing < target
+    return resume, target, existing
+
+
 async def pre_routing(state: QueryState):
     """
     Load stored sql + used_columns from the test file.
@@ -179,6 +213,31 @@ async def pre_routing(state: QueryState):
 
     model_context = load_model_context(test.get("model_name", ""))
     has_existing_tests = len(test.get("test_cases") or []) > 0
+
+    # Persiste l'objectif du batch dès le DÉBUT de la 1ʳᵉ génération (avant qu'un seul test
+    # ne soit construit) : ainsi, une coupure en cours de boucle laisse sur disque le N
+    # demandé, que la reprise lit pour savoir combien de tests il reste à construire.
+    incoming_target = state.get("tests_target") or 1
+    if not has_existing_tests and incoming_target > 1:
+        update_test(state["session"], {"tests_target": incoming_target})
+
+    # Reprise d'une boucle multi-tests interrompue : tests sur disque mais en nombre < N.
+    resume_batch, resume_target, resume_existing = _should_resume_batch(state, test)
+    resume_fields: Dict[str, Any] = {}
+    if resume_batch:
+        resume_fields = {
+            "resume_batch": True,
+            "tests_target": resume_target,
+            # auto_tests_built compte les tests EXTRA déjà construits (hors nominal) : E tests
+            # sur disque ⇒ E-1 extras. generate_single_suggestion reprendra à partir de là.
+            "auto_tests_built": max(resume_existing - 1, 0),
+        }
+        logger.diag(
+            "[pre_routing] reprise batch : %d/%d tests sur disque → construction des manquants",
+            resume_existing,
+            resume_target,
+        )
+
     stored_sql = (test.get("sql") or "").strip()
     stored_optimised_sql = (test.get("optimized_sql") or "").strip()
     stored_used_columns = test.get("used_columns") or []
@@ -209,6 +268,7 @@ async def pre_routing(state: QueryState):
             "model_context": model_context,
             "query_decomposed": stored_query_decomposed,
             "path_plans": stored_path_plans,
+            **resume_fields,
         }
 
     from models.schemas import get_profile
@@ -229,6 +289,7 @@ async def pre_routing(state: QueryState):
         "model_context": model_context,
         "query_decomposed": stored_query_decomposed,
         "path_plans": stored_path_plans,
+        **resume_fields,
     }
 
 
@@ -408,7 +469,9 @@ def route_evaluator(state: QueryState):
     # conversational_agent). Sinon, dernière étape : suggestions_generator (panneau, pas de
     # boucle). Ce point n'est atteint qu'une fois le test courant RÉGLÉ (les branches
     # bad_data / needs_validation / etc. ci-dessus sont prioritaires).
-    if not state.get("has_existing_tests"):
+    # Boucle active à la 1ʳᵉ génération (pas de tests préexistants) OU lors de la reprise d'un
+    # batch interrompu (resume_batch) : dans les deux cas on construit/complète jusqu'à N.
+    if not state.get("has_existing_tests") or state.get("resume_batch"):
         target = state.get("tests_target") or 1
         built = state.get("auto_tests_built") or 0
         if built < target - 1:
@@ -520,6 +583,11 @@ def build_query_graph():
                 "[route_input] → suggestions_generator (régénération à la demande)"
             )
             return "suggestions_generator"
+        if route == "resume_batch":
+            logger.diag(
+                "[route_input] → generate_single_suggestion (reprise boucle multi-tests)"
+            )
+            return "generate_single_suggestion"
         if len(state.get("used_columns", [])) == 0:
             logger.diag("[route_input] → executor (used_columns vides)")
             return "executor"
