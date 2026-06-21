@@ -1,6 +1,7 @@
 import datetime
 import difflib
 import json
+import re
 from typing import Optional, List
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage, AIMessage
@@ -482,6 +483,112 @@ def _build_min_points_agg_hint_block(sql: str, dialect: str = "bigquery") -> str
         "`ABS(corr) <= 0.5`), prévois **≥3 points dispersés** : 2 points donnent une "
         "corrélation parfaite (±1) qui serait exclue. La description doit décrire un "
         "scénario MULTI-entités, pas une entité unique.\n"
+    )
+
+
+# ── Pré-digestion structurelle du SQL (partagée entre prompts) ──────────────
+# Un aperçu compact du pipeline de CTEs, dérivé de `query_decomposed` (déjà produit
+# par le validator → aucun re-parse sqlglot). Détection des opérations par heuristique
+# regex (volontairement légère). Objectif : donner au LLM la CARTE de la requête
+# (ordre d'exécution, entrées de chaque étape, ce que chaque étape fait) au lieu de le
+# laisser ré-inférer la structure depuis le SQL brut. Réutilisable par tout prompt qui
+# dispose de `query_decomposed` (générateur, suggestions, suggestion unique…).
+
+# (motif regex, libellé) — premier match l'emporte par catégorie, ordre = priorité d'affichage.
+_DIGEST_OP_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bUNION\s+ALL\b", re.IGNORECASE), "union de branches"),
+    (re.compile(r"\bOVER\s*\(", re.IGNORECASE), "fenêtre"),
+    (
+        re.compile(
+            r"\bGROUP\s+BY\b|\b(?:SUM|COUNT|AVG|MIN|MAX|ARRAY_AGG|STRING_AGG)\s*\(",
+            re.IGNORECASE,
+        ),
+        "agrège",
+    ),
+    # JOIN relationnel : un JOIN dont le mot suivant n'est PAS UNNEST (aplatissement de tableau).
+    (re.compile(r"\bJOIN\s+(?!UNNEST\b)", re.IGNORECASE), "jointure"),
+    (re.compile(r"\bUNNEST\s*\(", re.IGNORECASE), "déplie un tableau"),
+    (re.compile(r"\b(?:WHERE|QUALIFY|HAVING)\b", re.IGNORECASE), "filtre"),
+    (re.compile(r"\bDISTINCT\b", re.IGNORECASE), "dédoublonne"),
+    (re.compile(r"\bLIMIT\b", re.IGNORECASE), "limite le nombre de lignes"),
+]
+
+
+def _digest_ops(code: str) -> list[str]:
+    """Opérations SQL d'une étape, détectées par heuristique regex (pas d'AST)."""
+    return [
+        label for pattern, label in _DIGEST_OP_PATTERNS if pattern.search(code or "")
+    ]
+
+
+def _digest_inputs(step: dict, cte_names: set[str]) -> list[str]:
+    """Entrées lisibles d'une étape : CTEs dont elle dépend + tables sources de base.
+    Les noms de CTE sont gardés tels quels ; les tables de base sont raccourcies à leur
+    nom court. Déduplique en conservant l'ordre."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for dep in step.get("dependencies") or []:
+        if dep and dep in cte_names and dep not in seen:
+            seen.add(dep)
+            out.append(f"`{dep}`")
+    for src in step.get("sources") or []:
+        table = (src or {}).get("table") if isinstance(src, dict) else None
+        if table:
+            short = table.split(".")[-1]
+            key = f"table:{short}"
+            if key not in seen:
+                seen.add(key)
+                out.append(f"table `{short}`")
+    return out
+
+
+def build_sql_digest(query_decomposed, max_steps: int = 20) -> str:
+    """Aperçu compact et ordonné du pipeline de CTEs, à injecter À CÔTÉ du SQL brut.
+
+    ``query_decomposed`` : la liste ``[{name, code, dependencies, sources}]`` produite par
+    le validator (acceptée aussi sous forme de chaîne JSON, comme stockée dans le state).
+    Retourne ``""`` quand la décomposition est absente, illisible, ou triviale (≤1 étape :
+    le SQL brut se suffit alors à lui-même). Aucune dépendance réseau ni re-parse sqlglot —
+    sûr à appeler dans n'importe quel prompt."""
+    if not query_decomposed:
+        return ""
+    try:
+        steps = (
+            json.loads(query_decomposed)
+            if isinstance(query_decomposed, str)
+            else query_decomposed
+        )
+    except Exception:
+        return ""
+    if not isinstance(steps, list) or len(steps) <= 1:
+        return ""
+
+    cte_names = {s.get("name") for s in steps if isinstance(s, dict) and s.get("name")}
+    lines: list[str] = []
+    for step in steps[:max_steps]:
+        if not isinstance(step, dict):
+            continue
+        name = step.get("name") or "?"
+        inputs = _digest_inputs(step, cte_names)
+        ops = _digest_ops(step.get("code", ""))
+        parts = [f"- `{name}`"]
+        if inputs:
+            parts.append(" ← " + ", ".join(inputs))
+        if ops:
+            parts.append(" · " + ", ".join(ops))
+        if name == "final_query":
+            parts.append(" · **résultat final**")
+        lines.append("".join(parts))
+
+    extra = len(steps) - max_steps
+    if extra > 0:
+        lines.append(f"- … (+{extra} étape(s))")
+
+    if not lines:
+        return ""
+    return (
+        "**Structure de la requête** (pipeline, dans l'ordre d'exécution — `étape` ← entrées · opérations) :\n"
+        + "\n".join(lines)
     )
 
 

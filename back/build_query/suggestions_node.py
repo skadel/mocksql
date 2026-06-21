@@ -13,8 +13,9 @@ from langchain_core.prompts import ChatPromptTemplate
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.path_slicer import ALL_PATH
-from build_query.prompt_tools import _format_profile_block
+from build_query.prompt_tools import _format_profile_block, build_sql_digest
 from build_query.state import QueryState
+from storage.config import is_native_thinking_active
 from storage.test_repository import get_test, update_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -70,7 +71,13 @@ _PITFALL_WINDOW = """Fonctions fenêtre (LAG, LEAD, RANK, etc.) :
 _PITFALL_STATS = """Algorithmes statistiques (z-score, anomalies, seuils dynamiques) :
 - Contamination du baseline : si une anomalie fait partie de la fenêtre de calcul de la moyenne/variance, elle tire le seuil vers le haut — exemple : stable pendant 11 mois, hausse en M+12, hausse similaire en M+13 → M+12 gonfle la variance et M+13 n'est plus détecté comme anomalie
 - Dérive progressive masquée : une série d'anomalies successives peut décaler le baseline progressivement sans qu'aucune ne dépasse le seuil individuellement
-- Fenêtre trop courte : en début de série, la variance est calculée sur peu de points, le z-score est instable et peut déclencher de faux positifs"""
+- Fenêtre trop courte : en début de série, la variance est calculée sur peu de points, le z-score est instable et peut déclencher de faux positifs
+- Percentile/médiane sur peu de points : un percentile (médiane, P90, etc.) calculé sur 1 ou 2 valeurs n'a pas de sens — l'interpolation renvoie une valeur plausible mais arbitraire, et un percentile « par fenêtre » (calculé sur toute la population au lieu d'un sous-groupe) mélange des populations qui ne devraient pas l'être"""
+
+_PITFALL_GROUPING = """Agrégats multi-niveaux (ROLLUP, CUBE, GROUPING SETS) :
+- Lignes de sous-total et de total global : ROLLUP/CUBE ajoutent des lignes où une ou plusieurs clés de regroupement valent NULL — ces NULL signifient « tous » (le total), pas une donnée absente. Sans GROUPING(), impossible de distinguer un vrai NULL métier d'une ligne de total → un filtre `WHERE col IS NOT NULL` ou un JOIN sur cette clé fait disparaître ou dédouble silencieusement les totaux
+- Double comptage en aval : ré-agréger ou sommer un résultat qui contient déjà des lignes de sous-total compte chaque valeur deux fois (une fois dans le détail, une fois dans le total)
+- Total global manquant ou en trop : selon que le métier attend une ligne « toutes catégories confondues », sa présence/absence change le nombre de lignes du rapport sans changer le détail"""
 
 _PITFALL_JOINS = """JOINs :
 - Fan-out silencieux : clé de jointure non-unique → multiplication des lignes avant agrégation, les SUM/COUNT sont gonflés sans erreur
@@ -78,7 +85,7 @@ _PITFALL_JOINS = """JOINs :
 - NULL dans la clé de jointure : un NULL ne matche jamais un autre NULL en SQL → lignes silencieusement perdues avec INNER JOIN"""
 
 _ALL_PITFALLS = "\n\n".join(
-    [_PITFALL_AGG, _PITFALL_WINDOW, _PITFALL_STATS, _PITFALL_JOINS]
+    [_PITFALL_AGG, _PITFALL_WINDOW, _PITFALL_STATS, _PITFALL_GROUPING, _PITFALL_JOINS]
 )
 
 # Fonctions d'agrégation statistique → déclenchent la section z-score/anomalies.
@@ -89,12 +96,23 @@ _STAT_FUNC_RE = re.compile(
 )
 
 
+def _has_real_table_join(tree: exp.Expression) -> bool:
+    """Vrai si le SQL contient un JOIN entre tables (relationnel), pas seulement un
+    ``CROSS/LEFT JOIN UNNEST(...)``. sqlglot représente l'aplatissement de tableau par
+    un ``exp.Join`` dont le ``this`` est un ``exp.Unnest`` — ce n'est PAS un join
+    relationnel et ne doit pas déclencher la section « fan-out / clé non-unique »."""
+    for join in tree.find_all(exp.Join):
+        if not isinstance(join.this, exp.Unnest):
+            return True
+    return False
+
+
 def _select_pitfalls(sql: str, dialect: str) -> str:
     """Ne garder que les sections du catalogue pertinentes pour ce SQL.
 
-    Détection via l'AST sqlglot (fenêtres, agrégats, joins) + regex (fonctions
-    statistiques). En cas d'échec de parsing, on retombe sur le catalogue complet
-    pour ne jamais perdre de couverture.
+    Détection via l'AST sqlglot (fenêtres, agrégats, grouping sets, joins) + regex
+    (fonctions statistiques). En cas d'échec de parsing, on retombe sur le catalogue
+    complet pour ne jamais perdre de couverture.
     """
     try:
         tree = sqlglot.parse_one(sql, dialect=dialect)
@@ -110,7 +128,9 @@ def _select_pitfalls(sql: str, dialect: str) -> str:
         sections.append(_PITFALL_WINDOW)
     if _STAT_FUNC_RE.search(sql):
         sections.append(_PITFALL_STATS)
-    if tree.find(exp.Join) is not None:
+    if tree.find(exp.Rollup, exp.Cube, exp.GroupingSets) is not None:
+        sections.append(_PITFALL_GROUPING)
+    if _has_real_table_join(tree):
         sections.append(_PITFALL_JOINS)
 
     return "\n\n".join(sections) if sections else _ALL_PITFALLS
@@ -407,6 +427,18 @@ async def generate_single_suggestion(state: QueryState):
     ``suggestions_generator``). Fallback : si le LLM ne rend rien, on pose tout de même
     ``suggestion_intent`` avec une consigne générique — le garde-fou ``route_agent_output``
     garantit qu'un test sort quand même."""
+    # Checkpoint incrémental : le test qui vient d'être réglé (dernier RESULTS) est
+    # persisté AVANT de lancer la génération du suivant — une coupure pendant la suite
+    # de la boucle ne fait alors plus perdre les tests déjà finis.
+    from utils.saver import persist_completed_tests
+
+    persisted = persist_completed_tests(state)
+    if persisted:
+        logger.diag(
+            "[single_suggestion] checkpoint : %d test(s) persisté(s) avant le tour suivant",
+            persisted,
+        )
+
     built = (state.get("auto_tests_built") or 0) + 1
     base = {"auto_tests_built": built, "suggestion_intent": True}
 
@@ -426,6 +458,7 @@ async def generate_single_suggestion(state: QueryState):
     )
     existing_block = existing or "Aucun test existant pour le moment."
     pitfalls_block = _select_pitfalls(sql, dialect)
+    sql_digest = build_sql_digest(state.get("query_decomposed"))
     profile_section = (
         f"Profil statistique réel des données :\n{profile_block}"
         if profile_block
@@ -441,6 +474,8 @@ async def generate_single_suggestion(state: QueryState):
 <sql>
 {sql}
 </sql>
+
+{sql_digest}
 
 Tests déjà générés (à ne PAS reproduire — propose un cas distinct) :
 <tests_existants>
@@ -467,6 +502,7 @@ détail d'implémentation). Renseigne aussi `analyse_des_manques` en une phrase.
             {
                 "dialect": dialect,
                 "sql": sql,
+                "sql_digest": sql_digest,
                 "existing_block": existing_block,
                 "profile_section": profile_section,
                 "pitfalls_block": pitfalls_block,
@@ -488,6 +524,13 @@ détail d'implémentation). Renseigne aussi `analyse_des_manques` en une phrase.
 
 async def generate_suggestions(state: QueryState):
     """Génère des suggestions de cas de tests non encore couverts et les émet comme message SUGGESTIONS."""
+
+    # Checkpoint incrémental : à la sortie de la boucle multi-tests, le dernier test réglé
+    # n'est pas encore persisté (history_saver ne tourne qu'après). Une coupure pendant
+    # cette génération de suggestions le perdrait — on le sauve d'abord (idempotent).
+    from utils.saver import persist_completed_tests
+
+    persist_completed_tests(state)
 
     # --- 1. Préparation des données ---
     test_cases = await retrieve_existing_tests(state["session"], state)
@@ -602,16 +645,35 @@ async def generate_suggestions(state: QueryState):
     )
 
     # --- 2. Construction du Prompt ---
+    # Quand le thinking natif est actif (flash/pro), le raisonnement se fait dans le
+    # canal de réflexion → `analyse_des_manques` ne porte qu'une conclusion brève (cf.
+    # schéma TestSuggestionsOutput). Demander un chain-of-thought *dans le JSON* le
+    # contredirait. Sinon (flash-lite / thinking coupé), le CoT in-schema est le seul
+    # raisonnement disponible : on le réclame explicitement.
+    native_thinking = is_native_thinking_active()
+    reasoning_directive = (
+        "Mène ton analyse dans ton canal de réflexion : comprends d'abord ce que fait le "
+        "SQL (quel algorithme, quel pattern métier), puis identifie les hypothèses implicites "
+        "sur les données. Dans `analyse_des_manques`, ne reporte que la conclusion (3-4 phrases)."
+        if native_thinking
+        else "Raisonne en mode chain-of-thought directement dans `analyse_des_manques` (3-4 phrases "
+        "max) : pars de ce que fait le SQL (quel algorithme, quel pattern métier), puis des "
+        "hypothèses implicites sur les données, avant de justifier le choix des suggestions."
+    )
+    system_prompt = (
+        MOCKSQL_PRODUCT_PREAMBLE
+        + """
+
+Ici, tu agis comme l'expert en assurance qualité et en tests unitaires SQL de MockSQL (dialecte: {dialect}). Tu proposes à l'utilisateur les cas de tests les plus utiles **non encore couverts**.
+Ton objectif est d'identifier les cas de tests les plus utiles — ceux où le résultat est contre-intuitif, ambigu, ou où l'ingénieur pourrait se tromper sur ce que la requête retourne réellement.
+"""
+        + reasoning_directive
+    )
     prompt_template = ChatPromptTemplate.from_messages(
         [
             (
                 "system",
-                MOCKSQL_PRODUCT_PREAMBLE
-                + """
-
-Ici, tu agis comme l'expert en assurance qualité et en tests unitaires SQL de MockSQL (dialecte: {dialect}). Tu proposes à l'utilisateur les cas de tests les plus utiles **non encore couverts**.
-Ton objectif est d'identifier les cas de tests les plus utiles — ceux où le résultat est contre-intuitif, ambigu, ou où l'ingénieur pourrait se tromper sur ce que la requête retourne réellement.
-Raisonne en mode chain-of-thought : commence par comprendre ce que fait le SQL (quel algorithme, quel pattern métier), puis identifie les hypothèses implicites sur les données, avant de proposer les suggestions.""",
+                system_prompt,
             ),
             (
                 "user",
@@ -619,6 +681,8 @@ Raisonne en mode chain-of-thought : commence par comprendre ce que fait le SQL (
 <sql>
 {sql}
 </sql>
+
+{sql_digest}
 
 {instruction_block}
 
@@ -633,7 +697,7 @@ Voici les tests déjà générés avec leurs données d'entrée, résultats d'ex
 
 Le bloc <suggestions_deja_proposees> liste les suggestions déjà traitées, regroupées par statut. Ne reproduis aucune d'elles, ni de variante proche : les **rejetées** ont été explicitement écartées par l'ingénieur, les **acceptées** sont déjà couvertes par un test existant, les **en attente** sont déjà affichées dans le panneau. Tes 3 nouvelles suggestions doivent être distinctes de toutes ces entrées.
 
-En t'appuyant sur les données d'entrée et les résultats de chaque test, identifie les cas non couverts : combinaisons de valeurs absentes, comportements limites non testés, scénarios que les données actuelles ne permettent pas de valider.
+{results_grounding}
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
 Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").
 
@@ -643,8 +707,15 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
 
 Pour ces patterns, formule la suggestion en décrivant uniquement le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite toute mention de fonctions SQL, d'opérateurs ou de détails d'implémentation — l'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *pourquoi techniquement*.
 
-Mauvais exemple : "Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
-Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la somme des totaux mensuels — un écart indiquerait des incidents invisibles dans le rapport annuel."
+Mauvais exemple (cite une fonction SQL, décrit la mécanique au lieu du symptôme métier) :
+"Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
+Bon exemple (symptôme métier observable, chiffrable, sans jargon) :
+"Vérifie que le total annuel d'incidents correspond bien à la somme des totaux mensuels — un écart signalerait des incidents rattachés à aucun mois, donc invisibles dans le rapport annuel."
+
+Autre mauvais exemple (banal, vrai par construction, n'apprend rien) :
+"Vérifie que la requête retourne des lignes quand il y a des données en entrée."
+Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
+"Vérifie qu'un client présent dans deux régions n'est compté qu'une fois dans le total national — sinon le total national dépasse la somme des effectifs réels."
 
 {prod_instruction_block}""",
             ),
@@ -662,6 +733,9 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
         else ""
     )
     pitfalls_block = _select_pitfalls(sql, dialect)
+    # Pré-digestion structurelle (pipeline de CTEs) injectée à côté du SQL brut — donne
+    # au LLM la carte de la requête sans qu'il ait à la ré-inférer (cf. build_sql_digest).
+    sql_digest = build_sql_digest(state.get("query_decomposed"))
     # Consigne [PROD] injectée seulement si un profil réel est disponible : sinon
     # le préfixe [PROD] serait un mensonge (aucune donnée de prod sous la main).
     prod_instruction_block = (
@@ -678,6 +752,24 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
         "et laisse le champ `rationale` vide pour toutes les suggestions."
     )
 
+    # #6 — Ne prétendre exploiter les résultats d'exécution que s'il existe au moins un
+    # test ayant réellement retourné des lignes. Si tous les tests sont vides ou en
+    # échec, il n'y a aucun résultat à analyser : on recentre la consigne sur la
+    # structure du SQL pour éviter une suggestion « contextualisée » sur du vide.
+    any_successful_result = any(
+        (build_test_detail(tc).get("row_count") or 0) > 0 for tc in test_cases
+    )
+    results_grounding = (
+        "En t'appuyant sur les données d'entrée ET les résultats d'exécution réels de chaque "
+        "test, identifie les cas non couverts : combinaisons de valeurs absentes, comportements "
+        "limites non testés, scénarios que les données actuelles ne permettent pas de valider."
+        if any_successful_result
+        else "Aucun test existant n'a encore produit de résultat exploitable (résultats vides ou "
+        "en échec) : ne prétends pas t'appuyer sur des résultats d'exécution. Raisonne depuis la "
+        "structure du SQL et les hypothèses implicites qu'il fait sur les données pour identifier "
+        "les cas non couverts."
+    )
+
     # Initialisés ici pour survivre à un échec LLM : les suggestions de path
     # (déterministes) doivent rester émises même si le LLM ne produit rien.
     suggestions: list[str] = []
@@ -688,12 +780,14 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
             _formatted = prompt_template.format_messages(
                 dialect=dialect,
                 sql=sql,
+                sql_digest=sql_digest,
                 instruction_block=instruction_block,
                 existing_tests_block=existing_tests_block,
                 prior_suggestions_block=prior_suggestions_block,
                 profile_section=profile_section,
                 pitfalls_block=pitfalls_block,
                 prod_instruction_block=prod_instruction_block,
+                results_grounding=results_grounding,
             )
             logger.diag(
                 "[suggestions] PROMPT LLM — system (extrait):\n%s",
@@ -710,12 +804,14 @@ Bon exemple : "Vérifie que le total annuel d'incidents correspond bien à la so
             {
                 "dialect": dialect,
                 "sql": sql,
+                "sql_digest": sql_digest,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,
                 "prior_suggestions_block": prior_suggestions_block,
                 "profile_section": profile_section,
                 "pitfalls_block": pitfalls_block,
                 "prod_instruction_block": prod_instruction_block,
+                "results_grounding": results_grounding,
             }
         )
         gap_analysis = (result.analyse_des_manques or "").strip()
