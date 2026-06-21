@@ -20,6 +20,57 @@ def get_message_type(m: BaseMessage) -> str:
     return m.additional_kwargs.get("type", "")
 
 
+def persist_completed_tests(state: QueryState) -> int:
+    """Checkpoint incrémental : persiste sur disque les test_cases déjà terminés (dernier
+    message RESULTS du state) sans attendre ``history_saver``.
+
+    Idempotent — ``merge_test_cases`` fusionne par ``test_index``, donc rejouer le même
+    RESULTS écrase proprement. Appelé aux frontières de la boucle multi-tests pour qu'une
+    coupure (réseau, crash LLM) en cours de génération ne fasse pas perdre les tests déjà
+    finis : au pire on perd le test en cours, jamais les précédents. Au reload,
+    ``GET /getMessages`` relit ``test_results`` depuis le fichier → les tests survivent.
+
+    Retourne le nombre de test_cases persistés (0 si rien à faire)."""
+    results_msgs = [
+        m for m in state.get("messages", []) if get_message_type(m) == MsgType.RESULTS
+    ]
+    if not results_msgs:
+        return 0
+    last_results = results_msgs[-1]
+    is_rerun_all = last_results.additional_kwargs.get("rerun_all", False)
+    try:
+        new_results = json.loads(last_results.content)
+    except (json.JSONDecodeError, TypeError):
+        return 0
+    if not isinstance(new_results, list):
+        new_results = [new_results]
+    if not new_results:
+        return 0
+    merge_test_cases(state["session"], new_results, rerun_all=is_rerun_all)
+
+    # Stash le minimum nécessaire pour REPRENDRE la boucle multi-tests après une coupure.
+    # Sans ces champs sur disque, ``pre_routing`` au re-run verrait un SQL « différent »
+    # (sql stocké vide) → re-validation complète, perte du contexte et reconstruction du
+    # nominal. En les checkpointant ici (idempotent), un reload retrouve la voie rapide et
+    # peut enchaîner directement sur la construction des tests manquants.
+    ctx: Dict[str, Any] = {}
+    raw_sql = (state.get("query") or "").strip()
+    if raw_sql:
+        ctx["sql"] = raw_sql
+    optimized = (state.get("optimized_sql") or "").strip()
+    if optimized:
+        ctx["optimized_sql"] = optimized
+    if state.get("used_columns"):
+        ctx["used_columns"] = state["used_columns"]
+    if state.get("query_decomposed"):
+        ctx["query_decomposed"] = state["query_decomposed"]
+    if state.get("tests_target"):
+        ctx["tests_target"] = state["tests_target"]
+    if ctx:
+        update_test(state["session"], ctx)
+    return len(new_results)
+
+
 async def history_saver(state: QueryState) -> Dict[str, str]:
     """
     Sauvegarde l'historique des messages (DuckDB/Postgres) et persiste les
@@ -131,17 +182,9 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
                     },
                 )
 
-    # Persister les résultats (merge par test_index)
-    results_msgs = [
-        m for m in state["messages"] if get_message_type(m) == MsgType.RESULTS
-    ]
-    if results_msgs:
-        last_results = results_msgs[-1]
-        is_rerun_all = last_results.additional_kwargs.get("rerun_all", False)
-        new_results = json.loads(last_results.content)
-        if not isinstance(new_results, list):
-            new_results = [new_results]
-        merge_test_cases(session, new_results, rerun_all=is_rerun_all)
+    # Persister les résultats (merge par test_index). Même logique que le checkpoint
+    # incrémental de la boucle multi-tests — factorisée dans persist_completed_tests.
+    persist_completed_tests(state)
 
     # Persister le profil dans schema_cache (partagé entre tous les modèles)
     profile_msgs = [

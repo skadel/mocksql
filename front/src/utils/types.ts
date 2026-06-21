@@ -205,6 +205,9 @@ export interface BuildModelState {
     suggestionRationales: Record<string, string>;
     loadingTestIndex?: number;
     retryBadDataTestIndex?: number | null;
+    /** Objectif du batch multi-tests (N demandé). Si testResults.length < testsTarget,
+     *  la boucle a été interrompue → on propose la reprise. */
+    testsTarget?: number;
 }
 
 

@@ -34,6 +34,7 @@ const initialState: BuildModelState = {
   suggestions: [],
   suggestionRationales: {},
   retryBadDataTestIndex: undefined,
+  testsTarget: undefined,
 };
 
 // Fonction utilitaire pour remonter du message jusqu'à la racine
@@ -359,13 +360,15 @@ export const buildModelSlice = createSlice({
       state.suggestions = [];
       state.suggestionRationales = {};
     })
-      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; suggestions?: string[]; suggestion_rationales?: Record<string, string>; restored_message_id?: string | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
-        const { messages, sql, optimized_sql, test_results, suggestions, suggestion_rationales, restored_message_id, last_error, sql_history } = action.payload;
+      .addCase(getMessages.fulfilled, (state, action: PayloadAction<{ messages: any[]; sql: string | null; optimized_sql: string | null; test_results: any[]; suggestions?: string[]; suggestion_rationales?: Record<string, string>; restored_message_id?: string | null; tests_target?: number | null; last_error?: string | null; sql_history?: SqlHistoryEntry[] }>) => {
+        const { messages, sql, optimized_sql, test_results, suggestions, suggestion_rationales, restored_message_id, tests_target, last_error, sql_history } = action.payload;
         state.error = '';
         state.loading = false;
         if (sql) state.query = sql;
         if (optimized_sql) state.optimizedQuery = optimized_sql;
         if (test_results?.length) state.testResults = test_results;
+        // Objectif du batch : sert à détecter une boucle multi-tests interrompue (reprise).
+        state.testsTarget = tests_target ?? undefined;
         // Suggestions = état du modèle (panneau dédié), chargé comme test_results.
         if (suggestions?.length) state.suggestions = suggestions;
         state.suggestionRationales = suggestion_rationales ?? {};

@@ -81,6 +81,9 @@ async def get_messages(body: MessageRequest):
         suggestions = test.get("suggestions", []) if test else []
         suggestion_rationales = test.get("suggestion_rationales", {}) if test else {}
         restored_message_id = test.get("restored_message_id") if test else None
+        # Objectif du batch multi-tests (N demandé). Sert au front à détecter une boucle
+        # interrompue (len(test_results) < tests_target) et à proposer la reprise.
+        tests_target = test.get("tests_target") if test else None
 
         # Fallback: extract from last results message in history
         if not test_results:
@@ -102,6 +105,7 @@ async def get_messages(body: MessageRequest):
             "suggestions": suggestions,
             "suggestion_rationales": suggestion_rationales,
             "restored_message_id": restored_message_id,
+            "tests_target": tests_target,
             "last_error": last_error or "",
             "sql_history": [],
         }

@@ -206,6 +206,7 @@ const ChatComponent: React.FC = () => {
     lastError,
     testResults,
     retryBadDataTestIndex,
+    testsTarget: storedTestsTarget,
   } = useAppSelector((state) => state.buildModel);
 
   const messagesRef = useRef(messages);
@@ -1118,6 +1119,37 @@ const ChatComponent: React.FC = () => {
     dispatchChatQuery(lastChatQueryArgsRef.current);
   }, [dispatch, dispatchChatQuery]);
 
+  // Reprise d'une boucle multi-tests interrompue : on a demandé N tests mais seuls K<N sont
+  // sur disque (coupure réseau/crash). Re-dispatcher la MÊME requête fait reprendre le batch
+  // côté backend (pre_routing détecte tests sur disque < tests_target → construit les manquants,
+  // sans reconstruire le nominal). Visible même après un reload (tests_target chargé via getMessages).
+  const builtTestsCount = testResults?.length ?? 0;
+  const canResumeBatch =
+    !loading &&
+    !!storedQuery &&
+    !!storedTestsTarget &&
+    builtTestsCount > 0 &&
+    builtTestsCount < storedTestsTarget;
+
+  const handleResume = useCallback(() => {
+    if (!storedQuery || !currentModelId) return;
+    setSubmitError(null);
+    dispatch(setError(''));
+    isGeneratingRef.current = true;
+    setPendingFirstLoad(true);
+    dispatchChatQuery({
+      userInput: '',
+      sessionId: currentModelId,
+      project: '',
+      dialect: DIALECT,
+      query: storedQuery,
+      ChangedMessageId: '',
+      t,
+      parentMessageId: '',
+      testsTarget: storedTestsTarget,
+    });
+  }, [storedQuery, currentModelId, DIALECT, storedTestsTarget, t, dispatch, dispatchChatQuery]);
+
   const handleAddTest = useCallback(() => {
     setSelectedTestIndex(null);
     setAddTestTrigger(n => n + 1);
@@ -1279,8 +1311,28 @@ const ChatComponent: React.FC = () => {
       }}
     >
       {/* Workspace-mode alerts */}
-      {uiPhase === 'workspace' && (submitError || (lastError && !lastErrorDismissed) || missingTables) && (
+      {uiPhase === 'workspace' && (submitError || (lastError && !lastErrorDismissed) || missingTables || canResumeBatch) && (
         <Box sx={{ flexShrink: 0, px: 2, pt: 1 }}>
+          {canResumeBatch && !missingTables && (
+            <Alert
+              severity="info"
+              sx={{ borderRadius: '12px', mb: 1 }}
+              action={
+                <Button
+                  size="small"
+                  color="inherit"
+                  variant="outlined"
+                  startIcon={<RefreshRoundedIcon sx={{ fontSize: 16 }} />}
+                  onClick={handleResume}
+                  sx={{ whiteSpace: 'nowrap', textTransform: 'none', ml: 1 }}
+                >
+                  Reprendre la génération
+                </Button>
+              }
+            >
+              {`Génération interrompue : ${builtTestsCount}/${storedTestsTarget} tests construits. Reprends pour générer les ${storedTestsTarget! - builtTestsCount} manquants.`}
+            </Alert>
+          )}
           {submitError && (
             <Alert
               severity="error"

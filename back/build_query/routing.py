@@ -43,6 +43,13 @@ async def routing(state: QueryState):
         logger.diag("[routing] → suggestions (regenerate_suggestions présent)")
         return {"route": "suggestions"}
 
+    # Reprise d'une boucle multi-tests interrompue (posée par pre_routing) : on saute le
+    # générateur (pas de reconstruction du nominal) et on attaque directement la production
+    # du prochain test manquant via generate_single_suggestion.
+    if state.get("resume_batch"):
+        logger.diag("[routing] → resume_batch (reprise boucle multi-tests)")
+        return {"route": "resume_batch"}
+
     user_tables = state.get("user_tables")
     if user_tables:
         logger.diag("[routing] → executor (user_tables présent)")
