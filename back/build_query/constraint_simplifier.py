@@ -3071,15 +3071,27 @@ def detect_select_derived_expressions(
 
     # Build alias map from every Table node in the AST — more robust than
     # _collect_aliases which relies on "from" key (renamed "from_" in newer sqlglot).
+    # Keys and values are lowercased so resolution stays case-insensitive (and the
+    # lineage resolver, which compares against lowercased CTE names, is unaffected).
     alias_map: dict[str, str] = {}
+    # Lowercased full/short name → ORIGINAL-case full name. Used only to restore the
+    # source-table casing in the result: these names end up in the profiling FROM
+    # clause, and BigQuery dataset names are case-sensitive (a lowercased dataset
+    # 404s "Dataset … not found"). Resolution itself keeps using alias_map.
+    orig_case: dict[str, str] = {}
     for tbl in statement.find_all(exp.Table):
         parts = [p for p in [tbl.catalog, tbl.db, tbl.name] if p]
-        real_full = ".".join(parts).lower()
+        real_full_orig = ".".join(parts)
+        real_full = real_full_orig.lower()
         real_short = tbl.name.lower()
         alias = tbl.alias.lower() if tbl.alias else real_full
         alias_map[alias] = real_full
         alias_map[real_short] = real_full
         alias_map[real_full] = real_full
+        orig_case.setdefault(real_full, real_full_orig)
+        # Map the bare table name too, so resolver-returned base tables (which carry
+        # only the last segment, lowercased) can be lifted back to the full name.
+        orig_case.setdefault(real_short, real_full_orig)
 
     seen: set[str] = set()
     results: list[dict] = []
@@ -3100,13 +3112,13 @@ def detect_select_derived_expressions(
             if ref.table == "__unknown__":
                 # Unqualified column — infer source table only when unambiguous
                 if len(unique_real_tables) == 1:
-                    tables.update(unique_real_tables)
+                    tables.update(orig_case.get(t, t) for t in unique_real_tables)
                 continue
             resolved_list = resolver.resolve_all(ref)
             for resolved in resolved_list:
                 tbl = resolved.real_table or resolved.table
                 if tbl and tbl != "__unknown__":
-                    tables.add(tbl)
+                    tables.add(orig_case.get(tbl, tbl))
         return sorted(tables)
 
     def _col_refs_for(node: exp.Expression) -> list[tuple[str, str]]:

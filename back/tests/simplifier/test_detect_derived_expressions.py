@@ -118,6 +118,29 @@ class TestSourceTableResolution:
         assert "ta" in r["source_tables"]
         assert "tb" in r["source_tables"]
 
+    def test_mixed_case_dataset_preserved_qualified(self):
+        # BigQuery dataset names are case-sensitive: the resolved source table must
+        # keep the original case, not be lowercased (else the profiling FROM 404s).
+        sql = (
+            "SELECT COALESCE(t.x, 'Global') "
+            "FROM `MyProject.MARKETING_Reporting.daily_sales` t"
+        )
+        results = detect_select_derived_expressions(sql, "bigquery")
+        r = find_expr(results, "COALESCE")
+        assert r is not None
+        assert "MyProject.MARKETING_Reporting.daily_sales" in r["source_tables"]
+
+    def test_mixed_case_dataset_preserved_unqualified(self):
+        # Unqualified column, single base table → inferred source must keep case.
+        sql = (
+            "SELECT COALESCE(libelle, 'Global') "
+            "FROM `MARKETING_Reporting.datamart_commercants`"
+        )
+        results = detect_select_derived_expressions(sql, "bigquery")
+        r = find_expr(results, "COALESCE")
+        assert r is not None
+        assert "MARKETING_Reporting.datamart_commercants" in r["source_tables"]
+
 
 # ─── CTE lineage resolution ───────────────────────────────────────────────────
 
