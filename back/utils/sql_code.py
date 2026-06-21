@@ -419,8 +419,51 @@ def get_all_columns_with_sources(
             out.append((project_text, database_text, table_name_text, alias_text, cols))
         return out
 
+    def _pivot_aliases(scope):
+        """Map alias_pivot.lower() → (table de base, valeurs générées par le pivot).
+
+        En BigQuery, ``PIVOT`` expose dans sa sortie les colonnes de base qui ne
+        sont ni la valeur agrégée ni la colonne ``FOR`` (colonnes de regroupement
+        implicites), plus une colonne par valeur de la liste ``IN``. Les premières
+        proviennent de la table de base ; il faut donc rattacher toute référence
+        ``alias_pivot.col`` (où ``col`` n'est pas une valeur générée) à cette table.
+        """
+        out: dict[str, tuple] = {}
+        for source in scope.sources.values():
+            if not isinstance(source, exp.Table):
+                continue
+            pivots = source.args.get("pivots") or []
+            for pivot in pivots:
+                if pivot.args.get("unpivot"):
+                    continue
+                alias = pivot.args.get("alias")
+                alias_name = alias.text("this") if alias else None
+                if not alias_name:
+                    continue
+                value_cols: set[str] = set()
+                for field in pivot.args.get("fields") or []:
+                    for value in field.find_all(exp.Alias, exp.Literal):
+                        name = (
+                            value.alias if isinstance(value, exp.Alias) else value.name
+                        )
+                        if name:
+                            value_cols.add(name.lower())
+                table_token = source.this
+                table_name_text = table_token.this if table_token else alias_name
+                tbl_alias = source.args.get("alias")
+                alias_text = tbl_alias.text("this") if tbl_alias else table_name_text
+                out[alias_name.lower()] = (
+                    source.catalog,
+                    source.db,
+                    table_name_text,
+                    alias_text,
+                    value_cols,
+                )
+        return out
+
     def _extract(scope) -> None:
         base_tables = None  # résolu paresseusement, seulement si besoin
+        pivot_aliases = None  # résolu paresseusement, seulement si besoin
         for column in scope.columns:
             table_alias = column.table
 
@@ -471,8 +514,32 @@ def get_all_columns_with_sources(
                             column.name,
                         )
             else:
-                # table_alias présent mais hors sources (ex. réf. corrélée externe)
+                # table_alias présent mais hors sources. Cas PIVOT : l'alias
+                # virtuel du pivot porte les colonnes de regroupement implicites,
+                # qui proviennent de la table de base.
                 if not table_alias:
+                    continue
+                if pivot_aliases is None:
+                    pivot_aliases = _pivot_aliases(scope)
+                pivot = pivot_aliases.get(table_alias.lower())
+                if pivot is not None:
+                    (
+                        project_text,
+                        database_text,
+                        table_name_text,
+                        alias_text,
+                        value_cols,
+                    ) = pivot
+                    if column.name.lower() not in value_cols:
+                        _record(
+                            project_text,
+                            database_text,
+                            table_name_text,
+                            alias_text,
+                            column.name,
+                        )
+                        continue
+                    # Colonne générée par le pivot : pas une colonne de base.
                     continue
                 _record(None, None, table_alias, table_alias, column.name)
 
