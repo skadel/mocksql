@@ -3,10 +3,13 @@ import json
 import logging
 import re
 from collections import defaultdict
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from google.cloud import bigquery
 
 import sqlglot
 from sqlglot._typing import E
-from google.cloud import bigquery
 from langchain_core.messages import AIMessage
 from sqlglot import MappingSchema
 from sqlglot import expressions as exp
@@ -23,10 +26,13 @@ from utils.timing import atimed, timed
 
 logger = logging.getLogger(__name__)
 
-_bq_client: bigquery.Client | None = None
+_bq_client: "bigquery.Client | None" = None
 
 
-def _get_bq_client() -> bigquery.Client:
+def _get_bq_client() -> "bigquery.Client":
+    from utils.optional_deps import import_bigquery
+
+    bigquery = import_bigquery()
     global _bq_client
     if _bq_client is None:
         _bq_client = bigquery.Client(project=BQ_TEST_PROJECT)
@@ -294,7 +300,10 @@ async def compile_query(sql_code, project, dialect):
         raise ValueError(f"Unsupported dialect: {dialect}")
 
 
-def run_query(sql, dry=True) -> bigquery.QueryJob:
+def run_query(sql, dry=True) -> "bigquery.QueryJob":
+    from utils.optional_deps import import_bigquery
+
+    bigquery = import_bigquery()
     # Validate the query
     # This will raise an error if the query is not valid
     job_config = bigquery.QueryJobConfig(dry_run=dry, use_query_cache=False)

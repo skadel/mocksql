@@ -352,8 +352,9 @@ async def fetch_tables_schema(
       - failed: list of {"table": ref, "error": msg}
       - partitions: {ref: {"type": "time"|"range", "granularity": str, "field": str|None}}
     """
-    from google.cloud import bigquery as _bq
+    from utils.optional_deps import import_bigquery
 
+    _bq = import_bigquery()
     client = _bq.Client(project=billing_project)
     sem = asyncio.Semaphore(concurrency)
     tasks = [_fetch_single_table(sem, client, ref, billing_project) for ref in refs]

@@ -37,6 +37,19 @@ mocksql generate models/my_model.sql
 
 For the full setup (GCP, IAM, Web UI, development) → **[docs/quickstart.md](docs/quickstart.md)**
 
+### Installation & optional connectors
+
+The base install stays lightweight: data generation and execution run entirely on **DuckDB**, with no warehouse client pulled in. The source-warehouse connectors are heavy (they bring `pyarrow`, `grpc`, …) and are only needed to **profile or import** real tables — so they ship as optional extras:
+
+```bash
+pip install mocksql              # core: generate + DuckDB execution + CI replay
+pip install mocksql[bigquery]    # + profiling/import from BigQuery
+pip install mocksql[snowflake]   # + profiling/import from Snowflake
+pip install mocksql[all]         # all connectors
+```
+
+If you run a profiling/import step without the matching extra, MockSQL fails fast with the exact `pip install mocksql[…]` command to run.
+
 ---
 
 ## dbt projects

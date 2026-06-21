@@ -92,8 +92,9 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
         typer.echo("[ERROR] No schemas available — cannot profile.")
         raise typer.Exit(1)
 
-    from google.cloud import bigquery as _bq
+    from utils.optional_deps import import_bigquery
 
+    _bq = import_bigquery()
     client = _bq.Client(project=billing_project)
 
     def executor(bq_sql: str) -> list[dict]:

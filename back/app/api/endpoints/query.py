@@ -357,7 +357,7 @@ class AutoProfileRequest(BaseModel):
 @router.post("/auto-profile")
 async def auto_profile_route(body: AutoProfileRequest):
 
-    from google.cloud import bigquery as _bq
+    from utils.optional_deps import import_bigquery
     from build_query.profile_checker import (
         _normalize_profile,
         _load_model_profile,
@@ -367,6 +367,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         enrich_tables_with_partition_window,
     )
 
+    _bq = import_bigquery()
     billing_project = BQ_TEST_PROJECT
     client = _bq.Client(project=billing_project)
 

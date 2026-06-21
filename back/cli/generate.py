@@ -533,11 +533,12 @@ def _run_profile_bq(
     schemas: list[dict], sql: str, dialect: str, billing_project: str
 ) -> dict:
     """Run BigQuery profiling queries and return a normalized profile dict."""
-    from google.cloud import bigquery as _bq
+    from utils.optional_deps import import_bigquery
 
     from build_query.profile_checker import _to_profiler_schema
     from build_query.profiler import profile_joins_for_query, profile_schema
 
+    _bq = import_bigquery()
     client = _bq.Client(project=billing_project)
 
     def executor(bq_sql: str) -> list[dict]:

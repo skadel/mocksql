@@ -79,6 +79,16 @@ In CI/CD, inject `GOOGLE_APPLICATION_CREDENTIALS` as a secret environment variab
 pip install mocksql
 ```
 
+The base install is intentionally lightweight: data generation and execution run entirely on **DuckDB**, with no warehouse client. The source-warehouse connectors are heavy (`pyarrow`, `grpc`, …) and only needed to **profile or import** real tables, so they ship as optional extras:
+
+```bash
+pip install mocksql[bigquery]    # + profiling/import from BigQuery
+pip install mocksql[snowflake]   # + profiling/import from Snowflake
+pip install mocksql[all]         # all connectors
+```
+
+If you trigger a profiling/import step without the matching extra installed, MockSQL fails fast with the exact `pip install mocksql[…]` command to run. Since the default `dialect` is `bigquery`, profiling against BigQuery sources requires `mocksql[bigquery]`.
+
 ### Environment variables
 
 MockSQL reads its GCP configuration from environment variables. The priority is:
