@@ -568,6 +568,30 @@ async def conversational_agent(state: QueryState):
         else "Aucune suggestion active pour l'instant."
     )
 
+    # L'outil generate_suggestions n'est exposé que s'il existe au moins un test
+    # (cf. gating de suggestion_tools plus bas) : on n'en décrit l'usage dans le
+    # prompt que dans ce cas, pour ne pas inviter à appeler un outil absent.
+    suggestions_tool_note = (
+        (
+            "Tu peux générer des suggestions toi-même avec `generate_suggestions` ; passe "
+            "dans `instructions` le commentaire de l'utilisateur (ex : « focus sur les cas "
+            "limites », « des cas qui existent en prod ») pour orienter les propositions. "
+            f"Règles du plafond de {SUGGESTIONS_CAP} :\n"
+            "- Par défaut, les nouvelles suggestions s'AJOUTENT aux existantes (appel sans `replace`).\n"
+            "- Si l'utilisateur demande de « remplacer » / « refaire » les suggestions → "
+            "appelle `generate_suggestions` avec `replace=True`.\n"
+            f"- Si les {SUGGESTIONS_CAP} suggestions sont déjà présentes et qu'il en veut plus "
+            f"SANS remplacer → n'appelle pas l'outil : explique-lui qu'il a atteint le maximum "
+            f"de {SUGGESTIONS_CAP} et qu'il peut en supprimer dans le panneau ou demander un "
+            "remplacement."
+        )
+        if existing_tests
+        else (
+            "Il n'y a encore aucun test : commence par en générer un avec "
+            "`generate_test_data` avant toute suggestion de couverture."
+        )
+    )
+
     # Contexte injecté quand l'agent est appelé après un verdict "bad_data" de l'évaluateur
     evaluation_feedback = state.get("evaluation_feedback")
     eval_context, eval_test_idx = _build_agent_eval_context(state, existing_tests)
@@ -700,10 +724,7 @@ Suggestions de couverture actives ({suggestions_count}/{SUGGESTIONS_CAP} — max
 {suggestions_summary}
 
 Si l'utilisateur fait référence à une suggestion (« la suggestion 2 », « le cas que tu as proposé sur les NULL »…), appuie-toi sur cette liste pour savoir de quoi il parle, puis agis : `generate_test_data` pour en faire un nouveau test, ou étends un test existant si le scénario recoupe largement.
-Tu peux générer des suggestions toi-même avec `generate_suggestions` ; passe dans `instructions` le commentaire de l'utilisateur (ex : « focus sur les cas limites », « des cas qui existent en prod ») pour orienter les propositions. Règles du plafond de {SUGGESTIONS_CAP} :
-- Par défaut, les nouvelles suggestions s'AJOUTENT aux existantes (appel sans `replace`).
-- Si l'utilisateur demande de « remplacer » / « refaire » les suggestions → appelle `generate_suggestions` avec `replace=True`.
-- Si les {SUGGESTIONS_CAP} suggestions sont déjà présentes et qu'il en veut plus SANS remplacer → n'appelle pas l'outil : explique-lui qu'il a atteint le maximum de {SUGGESTIONS_CAP} et qu'il peut en supprimer dans le panneau ou demander un remplacement.
+{suggestions_tool_note}
 
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
@@ -883,23 +904,41 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         question : la question à poser à l'utilisateur (claire, concise, en français)."""
         return question
 
+    # Outils indépendants de l'existence d'un test : démarrer, clarifier, ou mémoriser
+    # une règle métier (qui peut être énoncée avant tout test).
     base_tools = [
         ask_clarification,
         generate_test_data,
-        delete_test,
-        update_test_data,
-        update_test_description,
-        generate_suggestions,
-        request_reevaluation,
-        patch_test_field,
-        remove_test_row,
-        add_test_row,
         note_lesson,
     ]
+    # Outils qui opèrent sur un test EXISTANT (identifié par test_uid) : inutiles tant
+    # qu'aucun test n'a tourné, et source d'un test_uid halluciné s'ils sont exposés à
+    # vide. Gatés sur existing_tests, comme generate_suggestions ci-dessous.
+    existing_test_tools = (
+        [
+            delete_test,
+            update_test_data,
+            update_test_description,
+            request_reevaluation,
+            patch_test_field,
+            remove_test_row,
+            add_test_row,
+        ]
+        if existing_tests
+        else []
+    )
     debug_tools = [run_cte] if debug_retries > 0 else []
     # set_target_path n'est exposé que sur les SQL à branches UNION ALL (catalogue présent).
+    # Utile même sans test : un clic « Tester la branche X » crée un nouveau test focalisé.
     path_tools = [set_target_path] if valid_paths else []
-    llm = make_llm().bind_tools(base_tools + debug_tools + path_tools)
+    # generate_suggestions ne sert que face à des tests existants : une suggestion est un
+    # MANQUE de couverture, calculé par rapport aux tests déjà là. Sans aucun test, l'outil
+    # n'a rien à comparer (le suggestions_node early-return sur liste vide) → on ne l'expose
+    # pas, pour éviter un appel no-op et le bruit dans le prompt.
+    suggestion_tools = [generate_suggestions] if existing_tests else []
+    llm = make_llm().bind_tools(
+        base_tools + existing_test_tools + debug_tools + path_tools + suggestion_tools
+    )
     history = get_history_from_state(
         state,
         msg_type=[
