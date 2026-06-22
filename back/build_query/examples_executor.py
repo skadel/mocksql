@@ -8,7 +8,7 @@ from typing import List, Dict, Any, Literal, Optional
 import sqlglot
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pandas import DataFrame
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, create_model, model_validator
 from sqlglot import exp
 from sqlglot.optimizer.simplify import simplify
 
@@ -219,6 +219,11 @@ class _Assertion(BaseModel):
             "exprimée directement (jamais sa négation). MockSQL la négocie lui-même "
             "pour produire la requête de validation. "
             "✓ Bon : `date = '2016-01-02'`, `amount > 0`. "
+            "⚠️ FLOATS — n'utilise JAMAIS `=` strict sur une colonne flottante (z-score, "
+            "moyenne, STDDEV, ratio, pourcentage) : l'égalité exacte est non-déterministe "
+            "(ordre d'agrégation, précision). Pince via `ROUND(col, 2) = 1.35` ou "
+            "`ABS(col - 1.35) < 0.01`. L'égalité exacte n'est sûre que pour entiers, dates "
+            "et chaînes. "
             "⚠️ Testée sur CHAQUE ligne : `z_score = (SELECT MAX(z_score) FROM __result__)` "
             "n'est correcte que si `__result__` a UNE seule ligne. Sur un résultat "
             "MULTI-lignes, viser une ligne précise (le min/max, la 1ʳᵉ) échoue sur toutes "
@@ -274,8 +279,20 @@ class DiagnosticBlock(BaseModel):
     affected_ctes: List[str]
 
 
+_REASONING_DESC_NATIVE = (
+    "**1 phrase maximum.** Justification courte : quel comportement SQL est ciblé et "
+    "pourquoi les données et les assertions le couvrent. Le raisonnement détaillé est fait "
+    "nativement (canal thinking) en amont — ne le duplique pas ici."
+)
+_REASONING_DESC_FULL = (
+    "**3 phrases maximum.** Seul chain-of-thought disponible : intention du test, cohérence "
+    "données↔résultat, et qualité des assertions (pincent-elles une valeur concrète ?). "
+    "Reste sous la limite pour ne pas tronquer le JSON sur les requêtes complexes."
+)
+
+
 class _AssertionsAndEvaluation(BaseModel):
-    reasoning: str  # chain-of-thought: intention du test, cohérence données/résultat, qualité des assertions
+    reasoning: str = Field(description=_REASONING_DESC_FULL)
     assertions: List[_Assertion] = Field(min_length=1)
     verdict: Literal["Excellent", "Bon", "Insuffisant"]
     reason_type: Optional[
@@ -317,6 +334,23 @@ class _AssertionsAndEvaluation(BaseModel):
                 affected_ctes=[],
             )
         return self
+
+
+def _build_assertion_eval_output_type(native_thinking: bool):
+    """Type de sortie structurée pour l'éval d'assertions, avec la longueur du champ
+    `reasoning` adaptée au mode de raisonnement (cf. get_generation_output_type dans
+    examples_generator). Quand le thinking natif Gemini est actif (flash/pro), le vrai
+    raisonnement se fait hors JSON → `reasoning` n'est qu'une justification d'1 phrase
+    (coût output négligeable, pas de troncature). Sinon, c'est le seul CoT disponible
+    → capé à 3 phrases. Sous-classe `_AssertionsAndEvaluation` : tous les autres champs
+    et le model_validator sont hérités tels quels."""
+    if not native_thinking:
+        return _AssertionsAndEvaluation
+    return create_model(
+        "_AssertionsAndEvaluationNative",
+        __base__=_AssertionsAndEvaluation,
+        reasoning=(str, Field(description=_REASONING_DESC_NATIVE)),
+    )
 
 
 def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
@@ -1679,194 +1713,106 @@ Le message suivant contient ces sections, délimitées par des balises :
   ci-dessous (notamment l'interdiction des assertions triviales et négatives).
 - `<task>` : ce que tu dois produire.
 
-**Méthode — commence par raisonner à voix haute (`reasoning`, 3–5 phrases) :**
-- Quelle est l'intention de ce test ? Quel comportement SQL veut-il vérifier ?
+**Méthode — raisonne d'abord brièvement dans `reasoning`, puis produis assertions + verdict :**
+- Quelle est l'intention du test ? Quel comportement SQL veut-il vérifier ?
 - Les données d'entrée sont-elles cohérentes avec cette intention (types, cardinalité, cas limites) ?
-- Si la requête contient GROUP BY + agrégat (COUNT, STDDEV, AVG, SUM, MAX…) : est-ce que
-  TOUS les groupes ont exactement la même cardinalité ? Ex : 1 ligne par groupe partout →
-  COUNT=1 constant → STDDEV=0 → bad_data. En revanche, si les groupes ont des cardinalités
-  différentes (ex : 3, 2, 1, 1, 1) → STDDEV calculable → test valide, ne pas signaler bad_data.
-  La correction est de dupliquer des lignes sur la même clé GROUP BY, pas d'ajouter de nouvelles valeurs.
-- Le résultat DuckDB est-il conforme à ce qu'on attendrait ?
-- Les assertions à générer valident-elles réellement la logique métier ? Regarde les exemples de
-  `<result_sample>` pour juger : si la colonne vérifiée par `IS NULL` contient déjà des valeurs
-  non-nulles dans les exemples, l'assertion est triviale (retourne toujours 0 ligne). Plus
-  généralement, une assertion est triviale si elle passe quel que soit le contenu réel du résultat —
-  elle ne discrimine pas une bonne réponse d'une mauvaise. Exemples typiques : `WHERE col IS NULL`
-  (colonne jamais nulle), `WHERE 1=0`, ou un `NOT IN (...)` dont la liste englobe tous les cas
-  possibles sauf un. Si toutes les assertions sont triviales et ne vérifient aucune valeur concrète
-  ou invariant réel du résultat, c'est `bad_assertions`.
-  Une bonne assertion pince soit la valeur exacte retournée (condition `date = '2026-03-07'`), soit
-  un invariant structurel observable (condition `z_score = (SELECT MAX(z_score) FROM __result__)`).
-- Si la requête utilise ORDER BY + LIMIT ou OFFSET : est-ce que plusieurs lignes ont exactement la même
-  valeur de tri à la position retournée ? Si oui, le résultat est non-déterministe (ex : 3 groupes avec
-  le même COUNT → même Z-score → OFFSET 1 retourne n'importe lequel) → `bad_data`. La correction est
-  d'assigner des cardinalités distinctes à chaque groupe de façon à avoir un ordre unique.
+- Le résultat DuckDB est-il conforme à l'attendu, et tes assertions pincent-elles une valeur
+  concrète plutôt qu'une évidence ?
 
-**Règle du champ `description` (ce que l'utilisateur lit dans l'UI) :**
-Chaque assertion porte une `description` : une phrase **en français**, **courte (max 12 mots)**,
-en **langage métier** lisible par un responsable non-développeur. Elle affirme ce qui est vérifié,
-pas la mécanique SQL.
-- OBLIGATOIRE en français — jamais en anglais, même si la requête ou les colonnes sont en anglais.
-- INTERDIT : noms de colonnes/CTEs, mots-clés SQL, opérateurs (`>`, `=`, `IS NULL`…), `__result__`.
-- ✓ Bon : « Le montant total reste positif. » / « Chaque commande a un client actif. »
-- ✗ À proscrire : « price > 0 for every row of __result__ », « COALESCE(amount, 0) != NULL ».
+═══════════════════ PARTIE 1 — GÉNÉRER LES ASSERTIONS ═══════════════════
 
-**OBJECTIF — capter les régressions, pas énoncer des évidences :**
-Une assertion ne sert à RIEN si elle resterait vraie quand la logique SQL régresse. Le but est
-qu'une modification fautive du SQL (mauvais calcul, mauvaise jointure, mauvais filtre) fasse
-ÉCHOUER l'assertion. Pour cela, **pince la VALEUR DE SORTIE CONCRÈTE** attendue pour ce scénario,
-calculée à partir des données d'entrée injectées (lis `<result_sample>`).
-- ✗ FAIBLE — invariants génériques qui survivraient à une régression : `montant > 0`, `montant
-  >= 0` ("pas négatif"), `total IS NOT NULL`. Le total peut devenir faux tout en restant positif :
-  l'assertion ne capte rien.
-- ✓ FORT — la valeur exacte que le scénario doit produire : si les entrées impliquent un total de
-  150, écris `total = 150` (pas `total > 0`). Si la date attendue est `2026-01-02`, écris
-  `date = '2026-01-02'`. Si le scénario teste un rang/ordre, pince la valeur classée attendue.
-- Exception légitime : un invariant non-trivial EST l'objet même du test (ex. le scénario vérifie
-  explicitement qu'un solde ne peut jamais être négatif après remboursement) — alors `solde >= 0`
-  est valide. Mais par défaut, préfère toujours la valeur exacte.
+**Règle d'or — pince la VALEUR DE SORTIE CONCRÈTE, pas une évidence :**
+Une assertion ne sert à RIEN si elle resterait vraie quand la logique SQL régresse. Le but : qu'une
+modif fautive du SQL (mauvais calcul, jointure, filtre) fasse ÉCHOUER l'assertion. Donc AU MOINS une
+assertion fige la valeur exacte que CE scénario doit produire, lue dans `<result_sample>`.
+- ✓ FORT : `total = 150`, `date = '2026-01-02'` (la valeur attendue pour ce scénario).
+- ✗ FAIBLE : `total > 0`, `total >= 0` ("pas négatif"), `total IS NOT NULL` — survivent à une
+  régression, ne captent rien.
+- À fortiori pour un agrégat (SUM/COUNT/AVG/MAX), un CASE ou un ORDER BY + LIMIT/OFFSET : fige la
+  valeur calculée, pas seulement une borne.
+- Exception : un invariant non-trivial EST l'objet même du test (« le solde ne peut être négatif
+  après remboursement ») → `solde >= 0` est alors valide. Par défaut, préfère la valeur exacte.
 
-**Règles des assertions (`expected_condition`) — entre 1 et plusieurs, selon le scénario :**
-Chaque assertion fournit une `expected_condition` : une **condition booléenne POSITIVE** qui doit
-être VRAIE pour chaque ligne de `__result__` quand le test réussit. **Tu n'écris PAS de SQL
-`SELECT`/`WHERE` et tu n'écris JAMAIS la négation** — MockSQL négocie lui-même ta condition pour
-produire la requête de validation (0 ligne = OK). Tu exprimes seulement la vérité métier attendue,
-à l'affirmative.
-- Exprime l'AFFIRMATION, jamais sa négation : pour pincer la valeur retournée `2026-01-02`,
-  écris `expected_condition: "date = '2026-01-02'"` — surtout PAS `date != '2026-01-02'`.
-  "Vérifier ce qui ne doit pas être là" est INTERDIT : reformule toujours en ce qui DOIT être là.
-- UNE dimension par assertion : chaque `expected_condition` ne valide qu'UNE seule propriété
-  observable (une colonne, ou un invariant portant sur une colonne). Si le scénario exige de
-  vérifier plusieurs propriétés, émets PLUSIEURS assertions — le schéma en accepte 1 à N.
-  ✗ INTERDIT — combiner deux colonnes sans rapport avec `OR`/`AND` : un `OR` est vrai dès qu'une
-    branche l'est, donc ne pince RIEN et masque la vraie intention ; un `AND` entre colonnes
-    d'intentions distinctes fait échouer l'assertion pour une raison ambiguë (on ne sait pas
-    quelle propriété est violée).
-  ✓ Découpe : une assertion par colonne/propriété, chacune vérifiable seule.
-  Exception : `AND` reste permis quand les deux termes décrivent le MÊME invariant sur la MÊME
-  colonne (ex. bornes d'un intervalle : `col >= 0 AND col <= 100`).
-- Utilise UNIQUEMENT les colonnes de `<result_schema>` (noms exacts, sensibles à la casse).
-- N'écris que l'expression booléenne (pas de `SELECT`, pas de `WHERE`, pas de `FROM`).
-  Pour une valeur relative, une sous-requête sur `__result__` uniquement est permise :
-  `expected_condition: "val = (SELECT MAX(val) FROM __result__)"`.
-- ⚠️ Chaque `expected_condition` est testée sur CHAQUE ligne de `__result__`. Donc
-  `val = (SELECT MAX(val) FROM __result__)` n'est correcte que si le résultat a UNE seule
-  ligne. Sur un résultat MULTI-lignes, viser une ligne précise (min/max, première, une
-  clé donnée) échoue à tort sur toutes les autres lignes. Dans ce cas, renseigne `scope` :
-  - `scope` (optionnel) sélectionne les lignes sur lesquelles la condition s'applique ;
-    les autres sont ignorées. La requête devient `WHERE (scope) AND ((condition) IS NOT TRUE)`.
-  - Ex. « la ligne la plus ancienne est le dataset DS_001 » sur un résultat trié multi-lignes :
-    `scope: "billing_started_at = (SELECT MIN(billing_started_at) FROM __result__)"`,
-    `expected_condition: "dataset_id = 'DS_001'"`. Reste POSITIF, pince une régression de tri.
-  - Un `scope` qui ne matche aucune ligne fait ÉCHOUER l'assertion (elle ne testerait rien).
-- INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`.
-- INTERDIT — conditions triviales (toujours vraies quelle que soit la valeur du résultat) :
-  ✗ une condition que toute ligne satisfait forcément (ex. `1 = 1`, `col = col`)
-  ✗ une condition basée sur `IS NOT NULL` d'une colonne déjà non-nulle dans les exemples
-  Une condition triviale ne discrimine pas une bonne réponse d'une mauvaise — elle est inutile.
-- OBLIGATOIRE — au moins une assertion qui pince la VALEUR CONCRÈTE de sortie (cf. OBJECTIF
-  ci-dessus), tirée de `<result_sample>`. C'est elle qui capte les régressions. À fortiori pour
-  les requêtes avec agrégat (SUM/COUNT/AVG/MAX), CASE, ou ORDER BY + LIMIT/OFFSET : la valeur
-  calculée doit être figée, pas seulement bornée.
-  Exemple : si `__result__` contient `{"date": "2026-01-02"}`, écris `expected_condition: "date = '2026-01-02'"`.
-  Pour les colonnes date/timestamp, utilise le format `'YYYY-MM-DD'` (ex: `'2016-01-02'`) sans la partie heure.
+**Floats — JAMAIS d'égalité stricte :** pour une colonne flottante (z-score, moyenne, STDDEV,
+ratio, pourcentage), `col = 1.234` est non-déterministe (ordre d'agrégation, précision) → assertion
+fragile. Pince via `ROUND(col, 2) = 1.23` ou `ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre
+que pour les entiers, dates et chaînes. Date/timestamp : format `'YYYY-MM-DD'` sans la partie heure.
 
-**Verdict de qualité :**
-- `verdict` : "Excellent", "Bon", ou "Insuffisant"
-- `reason_type` (uniquement si Insuffisant) : "bad_data" (données d'entrée incorrectes —
-  mauvais types, contraintes non respectées, résultat inattendu), "bad_assertions"
-  (les assertions générées ne permettent pas de valider ce scénario — y compris si elles
-  sont triviales : toujours vraies indépendamment de la valeur réelle du résultat),
-  "bad_description" (cf. ci-dessous — la description annonce une sortie que la requête ne
-  produit pas), ou "needs_validation" (cf. ci-dessous — la description suppose un NOMBRE de
-  lignes différent du réel, mais les données d'entrée sont valides → on demande à l'humain)
-- `explanation` : une phrase ultra-concise (max 20 mots) en français, lisible par un responsable métier —
-  sans noms de colonnes, de CTEs ni de mots-clés SQL.
-  ✓ 'Les données couvrent correctement le scénario nominal.'
-  ✓ 'Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite.'
-  ✗ 'La CTE orders_filtered retourne 0 lignes car user_id IS NULL.'
-- `assertion_fix` (uniquement si `reason_type == "bad_assertions"`) : objet décrivant
-  la correction à apporter au test pour permettre une meilleure génération d'assertions :
-  - `test_name` : nom court corrigé (3–6 mots)
-  - `unit_test_description` : description précise et correcte, sans ambiguïté
-  - `unit_test_build_reasoning` : explication de la correction
-  - `tags` : liste parmi Logique métier, Null checks, Cas limites, Intégration,
-    Valeurs dupliquées, Performance
-  - `suggestions` : 2–3 vérifications correctives précises ("Vérifie que …")
-  Si `reason_type != "bad_assertions"`, `assertion_fix` doit être `null`.
-- `diagnostic` : OBLIGATOIRE si `reason_type == "bad_data"`, sinon `null`.
-  Quand `reason_type == "bad_data"`, tu DOIS remplir ce bloc — ne laisse pas null :
-  - `root_cause` : phrase courte identifiant la cause (ex: "STDDEV=0 — chaque date n'apparaît qu'une fois")
-  - `sql_pattern` : clause SQL en cause (ex: "COUNT(descript) GROUP BY date → variance nulle")
-  - `data_issue` : ce qui manque dans les données générées (ex: "6 dates distinctes avec 1 ligne chacune, COUNT=1 partout")
-  - `fix_summary` : phrase courte (max 15 mots) lisible par l'utilisateur dans l'UI —
-    décrit le mécanisme sans les valeurs concrètes ni les détails techniques.
-    ✓ Bon : "Dupliquer des lignes sur la même date pour varier le COUNT par groupe."
-    ✓ Bon : "Ajouter une ligne de JOIN manquante pour que la jointure produise un résultat."
-    ✗ Interdit : noms de colonnes, de CTEs, valeurs spécifiques, termes SQL.
-  - `fix_recipe` : instruction opérationnelle complète passée au correcteur — 4 éléments requis :
-    (1) table exacte et champ(s) à modifier (nom exact tel qu'affiché dans `<input_data>`),
-    (2) mécanisme précis : pour les bugs GROUP BY/agrégat, écrire impérativement
-        "dupliquer N lignes avec [col_group_by]='[valeur]'" — JAMAIS "ajouter des valeurs variables"
-        ni aucune formulation abstraite,
-    (3) valeurs concrètes tirées des données d'entrée, avec le compte par groupe
-        (ex: "'2016-01-02' × 3 lignes, '2016-01-03' × 2 lignes"),
-    (4) effet attendu sur le calcul SQL (ex: "→ COUNT ∈ {2, 3} → STDDEV > 0").
-    ✗ Interdit : "ajouter des données variables", "modifier les valeurs", tout terme générique.
-    ✓ Bon : "Dans [table], dupliquer la ligne [col]='2016-01-02' pour en avoir 3 copies
-             et [col]='2016-01-03' pour en avoir 2 → COUNT varie → STDDEV > 0."
-  - `affected_tables` : liste des noms de tables dont les données doivent être corrigées
-  - `affected_ctes` : liste des CTEs impactées par le problème
+**Cible les bonnes colonnes :** concentre tes assertions sur les colonnes NOMMÉES ou impliquées par
+`<test_context>` (la cible du scénario) ; n'épingle pas les colonnes intermédiaires ou techniques.
 
-**Cohérence description ↔ sortie réelle (`bad_description`) :**
-Compare la valeur de sortie ANNONCÉE dans `<test_context>` au résultat réel de `<result_sample>`.
-Si la description affirme une valeur de sortie CONCRÈTE (« le total est de 2.0M », « la corrélation
-vaut 0.2 », « le résultat attendu est X ») que le résultat réel CONTREDIT (valeur différente), le
-test ment au lecteur **même si les assertions passent** (elles ont pu être alignées sur le réel).
-Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "bad_description"`, et `explanation` qui pointe
-l'écart en langage métier (ex. « La description annonce une valeur que le calcul ne produit pas »).
-Remplis aussi `corrected_description` : la même description réécrite pour refléter fidèlement la sortie
-réelle (valeur concrète corrigée), même scénario métier, sans inventer d'autres faits — c'est ce que
-l'utilisateur appliquera s'il valide la sortie. Optionnellement `corrected_name` (titre 3–6 mots).
-Les données sont valides — NE les corrige PAS, NE relance rien : c'est le narratif qui est faux.
-⚠️ N'utilise ce motif QUE si la description énonce une valeur concrète contredite — JAMAIS pour une
-description qualitative ou structurelle (« vérifie que les régions sans trajet n'apparaissent pas »),
-ni quand la description ne donne aucune valeur chiffrée précise.
+**Forme des assertions :** le détail des contraintes est porté par les descriptions des champs
+`description`, `expected_condition` et `scope` du schéma de sortie — respecte-les strictement :
+condition POSITIVE (jamais de négation `!=`/`<>`/`NOT IN`/`IS NULL` pour « vérifier ce qui ne doit
+PAS être là » → reformule en l'affirmation attendue) ; UNE propriété observable par assertion (émets-
+en plusieurs au besoin ; jamais d'`OR`/`AND` entre colonnes d'intentions distinctes) ; `scope` pour
+affirmer un fait sur UNE ligne précise d'un résultat MULTI-lignes ; sous-requête sur `__result__`
+UNIQUEMENT (aucune autre table) ; anti-trivialité (`1=1`, `col=col`, `IS NOT NULL` d'une colonne déjà
+non-nulle) ; et, pour valider un TRI, affirmer la relation d'ordre sans épingler de clé technique.
+En bref :
+- `description` : phrase FR métier, ≤12 mots, sans nom de colonne/CTE ni mot-clé SQL.
+- `expected_condition` : booléen POSITIF vrai pour CHAQUE ligne de `__result__` ; uniquement les
+  colonnes de `<result_schema>` (casse exacte) ; pas de `SELECT`/`WHERE`/`FROM` de tête.
 
-**Cohérence description ↔ données d'ENTRÉE injectées (`bad_input_description`) :**
-Compare les valeurs d'ENTRÉE que `<test_context>` prétend injecter aux lignes réelles de
-`<input_data>`. Si la description énonce des valeurs d'entrée CONCRÈTES (« on injecte deux claims de
-10 et 20 TiB », « un montant de 500 € ») que les données injectées CONTREDISENT (valeurs différentes),
-le test ment au lecteur sur ses propres entrées **même si les assertions passent**. Dans ce cas :
-`verdict: "Insuffisant"` + `reason_type: "bad_input_description"`, et `explanation` qui pointe l'écart
-(ex. « La description annonce 10 et 20 mais les lignes injectées portent 28.08 et 3479.61 »).
-Remplis aussi `corrected_description` : la même description réécrite pour refléter fidèlement les valeurs
-réellement injectées, même scénario métier, sans inventer d'autres faits. Optionnellement `corrected_name`.
-Les données sont valides — NE les corrige PAS, NE relance rien : c'est le narratif d'entrée qui est faux.
-⚠️ N'utilise ce motif QUE si la description énonce des valeurs d'entrée concrètes contredites par
-`<input_data>` — JAMAIS pour une description qualitative (« quelques lignes représentatives »), ni quand
-elle ne chiffre aucune valeur d'entrée précise. Distinct de `bad_description` (qui porte sur la SORTIE).
+═══════════════════ PARTIE 2 — ÉVALUER LA QUALITÉ ═══════════════════
 
-**Cardinalité annoncée ↔ réelle (`needs_validation`) :**
-Compare le NOMBRE de lignes que la description suppose en sortie au `row_count` réel de
-`<result_sample>`. Si la description suppose une cardinalité précise (« une seule ligne »,
-« exactement N lignes », « pour un client avec 2 cartes je m'attends à 1 ligne ») et que le
-résultat réel en produit un nombre DIFFÉRENT, **alors qu'aucune donnée n'est cassée** (lignes
-genuines, pas de type invalide, sortie non vide), NE tranche PAS toi-même : c'est peut-être la
-description qui est trop stricte, peut-être le SQL qui a dérivé. C'est une AMBIGUÏTÉ à déléguer
-à l'humain, pas une donnée à corriger.
-Dans ce cas : `verdict: "Insuffisant"` + `reason_type: "needs_validation"`, `expected_row_count`
-= le nombre de lignes supposé par la description (entier), et `explanation` qui pointe l'écart en
-langage métier (ex. « Le scénario suppose 1 ligne mais le calcul en produit 2 — à confirmer »).
-Remplis aussi `corrected_description` : la description réécrite pour refléter fidèlement la sortie
-réelle (notamment sa cardinalité), même scénario métier — c'est ce que l'utilisateur appliquera s'il
-valide la sortie tel quel. Optionnellement `corrected_name` (titre 3–6 mots).
-NE génère PAS de `diagnostic`, NE corrige PAS les données.
-⚠️ N'utilise ce motif QUE pour un écart de CARDINALITÉ avec données valides. Si la sortie est
-vide (0 ligne), reste sur le cas « résultat vide » ci-dessous. Si les données sont réellement
-incohérentes (mauvais types, contrainte de jointure non satisfaite), utilise `bad_data`. Si la
-description ne suppose aucun nombre de lignes précis, n'utilise PAS ce motif.
+- `verdict` : "Excellent", "Bon", ou "Insuffisant".
+- `explanation` : une phrase ≤20 mots, en français, lisible par un responsable métier — sans noms
+  de colonnes, de CTEs ni de mots-clés SQL.
+  ✓ « Les données couvrent correctement le scénario nominal. »
+  ✓ « Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite. »
+  ✗ « La CTE orders_filtered retourne 0 lignes car user_id IS NULL. »
+
+**Si Insuffisant, choisis le `reason_type` dans CET ORDRE — premier match gagne :**
+
+1. `bad_input_description` — une valeur d'ENTRÉE chiffrée par `<test_context>` (« on injecte deux
+   claims de 10 et 20 TiB », « un montant de 500 € ») est CONTREDITE par `<input_data>`. Données
+   valides, narratif d'entrée faux (même si les assertions passent). → Remplis `corrected_description`
+   (réécrite sur les valeurs réellement injectées, même scénario, sans inventer d'autres faits) +
+   `corrected_name` (optionnel). NE corrige PAS les données, NE relance rien.
+   ⚠️ QUE si la description chiffre une valeur d'ENTRÉE précise contredite — jamais pour du qualitatif
+   (« quelques lignes représentatives »).
+
+2. `bad_description` — une valeur de SORTIE chiffrée annoncée par `<test_context>` (« le total est
+   2.0M », « la corrélation vaut 0.2 ») est CONTREDITE par `<result_sample>`. Le test ment au lecteur
+   même si les assertions passent (elles ont pu être alignées sur le réel). → `corrected_description`
+   (réécrite sur la sortie réelle, même scénario) + `corrected_name` (optionnel). NE corrige PAS les
+   données, NE relance rien.
+   ⚠️ QUE si la description énonce une valeur de SORTIE concrète contredite — jamais pour du
+   qualitatif/structurel (« vérifie que les régions sans trajet n'apparaissent pas »).
+
+3. `needs_validation` — la description suppose un NOMBRE de lignes précis (« une seule ligne »,
+   « exactement N lignes », « pour un client avec 2 cartes j'attends 1 ligne ») DIFFÉRENT du
+   `row_count` réel, alors que les données sont SAINES (types ok, sortie non vide). Ambiguïté à
+   déléguer à l'humain (la description est peut-être trop stricte, ou le SQL a dérivé), pas une
+   donnée à corriger. → renseigne `expected_row_count` (entier supposé par la description) +
+   `corrected_description` (réécrite sur la cardinalité réelle) + `corrected_name` (optionnel).
+   NE génère PAS de `diagnostic`, NE corrige PAS les données.
+   ⚠️ QUE pour un écart de CARDINALITÉ avec données valides. Sortie vide (0 ligne) → cas « résultat
+   vide » ci-dessous, pas ici.
+
+4. `bad_data` — les données d'entrée sont réellement incohérentes avec la logique SQL : mauvais
+   types, contrainte de jointure non satisfaite, résultat inattendu, ou agrégat dégénéré. Repères :
+   - GROUP BY + agrégat (COUNT/STDDEV/AVG/SUM/MAX) où TOUS les groupes ont la MÊME cardinalité (1
+     ligne par groupe → COUNT=1 constant → STDDEV=0). Correction = dupliquer des lignes sur la MÊME
+     clé GROUP BY pour des cardinalités distinctes (ex. 3,2,1,1), PAS ajouter de nouvelles valeurs.
+     Si les groupes ont déjà des cardinalités différentes → STDDEV calculable → ce n'est PAS bad_data.
+   - ORDER BY + LIMIT/OFFSET où plusieurs lignes ont la même valeur de tri à la position retournée
+     → résultat non-déterministe. Correction = cardinalités distinctes pour un ordre unique.
+   → Laisse `diagnostic` à `null` : l'analyse opérationnelle détaillée (cause racine, recette de
+     correction) est produite par une ÉTAPE DÉDIÉE séparée — ne la rédige pas ici. Renseigne
+     seulement `explanation` (la cause, en langage métier).
+
+5. `bad_assertions` — les assertions générées ne permettent pas de valider ce scénario, notamment si
+   elles sont toutes TRIVIALES (vraies quel que soit le résultat). → Remplis `assertion_fix` :
+   - `test_name` : nom court corrigé (3–6 mots)
+   - `unit_test_description` : description précise et correcte, sans ambiguïté
+   - `unit_test_build_reasoning` : explication de la correction
+   - `tags` : parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées,
+     Performance
+   - `suggestions` : 2–3 vérifications correctives précises (« Vérifie que … »)
+
+Sinon → "Bon" / "Excellent", avec `reason_type`, `assertion_fix` et `diagnostic` à `null`.
 
 **Cas particulier — résultat vide intentionnel :** si `<test_context>` mentionne explicitement
 "plage vide", "aucune ligne", "filtre qui exclut tout", alors le résultat vide est correct.
@@ -1913,8 +1859,15 @@ Produis, conformément aux règles du message système :
 Réponds uniquement avec l'objet structuré demandé.
 </task>"""
 
+    # Le champ `reasoning` est un CoT plein (3 phrases) en l'absence de thinking natif, sinon une
+    # justification d'1 phrase (le vrai raisonnement passe par le canal thinking Gemini). Cf.
+    # get_generation_output_type dans examples_generator pour le même réglage côté générateur.
+    from storage.config import is_native_thinking_active
+
+    output_type = _build_assertion_eval_output_type(is_native_thinking_active())
+
     llm = make_llm()
-    structured_llm = llm.with_structured_output(_AssertionsAndEvaluation)
+    structured_llm = llm.with_structured_output(output_type)
     try:
         logger.diag("[assertions_eval] human (extrait):\n%s", human_content[:3000])
         result: _AssertionsAndEvaluation = await structured_llm.ainvoke(
