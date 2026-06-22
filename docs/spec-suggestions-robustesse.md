@@ -11,7 +11,7 @@
 | W6 | Le profil injecté fuit des tables d'autres projets                | **P0**  | ✅ Corrigé (a) + investigué (b) |
 | W5 | Labels de branches tous identiques                                | P1      | ✅ Corrigé (+ régression) |
 | W4 | Nommage des branches ré-appelé à chaque génération                | P1      | ✅ Corrigé (+ régression) |
-| W2/W3 | SQL verbeux + règle « zéro jargon » mal calibrée               | P3      | Optionnel       |
+| W2/W3 | SQL verbeux + règle « zéro jargon » mal calibrée               | P3      | ✅ Corrigé (+ régression) |
 
 ---
 
@@ -128,7 +128,7 @@ n'est pas appelé.
 
 ---
 
-## P3 — W2/W3 : qualité du prompt de suggestions (optionnel)
+## P3 — W2/W3 : qualité du prompt de suggestions
 
 - **W2** : le SQL brut (passthrough `x AS x` × 40 cols × 8 CTEs) noie le prompt alors que
   `sql_digest` porte déjà la structure. Piste : compacter les projections passthrough avant injection.
@@ -136,6 +136,24 @@ n'est pas appelé.
   winsorization) ; les few-shot sont tous des cas BI additifs simples. Piste : ajouter un exemple
   « bon » analytique (anomalie qui en masque une autre via le baseline) et tolérer un terme technique
   s'il est indispensable au sens.
+
+### Statut
+
+- **W2 — Corrigé.** `compact_passthrough_sql` (`prompt_tools.py`) résume les projections passthrough
+  (`col` nu / `col AS col`) au-delà d'un seuil par branche SELECT : `keep_samples` colonnes gardées
+  (dé-aliasées) + commentaire `… (+N autres colonnes transmises telles quelles)`. Les projections
+  porteuses de logique (calculs, casts, renommages, agrégats, fenêtres) restent intactes. Appliqué
+  **uniquement aux prompts de suggestions** (`generate_suggestions`, `generate_single_suggestion`) —
+  jamais au générateur de données qui a besoin de la liste exacte de colonnes ; les détections de
+  pièges (`_select_pitfalls`) tournent sur le SQL original.
+- **W3 — Corrigé.** Le prompt de suggestions tolère désormais un terme d'analyse indispensable au
+  sens (référence/baseline, écart-type, seuil, percentile) — la prohibition vise le détail
+  d'implémentation, pas le vocabulaire d'analyse — et ajoute un exemple « bon » analytique (une
+  anomalie qui en masque une autre via la contamination de la référence de calcul). Mis à jour aussi
+  dans le `Field.text` de `TestSuggestion`.
+- Régression : `tests/test_suggestions_prompt_w2_w3.py` (compaction pure : collapse/no-op/SQL
+  invalide/SELECT tout-passthrough ; câblage : SQL compacté injecté, exemple analytique et clause
+  assouplie présents).
 
 ---
 

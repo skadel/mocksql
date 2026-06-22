@@ -13,7 +13,11 @@ from langchain_core.prompts import ChatPromptTemplate
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.path_slicer import ALL_PATH
-from build_query.prompt_tools import _format_profile_block, build_sql_digest
+from build_query.prompt_tools import (
+    _format_profile_block,
+    build_sql_digest,
+    compact_passthrough_sql,
+)
 from build_query.state import QueryState
 from storage.config import is_native_thinking_active
 from storage.test_repository import get_test, update_test
@@ -143,9 +147,11 @@ class TestSuggestion(BaseModel):
         description=(
             "La suggestion, formulée en langage métier. Commence par un verbe et décrit un "
             "comportement observable pour le domaine (ex : un total incohérent, des lignes "
-            "manquantes, un classement incorrect). Ne jamais mentionner de fonctions SQL, "
-            "d'opérateurs ou de détails d'implémentation (pas de EXTRACT, COUNT DISTINCT, LAG, "
-            'NULL, JOIN, CTE, etc.). Préfixée par "[PROD] " si et seulement si elle est ancrée '
+            "manquantes, un classement incorrect). Évite le jargon d'implémentation — noms de "
+            "fonctions SQL, d'opérateurs, de colonnes ou de CTE (pas de EXTRACT, COUNT DISTINCT, "
+            "LAG, JOIN, CTE, etc.). Un terme d'analyse indispensable au sens "
+            "(référence/baseline, écart-type, seuil, percentile) est toléré s'il est nécessaire "
+            'pour décrire le symptôme. Préfixée par "[PROD] " si et seulement si elle est ancrée '
             "sur le profil statistique réel fourni."
         )
     )
@@ -554,6 +560,9 @@ async def generate_single_suggestion(state: QueryState):
     )
     existing_block = existing or "Aucun test existant pour le moment."
     pitfalls_block = _select_pitfalls(sql, dialect)
+    # W2 — le SQL injecté est compacté (projections passthrough résumées) ; les détections
+    # structurelles (pitfalls) tournent sur le SQL ORIGINAL pour ne rien perdre.
+    sql_for_prompt = compact_passthrough_sql(sql, dialect)
     sql_digest = build_sql_digest(state.get("query_decomposed"))
     profile_section = (
         f"Profil statistique réel des données :\n{profile_block}"
@@ -597,7 +606,7 @@ détail d'implémentation). Renseigne aussi `analyse_des_manques` en une phrase.
         result = await (prompt_template | structured_llm).ainvoke(
             {
                 "dialect": dialect,
-                "sql": sql,
+                "sql": sql_for_prompt,
                 "sql_digest": sql_digest,
                 "existing_block": existing_block,
                 "profile_section": profile_section,
@@ -804,7 +813,7 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
 
 {pitfalls_block}
 
-Pour ces patterns, formule la suggestion en décrivant uniquement le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite toute mention de fonctions SQL, d'opérateurs ou de détails d'implémentation — l'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *pourquoi techniquement*.
+Pour ces patterns, formule la suggestion en décrivant le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite le jargon **d'implémentation** — noms de fonctions SQL, d'opérateurs, de colonnes ou de CTE. En revanche, un terme **d'analyse indispensable** au sens (référence/baseline de calcul, écart-type, seuil, percentile, moyenne glissante) reste acceptable s'il est nécessaire pour décrire le symptôme : la prohibition vise le *comment technique*, pas le vocabulaire métier de l'analyse. L'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *par quelle fonction SQL*.
 
 Mauvais exemple (cite une fonction SQL, décrit la mécanique au lieu du symptôme métier) :
 "Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
@@ -815,6 +824,9 @@ Autre mauvais exemple (banal, vrai par construction, n'apprend rien) :
 "Vérifie que la requête retourne des lignes quand il y a des données en entrée."
 Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
 "Vérifie qu'un client présent dans deux régions n'est compté qu'une fois dans le total national — sinon le total national dépasse la somme des effectifs réels."
+
+Autre bon exemple (cas analytique — **une anomalie en masque une autre**, terme technique indispensable toléré) :
+"Vérifie qu'une hausse brutale un mois n'empêche pas de détecter une hausse comparable le mois suivant : si la première gonfle la référence de calcul (moyenne et écart-type), la seconde repasse sous le seuil d'alerte et reste invisible dans le rapport d'anomalies."
 
 {prod_instruction_block}""",
             ),
@@ -832,6 +844,9 @@ Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
         else ""
     )
     pitfalls_block = _select_pitfalls(sql, dialect)
+    # W2 — le SQL injecté est compacté (projections passthrough résumées) pour ne pas noyer
+    # le prompt ; les détections structurelles (pitfalls) tournent sur le SQL ORIGINAL.
+    sql_for_prompt = compact_passthrough_sql(sql, dialect)
     # Pré-digestion structurelle (pipeline de CTEs) injectée à côté du SQL brut — donne
     # au LLM la carte de la requête sans qu'il ait à la ré-inférer (cf. build_sql_digest).
     sql_digest = build_sql_digest(state.get("query_decomposed"))
@@ -878,7 +893,7 @@ Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
         try:
             _formatted = prompt_template.format_messages(
                 dialect=dialect,
-                sql=sql,
+                sql=sql_for_prompt,
                 sql_digest=sql_digest,
                 instruction_block=instruction_block,
                 existing_tests_block=existing_tests_block,
@@ -902,7 +917,7 @@ Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
         result = await chain.ainvoke(
             {
                 "dialect": dialect,
-                "sql": sql,
+                "sql": sql_for_prompt,
                 "sql_digest": sql_digest,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,

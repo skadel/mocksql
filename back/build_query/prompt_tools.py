@@ -599,6 +599,83 @@ def build_sql_digest(query_decomposed, max_steps: int = 20) -> str:
     )
 
 
+def compact_passthrough_sql(
+    sql: str,
+    dialect: str = "bigquery",
+    *,
+    threshold: int = 6,
+    keep_samples: int = 3,
+) -> str:
+    """Compacte les projections « passthrough » (``col`` nu ou ``col AS col``) avant injection
+    d'un SQL dans un prompt de suggestions (W2).
+
+    Les modèles de staging projettent souvent des dizaines de colonnes transmises telles quelles
+    (``x AS x`` × 40 × 8 CTEs) : en SQL pretty-printé, une colonne par ligne → le prompt est noyé
+    sous du bruit sans logique (la structure est déjà portée par ``build_sql_digest``). Pour chaque
+    SELECT comptant plus de ``threshold`` projections passthrough, on n'en garde que ``keep_samples``
+    (dé-aliasées) et on résume le reste par un commentaire ``… (+N autres colonnes transmises telles
+    quelles)``. Les projections PORTEUSES DE LOGIQUE (calculs, casts, renommages ``a AS b``,
+    littéraux, agrégats, fenêtres) sont toujours conservées intégralement.
+
+    Pur, sans effet de bord. Parsing en échec ou aucun SELECT compacté → ``sql`` renvoyé inchangé.
+    À réserver aux prompts d'ANALYSE (suggestions) : ne pas appliquer au générateur de données,
+    qui a besoin de la liste exacte des colonnes."""
+    if not sql:
+        return sql
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return sql
+    if tree is None:
+        return sql
+
+    def _is_passthrough(proj) -> bool:
+        inner = proj.this if isinstance(proj, exp.Alias) else proj
+        if not isinstance(inner, exp.Column):
+            return False
+        if isinstance(proj, exp.Alias):
+            return (proj.alias or "").lower() == (inner.name or "").lower()
+        return True
+
+    changed = False
+    for sel in list(tree.find_all(exp.Select)):
+        projections = sel.expressions
+        pt_total = sum(1 for p in projections if _is_passthrough(p))
+        if pt_total <= threshold:
+            continue
+        new_exprs: list = []
+        seen_pt = 0
+        last_sample = None
+        for proj in projections:
+            if not _is_passthrough(proj):
+                new_exprs.append(proj)
+                continue
+            seen_pt += 1
+            if seen_pt <= keep_samples:
+                inner = proj.this if isinstance(proj, exp.Alias) else proj
+                bare = inner.copy()  # dé-aliase (`col AS col` → `col`)
+                bare.comments = None  # repart d'un nœud sans commentaire hérité
+                new_exprs.append(bare)
+                last_sample = bare
+        remaining = pt_total - min(keep_samples, pt_total)
+        if last_sample is not None and remaining > 0:
+            last_sample.add_comments(
+                [f"… (+{remaining} autres colonnes transmises telles quelles)"]
+            )
+        sel.set("expressions", new_exprs)
+        changed = True
+
+    if not changed:
+        return sql
+    try:
+        return tree.sql(dialect=dialect, pretty=True)
+    except Exception:
+        return sql
+
+
 # ── Exemple few-shot statique « clé dérivée + photos M/M-1 » (P2a) ──────────
 # Mini-requête FICTIVE concentrant les deux pièges qui vident le plus souvent
 # le résultat : (a) clé de JOIN dérivée d'un CASE — il faut générer la valeur
