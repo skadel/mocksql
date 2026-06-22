@@ -45,7 +45,7 @@ BACK=$ROOT/back
 ls <projet>/models/*.sql | xargs -I{} basename {} .sql
 ```
 
-Tous les modèles `.sql` sont (re)générés à chaque évaluation — même si un `.json` existe déjà.
+Tous les modèles `.sql` sont (re)générés **de zéro** à chaque évaluation — même si un `.json` existe déjà. Le `--overwrite` est **obligatoire** : sans lui, `generate` est additif et empile une nouvelle suite par-dessus l'ancienne (cas périmés conservés → l'éval juge des tests d'une version antérieure du générateur et masque les fixes).
 
 ### 3. Générer les tests
 
@@ -58,7 +58,8 @@ DUCKDB_PATH=<projet>/.mocksql/mocksql.duckdb \
 poetry -C $ROOT/back run mocksql generate \
   <projet>/models/<model>.sql \
   --config <projet>/mocksql.yml \
-  --output <projet>/.mocksql/tests
+  --output <projet>/.mocksql/tests \
+  --overwrite
 ```
 
 > Les credentials GCP sont lus depuis `back/.env` via `load_dotenv()` au démarrage du backend. Si la commande hang sur les appels BigQuery, vérifier que `GOOGLE_APPLICATION_CREDENTIALS` est bien défini dans `back/.env` avec un chemin absolu vers la clé de service account.

@@ -138,7 +138,9 @@ async def execute_run_cte(
         # run_cte est un OUTIL appelé par le conversational_agent : une exécution qui
         # échoue (erreur de données, idiome non transpilable…) doit remonter comme
         # diagnostic à l'agent, jamais crasher tout le graphe.
-        logger.warning("run_cte failed for CTE '%s': %s\nSQL:\n%s", cte_name, exc, debug_sql)
+        logger.warning(
+            "run_cte failed for CTE '%s': %s\nSQL:\n%s", cte_name, exc, debug_sql
+        )
         return {"cte_name": cte_name, "column": column, "error": str(exc)}
 
     result: Dict[str, Any] = {

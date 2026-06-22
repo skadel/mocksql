@@ -109,7 +109,10 @@ def test_bare_number_column_holds_large_integer():
     with initialize_duckdb(":memory:") as con:
         create_test_tables(schema, "sfx", con, "snowflake", overwrite=True)
         con.execute("INSERT INTO sch_events_sfx VALUES (2000000000000000)")
-        assert con.execute("SELECT amount FROM sch_events_sfx").fetchone()[0] == 2000000000000000
+        assert (
+            con.execute("SELECT amount FROM sch_events_sfx").fetchone()[0]
+            == 2000000000000000
+        )
 
 
 # ---------------------------------------------------------------------------
