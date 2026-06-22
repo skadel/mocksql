@@ -3,6 +3,7 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import duckdb
+from sqlglot import exp
 
 from storage.test_repository import get_test
 from utils.examples import (
@@ -15,6 +16,16 @@ from utils.examples import (
 from utils.insert_examples import replace_missing_with_null, insert_examples
 
 logger = logging.getLogger(__name__)
+
+
+def _quote_ident(name: str, dialect: str) -> str:
+    """Quote an identifier with the dialect's quote char.
+
+    Le SQL de debug est reparsé par ``run_query_on_test_dataset`` avec
+    ``read=dialect`` : des backticks codés en dur cassaient le parse sur tout
+    dialecte non-BigQuery (snowflake/postgres/duckdb → ParseError "Expecting (").
+    """
+    return exp.to_identifier(name, quoted=True).sql(dialect=dialect)
 
 
 async def _setup_test_tables(
@@ -96,11 +107,14 @@ async def execute_run_cte(
             debug_sql = f"SELECT {column} FROM ({debug_sql})"
     else:
         with_parts = [
-            f"`{ctes[j]['name']}` AS ({ctes[j]['code']})"
+            f"{_quote_ident(ctes[j]['name'], dialect)} AS ({ctes[j]['code']})"
             for j in range(target_idx + 1)
             if ctes[j]["name"] != "final_query"
         ]
-        debug_sql = f"WITH {', '.join(with_parts)}\n{select_clause} FROM `{cte_name}`"
+        debug_sql = (
+            f"WITH {', '.join(with_parts)}\n"
+            f"{select_clause} FROM {_quote_ident(cte_name, dialect)}"
+        )
 
     lineage_info = None
     if column:
@@ -112,13 +126,20 @@ async def execute_run_cte(
         except Exception:
             pass
 
-    with initialize_duckdb(DB_PATH) as con:
-        suffix = await _setup_test_tables(
-            session_id, test_index, schemas, used_columns, dialect, con, test_cases
-        )
-        df, _ = await run_query_on_test_dataset(
-            debug_sql, suffix, project, dialect, con
-        )
+    try:
+        with initialize_duckdb(DB_PATH) as con:
+            suffix = await _setup_test_tables(
+                session_id, test_index, schemas, used_columns, dialect, con, test_cases
+            )
+            df, _ = await run_query_on_test_dataset(
+                debug_sql, suffix, project, dialect, con
+            )
+    except Exception as exc:
+        # run_cte est un OUTIL appelé par le conversational_agent : une exécution qui
+        # échoue (erreur de données, idiome non transpilable…) doit remonter comme
+        # diagnostic à l'agent, jamais crasher tout le graphe.
+        logger.warning("run_cte failed for CTE '%s': %s\nSQL:\n%s", cte_name, exc, debug_sql)
+        return {"cte_name": cte_name, "column": column, "error": str(exc)}
 
     result: Dict[str, Any] = {
         "cte_name": cte_name,

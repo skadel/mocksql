@@ -1,0 +1,158 @@
+"""Tests de compatibilité Snowflake : transpilation d'idiomes + import de schéma.
+
+Couvre les correctifs apportés après l'évaluation Spider2-snow :
+  - import live : DictCursor MAJUSCULES, INFORMATION_SCHEMA qualifié, casse préservée,
+    reconstruction NUMBER(p, s) ;
+  - transpilation : TO_TIMESTAMP[_NTZ/LTZ/TZ] type-aware, TO_CHAR(date), débordement
+    NUMBER → DECIMAL large ;
+  - débogage : SQL de debug quoté selon le dialecte (plus de backticks BigQuery).
+
+Le pipeline d'exécution réel est DuckDB ; chaque test transpilé vérifie donc que la
+sortie s'exécute (ou échoue exactement là où c'est attendu).
+"""
+
+import asyncio
+
+import duckdb
+import sqlglot
+
+from build_query.debug_executor import _quote_ident
+from build_query.schema_fetcher import _sf_get, _sf_quote, _sf_snow_data_type
+from utils.examples import (
+    _widen_bare_decimals,
+    create_test_tables,
+    fix_duck_db_sql,
+    initialize_duckdb,
+    parse_test_query,
+)
+
+
+def _ptq(sql: str, dialect: str = "snowflake") -> str:
+    return asyncio.run(parse_test_query(sql, "sfx", dialect))
+
+
+# ---------------------------------------------------------------------------
+# TO_TIMESTAMP / TO_TIMESTAMP_NTZ — type-aware
+# ---------------------------------------------------------------------------
+
+
+def test_to_timestamp_ntz_numeric_epoch_uses_to_timestamp():
+    """TO_TIMESTAMP_NTZ(epoch) → to_timestamp (DuckDB ne sait pas CAST DOUBLE→TIMESTAMP)."""
+    out = _ptq('SELECT TO_TIMESTAMP_NTZ("bt" / 1000000) AS d FROM mydb.s.t')
+    assert "TO_TIMESTAMP(" in out.upper()
+    assert "AS TIMESTAMP)" not in out.upper()
+
+
+def test_to_timestamp_ntz_string_uses_cast():
+    out = _ptq("SELECT TO_TIMESTAMP_NTZ(s) AS d FROM mydb.s.t")
+    assert "CAST(s AS TIMESTAMP)" in out
+
+
+def test_fix_duck_db_sql_does_not_clobber_to_timestamp():
+    """Le regex TO_TIMESTAMP→CAST a été retiré : un to_timestamp(epoch) doit survivre."""
+    s = "SELECT TO_TIMESTAMP(c / 1000000) FROM t"
+    assert fix_duck_db_sql(s, "snowflake") == s
+
+
+def test_to_timestamp_ntz_epoch_executes_on_duckdb():
+    out = _ptq("SELECT TO_DATE(TO_TIMESTAMP_NTZ(1672531200000000 / 1000000)) AS d")
+    res = duckdb.sql(out).fetchall()
+    assert res[0][0].isoformat() == "2023-01-01"
+
+
+# ---------------------------------------------------------------------------
+# TO_CHAR — formats date → strftime, formats numériques laissés en CAST AS TEXT
+# ---------------------------------------------------------------------------
+
+
+def test_to_char_date_format_becomes_strftime():
+    out = _ptq("SELECT TO_CHAR(d, 'YYYY-MM-DD HH24:MI:SS') AS x FROM mydb.s.t")
+    assert "STRFTIME(" in out.upper()
+    assert "%Y-%m-%d %H:%M:%S" in out
+
+
+def test_to_char_numeric_format_stays_cast_text():
+    out = _ptq("SELECT TO_CHAR(n, '999,999.00') AS x FROM mydb.s.t")
+    assert "STRFTIME" not in out.upper()
+    assert "AS TEXT)" in out.upper()
+
+
+def test_to_char_date_executes_on_duckdb():
+    out = _ptq("SELECT TO_CHAR(DATE '2023-07-15', 'YYYY/MM/DD') AS x")
+    assert duckdb.sql(out).fetchall()[0][0] == "2023/07/15"
+
+
+# ---------------------------------------------------------------------------
+# NUMBER sans précision → DECIMAL large (anti-débordement)
+# ---------------------------------------------------------------------------
+
+
+def test_widen_bare_decimals():
+    tree = sqlglot.parse_one(
+        "CREATE TABLE t (a NUMBER, b NUMBER(12, 2), c DECIMAL, d NUMERIC)",
+        dialect="bigquery",
+    )
+    _widen_bare_decimals(tree)
+    out = tree.sql(dialect="duckdb")
+    assert out.count("DECIMAL(38, 9)") == 3  # a, c, d
+    assert "DECIMAL(12, 2)" in out  # b inchangé
+
+
+def test_bare_number_column_holds_large_integer():
+    """Un grand entier (epoch µs / wei) ne doit plus déborder DECIMAL(18, 3)."""
+    schema = [
+        {
+            "table_name": "db.sch.events",
+            "columns": [{"name": "amount", "type": "NUMBER", "mode": "NULLABLE"}],
+        }
+    ]
+    with initialize_duckdb(":memory:") as con:
+        create_test_tables(schema, "sfx", con, "snowflake", overwrite=True)
+        con.execute("INSERT INTO sch_events_sfx VALUES (2000000000000000)")
+        assert con.execute("SELECT amount FROM sch_events_sfx").fetchone()[0] == 2000000000000000
+
+
+# ---------------------------------------------------------------------------
+# Import live Snowflake : robustesse aux clés DictCursor + reconstruction NUMBER
+# ---------------------------------------------------------------------------
+
+
+def test_sf_get_uppercase_dictcursor_keys():
+    """Le DictCursor Snowflake renvoie les clés en MAJUSCULES."""
+    row = {"COLUMN_NAME": "C_CUSTKEY", "DATA_TYPE": "NUMBER"}
+    assert _sf_get(row, "COLUMN_NAME") == "C_CUSTKEY"
+    assert _sf_get(row, "column_name") == "C_CUSTKEY"  # tolère minuscule aussi
+    assert _sf_get(row, "MISSING") == ""
+
+
+def test_sf_snow_data_type_reconstructs_number_precision():
+    row = {"DATA_TYPE": "NUMBER", "NUMERIC_PRECISION": "38", "NUMERIC_SCALE": "0"}
+    assert _sf_snow_data_type(row) == "NUMBER(38,0)"
+    row2 = {"DATA_TYPE": "NUMBER", "NUMERIC_PRECISION": "12", "NUMERIC_SCALE": "2"}
+    assert _sf_snow_data_type(row2) == "NUMBER(12,2)"
+    # NUMBER sans précision exposée → laissé tel quel (le widen DuckDB s'en charge)
+    assert _sf_snow_data_type({"DATA_TYPE": "NUMBER"}) == "NUMBER"
+    assert _sf_snow_data_type({"DATA_TYPE": "TEXT"}) == "TEXT"
+
+
+def test_sf_quote_identifier():
+    assert _sf_quote("SNOWFLAKE_SAMPLE_DATA") == '"SNOWFLAKE_SAMPLE_DATA"'
+
+
+# ---------------------------------------------------------------------------
+# Debug executor : quoting dépendant du dialecte (plus de backticks BigQuery)
+# ---------------------------------------------------------------------------
+
+
+def test_quote_ident_dialect_aware():
+    assert _quote_ident("tx_fees", "bigquery") == "`tx_fees`"
+    assert _quote_ident("tx_fees", "snowflake") == '"tx_fees"'
+    assert _quote_ident("tx_fees", "duckdb") == '"tx_fees"'
+
+
+def test_snowflake_debug_sql_parses():
+    """Un WITH quoté pour snowflake doit se parser (le backtick BigQuery cassait)."""
+    name = _quote_ident("tx_fees", "snowflake")
+    sql = f"WITH {name} AS (SELECT 1 AS x)\nSELECT * FROM {name}"
+    # ne doit pas lever de ParseError
+    sqlglot.parse_one(sql, read="snowflake")
