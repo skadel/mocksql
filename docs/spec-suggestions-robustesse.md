@@ -9,8 +9,8 @@
 | -- | ----------------------------------------------------------------- | ------- | --------------- |
 | W1 | `instruction_block` : `{}` non interpolé → consignes perdues       | Moyenne | ✅ Corrigé (+ régression) |
 | W6 | Le profil injecté fuit des tables d'autres projets                | **P0**  | ✅ Corrigé (a) + investigué (b) |
-| W5 | Labels de branches tous identiques                                | P1      | À faire         |
-| W4 | Nommage des branches ré-appelé à chaque génération                | P1      | À faire         |
+| W5 | Labels de branches tous identiques                                | P1      | ✅ Corrigé (+ régression) |
+| W4 | Nommage des branches ré-appelé à chaque génération                | P1      | ✅ Corrigé (+ régression) |
 | W2/W3 | SQL verbeux + règle « zéro jargon » mal calibrée               | P3      | Optionnel       |
 
 ---
@@ -88,6 +88,19 @@ le tronc commun → LLM aveugle au discriminant → labels identiques.
 
 **Validation** : sur le SQL de référence (6 branches), les 6 labels doivent être **distincts**.
 
+### Statut
+
+- **Corrigé.** `_branch_discriminant_sql` (`suggestions_node.py`) retire le `WITH` du `sliced_sql`
+  pour exposer le SELECT final de la branche (qui porte le littéral `'<indicator>' AS indicator`),
+  puis borne par la fin — au lieu de tronquer le SQL complet en tête. Filet déterministe
+  `_disambiguate_branch_labels` : sur collision, suffixe le label avec le littéral `indicator`
+  (`_branch_indicator`), à défaut le nom machine humanisé, à défaut un indice → distinction
+  garantie, idempotente. Régression : `tests/test_suggestions_branch_labels.py`
+  (`test_label_branches_sends_discriminant_not_common_prefix`,
+  `test_disambiguate_branch_labels_yields_distinct_labels`,
+  `test_disambiguate_branch_labels_is_idempotent_on_distinct_input`,
+  `test_generate_suggestions_persists_distinct_labels_on_collision`).
+
 ---
 
 ## P1 — W4 : nommage une seule fois
@@ -103,6 +116,15 @@ pour les branches sans label ; zéro appel LLM si toutes en ont un.
 
 **Validation** : 2ᵉ appel à `generate_suggestions` (SQL inchangé, labels en cache) → `_label_branches`
 n'est pas appelé.
+
+### Statut
+
+- **Corrigé.** `generate_suggestions` amorce `branch_labels` depuis les `plans[name]["label"]`
+  persistés et n'appelle `_label_branches` que pour les branches sans label (`to_label`) ; zéro
+  appel LLM si toutes en ont un. La persistance n'écrit `path_plans` que si le set de labels a
+  changé (pas d'écriture inutile en cache). Régression :
+  `tests/test_suggestions_branch_labels.py` (`test_label_branches_skipped_when_all_branches_cached`,
+  `test_label_branches_called_only_for_unlabeled`).
 
 ---
 
