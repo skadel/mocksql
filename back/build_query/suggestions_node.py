@@ -21,6 +21,7 @@ from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_message_type
+from utils.sqlglot_ast import strip_with
 from utils.test_utils import build_test_detail
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,100 @@ def _humanize_branch_name(name: str) -> str:
     return " ".join(w.capitalize() for w in cleaned.split()) or (name or "")
 
 
+def _branch_discriminant_sql(sliced: str, dialect: str, limit: int = 2500) -> str:
+    """Partie discriminante d'une branche slicée à envoyer au labeleur : son SELECT final,
+    débarrassé du préfixe CTE commun (W5).
+
+    Les branches d'un UNION ALL partagent un long tronc ``WITH`` (souvent > ``limit``) et ne
+    diffèrent que par leur SELECT (le littéral ``'<indicator>' AS indicator`` + les colonnes
+    propres). Tronquer le SQL complet en tête masquait ce discriminant → labels identiques. On
+    retire donc le ``WITH`` pour exposer le SELECT — qui commence par le littéral discriminant,
+    préservé même après bornage. Parsing en échec → repli sur la tête du sliced brut."""
+    try:
+        parsed = sqlglot.parse_one(sliced, read=dialect)
+        rendered = (
+            strip_with(parsed).sql(dialect=dialect, pretty=True).strip()
+            if parsed is not None
+            else sliced
+        )
+    except Exception:
+        rendered = sliced
+    rendered = rendered or sliced
+    if len(rendered) > limit:
+        rendered = rendered[:limit] + "\n-- … (tronqué)"
+    return rendered
+
+
+def _branch_indicator(plan: dict, dialect: str) -> str | None:
+    """Littéral discriminant d'une branche : la valeur du ``'<x>' AS indicator`` (ou, à défaut,
+    le 1er littéral chaîne projeté) de son SELECT final. Sert de désambiguïsateur déterministe
+    quand deux branches reçoivent le même label LLM (W5). ``None`` si aucun littéral projeté."""
+    sliced = (plan.get("sliced_sql") or "").strip()
+    if not sliced:
+        return None
+    try:
+        parsed = sqlglot.parse_one(sliced, read=dialect)
+    except Exception:
+        return None
+    if parsed is None:
+        return None
+    body = strip_with(parsed)
+    select = body if isinstance(body, exp.Select) else body.find(exp.Select)
+    if select is None:
+        return None
+    first_literal: str | None = None
+    for proj in select.expressions:
+        node = proj
+        alias = ""
+        if isinstance(proj, exp.Alias):
+            alias = (proj.alias or "").lower()
+            node = proj.this
+        if isinstance(node, exp.Literal) and node.is_string:
+            value = (node.this or "").strip()
+            if not value:
+                continue
+            if alias == "indicator":
+                return value
+            if first_literal is None:
+                first_literal = value
+    return first_literal
+
+
+def _disambiguate_branch_labels(
+    labels: dict[str, str], plans: dict, dialect: str
+) -> dict[str, str]:
+    """Filet déterministe (W5) : garantit que deux branches n'aient jamais le même label.
+
+    Le labeleur LLM peut rendre des labels identiques quand les branches partagent l'essentiel
+    de leur SQL. Pour chaque collision, on suffixe le label avec le littéral discriminant de la
+    branche (son ``indicator``), à défaut son nom machine humanisé, et en ultime recours un
+    indice numérique — la liste finale est donc toujours sans doublon. Idempotent : des labels
+    déjà distincts ne sont pas modifiés (pas de churn entre deux générations)."""
+    out = dict(labels)
+    by_value: dict[str, list[str]] = {}
+    for name, lbl in out.items():
+        by_value.setdefault((lbl or "").strip().lower(), []).append(name)
+    for names in by_value.values():
+        if len(names) <= 1:
+            continue
+        for name in names:
+            suffix = _branch_indicator(
+                plans.get(name) or {}, dialect
+            ) or _humanize_branch_name(name)
+            if suffix:
+                out[name] = f"{out[name]} ({suffix})"
+    # Garantie ultime : si des collisions subsistent (suffixes absents ou identiques),
+    # on suffixe un indice pour ne jamais laisser deux labels égaux.
+    seen: dict[str, int] = {}
+    for name, lbl in out.items():
+        key = lbl.strip().lower()
+        count = seen.get(key, 0) + 1
+        seen[key] = count
+        if count > 1:
+            out[name] = f"{lbl} #{count}"
+    return out
+
+
 class _BranchLabel(BaseModel):
     path: str = Field(
         description="Le nom machine EXACT de la branche, repris tel quel depuis l'entrée."
@@ -302,10 +397,11 @@ async def _label_branches(
         sliced = (plan.get("sliced_sql") or "").strip()
         if not sliced:
             continue
-        # Borne la taille : un label n'a besoin que de l'intention de la branche, pas du SQL entier.
-        if len(sliced) > 2500:
-            sliced = sliced[:2500] + "\n-- … (tronqué)"
-        block = f"Branche « {name} » :\n<sql>\n{sliced}\n</sql>"
+        # Envoie la partie discriminante (le SELECT final, sans le tronc CTE commun) plutôt
+        # que le SQL entier tronqué en tête — sinon le discriminant des branches d'un UNION
+        # ALL (préfixe partagé > 2500 car) est masqué et les labels collisionnent (W5).
+        discriminant = _branch_discriminant_sql(sliced, dialect)
+        block = f"Branche « {name} » :\n<sql>\n{discriminant}\n</sql>"
         if profile:
             prof = _format_profile_block(profile, plan.get("used_columns") or [])
             if prof:
@@ -854,10 +950,32 @@ Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
     uncovered = [n for n in plans if n != ALL_PATH and n not in covered]
     branch_labels: dict[str, str] = {}
     if uncovered:
-        branch_labels = await _label_branches(
-            uncovered, plans, dialect, state.get("model_context"), profile
-        )
-        if branch_labels:
+        # W4 — nommage une seule fois : amorce depuis les labels déjà persistés (rechargés
+        # dans path_plans tant que le SQL ne change pas) et n'appelle le LLM que pour les
+        # branches encore sans label. Toutes labellisées → zéro appel LLM.
+        branch_labels = {
+            n: plans[n]["label"].strip()
+            for n in uncovered
+            if isinstance(plans.get(n), dict)
+            and isinstance(plans[n].get("label"), str)
+            and plans[n]["label"].strip()
+        }
+        to_label = [n for n in uncovered if n not in branch_labels]
+        if to_label:
+            branch_labels.update(
+                await _label_branches(
+                    to_label, plans, dialect, state.get("model_context"), profile
+                )
+            )
+        # W5 — filet déterministe : garantit des labels DISTINCTS même si le LLM en rend
+        # d'identiques (branches au long tronc CTE commun ne différant que par leur SELECT).
+        branch_labels = _disambiguate_branch_labels(branch_labels, plans, dialect)
+        # Persiste seulement si le set de labels diffère de ce qui est déjà stocké : évite
+        # une écriture inutile quand tout était en cache et déjà distinct (W4 run-once).
+        if any(
+            not isinstance(plans.get(n), dict) or plans[n].get("label") != lbl
+            for n, lbl in branch_labels.items()
+        ):
             for name, lbl in branch_labels.items():
                 if isinstance(plans.get(name), dict):
                     plans[name]["label"] = lbl
