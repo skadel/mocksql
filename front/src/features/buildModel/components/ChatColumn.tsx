@@ -7,7 +7,7 @@ import CloseIcon from '@mui/icons-material/Close';
 import ChatBubbleOutlineIcon from '@mui/icons-material/ChatBubbleOutline';
 import HistoryIcon from '@mui/icons-material/History';
 import DeleteSweepOutlinedIcon from '@mui/icons-material/DeleteSweepOutlined';
-import DroppableTextField from '../../../shared/DroppableTextField';
+import ChatInput from './ChatInput';
 
 import MessageDisplay from './MessageDisplay';
 import HistoryDrawer from './HistoryDrawer';
@@ -60,9 +60,8 @@ interface ChatColumnProps {
   assertionOnly: boolean;
   onClearAnchor: () => void;
   renderMessages: AnyRenderable[];
-  userInput: string;
-  setUserInput: React.Dispatch<React.SetStateAction<string>>;
-  onSend: () => void;
+  modelId?: string;
+  onSend: (text: string) => Promise<boolean> | boolean;
   isSending: boolean;
   loading: boolean | null;
   loading_message?: string | null;
@@ -94,8 +93,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   assertionOnly,
   onClearAnchor,
   renderMessages,
-  userInput,
-  setUserInput,
+  modelId,
   onSend,
   isSending,
   loading,
@@ -610,11 +608,10 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
             {queuedCount} instruction{queuedCount > 1 ? 's' : ''} en file · prise{queuedCount > 1 ? 's' : ''} en compte après la génération
           </Box>
         )}
-        <DroppableTextField
-          userInput={userInput}
-          setUserInput={setUserInput}
-          sendMessage={onSend}
-          stopStream={onStopStream}
+        <ChatInput
+          modelId={modelId}
+          onSend={onSend}
+          onStopStream={onStopStream}
           inputRef={inputRef}
           placeholder={
             isLoading
