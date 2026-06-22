@@ -62,7 +62,6 @@ const ChatComponent: React.FC = () => {
   const location = useLocation();
   const params = useParams();
 
-  const [userInput, setUserInput] = useState('');
   const [sqlQuery, setSqlQuery] = useState('');
   const [modelName, setModelName] = useState('');
   const [optimizedSql, setOptimizedSql] = useState('');
@@ -387,19 +386,6 @@ const ChatComponent: React.FC = () => {
    
   useEffect(() => { setValidationStatus('idle'); setSubmitError(null); setMissingTables(null); setTablesToImport(null); setUnderstandingDraft(null); setValidationMs(null); }, [sqlQuery]);
 
-  // -------- Draft localStorage (follow-up messages only)
-  const draftKeyRef = useRef<string>('');
-  useEffect(() => {
-    draftKeyRef.current = `draft:${currentModelId || 'new'}`;
-    const saved = localStorage.getItem(draftKeyRef.current);
-    if (saved && !userInput) setUserInput(saved);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentModelId]);
-
-  useEffect(() => {
-    if (draftKeyRef.current) localStorage.setItem(draftKeyRef.current, userInput);
-  }, [userInput]);
-
   // -------- Core send function
   const sendMessage = useCallback(
     async (
@@ -718,11 +704,11 @@ const ChatComponent: React.FC = () => {
 
   // -------- Follow-up messages
   const handleSendMessage = useCallback(
-    async (textParam?: string, testIdx?: number) => {
-      if (isSending) return;
-      const text = (textParam ?? userInput).trim();
+    async (textParam?: string, testIdx?: number): Promise<boolean> => {
+      if (isSending) return false;
+      const text = (textParam ?? '').trim();
       const effectiveTestIndex = testIdx ?? (selectedTestIndex !== null ? selectedTestIndex : undefined);
-      if (!text && effectiveTestIndex === undefined) return;
+      if (!text && effectiveTestIndex === undefined) return false;
 
       setIsSending(true);
       const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
@@ -742,13 +728,12 @@ const ChatComponent: React.FC = () => {
       setIsSending(false);
 
       if (ok) {
-        setUserInput('');
         setSelectedTestIndex(null);
         setAssertionOnly(false);
-        if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
       }
+      return !!ok;
     },
-    [userInput, sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
+    [sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
   );
 
   // Traite un message envoyé pendant qu'un run est déjà en cours. Le backend classe
@@ -758,11 +743,9 @@ const ChatComponent: React.FC = () => {
   //    complétion plus bas). On incrémente le compteur de file.
   //  - `question` → répondue en direct sans toucher la génération : on insère la
   //    question + la réponse dans le fil immédiatement.
-  const queueInstruction = useCallback(async (text: string) => {
+  const queueInstruction = useCallback(async (text: string): Promise<boolean> => {
     const trimmed = (text ?? '').trim();
-    if (!trimmed || !currentModelId) return;
-    setUserInput('');
-    if (draftKeyRef.current) localStorage.removeItem(draftKeyRef.current);
+    if (!trimmed || !currentModelId) return false;
     const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
     const parentId = lastMessage ? lastMessage.id : null;
     try {
@@ -770,22 +753,22 @@ const ChatComponent: React.FC = () => {
       if (res.kind === 'question') {
         if (res.question) dispatch(appendQueryComponentMessage(formatMessage(res.question)));
         if (res.answer) dispatch(appendQueryComponentMessage(formatMessage(res.answer)));
-        return;
+        return true;
       }
       setQueuedCount(typeof res.queued === 'number' ? res.queued : (n) => n + 1);
     } catch {
       setQueuedCount((n) => n + 1);
     }
+    return true;
   }, [currentModelId, DIALECT, dispatch, renderMessages, selectedChildIndices]);
 
-  const onSendClick = useCallback(() => {
+  const onSendClick = useCallback((text: string): Promise<boolean> => {
     // Pendant une génération en cours : le message devient une instruction en file.
     if (loading || isSending) {
-      queueInstruction(userInput);
-      return;
+      return queueInstruction(text);
     }
-    handleSendMessage(userInput);
-  }, [loading, isSending, userInput, queueInstruction, handleSendMessage]);
+    return handleSendMessage(text);
+  }, [loading, isSending, queueInstruction, handleSendMessage]);
 
   // -------- SQL bar update (re-run with new SQL)
   const handleSQLUpdate = useCallback(
@@ -1729,8 +1712,7 @@ const ChatComponent: React.FC = () => {
             assertionOnly={assertionOnly}
             onClearAnchor={() => { setSelectedTestIndex(null); setAssertionOnly(false); }}
             renderMessages={renderMessages as any}
-            userInput={userInput}
-            setUserInput={setUserInput}
+            modelId={currentModelId}
             onSend={onSendClick}
             isSending={isSending}
             loading={loading}
