@@ -10,6 +10,7 @@ from models.env_variables import (
     SNOWFLAKE_ACCOUNT,
     SNOWFLAKE_DATABASE,
     SNOWFLAKE_PASSWORD,
+    SNOWFLAKE_ROLE,
     SNOWFLAKE_SCHEMA_NAME,
     SNOWFLAKE_USER,
     SNOWFLAKE_WAREHOUSE,
@@ -35,14 +36,19 @@ def get_sf_connection() -> snowflake.connector.SnowflakeConnection:
 
     global _sf_conn
     if _sf_conn is None or _sf_conn.is_closed():
-        _sf_conn = snowflake_connector.connect(
-            account=SNOWFLAKE_ACCOUNT,
-            user=SNOWFLAKE_USER,
-            password=SNOWFLAKE_PASSWORD,
-            warehouse=SNOWFLAKE_WAREHOUSE,
-            database=SNOWFLAKE_DATABASE,
-            schema=SNOWFLAKE_SCHEMA_NAME,
-        )
+        kwargs: dict = {
+            "account": SNOWFLAKE_ACCOUNT,
+            "user": SNOWFLAKE_USER,
+            "password": SNOWFLAKE_PASSWORD,
+            "warehouse": SNOWFLAKE_WAREHOUSE,
+            "database": SNOWFLAKE_DATABASE,
+            "schema": SNOWFLAKE_SCHEMA_NAME,
+        }
+        # Le rôle est requis sur certains comptes (ex. comptes partagés type Spider2
+        # qui imposent role=PARTICIPANT). Optionnel : omis si non défini.
+        if SNOWFLAKE_ROLE:
+            kwargs["role"] = SNOWFLAKE_ROLE
+        _sf_conn = snowflake_connector.connect(**kwargs)
     return _sf_conn
 
 

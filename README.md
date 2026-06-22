@@ -27,43 +27,71 @@ MockSQL comes in two modes:
 
 ## Quick start
 
+Whatever your warehouse, MockSQL generates data with an LLM and runs every test locally on **DuckDB** — zero warehouse cost. The base install runs entirely on DuckDB; the source-warehouse connectors are heavy (`pyarrow`, `grpc`, …) and only needed to **profile/import** real tables, so they ship as optional extras (`mocksql[bigquery]`, `mocksql[snowflake]`, `mocksql[all]`). Run an import without the matching extra and MockSQL fails fast with the exact command.
+
+Data generation always uses an LLM (Gemini via Vertex AI by default), so set `VERTEX_PROJECT` in every setup below. Pick your source:
+
+### BigQuery
+
 ```bash
-pip install mocksql
+pip install mocksql[bigquery]
+gcloud auth application-default login         # GCP auth for schema import + Gemini
 export VERTEX_PROJECT=<your-gcp-project>
 
-mocksql init
-mocksql generate models/my_model.sql
+mocksql init                                  # dialect: bigquery (the default)
+mocksql generate models/orders.sql
 ```
 
-For the full setup (GCP, IAM, Web UI, development) → **[docs/quickstart.md](docs/quickstart.md)**
+Full GCP/IAM setup (roles, service accounts, CI) → **[docs/quickstart.md](docs/quickstart.md)**
 
-### Installation & optional connectors
-
-The base install stays lightweight: data generation and execution run entirely on **DuckDB**, with no warehouse client pulled in. The source-warehouse connectors are heavy (they bring `pyarrow`, `grpc`, …) and are only needed to **profile or import** real tables — so they ship as optional extras:
+### Snowflake
 
 ```bash
-pip install mocksql              # core: generate + DuckDB execution + CI replay
-pip install mocksql[bigquery]    # + profiling/import from BigQuery
-pip install mocksql[snowflake]   # + profiling/import from Snowflake
-pip install mocksql[all]         # all connectors
+pip install mocksql[snowflake]
+mocksql init                                  # choose dialect: snowflake
 ```
 
-If you run a profiling/import step without the matching extra, MockSQL fails fast with the exact `pip install mocksql[…]` command to run.
+Put credentials in a **gitignored** `.env` at your project root:
 
----
-
-## dbt projects
-
-MockSQL tests flat `.sql` files; a dbt project uses Jinja (`{{ ref }}`, macros…). The bridge is `dbt compile` (Jinja → pure SQL) plus a schema cache bootstrapped from the DuckDB database:
+```dotenv
+VERTEX_PROJECT=<your-gcp-project>             # LLM (Gemini via Vertex AI)
+SNOWFLAKE_ACCOUNT=<account_identifier>        # ORG-ACCOUNT, or <locator>.<region>.<cloud>
+SNOWFLAKE_USER=<user>
+SNOWFLAKE_PASSWORD=<password>
+SNOWFLAKE_WAREHOUSE=<warehouse>
+SNOWFLAKE_DATABASE=<database>
+# SNOWFLAKE_ROLE=<role>                        # optional (required on some accounts)
+```
 
 ```bash
+mocksql generate models/orders.sql
+```
+
+MockSQL imports the table schemas from Snowflake (`INFORMATION_SCHEMA`), generates data, and runs the tests on DuckDB. Snowflake idioms (`IFF`, `TO_TIMESTAMP_NTZ`, `TO_CHAR`, `LISTAGG`, `NUMBER(p,s)`…) are transpiled automatically.
+
+### dbt
+
+A dbt model isn't flat SQL (Jinja: `{{ ref }}`, macros). MockSQL reads the **compiled** SQL via a `dbt:` block in `mocksql.yml`, then imports schemas and runs on DuckDB like any other model:
+
+```bash
+pip install mocksql[bigquery]                 # or [snowflake] — match your dbt target
 cd my_dbt_project
-dbt compile && dbt run        # Jinja resolved + tables materialized
-# bootstrap the schema_cache from the DuckDB database, then:
-mocksql generate models/my_model.sql --config mocksql.yml
+dbt compile                                   # Jinja → flat SQL with real table names
+dbt run --select +my_mart                     # (marts only) materialize parent models
+mocksql generate models/marts/my_mart.sql --config mocksql.yml
 ```
 
-Full recipe (compile, cache bootstrap, `dialect: duckdb`) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
+```yaml
+# mocksql.yml — set the dbt block + the dialect of your dbt target
+dialect: bigquery        # bigquery | snowflake | duckdb (must match your dbt target)
+models_path: ./models
+dbt:
+  project_dir: .         # folder containing dbt_project.yml
+llm:
+  provider: vertexai
+```
+
+Full recipe (compile profile, materializing parents, scratch DuckDB) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
 
 ---
 

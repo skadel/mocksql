@@ -34,7 +34,7 @@ def _callback() -> None:
 
 CONFIG_FILE = "mocksql.yml"
 
-DIALECTS = ["bigquery", "postgres"]
+DIALECTS = ["bigquery", "postgres", "snowflake", "duckdb"]
 LLM_PROVIDERS = ["vertexai", "openai"]
 
 _SKIP_DIRS = {".venv", "venv", "node_modules", "__pycache__", ".git", ".tox"}

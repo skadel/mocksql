@@ -411,16 +411,28 @@ async def fetch_tables_schema_snowflake(
             f"AND TABLE_CATALOG = '{database_name.upper()}'" if database_name else ""
         )
 
+        # Qualifier INFORMATION_SCHEMA par la base de la ref : Snowflake n'a pas de
+        # base de session garantie, et chaque base a son propre INFORMATION_SCHEMA.
+        # Sans ça : "session does not have a current database" + impossible de viser
+        # une autre base que celle de la connexion.
+        info_schema = (
+            f"{_sf_quote(database_name)}.INFORMATION_SCHEMA.COLUMNS"
+            if database_name
+            else "INFORMATION_SCHEMA.COLUMNS"
+        )
+
         sql = f"""
             SELECT
                 TABLE_CATALOG,
                 TABLE_SCHEMA,
                 TABLE_NAME,
-                COLUMN_NAME    AS field_path,
-                DATA_TYPE      AS data_type,
+                COLUMN_NAME,
+                DATA_TYPE,
+                NUMERIC_PRECISION,
+                NUMERIC_SCALE,
                 IS_NULLABLE,
-                COMMENT        AS description
-            FROM INFORMATION_SCHEMA.COLUMNS
+                COMMENT
+            FROM {info_schema}
             WHERE TABLE_NAME = '{table_name.upper()}'
             {schema_filter}
             {db_filter}
@@ -439,25 +451,59 @@ async def fetch_tables_schema_snowflake(
             for row in rows:
                 schema_rows.append(
                     {
-                        "table_catalog": (
-                            row.get("TABLE_CATALOG") or database_name
-                        ).lower(),
-                        "table_schema": (
-                            row.get("TABLE_SCHEMA") or schema_name
-                        ).lower(),
-                        "table_name": (row.get("TABLE_NAME") or table_name).lower(),
-                        "field_path": row.get("field_path")
-                        or row.get("COLUMN_NAME", ""),
-                        "data_type": row.get("data_type") or row.get("DATA_TYPE", ""),
+                        # Conserver la casse renvoyée par Snowflake (identifiants en
+                        # MAJUSCULES pour des objets non-quotés) — le SQL gold les
+                        # référence en MAJUSCULES. Pas de .lower() (cassait le match).
+                        "table_catalog": _sf_get(row, "TABLE_CATALOG") or database_name,
+                        "table_schema": _sf_get(row, "TABLE_SCHEMA") or schema_name,
+                        "table_name": _sf_get(row, "TABLE_NAME") or table_name,
+                        # Le DictCursor Snowflake renvoie les clés en MAJUSCULES :
+                        # lire "COLUMN_NAME" (pas "field_path") sinon toutes les
+                        # colonnes sont droppées → cache vide.
+                        "field_path": _sf_get(row, "COLUMN_NAME"),
+                        "data_type": _sf_snow_data_type(row),
                         "mode": "NULLABLE"
-                        if (row.get("IS_NULLABLE") or "YES") == "YES"
+                        if (_sf_get(row, "IS_NULLABLE") or "YES") == "YES"
                         else "REQUIRED",
-                        "description": row.get("description")
-                        or row.get("COMMENT")
-                        or "",
+                        "description": _sf_get(row, "COMMENT"),
                     }
                 )
         except Exception as exc:
             failed.append({"table": ref, "error": str(exc)})
 
     return schema_rows, failed
+
+
+def _sf_quote(identifier: str) -> str:
+    """Quote a Snowflake identifier for safe interpolation in FROM clauses."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def _sf_get(row: dict, key: str) -> str:
+    """Read a value from a Snowflake DictCursor row, robust to key casing.
+
+    snowflake.connector.DictCursor returns column names in UPPERCASE; older code
+    paths may pass lowercase keys. Match case-insensitively before giving up.
+    """
+    val = row.get(key)
+    if val is None:
+        val = row.get(key.upper())
+    if val is None:
+        val = row.get(key.lower())
+    return "" if val is None else str(val)
+
+
+def _sf_snow_data_type(row: dict) -> str:
+    """Reconstruct a faithful Snowflake type string, restoring NUMBER(p,s).
+
+    INFORMATION_SCHEMA.DATA_TYPE collapses all fixed-point types to "NUMBER" and
+    exposes precision/scale separately. Without them the type degrades to DuckDB's
+    default DECIMAL(18,3), which overflows on large integers (epoch µs, ids…).
+    """
+    data_type = _sf_get(row, "DATA_TYPE")
+    if data_type.upper() == "NUMBER":
+        precision = _sf_get(row, "NUMERIC_PRECISION")
+        scale = _sf_get(row, "NUMERIC_SCALE")
+        if precision:
+            return f"NUMBER({precision},{scale or '0'})"
+    return data_type

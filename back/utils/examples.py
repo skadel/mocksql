@@ -363,10 +363,36 @@ def _resolve_duck_type(bq_ddl_type: str) -> str:
         dummy = sqlglot.parse_one(
             f"CREATE TABLE _t (_c {bq_ddl_type})", dialect="bigquery"
         )
+        _widen_bare_decimals(dummy)
         col_def = dummy.find(exp.ColumnDef)
         return col_def.args["kind"].sql(dialect="duckdb")
     except Exception:
         return bq_ddl_type
+
+
+def _widen_bare_decimals(tree: exp.Expression) -> exp.Expression:
+    """Donne une précision large aux décimaux sans précision (NUMBER/DECIMAL/NUMERIC).
+
+    Un `NUMBER`/`DECIMAL` sans `(p, s)` (typique d'un import Snowflake où la
+    précision a été perdue, ou d'un BigQuery NUMERIC) se résout en DuckDB par le
+    défaut `DECIMAL(18, 3)`, qui **déborde** sur tout grand entier (timestamps en
+    µs, valeurs wei blockchain, ids…) :
+    `Could not convert string "2000000000000000" to DECIMAL(18,3)`.
+
+    On élargit donc tout décimal sans précision à `DECIMAL(38, 9)` — assez large
+    pour les grands entiers comme pour les fractions. Les décimaux qui portent
+    déjà une précision explicite (`NUMBER(12, 2)`) sont laissés intacts.
+    """
+    for dt in tree.find_all(exp.DataType):
+        if dt.this == exp.DataType.Type.DECIMAL and not dt.expressions:
+            dt.set(
+                "expressions",
+                [
+                    exp.DataTypeParam(this=exp.Literal.number(38)),
+                    exp.DataTypeParam(this=exp.Literal.number(9)),
+                ],
+            )
+    return tree
 
 
 def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
@@ -459,9 +485,11 @@ def create_test_tables(
             # bigquery, jamais comme `dialect` : sinon, pour un projet
             # dialect=duckdb/postgres, les backticks font échouer le parse
             # ("Expecting )"). La cible d'exécution reste DuckDB.
-            create_test_table_query = sqlglot.parse_one(
+            create_test_table_tree = sqlglot.parse_one(
                 create_table_query, dialect="bigquery"
-            ).sql(dialect="duckdb")
+            )
+            _widen_bare_decimals(create_test_table_tree)
+            create_test_table_query = create_test_table_tree.sql(dialect="duckdb")
 
             # Handle unsupported types (e.g., GEOGRAPHY)
             create_test_table_query = create_test_table_query.replace(
@@ -764,16 +792,18 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
             flags=re.IGNORECASE,
         )
 
-        # TO_DATE(x) → CAST(x AS DATE)  /  TO_TIMESTAMP(x) → CAST(x AS TIMESTAMP)
+        # NB: TO_TIMESTAMP / TO_TIMESTAMP_NTZ/LTZ/TZ est traité plus en amont sur
+        # l'AST (_fix_snowflake_idioms dans parse_test_query) car le rendu dépend du
+        # type de l'argument (numérique epoch → to_timestamp ; sinon → CAST AS
+        # TIMESTAMP). Surtout PAS de regex `TO_TIMESTAMP → CAST AS TIMESTAMP` ici :
+        # elle écraserait le `to_timestamp(epoch)` légitime émis par l'AST en un
+        # `CAST(DOUBLE AS TIMESTAMP)` que DuckDB rejette.
+
+        # TO_DATE(x) → CAST(x AS DATE) — filet de sécurité si TO_DATE a survécu en
+        # Anonymous (sqlglot le rend déjà en CAST AS DATE dans la plupart des cas).
         s = re.sub(
             r"\bTO_DATE\s*\(([^)]+)\)",
             lambda m: f"CAST({m.group(1)} AS DATE)",
-            s,
-            flags=re.IGNORECASE,
-        )
-        s = re.sub(
-            r"\bTO_TIMESTAMP\s*\(([^)]+)\)",
-            lambda m: f"CAST({m.group(1)} AS TIMESTAMP)",
             s,
             flags=re.IGNORECASE,
         )
@@ -1360,6 +1390,135 @@ def _fix_unnest_with_offset(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+# Tokens de format Snowflake TO_CHAR → tokens strftime DuckDB (longest-first :
+# l'alternation regex est leftmost, donc YYYY avant YY, HH24 avant HH, etc.).
+_SNOW_TO_CHAR_TOKENS: list[tuple[str, str]] = [
+    ("YYYY", "%Y"),
+    ("YY", "%y"),
+    ("MMMM", "%B"),
+    ("MON", "%b"),
+    ("MM", "%m"),
+    ("DD", "%d"),
+    ("DY", "%a"),
+    ("HH24", "%H"),
+    ("HH12", "%I"),
+    ("HH", "%H"),
+    ("MI", "%M"),
+    ("SS", "%S"),
+    ("AM", "%p"),
+    ("PM", "%p"),
+]
+_SNOW_TO_CHAR_RE = re.compile(
+    "|".join(re.escape(k) for k, _ in _SNOW_TO_CHAR_TOKENS), re.IGNORECASE
+)
+_SNOW_TO_CHAR_MAP = {k.upper(): v for k, v in _SNOW_TO_CHAR_TOKENS}
+
+
+def _snow_fmt_to_strftime(snow_fmt: str) -> str | None:
+    """Traduit un format date Snowflake en format strftime DuckDB.
+
+    Retourne ``None`` si AUCUN token de date n'est reconnu (ex. format numérique
+    '999,999.00') — dans ce cas on laisse sqlglot rendre `TO_CHAR` en CAST AS TEXT.
+    """
+    matched = False
+
+    def _repl(m: re.Match) -> str:
+        nonlocal matched
+        matched = True
+        return _SNOW_TO_CHAR_MAP[m.group(0).upper()]
+
+    out = _SNOW_TO_CHAR_RE.sub(_repl, snow_fmt)
+    return out if matched else None
+
+
+def _fix_snowflake_to_char(tree: exp.Expression) -> exp.Expression:
+    """Réécrit ``TO_CHAR(x, '<fmt date>')`` en ``strftime(x, '<fmt duckdb>')``.
+
+    sqlglot transpile `TO_CHAR(x, fmt)` snowflake→duckdb en **abandonnant** l'argument
+    de format (→ `CAST(x AS TEXT)`, avec un warning), ce qui perd le formatage. On
+    réécrit donc sur l'AST snowflake AVANT la transpilation, tant que le format est
+    encore présent.
+    """
+    for node in list(tree.find_all(exp.ToChar)):
+        fmt = node.args.get("format")
+        if not isinstance(fmt, exp.Literal) or not fmt.is_string:
+            continue
+        duck_fmt = _snow_fmt_to_strftime(fmt.this)
+        if duck_fmt is None:
+            continue
+        node.replace(
+            exp.Anonymous(
+                this="strftime",
+                expressions=[node.this.copy(), exp.Literal.string(duck_fmt)],
+            )
+        )
+    return tree
+
+
+def _is_numeric_expr(node: exp.Expression) -> bool:
+    """Heuristique : l'expression dénote-t-elle un nombre (epoch) plutôt qu'une chaîne ?"""
+    if isinstance(node, exp.Paren):
+        return _is_numeric_expr(node.this)
+    if isinstance(node, (exp.Add, exp.Sub, exp.Mul, exp.Div, exp.Mod)):
+        return True
+    if isinstance(node, exp.Literal):
+        return not node.is_string
+    if isinstance(node, exp.Cast):
+        target = node.to
+        return isinstance(target, exp.DataType) and target.this in (
+            exp.DataType.Type.INT,
+            exp.DataType.Type.BIGINT,
+            exp.DataType.Type.DECIMAL,
+            exp.DataType.Type.DOUBLE,
+            exp.DataType.Type.FLOAT,
+        )
+    return False
+
+
+_SNOW_TO_TIMESTAMP_FNS = {
+    "TO_TIMESTAMP",
+    "TO_TIMESTAMP_NTZ",
+    "TO_TIMESTAMP_LTZ",
+    "TO_TIMESTAMP_TZ",
+}
+
+
+def _fix_snowflake_to_timestamp(tree: exp.Expression) -> exp.Expression:
+    """Réécrit les ``TO_TIMESTAMP[_NTZ/LTZ/TZ](x)`` laissés en Anonymous par sqlglot.
+
+    sqlglot rend déjà `TO_TIMESTAMP('<chaîne>')` en `CAST AS TIMESTAMP`, mais laisse
+    les variantes `_NTZ/_LTZ/_TZ` et `TO_TIMESTAMP(<numérique|colonne>)` en Anonymous.
+    DuckDB n'a pas `to_timestamp_ntz` ; et `to_timestamp(epoch)` attend un nombre.
+    Le rendu dépend donc du type de l'argument :
+    - numérique (epoch en secondes, ex. ``"bt" / 1000000``) → ``to_timestamp(x)``
+      (DuckDB ne sait PAS faire `CAST(DOUBLE AS TIMESTAMP)`) ;
+    - sinon (chaîne, colonne) → ``CAST(x AS TIMESTAMP)``.
+    """
+    for node in list(tree.find_all(exp.Anonymous)):
+        name = (node.this or "").upper()
+        if name not in _SNOW_TO_TIMESTAMP_FNS or len(node.expressions) != 1:
+            continue
+        arg = node.expressions[0]
+        if _is_numeric_expr(arg):
+            replacement: exp.Expression = exp.Anonymous(
+                this="to_timestamp", expressions=[arg.copy()]
+            )
+        else:
+            replacement = exp.cast(arg.copy(), "TIMESTAMP")
+        node.replace(replacement)
+    return tree
+
+
+def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
+    """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
+
+    Appliquées sur l'AST snowflake AVANT ``.sql(dialect="duckdb")``.
+    """
+    _fix_snowflake_to_char(tree)
+    _fix_snowflake_to_timestamp(tree)
+    return tree
+
+
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
@@ -1369,6 +1528,8 @@ async def parse_test_query(query, suffix, dialect):
     _fix_group_by_strict_mode(tree)
     _fix_unnest_with_offset(tree)
     _alias_unnamed_final_projections(tree)
+    if dialect == "snowflake":
+        _fix_snowflake_idioms(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
