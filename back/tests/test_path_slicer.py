@@ -13,6 +13,7 @@ import json
 from build_query.path_slicer import (
     build_path_plans,
     list_union_paths,
+    prune_dead_projections,
     resolve_active_sql,
     slice_to_path,
     slice_used_columns,
@@ -90,6 +91,65 @@ WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id),
 SELECT u1.id FROM u1 JOIN u2 USING (id)
 """
 
+# Transpose c6 : 6 branches partageant le MÊME FROM (`filter_high_scores`, UNNEST), ne
+# différant que par la constante projetée `'<x>' AS indicator` (le tag discriminant).
+# Nommer par la source du FROM donnerait `filter_high_scores` × 6 (→ branch_2…6) ; il
+# faut nommer par la valeur du tag. (Parsé en bigquery : UNNEST style BigQuery.)
+TRANSPOSE_UNION = """
+WITH filter_high_scores AS (
+    SELECT 'E1' AS entity, [1.0, 2.0, 3.0] AS nb_ope_lags
+),
+res AS (
+    SELECT entity, 'nb_ope' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+    UNION ALL
+    SELECT entity, 'ouvertures' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+    UNION ALL
+    SELECT entity, 'fermetures' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+    UNION ALL
+    SELECT entity, 'parc' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+    UNION ALL
+    SELECT entity, 'parc_actifs' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+    UNION ALL
+    SELECT entity, 'mt_ope' AS indicator, val AS value
+    FROM filter_high_scores, UNNEST(nb_ope_lags) AS val
+)
+SELECT * FROM res
+"""
+
+# Branches sur des tables DIFFÉRENTES, sans tag constant → nommage par source du FROM
+# (régression : le tag ne doit pas écraser le comportement existant).
+HETERO_NO_TAG = """
+WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id), c AS (SELECT 3 AS id)
+SELECT id FROM a
+UNION ALL
+SELECT id FROM b
+UNION ALL
+SELECT id FROM c
+"""
+
+# Branches sans tag constant ET sans table exploitable au FROM (sous-requête aliasée) →
+# fallback branch_N.
+NO_TAG_NO_TABLE = """
+WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id)
+SELECT x.id FROM (SELECT id FROM a) AS x
+UNION ALL
+SELECT y.id FROM (SELECT id FROM b) AS y
+"""
+
+# Constante projetée présente dans toutes les branches mais IDENTIQUE → pas discriminante
+# (il faut ≥2 valeurs distinctes) → retombe sur la source du FROM.
+SAME_TAG = """
+WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id)
+SELECT id, 'X' AS kind FROM a
+UNION ALL
+SELECT id, 'X' AS kind FROM b
+"""
+
 
 # --- list_union_paths -----------------------------------------------------------------
 
@@ -121,6 +181,59 @@ def test_list_union_paths_union_distinct_bails():
 
 def test_list_union_paths_multiple_unions_bails():
     assert list_union_paths(_decompose(TWO_UNIONS)) == []
+
+
+# --- SPEC 2 : nommage de branche par tag constant discriminant -----------------------
+
+
+def test_transpose_branches_named_by_discriminant_tag():
+    # 6 branches, même FROM `filter_high_scores` → le tag `indicator` doit nommer.
+    paths = list_union_paths(_decompose(TRANSPOSE_UNION, "bigquery"), "bigquery")
+    names = [p.name for p in paths]
+    assert names == [
+        "nb_ope",
+        "ouvertures",
+        "fermetures",
+        "parc",
+        "parc_actifs",
+        "mt_ope",
+    ]
+    assert not any(n.startswith("branch_") for n in names)
+    assert "filter_high_scores" not in names
+    # target_path persisté = le tag → titre `[Focus <tag>]` (examples_generator).
+    assert paths[0].name == "nb_ope"
+
+
+def test_from_heterogeneous_naming_unchanged():
+    # Tables différentes, aucun tag constant → nommage par source du FROM (régression).
+    paths = list_union_paths(_decompose(HETERO_NO_TAG))
+    assert [p.name for p in paths] == ["a", "b", "c"]
+
+
+def test_no_tag_no_table_falls_to_branch_n():
+    paths = list_union_paths(_decompose(NO_TAG_NO_TABLE))
+    assert [p.name for p in paths] == ["branch_1", "branch_2"]
+
+
+def test_identical_constant_is_not_discriminant():
+    # 'X' AS kind partout (1 seule valeur) → pas un tag → source du FROM.
+    paths = list_union_paths(_decompose(SAME_TAG))
+    assert [p.name for p in paths] == ["a", "b"]
+
+
+def test_build_path_plans_keys_are_tags_for_transpose():
+    plans = build_path_plans(
+        TRANSPOSE_UNION, _decompose(TRANSPOSE_UNION, "bigquery"), [], "bigquery"
+    )
+    assert set(plans) == {
+        "nb_ope",
+        "ouvertures",
+        "fermetures",
+        "parc",
+        "parc_actifs",
+        "mt_ope",
+        "all",
+    }
 
 
 # --- slice_to_path --------------------------------------------------------------------
@@ -255,6 +368,69 @@ def test_resolve_active_sql_falls_back_to_full_for_all_or_missing():
     # path inconnu + catalogue absent → complet (défensif)
     sql, _ = resolve_active_sql({**base, "target_path": "zzz"})
     assert sql == THREE_BRANCH
+
+
+# --- SPEC 3 : pruning des projections mortes du SQL slicé -----------------------------
+
+# Branche `nb_ope` d'un transpose c6-like : 6 arrays de lags en amont, mais seules
+# `nb_ope_lags` (projetée) et `parc_lags` (filtre ARRAY_LENGTH) sont vivantes.
+_C6_LIKE_BRANCH = """
+WITH base AS (
+  SELECT id, nb_ope_lags, ouvertures_lags, fermetures_lags, parc_lags, parc_actifs_lags, mt_ope_lags
+  FROM proj.ds.metrics
+),
+filtered AS (
+  SELECT * FROM base WHERE ARRAY_LENGTH(parc_lags) >= 2
+),
+nb_ope_branch AS (
+  SELECT id, 'nb_ope' AS indicator, nb_ope_lags AS lags FROM filtered
+)
+SELECT id, indicator, lags FROM nb_ope_branch
+"""
+
+_C6_LIKE_SCHEMA = [
+    {
+        "table_name": "proj.ds.metrics",
+        "columns": [
+            {"name": "id", "type": "INT64"},
+            {"name": "nb_ope_lags", "type": "ARRAY<FLOAT64>"},
+            {"name": "ouvertures_lags", "type": "ARRAY<FLOAT64>"},
+            {"name": "fermetures_lags", "type": "ARRAY<FLOAT64>"},
+            {"name": "parc_lags", "type": "ARRAY<FLOAT64>"},
+            {"name": "parc_actifs_lags", "type": "ARRAY<FLOAT64>"},
+            {"name": "mt_ope_lags", "type": "ARRAY<FLOAT64>"},
+        ],
+    }
+]
+
+
+def test_prune_drops_dead_sibling_arrays_keeps_used_and_filtered():
+    pruned = prune_dead_projections(_C6_LIKE_BRANCH, _C6_LIKE_SCHEMA, "bigquery")
+    # Vivantes : projetée + filtre ARRAY_LENGTH.
+    assert "nb_ope_lags" in pruned
+    assert "parc_lags" in pruned
+    # Sœurs mortes retirées.
+    for dead in (
+        "ouvertures_lags",
+        "fermetures_lags",
+        "parc_actifs_lags",
+        "mt_ope_lags",
+    ):
+        assert dead not in pruned, f"{dead} aurait dû être pruné"
+
+
+def test_prune_without_schema_is_noop():
+    # Sans schéma, `SELECT *` n'est pas résolu → renvoyé inchangé (pas de pruning hasardeux).
+    assert prune_dead_projections(_C6_LIKE_BRANCH, None, "bigquery") == _C6_LIKE_BRANCH
+
+
+def test_prune_unparseable_is_noop():
+    junk = "SELECT FROM WHERE )("
+    assert prune_dead_projections(junk, _C6_LIKE_SCHEMA, "bigquery") == junk
+
+
+def test_prune_empty_sql_is_noop():
+    assert prune_dead_projections("", _C6_LIKE_SCHEMA, "bigquery") == ""
 
 
 # --- régression -----------------------------------------------------------------------

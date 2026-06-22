@@ -493,70 +493,6 @@ def _build_min_points_agg_hint_block(sql: str, dialect: str = "bigquery") -> str
     )
 
 
-def _build_detector_query_hint_block(sql: str, dialect: str = "bigquery") -> str:
-    """Requête DÉTECTEUR : une clause filtrante compare une statistique *dérivée*
-    (fenêtre / percentile / écart-type) à un seuil. Des données lisses → résultat
-    vide ; le cas nominal est alors l'événement de détection lui-même (population de
-    référence + point déviant). Gate volontairement large : un faux positif n'ajoute
-    que du texte (le bloc s'ouvre par « si la requête filtre sur une valeur calculée »),
-    jamais d'erreur. Le guard `find_ancestor(Where/Qualify/Having)` évite de déclencher
-    sur un seuil porté par un `JOIN … ON`."""
-    if not sql:
-        return ""
-    try:
-        import sqlglot
-        from sqlglot import exp
-
-        tree = sqlglot.parse_one(sql, read=dialect)
-    except Exception:
-        return ""
-    if tree is None:
-        return ""
-
-    _STAT = (
-        exp.Stddev,
-        exp.StddevSamp,
-        exp.StddevPop,
-        exp.Variance,
-        exp.VariancePop,
-        exp.PercentileCont,
-        exp.PercentileDisc,
-    )
-    has_windowed_stat = any(True for _ in tree.find_all(exp.Window)) or any(
-        isinstance(n, _STAT) for n in tree.walk()
-    )
-    has_threshold = any(
-        isinstance(cmp, (exp.GT, exp.LT, exp.GTE, exp.LTE))
-        and any(
-            isinstance(s, exp.Literal) and s.is_number
-            for s in (cmp.this, cmp.expression)
-        )
-        and cmp.find_ancestor(exp.Where, exp.Qualify, exp.Having) is not None
-        for cmp in tree.find_all(exp.GT, exp.LT, exp.GTE, exp.LTE)
-    )
-    if not (has_windowed_stat and has_threshold):
-        return ""
-    return (
-        "\n⚠️ **Requête DÉTECTEUR (seuil sur valeur calculée)** : un filtre compare une "
-        "statistique dérivée (fenêtre / percentile / écart-type) à un seuil. Des données "
-        "plates donnent un résultat **VIDE** — le cas nominal EST l'événement détecté. Pour "
-        "produire une ligne :\n"
-        "  - construis une **série de référence** dans la même partition de fenêtrage (mêmes "
-        "valeurs de `PARTITION BY`), assez longue pour remplir la fenêtre exigée (compte les "
-        "`PRECEDING` et les `ARRAY_LENGTH(...) >= N` du SQL) ;\n"
-        "  - fais **varier légèrement** la base — des valeurs toutes identiques donnent un "
-        "écart-type NUL qui annule le z-score et fait rejeter la ligne ;\n"
-        "  - ajoute **un point déviant** dont l'écart à la tendance dépasse le seuil : c'est "
-        "ce que la requête capture ;\n"
-        "  - méfie-toi des transformations appliquées à la stat mais PAS au numérateur "
-        "(percentile / winsorisation calculés sur des valeurs bornées, alors que l'écart est "
-        "mesuré sur la valeur BRUTE) : garde la base resserrée et fais porter le pic sur la "
-        "valeur brute du point cible ;\n"
-        "  - **nomme l'événement** dans la description (« stable à ~X de janvier à mai puis "
-        "pic à Y en juin → juin flaggé »).\n"
-    )
-
-
 # ── Pré-digestion structurelle du SQL (partagée entre prompts) ──────────────
 # Un aperçu compact du pipeline de CTEs, dérivé de `query_decomposed` (déjà produit
 # par le validator → aucun re-parse sqlglot). Détection des opérations par heuristique
@@ -887,7 +823,6 @@ def generate_data_prompt(
 
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
     min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
-    detector_hint_block = _build_detector_query_hint_block(sql, dialect)
 
     if user_instruction:
         consignes_1_2 = """\
@@ -897,9 +832,15 @@ def generate_data_prompt(
    d'erreurs, de jointures défaillantes ou tout autre cas demandé par l'instruction."""
     else:
         consignes_1_2 = """\
-1. **Cas nominal = le BUT de la requête réalisé une fois proprement** : construisez le **témoin le plus simple** qui SURVIT jusqu'au SELECT final (résultat non vide, sans NULL ni valeurs vides gratuites). Sa forme dépend de la **dernière clause filtrante** de la requête :
+1. **Cas nominal = le BUT de la requête réalisé une fois proprement, ET observable.** Construisez le **témoin minimal** qui (a) SURVIT jusqu'au SELECT final (résultat non vide, sans NULL ni valeurs vides gratuites) **et** (b) produit une sortie sur laquelle on peut **formuler une assertion** — un nombre de lignes maîtrisé, pas un pavé.
+   **« Minimal » se mesure sur la SORTIE, pas sur l'entrée.** Avant de générer, prédisez combien de lignes la requête va émettre d'après ses **opérateurs structurels**, et gardez ce nombre aussi petit que la requête l'autorise :
+   - `GROUP BY CUBE / ROLLUP / GROUPING SETS` → une ligne **par combinaison de regroupement** (2^N sous-totaux **même avec une seule entité**). Impossible à supprimer par les données — alors **n'ajoutez aucune valeur de dimension superflue** (une 2ᵉ banque, un 2ᵉ réseau multiplient les sous-totaux) et **ancrez l'assertion sur UNE ligne identifiable** (la ligne de détail, ou le total), nommée par ses colonnes discriminantes dans la description.
+   - `UNNEST(array)` / `CROSS JOIN` → une ligne **par élément** : gardez les tableaux au strict nécessaire pour que la logique tienne (la fenêtre exige N éléments → exactement N, pas plus).
+   - Les fonctions de fenêtre ne démultiplient pas (1 ligne → 1 ligne) ; un **détecteur** émet en revanche **toutes** les lignes qui franchissent le seuil → n'en fabriquez **qu'une**.
+   **Forme selon la dernière clause filtrante :**
    - elle laisse passer des données ordinaires (jointures, agrégats, dérivations) → un cas d'usage métier **standard** suffit ;
-   - elle ne retient qu'une condition **rare** (seuil sur une valeur calculée — z-score, percentile, écart à une moyenne mobile —, `HAVING`, `QUALIFY`, sélection d'un extrême) → le témoin nominal **EST l'occurrence de cette condition**. Des données uniformément « normales » donnent alors un résultat **VIDE** : il faut **fabriquer le contraste** qui déclenche la condition (une population de référence + l'élément déviant), surtout pas lisser les données.
+   - elle ne retient qu'une condition **rare** (seuil sur valeur calculée — z-score, percentile, écart à une moyenne mobile —, `HAVING`, `QUALIFY`, sélection d'un extrême) → le témoin nominal **EST l'occurrence de cette condition**. Des données uniformément « normales » donnent un résultat **VIDE** : **fabriquez le contraste** qui la déclenche (une population de référence assez longue pour remplir la fenêtre — comptez les `PRECEDING` et les `ARRAY_LENGTH(...) >= N` — + un point déviant dont l'écart **brut** dépasse le seuil), surtout ne lissez pas. Méfiez-vous des transformations appliquées à la stat mais pas au numérateur (winsorisation / percentile) : gardez la base resserrée, faites porter le pic sur la valeur brute.
+   **La description affirme un fait vérifiable sur la sortie réelle, jamais une valeur que vous ne pouvez pas connaître.** Précisez les **entrées** (IDs, dates, montants) et le **sens** du résultat (« franchit le seuil de détection », « ressort comme ouverture ») — **interdiction d'énoncer une valeur calculée** (z-score, moyenne, total agrégé) : vous l'inventeriez, et le juge la verra fausse.
 2. **Exclusion des cas exceptionnels** : pas de scénarios d'erreurs ni de jointures défaillantes. La déviation exigée par une clause de détection (point 1) n'en est PAS une : c'est la cible métier que la requête existe pour capturer."""
 
     if native_thinking:
@@ -928,14 +869,14 @@ def generate_data_prompt(
             "FAUSSE (branche concurrente vide, anti-jointure non matchée — voir `branch_plan.must_not_hold`)."
         )
         consigne_3 = """\
-3. **Une seule branche, sélection explicite** : quand le SQL contient plusieurs alternatives (`A OR B`, `CASE WHEN`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et renseigner `branch_plan` AVANT de générer `data`. La STRATÉGIE dépend de la façon dont la branche est sélectionnée :
+3. **Une seule branche, sélection explicite** : quand le SQL contient plusieurs alternatives (`A OR B`, `CASE WHEN`, plusieurs chemins de jointure), choisir **une seule branche** et renseigner `branch_plan` AVANT de générer `data`. La STRATÉGIE dépend de la façon dont la branche est sélectionnée :
    - **Sélection par TABLE** (une table / un chemin de jointure dédié par alternative) → laisser les tables des autres branches VIDES (null).
-   - **Sélection par VALEUR** (date, statut, type sur des tables PARTAGÉES — cas des photos M/M-1) → ne vider AUCUNE table : placer la valeur dans l'intervalle qui satisfait UNIQUEMENT la branche visée (cf. #6), et garantir qu'aucune ligne ne retombe dans une autre branche pour la même clé.
+   - **Sélection par VALEUR** (date, statut, type sur des tables PARTAGÉES — cas des photos M/M-1) → ne vider AUCUNE table : placer la valeur dans l'intervalle qui satisfait UNIQUEMENT la branche visée (cf. #5), et garantir qu'aucune ligne ne retombe dans une autre branche pour la même clé.
    À défaut d'instruction utilisateur, préférer la branche **sans dépendance inter-branches** (sans anti-jointure ni `NOT IN` référençant une autre branche). La description nomme la branche choisie. Les autres branches alimentent les suggestions.
-3bis. **Branches inter-dépendantes (anti-jointure croisée)** : si la branche ciblée comporte une anti-jointure contre une CTE issue d'une AUTRE branche du `UNION ALL` (`NOT IN (SELECT … FROM autre_branche)`), les autres branches doivent rester VIDES pour la clé testée — liste-le dans `branch_plan.must_not_hold`. Ne cible JAMAIS une branche dont la survie exigerait qu'une autre branche soit simultanément peuplée ET vide : une telle condition dans le blob `conditions` aplati signale une extraction bruitée (branches fusionnées) — raisonne alors CTE par CTE depuis `<query>`."""
+3bis. **Branches inter-dépendantes (anti-jointure croisée)** : si la branche ciblée comporte une anti-jointure contre une CTE issue d'une AUTRE branche du `UNION ALL` (`NOT IN (SELECT … FROM autre_branche)`), les autres branches doivent rester VIDES pour la clé testée — liste-le dans `branch_plan.must_not_hold`. Ne cible JAMAIS une branche dont la survie exigerait qu'une autre branche soit simultanément peuplée ET vide."""
     else:
         consigne_3 = """\
-3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure, plusieurs `UNION ALL`), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions."""
+3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions."""
 
     system_message_content = (
         """
@@ -963,18 +904,14 @@ La conversation contient ces sections, délimitées par des balises. Le schéma,
    - `JOIN ON a.k = CASE WHEN t.reseau='BP' THEN '1' END` et `a.k` vient de `t2` → mettez `t2.k = '1'`.
    - `SUBSTR(col, 2, LEN(col)-2)` puis `SPLIT ','` : la colonne SOURCE doit inclure les caractères de bord qui seront retirés (ex. `"'PROD1'"` → après SUBSTR/TRIM → `PROD1`), pas `PROD1` brut.
    - `SAFE_CAST(x AS INT64)` utilisé en clé : `x` doit être numérique des deux côtés et égal.
-5. **Contrôle strict des types et fonctions** :
-   - colonne convertie (`CAST`, `SAFE_CAST`) en entier → valeur d'origine au format numérique ("123", "00123" acceptables, pas "ABC").
-   - fonction de date (`PARSE_DATE`, `SAFE.PARSE_DATE`, …) → la chaîne d'entrée respecte exactement le format attendu.
-   - JOIN sur un champ entier → les valeurs correspondent dans les deux tables.
-6. **Conditions temporelles** : décodez les bornes de chaque filtre de date AVANT de générer. Les bornes viennent des **littéraux du SQL, jamais de la date courante**. Si une CTE exige `dt_deb < D1 AND dt_fin >= D2` et qu'une autre caractérise la branche par l'inverse (présent en M, absent en M-1), placez les dates dans l'intervalle qui satisfait UNIQUEMENT la branche visée. Méfiez-vous des sentinelles (`'0001-01-01'`, `'9999-12-31'`).
-7. **Cohérence inter-tables** : les valeurs partagées entre tables — clés de jointure ET littéraux des filtres (année, dates, statuts, devises) — doivent être **cohérentes dans TOUTES les tables**. Si la requête filtre 2017, aucune donnée 2016. Une valeur cohérente sur une table mais incohérente avec les autres rend le test invalide.
-8. **Agrégats** : si le SQL contient `GROUP BY` + `COUNT`/`SUM`/`AVG`/`STDDEV`/`CORR`, mettez plusieurs lignes partageant la **même clé de groupe** (sinon COUNT=1, STDDEV=0). Ex. : GROUP BY date → 3 lignes `date='2024-01-01'` et 2 lignes `date='2024-01-02'`, pas une date par ligne. Gardez la clé **unique côté table de dimension** pour éviter un fan-out many-to-many qui fausse l'agrégat. Si `ORDER BY` + `OFFSET` sur l'agrégat, des COUNT tous distincts (3, 2, 1 — pas 3, 1, 1, 1 qui créent un ex æquo) pour un OFFSET déterministe.
-9. **LEFT JOIN** : le prédicat ON n'a PAS à matcher pour qu'une ligne survive — une table en LEFT JOIN peut rester vide si le scénario ne la requiert pas. Les INNER JOIN, eux, exigent des clés correspondantes et non nulles.
-10. **Anti-jointures / `NOT IN` / `NOT EXISTS`** : générez des données qui NE matchent PAS la table anti-jointe (sinon la ligne est supprimée).
-11. **NULL** : pas de valeur NULL/vide GRATUITE. Exception explicite : si la logique testée DÉPEND d'un NULL (ex. `LEFT JOIN … WHERE x IS NULL`, `segment IS NULL`), produisez ce NULL — c'est le test.
-12. **Respect strict de la casse** : les clés de `data` reprennent EXACTEMENT les clés de `<schema>`, au format `{dataset}_{table}` (les deux derniers segments du nom qualifié, joints par `_`). Ex. : `bigquery-public-data.covid19_open_data.covid19_open_data` → `covid19_open_data_covid19_open_data`, jamais `covid19_open_data` seul.
-13. **Un seul test**, et **ne pas inclure la requête SQL** dans le résultat.
+5. **Conditions temporelles & formats de date** : décodez les bornes de chaque filtre de date AVANT de générer. Les bornes viennent des **littéraux du SQL, jamais de la date courante**. Si une CTE exige `dt_deb < D1 AND dt_fin >= D2` et qu'une autre caractérise la branche par l'inverse (présent en M, absent en M-1), placez les dates dans l'intervalle qui satisfait UNIQUEMENT la branche visée. Méfiez-vous des sentinelles (`'0001-01-01'`, `'9999-12-31'`). Quand une fonction de parsing (`PARSE_DATE`, `SAFE.PARSE_DATE`, …) lit la valeur, la chaîne d'entrée doit respecter **exactement** le format attendu.
+6. **Cohérence inter-tables** : les valeurs partagées entre tables — clés de jointure ET littéraux des filtres (année, dates, statuts, devises) — doivent être **cohérentes dans TOUTES les tables**. Si la requête filtre 2017, aucune donnée 2016. Une valeur cohérente sur une table mais incohérente avec les autres rend le test invalide.
+7. **Agrégats** : si le SQL contient `GROUP BY` + `COUNT`/`SUM`/`AVG`/`STDDEV`/`CORR`, mettez plusieurs lignes **variées** partageant la **même clé de groupe** (sinon COUNT=1, STDDEV=0). Ex. : GROUP BY date → 3 lignes `date='2024-01-01'` et 2 lignes `date='2024-01-02'`, pas une date par ligne. Gardez la clé **unique côté table de dimension** pour éviter un fan-out many-to-many qui fausse l'agrégat. Si `ORDER BY` + `OFFSET` sur l'agrégat, des COUNT tous distincts (3, 2, 1 — pas 3, 1, 1, 1 qui créent un ex æquo) pour un OFFSET déterministe.
+8. **LEFT JOIN** : le prédicat ON n'a PAS à matcher pour qu'une ligne survive — une table en LEFT JOIN peut rester vide si le scénario ne la requiert pas. Les INNER JOIN, eux, exigent des clés correspondantes et non nulles.
+9. **Anti-jointures / `NOT IN` / `NOT EXISTS`** : générez des données qui NE matchent PAS la table anti-jointe (sinon la ligne est supprimée).
+10. **NULL** : pas de valeur NULL/vide GRATUITE. Exception explicite : si la logique testée DÉPEND d'un NULL (ex. `LEFT JOIN … WHERE x IS NULL`, `segment IS NULL`), produisez ce NULL — c'est le test.
+11. **Casse stricte** : les clés de `data` reprennent EXACTEMENT les clés de `<schema>` (format `{dataset}_{table}`).
+12. **Un seul test**, et **ne pas inclure la requête SQL** dans le résultat.
 
 **Ce que cet outil NE doit PAS tester** (laisser au moteur de warehouse) :
 - Les expressions constantes dans le SELECT final (ex. `SELECT 'valeur_fixe' AS col`) : résultat trivial, aucune logique métier à valider.
@@ -988,7 +925,7 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
         + reasoning_bullet
         + """
 - `test_name`: 3-6 mots, lecteur métier, sans jargon SQL ni noms techniques (ex. "Ouverture nouveau client janvier"). Pas de noms de CTE/colonnes.
-- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] [condition/situation] → [résultat attendu]"*. Nommer la branche choisie quand le SQL a des alternatives. Exemple : "Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse". Interdits : noms de colonnes/CTE, syntaxe SQL, formulations génériques type "Vérifie que le calcul est correct".
+- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] [condition/situation] → [résultat attendu]"*. Nommer la branche choisie quand le SQL a des alternatives. Exemple : "Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse". Interdits : noms de colonnes/CTE, syntaxe SQL, formulations génériques type "Vérifie que le calcul est correct", et **toute valeur calculée** (z-score, moyenne, total agrégé) que vous ne pouvez pas connaître sans exécuter la requête.
 - `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
 - `data`: Données cohérentes, correctes pour la requête.
 
@@ -1042,7 +979,7 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
     constraints_inner = (
         f"{constraints_block}{join_recipes_block}"
         f"{unnest_block}{volume_hints_block}{fanout_hint_block}"
-        f"{min_points_hint_block}{detector_hint_block}"
+        f"{min_points_hint_block}"
     )
     constraints_section = (
         f"<constraints>\n{constraints_inner}</constraints>\n"
@@ -1164,11 +1101,10 @@ def update_data_prompt(
     volume_hints_block = _build_volume_hints_block(sql, dialect)
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
     min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
-    detector_hint_block = _build_detector_query_hint_block(sql, dialect)
 
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}{detector_hint_block}{existing_test_block}
+{sql_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>
