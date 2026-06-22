@@ -25,6 +25,7 @@ renvoie ``[]`` (le système retombe sur le comportement actuel : path ``all`` im
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 
 import sqlglot
@@ -40,9 +41,10 @@ ALL_PATH = "all"
 class PathSpec:
     """Une branche d'un UNION ALL de premier niveau.
 
-    ``name`` est le **nom machine** (clé de ``target_path``), dérivé de la source
-    primaire du FROM de la branche ; il est distinct du label humain produit par le
-    LLM (``BranchPlan.branch``).
+    ``name`` est le **nom machine** (clé de ``target_path``), dérivé en priorité du
+    **tag constant discriminant** projeté par la branche (``'nb_ope' AS indicator``…),
+    sinon de la source primaire de son FROM ; il est distinct du label humain produit
+    par le LLM (``BranchPlan.branch``).
     """
 
     name: str
@@ -116,6 +118,51 @@ def _branch_name(branch: exp.Expression, index: int) -> str:
     return f"branch_{index + 1}"
 
 
+def _literal_text(node: exp.Expression) -> str | None:
+    """Texte d'un littéral constant (chaîne / nombre / booléen), sinon ``None``."""
+    if isinstance(node, exp.Boolean):
+        return "true" if node.this else "false"
+    if isinstance(node, exp.Literal):
+        return node.this
+    return None
+
+
+def _slug(value: str) -> str:
+    """Slug machine d'une valeur de tag : minuscules, ``[^a-z0-9_]`` → ``_``."""
+    return re.sub(r"[^a-z0-9_]+", "_", (value or "").lower()).strip("_")
+
+
+def _branch_const_aliases(branch: exp.Expression) -> dict[str, str]:
+    """Map ``{alias: valeur littérale}`` des projections **constantes aliasées** d'une
+    branche (``'nb_ope' AS indicator`` → ``{"indicator": "nb_ope"}``), dans l'ordre de
+    projection. Sert à repérer le tag discriminant d'un UNION ALL de transpose."""
+    sel = _unwrap(branch)
+    out: dict[str, str] = {}
+    if isinstance(sel, exp.Select):
+        for proj in sel.expressions:
+            if isinstance(proj, exp.Alias) and proj.alias:
+                text = _literal_text(proj.this)
+                if text is not None:
+                    out.setdefault(proj.alias, text)
+    return out
+
+
+def _discriminant_alias(per_branch: list[dict[str, str]]) -> str | None:
+    """Alias d'une projection constante présente dans **toutes** les branches avec **au
+    moins deux valeurs littérales distinctes** (propriété croisée — d'où le calcul sur la
+    liste entière des branches, pas branche par branche). Le premier dans l'ordre de
+    projection de la 1ʳᵉ branche. ``None`` si aucun."""
+    if len(per_branch) < 2:
+        return None
+    for alias in per_branch[0]:  # ordre de projection de la 1ʳᵉ branche
+        if (
+            all(alias in d for d in per_branch)
+            and len({d[alias] for d in per_branch}) > 1
+        ):
+            return alias
+    return None
+
+
 def _find_host(query_decomposed: list[dict], dialect: str):
     """Le couple ``(host_name, union_node, branches)`` de l'UNION ALL de 1er niveau à
     focaliser, ou ``None``.
@@ -159,10 +206,19 @@ def list_union_paths(
         return []
     host_name, _union, branches = found
 
+    # Tag discriminant (transpose : branches au même FROM, distinguées par une constante
+    # projetée) calculé sur l'ENSEMBLE des branches → nommer par la valeur du tag plutôt
+    # que par la source du FROM (qui collisionnerait). Fallback : source du FROM, puis
+    # branch_N. La désambiguïsation par collision reste un filet pour tous les cas.
+    per_branch = [_branch_const_aliases(b) for b in branches]
+    disc = _discriminant_alias(per_branch)
+
     specs: list[PathSpec] = []
     used: set[str] = set()
     for i, branch in enumerate(branches):
-        name = _branch_name(branch, i)
+        name = _slug(per_branch[i][disc]) if disc is not None else ""
+        if not name:  # pas de tag (ou slug vide) → source du FROM, sinon branch_N
+            name = _branch_name(branch, i)
         if name in used:  # collision de noms → désambiguïse en branch_N
             name = f"branch_{i + 1}"
         used.add(name)
@@ -247,6 +303,45 @@ def slice_used_columns(
         for entry in (used_columns or [])
         if (entry.get("table") or "").lower() in referenced
     ]
+
+
+def prune_dead_projections(
+    sql: str,
+    schema: list[dict] | None = None,
+    dialect: str = "bigquery",
+) -> str:
+    """Retire les projections **prouvées mortes** d'un SQL (slicé) via
+    ``pushdown_projections`` — colonnes calculées en amont mais jamais lues en aval (ex.
+    les *arrays de lags sœurs* d'une branche de transpose : ``ouvertures_lags`` &c. quand
+    on focalise ``nb_ope``). **Sémantiquement équivalent** : mêmes lignes en sortie, seules
+    des colonnes inutilisées disparaissent (SPEC 3).
+
+    But : un SQL plus court à faire raisonner par le LLM — *pas* une sortie plus petite.
+    ``pushdown_projections`` ne déboulonne QUE les colonnes mortes ; un scalaire lu par un
+    filtre (``GREATEST/LEAST`` sur N métriques, ``ARRAY_LENGTH(parc_lags) >= N``) reste.
+
+    **Pur, sans effet de bord. Tout échec → ``sql`` inchangé** (no-op) : l'expansion de
+    ``SELECT *`` exige un ``schema`` (sinon les colonnes ne sont pas résolues → renvoyé
+    tel quel), et ``sqlglot`` n'encaisse pas toujours ``PIVOT`` / ``CUBE`` /
+    ``UNNEST … WITH OFFSET`` selon le dialecte. ``schema`` est au format
+    ``[{table_name, columns: [{name, type}]}]`` (comme pour ``build_conditions_hint``).
+    Sans ``schema``, ``SELECT *`` ne peut être étendu → no-op (``sql`` renvoyé tel quel),
+    pour ne pas churner le SQL (requalification) sans bénéfice de pruning."""
+    if not sql or not schema:
+        return sql
+    try:
+        from sqlglot.optimizer.pushdown_projections import pushdown_projections
+        from sqlglot.optimizer.qualify import qualify
+
+        from build_query.constraint_simplifier import _schemas_to_sqlglot
+
+        sqlglot_schema = _schemas_to_sqlglot(schema)
+        tree = sqlglot.parse_one(sql, read=dialect)
+        qualified = qualify(tree, schema=sqlglot_schema, dialect=dialect)
+        pruned = pushdown_projections(qualified, schema=sqlglot_schema)
+        return pruned.sql(dialect=dialect, pretty=True)
+    except Exception:
+        return sql
 
 
 def build_path_plans(
