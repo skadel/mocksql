@@ -78,6 +78,35 @@ def get_duckdb_path() -> str:
     return str(get_mocksql_dir() / "data" / "mocksql.duckdb")
 
 
+def get_prompt_dump_filter() -> set[str] | None:
+    """Labels d'agents dont on dump le prompt rendu + l'output, pour debug.
+
+    Lu depuis l'env ``MOCKSQL_DUMP_PROMPTS`` (liste séparée par des virgules, ou
+    ``*`` pour tout). Absent/vide = désactivé (``None``) → aucun coût en prod.
+    Pas de cache : toggalable sans redémarrer (tests / sessions debug).
+
+    Exemples : ``generator`` · ``generator,suggestions_generator`` · ``*``.
+    Un token matche un label exact, sa base (avant ``:``) ou son préfixe — donc
+    ``generator`` attrape ``generator`` et ``generator:update`` mais pas
+    ``suggestions_generator``.
+    """
+    raw = os.getenv("MOCKSQL_DUMP_PROMPTS", "").strip()
+    if not raw:
+        return None
+    return {tok.strip() for tok in raw.split(",") if tok.strip()}
+
+
+def get_prompt_dump_dir() -> Path:
+    """Dossier d'écriture des dumps de prompt (gitignoré).
+
+    Surchargeable via l'env ``MOCKSQL_DUMP_DIR``, sinon ``<base_dir>/logs/prompts``.
+    """
+    raw = os.getenv("MOCKSQL_DUMP_DIR")
+    if raw:
+        return Path(raw).resolve()
+    return _base_dir() / "logs" / "prompts"
+
+
 def get_langchain_api_key() -> str | None:
     cfg = load_config()
     return cfg.get("langchain_api_key") or os.getenv("LANGCHAIN_API_KEY")
