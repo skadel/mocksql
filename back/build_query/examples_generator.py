@@ -1531,23 +1531,31 @@ def _compute_faker_columns(
         for src in f.source_columns:
             constrained.add((src.table.lower(), src.column.lower()))
 
-    # GROUP BY columns need repeated values across rows — Faker would assign unique values
-    # per row, destroying the aggregation structure (STDDEV=0, wrong counts, etc.).
+    # Two classes of columns the SQL text reveals but the simplifier's constraint
+    # extraction misses — both must stay LLM-controlled, never Faker-filled:
+    #   • GROUP BY keys: need repeated values across rows — Faker would assign a
+    #     unique value per row, destroying the aggregation structure (STDDEV=0,
+    #     wrong counts, etc.).
+    #   • Aggregate-argument *measures* (SUM/AVG/COUNT/MIN/MAX/STDDEV…): the test
+    #     scenario pins these to specific values (e.g. "100 then 150 cases").
+    #     Faker fills them with arbitrary values disconnected from the
+    #     description → description↔data desync (bad_input_description). The
+    #     measure is the point of the test, not an incidental filler column.
     if sql:
         try:
             import sqlglot
             import sqlglot.expressions as exp
 
-            group_by_cols: set[str] = set()
+            pinned_cols: set[str] = set()
             for statement in sqlglot.parse(sql, dialect=dialect):
                 if statement is None:
                     continue
                 for node in statement.walk():
-                    if isinstance(node, exp.Group):
+                    if isinstance(node, (exp.Group, exp.AggFunc)):
                         for col in node.find_all(exp.Column):
-                            group_by_cols.add(col.name.lower())
+                            pinned_cols.add(col.name.lower())
             for table in base_tables:
-                for col in group_by_cols:
+                for col in pinned_cols:
                     constrained.add((table, col))
         except Exception:
             pass
