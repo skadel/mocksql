@@ -493,6 +493,70 @@ def _build_min_points_agg_hint_block(sql: str, dialect: str = "bigquery") -> str
     )
 
 
+def _build_detector_query_hint_block(sql: str, dialect: str = "bigquery") -> str:
+    """Requête DÉTECTEUR : une clause filtrante compare une statistique *dérivée*
+    (fenêtre / percentile / écart-type) à un seuil. Des données lisses → résultat
+    vide ; le cas nominal est alors l'événement de détection lui-même (population de
+    référence + point déviant). Gate volontairement large : un faux positif n'ajoute
+    que du texte (le bloc s'ouvre par « si la requête filtre sur une valeur calculée »),
+    jamais d'erreur. Le guard `find_ancestor(Where/Qualify/Having)` évite de déclencher
+    sur un seuil porté par un `JOIN … ON`."""
+    if not sql:
+        return ""
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return ""
+    if tree is None:
+        return ""
+
+    _STAT = (
+        exp.Stddev,
+        exp.StddevSamp,
+        exp.StddevPop,
+        exp.Variance,
+        exp.VariancePop,
+        exp.PercentileCont,
+        exp.PercentileDisc,
+    )
+    has_windowed_stat = any(True for _ in tree.find_all(exp.Window)) or any(
+        isinstance(n, _STAT) for n in tree.walk()
+    )
+    has_threshold = any(
+        isinstance(cmp, (exp.GT, exp.LT, exp.GTE, exp.LTE))
+        and any(
+            isinstance(s, exp.Literal) and s.is_number
+            for s in (cmp.this, cmp.expression)
+        )
+        and cmp.find_ancestor(exp.Where, exp.Qualify, exp.Having) is not None
+        for cmp in tree.find_all(exp.GT, exp.LT, exp.GTE, exp.LTE)
+    )
+    if not (has_windowed_stat and has_threshold):
+        return ""
+    return (
+        "\n⚠️ **Requête DÉTECTEUR (seuil sur valeur calculée)** : un filtre compare une "
+        "statistique dérivée (fenêtre / percentile / écart-type) à un seuil. Des données "
+        "plates donnent un résultat **VIDE** — le cas nominal EST l'événement détecté. Pour "
+        "produire une ligne :\n"
+        "  - construis une **série de référence** dans la même partition de fenêtrage (mêmes "
+        "valeurs de `PARTITION BY`), assez longue pour remplir la fenêtre exigée (compte les "
+        "`PRECEDING` et les `ARRAY_LENGTH(...) >= N` du SQL) ;\n"
+        "  - fais **varier légèrement** la base — des valeurs toutes identiques donnent un "
+        "écart-type NUL qui annule le z-score et fait rejeter la ligne ;\n"
+        "  - ajoute **un point déviant** dont l'écart à la tendance dépasse le seuil : c'est "
+        "ce que la requête capture ;\n"
+        "  - méfie-toi des transformations appliquées à la stat mais PAS au numérateur "
+        "(percentile / winsorisation calculés sur des valeurs bornées, alors que l'écart est "
+        "mesuré sur la valeur BRUTE) : garde la base resserrée et fais porter le pic sur la "
+        "valeur brute du point cible ;\n"
+        "  - **nomme l'événement** dans la description (« stable à ~X de janvier à mai puis "
+        "pic à Y en juin → juin flaggé »).\n"
+    )
+
+
 # ── Pré-digestion structurelle du SQL (partagée entre prompts) ──────────────
 # Un aperçu compact du pipeline de CTEs, dérivé de `query_decomposed` (déjà produit
 # par le validator → aucun re-parse sqlglot). Détection des opérations par heuristique
@@ -823,6 +887,7 @@ def generate_data_prompt(
 
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
     min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
+    detector_hint_block = _build_detector_query_hint_block(sql, dialect)
 
     if user_instruction:
         consignes_1_2 = """\
@@ -832,9 +897,10 @@ def generate_data_prompt(
    d'erreurs, de jointures défaillantes ou tout autre cas demandé par l'instruction."""
     else:
         consignes_1_2 = """\
-1. **Usage nominal uniquement** : concentrez-vous sur un cas d'usage métier standard, où le résultat
-   de la requête est non vide et non nul (pas de valeurs NULL ou vides).
-2. **Exclusion des cas exceptionnels** : pas de scénarios d'erreurs ou de jointures défaillantes."""
+1. **Cas nominal = le BUT de la requête réalisé une fois proprement** : construisez le **témoin le plus simple** qui SURVIT jusqu'au SELECT final (résultat non vide, sans NULL ni valeurs vides gratuites). Sa forme dépend de la **dernière clause filtrante** de la requête :
+   - elle laisse passer des données ordinaires (jointures, agrégats, dérivations) → un cas d'usage métier **standard** suffit ;
+   - elle ne retient qu'une condition **rare** (seuil sur une valeur calculée — z-score, percentile, écart à une moyenne mobile —, `HAVING`, `QUALIFY`, sélection d'un extrême) → le témoin nominal **EST l'occurrence de cette condition**. Des données uniformément « normales » donnent alors un résultat **VIDE** : il faut **fabriquer le contraste** qui déclenche la condition (une population de référence + l'élément déviant), surtout pas lisser les données.
+2. **Exclusion des cas exceptionnels** : pas de scénarios d'erreurs ni de jointures défaillantes. La déviation exigée par une clause de détection (point 1) n'en est PAS une : c'est la cible métier que la requête existe pour capturer."""
 
     if native_thinking:
         # Le modèle raisonne nativement en amont : le champ ne porte qu'une
@@ -975,7 +1041,8 @@ Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans cl
 
     constraints_inner = (
         f"{constraints_block}{join_recipes_block}"
-        f"{unnest_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}"
+        f"{unnest_block}{volume_hints_block}{fanout_hint_block}"
+        f"{min_points_hint_block}{detector_hint_block}"
     )
     constraints_section = (
         f"<constraints>\n{constraints_inner}</constraints>\n"
@@ -1097,10 +1164,11 @@ def update_data_prompt(
     volume_hints_block = _build_volume_hints_block(sql, dialect)
     fanout_hint_block = _build_fanout_hint_block(sql, dialect)
     min_points_hint_block = _build_min_points_agg_hint_block(sql, dialect)
+    detector_hint_block = _build_detector_query_hint_block(sql, dialect)
 
     final_human_message_content = f"""
 Modifie les données JSON selon l'instruction ci-dessous :
-{sql_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}{existing_test_block}
+{sql_block}{volume_hints_block}{fanout_hint_block}{min_points_hint_block}{detector_hint_block}{existing_test_block}
 <Instruction>
 {user_input}
 </Instruction>
