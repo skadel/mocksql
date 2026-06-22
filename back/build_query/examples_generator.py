@@ -421,7 +421,10 @@ def _build_eval_messages(state, existing_tests: list) -> list:
                     "Corrige précisément l'étape bloquante identifiée ci-dessus (pas "
                     "l'ensemble du test) : ajuste les données des tables qui l'alimentent. "
                     "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), "
-                    "génère des données qui NE matchent PAS la table anti-jointe."
+                    "génère des données qui NE matchent PAS l'ensemble exclu. Quand cet "
+                    "ensemble est une CTE dérivée par agrégat (part/proportion `>= seuil`, "
+                    "COUNT/SUM sur PARTITION BY), change l'AGRÉGAT en ajoutant/dupliquant des "
+                    "lignes (ex. répartir la clé sur ≥ 2 sous-groupes) — une seule valeur ne suffit pas."
                 )
             else:
                 raw_output = test_case.get("results_json", "[]")
@@ -551,9 +554,17 @@ def _format_cte_trace_hint(failing_cte: str, cte_trace: dict) -> str:
                 lines.append(f"  - {bl}")
     lines.append(
         f"\nLa CTE `{failing_cte}` produit 0 ligne, bloquée à l'étape ci-dessus. "
-        "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), génère "
-        "des données qui NE matchent PAS la table anti-jointe ; sinon, ajuste les données "
-        "pour satisfaire ce filtre précis."
+        "Si l'étape bloquante est un anti-join (`… IS NULL` sur une clé jointe), la clé doit "
+        "NE PAS appartenir à l'ensemble exclu — distingue deux cas :\n"
+        "  • ensemble exclu = **table/CTE brute** (liste de clés figées) → change la valeur "
+        "de la clé jointe pour qu'elle n'y figure pas (un seul patch de valeur suffit) ;\n"
+        "  • ensemble exclu = **CTE dérivée par agrégat** (appartenance CALCULÉE : "
+        "part/proportion `>= seuil`, `COUNT`/`SUM`/`ROW_NUMBER` sur `PARTITION BY`) → patcher "
+        "UN seul champ ne déplace PAS l'appartenance (la valeur recalculée reste la même). "
+        "Il faut CHANGER L'AGRÉGAT : ajoute ou duplique des lignes (`add_test_row`) pour que "
+        "la valeur calculée franchisse le seuil — ex. répartir la clé sur ≥ 2 sous-groupes "
+        "pour qu'une part tombe sous le seuil.\n"
+        "Sinon (filtre simple, non anti-join), ajuste les données pour le satisfaire."
     )
     return "\n".join(lines)
 
