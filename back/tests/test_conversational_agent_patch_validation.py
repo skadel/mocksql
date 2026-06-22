@@ -222,3 +222,27 @@ async def test_apply_single_patch_does_not_create_phantom_field():
     )
     assert out["t"][0] == {"partition_date": "2025-01-01"}
     assert "partition_dat" not in out["t"][0]
+
+
+@pytest.mark.asyncio
+async def test_apply_single_patch_recovers_stray_single_quotes():
+    """L'agent flash-lite copie l'exemple Python-repr du docstring (`'"texte"'`) et
+    émet un value_json entouré de guillemets SIMPLES parasites. json.loads échoue ;
+    sans récupération, la valeur garderait ses quotes (ex. SIRET `'"99999999999999"'`
+    qui casse LENGTH=14 / REGEXP `^[0-9]+$` → ligne filtrée → résultat vide).
+    Le coercion doit retomber sur le littéral JSON intérieur."""
+    data = {"t": [{"no_siret": "11111111111111"}]}
+    out = await apply_single_patch(
+        state={},
+        test_case={},
+        data=data,
+        tool_name="patch_test_field",
+        args={
+            "test_index": "1",
+            "table": "t",
+            "row_index": 0,
+            "field": "no_siret",
+            "value_json": "'\"99999999999999\"'",  # guillemets simples parasites
+        },
+    )
+    assert out["t"][0]["no_siret"] == "99999999999999"

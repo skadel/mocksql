@@ -62,6 +62,28 @@ def append_correction_attempt(state: QueryState, test_uid, ops: list) -> list:
     return attempts
 
 
+def _coerce_value_json(raw):
+    """Décode un ``value_json`` (littéral JSON encodé en chaîne) en valeur Python.
+
+    Récupère l'erreur récurrente du LLM (surtout flash-lite) qui copie l'exemple
+    Python-repr du docstring de ``patch_test_field`` (`'"texte"'`) et entoure le
+    littéral JSON de guillemets SIMPLES parasites → ``json.loads`` échoue et, sans
+    récupération, la valeur garderait ses quotes (ex. SIRET ``'"99999999999999"'``
+    qui casse ``LENGTH(...)=14`` / ``REGEXP '^[0-9]+$'`` → ligne filtrée → vide).
+    On retente après avoir retiré une seule couche de guillemets simples enveloppants ;
+    sinon on retombe sur ``raw`` brut (comportement historique)."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        pass
+    if isinstance(raw, str) and len(raw) >= 2 and raw[0] == "'" and raw[-1] == "'":
+        try:
+            return json.loads(raw[1:-1])
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return raw
+
+
 async def apply_single_patch(
     state: QueryState, test_case: dict, data: dict, tool_name: str, args: dict
 ) -> dict:
@@ -71,11 +93,7 @@ async def apply_single_patch(
         table = args.get("table", "")
         row_idx = int(args.get("row_index", 0))
         field = args.get("field", "")
-        raw = args.get("value_json", "null")
-        try:
-            value = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            value = raw
+        value = _coerce_value_json(args.get("value_json", "null"))
         if table not in data or row_idx >= len(data[table]):
             logger.warning(
                 "[data_patcher] patch_test_field test=%s: cible %s[%d] introuvable — patch ignoré",

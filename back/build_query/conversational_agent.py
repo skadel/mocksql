@@ -278,11 +278,12 @@ def _noop_batch_reason(
             return None  # une suppression change toujours les multisets
         if tool == "patch_test_field":
             field = args.get("field", "")
-            raw = args.get("value_json", "null")
-            try:
-                value = json.loads(raw)
-            except (json.JSONDecodeError, TypeError):
-                value = raw
+            # Même coercion que le vrai patch (data_patcher) — sinon la détection de
+            # no-op divergerait de l'état réellement appliqué (récup. des guillemets
+            # simples parasites du LLM).
+            from build_query.data_patcher import _coerce_value_json
+
+            value = _coerce_value_json(args.get("value_json", "null"))
             rows[row_idx][field] = value
             touched.add((uid, table, field))
 
@@ -827,7 +828,11 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         table: nom de la table tel qu'affiché dans les données (ex: 'chicago_taxi_trips_taxi_trips')
         row_index: indice 0-based de la ligne à modifier (visible dans l'affichage [0], [1]…)
         field: nom du champ à modifier
-        value_json: valeur JSON encodée à affecter (ex: "null" pour NULL, "42" pour entier, '"texte"' pour chaîne, '"2024-01-01"' pour date)"""
+        value_json: la valeur à affecter, en littéral JSON BRUT — JAMAIS entourée de
+            guillemets simples. Passe exactement : null (NULL) · 42 (entier) ·
+            "99999999999999" (chaîne, guillemets DOUBLES uniquement) · "2024-01-01" (date).
+            ✗ FAUX : '"texte"' ou 'texte' — les guillemets simples sont injectés tels
+            quels dans la donnée et la cassent (longueur/format)."""
         return f"{test_uid}:{table}:{row_index}:{field}:{value_json}"
 
     @tool

@@ -832,6 +832,29 @@ class TestFormatCteTraceHintBlocking:
         assert "cannot convert float NaN to integer" in out
         assert "COUNT(no_carte)" not in out
 
+    def test_anti_join_hint_covers_aggregate_derived_exclusion(self):
+        """Fix #2 (cas c1/SIRET_ONUS) : quand l'ensemble exclu par un anti-join est
+        une CTE DÉRIVÉE par agrégat (appartenance calculée : part `>= seuil`,
+        COUNT/SUM/ROW_NUMBER sur PARTITION BY), patcher UN champ ne déplace pas
+        l'appartenance — le hint doit pousser vers la modification de l'AGRÉGAT
+        (ajout/duplication de lignes via add_test_row), pas une simple édition de valeur."""
+        trace = {
+            "main": {
+                "row_count": 0,
+                "blocking": True,
+                "steps": [
+                    {"label": "base", "count": 1},
+                    {"label": "+ WHERE onus.no_siret IS NULL", "count": 0},
+                ],
+            }
+        }
+        out = _format_cte_trace_hint("main", trace).lower()
+        assert "agrégat" in out
+        assert "add_test_row" in out
+        assert "seuil" in out
+        # On garde la distinction avec le cas table brute (patch de valeur simple).
+        assert "anti-join" in out
+
     def test_error_upstream_of_failing_cte_keeps_sql(self):
         # Une erreur AVANT la CTE ciblée est potentiellement la vraie cause →
         # elle garde le SQL de l'étape (règle de logging projet).
