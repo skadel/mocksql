@@ -611,9 +611,12 @@ async def generate_suggestions(state: QueryState):
         test_blocks.append(f"{header}\n{body}")
     existing = "\n\n".join(test_blocks)
 
-    # Formatage propre avec balises XML pour le prompt
+    # Formatage propre avec balises XML pour le prompt. NB : f-string — le contenu réel
+    # des instructions doit être injecté ici. Un littéral `{}` resterait tel quel (la valeur
+    # est passée comme kwarg à .format() qui ne ré-interpole pas les accolades du contenu) →
+    # les consignes spécifiques de l'utilisateur seraient silencieusement perdues.
     instruction_block = (
-        "<instructions_specifiques>\n{}\n</instructions_specifiques>"
+        f"<instructions_specifiques>\n{instructions}\n</instructions_specifiques>"
         if instructions
         else ""
     )

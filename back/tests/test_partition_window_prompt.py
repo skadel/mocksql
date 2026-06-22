@@ -86,5 +86,50 @@ class TestProfileBlockWindowNote(unittest.TestCase):
         self.assertNotIn("partitions", block)
 
 
+class TestProfileBlockCrossProjectLeak(unittest.TestCase):
+    """W6 — une table absente de `used_columns` ne doit JAMAIS apparaître dans le bloc,
+    même quand elle porte des `derived_expressions`. Régression : un profil contaminé par
+    des tables d'autres projets (cache PII partagé) fuitait leurs expressions via la boucle
+    derived_expressions, qui sautait son filtre quand `wanted_cols` était vide."""
+
+    def _profile(self) -> dict:
+        return {
+            "tables": {
+                # Table pertinente : référencée par la requête.
+                "proj.MARKETING.datamart_commercants": {
+                    "columns": {
+                        "valeur": {
+                            "min_value": 10,
+                            "max_value": 99,
+                            "distinct_count": 40,
+                        },
+                    },
+                },
+                # Table ÉTRANGÈRE : absente de used_columns, mais porte une expr dérivée.
+                "other_proj.genomics.quant_proteome_ccrcc": {
+                    "derived_expressions": [
+                        {
+                            "expr_sql": "CAST(quant.protein_abundance_log2ratio AS FLOAT64)",
+                            "top_values": [-0.1822, -0.3095, -0.5247],
+                        }
+                    ],
+                },
+            },
+            "joins": [],
+        }
+
+    def test_foreign_table_with_derived_expr_is_not_leaked(self):
+        used = [
+            {"table": "proj.MARKETING.datamart_commercants", "used_columns": ["valeur"]}
+        ]
+        block = _format_profile_block(self._profile(), used)
+        # La table pertinente est présente…
+        self.assertIn("datamart_commercants", block)
+        self.assertIn("`valeur`", block)
+        # …mais aucune trace de la table étrangère ni de son expression.
+        self.assertNotIn("quant_proteome_ccrcc", block)
+        self.assertNotIn("protein_abundance_log2ratio", block)
+
+
 if __name__ == "__main__":
     unittest.main()

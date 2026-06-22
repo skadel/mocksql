@@ -263,6 +263,13 @@ def _format_profile_block(
     lines: List[str] = []
     for tbl_key, tbl_data in profile["tables"].items():
         short_key = tbl_key.split(".")[-1]
+        # Une table absente de `used_columns` ne doit JAMAIS apparaître — même via ses
+        # `derived_expressions`. Sinon un profil contaminé par des tables d'autres projets
+        # (cache PII partagé) fuite leurs expressions dans le prompt (W6). La boucle des
+        # derived_expressions plus bas ne filtrait que `if wanted_cols:` → pour une table
+        # non demandée (wanted_cols vide), elle émettait tout.
+        if tbl_key not in requested and short_key not in requested:
+            continue
         wanted_cols = requested.get(tbl_key) or requested.get(short_key)
         derived_exprs = tbl_data.get("derived_expressions", [])
         if not wanted_cols and not derived_exprs:

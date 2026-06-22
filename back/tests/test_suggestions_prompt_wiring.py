@@ -50,7 +50,9 @@ def _test_case(*, with_result: bool) -> dict:
     }
 
 
-async def _run(monkeypatch, *, native: bool, with_result: bool) -> dict:
+async def _run(
+    monkeypatch, *, native: bool, with_result: bool, instructions: str | None = None
+) -> dict:
     captured: dict = {}
     _install_capture(monkeypatch, captured)
     monkeypatch.setattr(suggestions_node, "is_native_thinking_active", lambda: native)
@@ -64,6 +66,7 @@ async def _run(monkeypatch, *, native: bool, with_result: bool) -> dict:
         "session": "s1",
         "query": "SELECT region, SUM(x) FROM t GROUP BY region",
         "messages": [],
+        "agent_tool_args": {"instructions": instructions} if instructions else {},
         "query_decomposed": json.dumps(
             [
                 {
@@ -116,6 +119,29 @@ async def test_results_grounding_falls_back_when_no_test_succeeded(monkeypatch):
     captured = await _run(monkeypatch, native=True, with_result=False)
     user = captured["user"]
     assert "ne prétends pas t'appuyer sur des résultats" in user
+
+
+@pytest.mark.asyncio
+async def test_instructions_specifiques_injected_when_present(monkeypatch):
+    """Régression : les consignes spécifiques (agent_tool_args.instructions) doivent être
+    réellement injectées dans le prompt — pas un littéral `{}` orphelin. Cf. bug où
+    `instruction_block` portait un `{}` non-interpolé : les instructions étaient perdues."""
+    instructions = "Concentre-toi sur la fenêtre glissante de winsorization"
+    captured = await _run(
+        monkeypatch, native=True, with_result=True, instructions=instructions
+    )
+    user = captured["user"]
+    assert "<instructions_specifiques>" in user
+    assert instructions in user
+    # Le placeholder littéral ne doit jamais survivre au rendu.
+    assert "<instructions_specifiques>\n{}\n</instructions_specifiques>" not in user
+
+
+@pytest.mark.asyncio
+async def test_instructions_specifiques_absent_when_empty(monkeypatch):
+    """Sans consigne spécifique, aucun bloc <instructions_specifiques> ne doit apparaître."""
+    captured = await _run(monkeypatch, native=True, with_result=True, instructions=None)
+    assert "<instructions_specifiques>" not in captured["user"]
 
 
 @pytest.mark.asyncio
