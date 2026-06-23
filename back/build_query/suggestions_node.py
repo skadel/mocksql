@@ -166,6 +166,15 @@ class TestSuggestion(BaseModel):
             "(taux de NULL, min/max, cardinalité, valeur observée), jamais une fonction SQL."
         ),
     )
+    target_path: str = Field(
+        default="",
+        description=(
+            "Nom machine EXACT d'une branche du catalogue <branches_union_all> sur laquelle "
+            "FOCALISER ce test (repris tel quel). À ne renseigner QUE si isoler cette branche "
+            "révèle un cas qu'un test sur l'assemblage complet masquerait. Vide (\"\") sinon — "
+            "c'est le cas par défaut, ne propose pas un focus par branche « pour la forme »."
+        ),
+    )
 
 
 class TestSuggestionsOutput(BaseModel):
@@ -259,22 +268,15 @@ def _covered_paths(state: QueryState, test_cases: list[dict]) -> set:
     return covered
 
 
-def _humanize_branch_name(name: str) -> str:
-    """Fallback lisible d'un nom machine de branche : ``pr_segmentation_bp`` → « Segmentation
-    Bp ». Utilisé quand le label fonctionnel LLM n'est pas disponible."""
-    cleaned = re.sub(r"[_\-]+", " ", name or "").strip()
-    return " ".join(w.capitalize() for w in cleaned.split()) or (name or "")
-
-
 def _branch_discriminant_sql(sliced: str, dialect: str, limit: int = 2500) -> str:
-    """Partie discriminante d'une branche slicée à envoyer au labeleur : son SELECT final,
-    débarrassé du préfixe CTE commun (W5).
+    """Partie discriminante d'une branche slicée : son SELECT final, débarrassé du préfixe
+    CTE commun.
 
     Les branches d'un UNION ALL partagent un long tronc ``WITH`` (souvent > ``limit``) et ne
-    diffèrent que par leur SELECT (le littéral ``'<indicator>' AS indicator`` + les colonnes
-    propres). Tronquer le SQL complet en tête masquait ce discriminant → labels identiques. On
-    retire donc le ``WITH`` pour exposer le SELECT — qui commence par le littéral discriminant,
-    préservé même après bornage. Parsing en échec → repli sur la tête du sliced brut."""
+    diffèrent que par leur SELECT (le filtre/littéral propre + les colonnes propres). On retire
+    donc le ``WITH`` pour exposer ce SELECT discriminant — injecté tel quel dans le catalogue de
+    branches du suggesteur (cf. ``_branch_catalog_block``). Parsing en échec → repli sur la tête
+    du sliced brut."""
     try:
         parsed = sqlglot.parse_one(sliced, read=dialect)
         rendered = (
@@ -290,218 +292,38 @@ def _branch_discriminant_sql(sliced: str, dialect: str, limit: int = 2500) -> st
     return rendered
 
 
-def _branch_indicator(plan: dict, dialect: str) -> str | None:
-    """Littéral discriminant d'une branche : la valeur du ``'<x>' AS indicator`` (ou, à défaut,
-    le 1er littéral chaîne projeté) de son SELECT final. Sert de désambiguïsateur déterministe
-    quand deux branches reçoivent le même label LLM (W5). ``None`` si aucun littéral projeté."""
-    sliced = (plan.get("sliced_sql") or "").strip()
-    if not sliced:
-        return None
-    try:
-        parsed = sqlglot.parse_one(sliced, read=dialect)
-    except Exception:
-        return None
-    if parsed is None:
-        return None
-    body = strip_with(parsed)
-    select = body if isinstance(body, exp.Select) else body.find(exp.Select)
-    if select is None:
-        return None
-    first_literal: str | None = None
-    for proj in select.expressions:
-        node = proj
-        alias = ""
-        if isinstance(proj, exp.Alias):
-            alias = (proj.alias or "").lower()
-            node = proj.this
-        if isinstance(node, exp.Literal) and node.is_string:
-            value = (node.this or "").strip()
-            if not value:
-                continue
-            if alias == "indicator":
-                return value
-            if first_literal is None:
-                first_literal = value
-    return first_literal
+def _branch_catalog_block(state: QueryState, covered: set, dialect: str) -> str:
+    """Catalogue des branches d'un UNION ALL injecté dans le suggesteur CONTEXTUEL.
 
-
-def _disambiguate_branch_labels(
-    labels: dict[str, str], plans: dict, dialect: str
-) -> dict[str, str]:
-    """Filet déterministe (W5) : garantit que deux branches n'aient jamais le même label.
-
-    Le labeleur LLM peut rendre des labels identiques quand les branches partagent l'essentiel
-    de leur SQL. Pour chaque collision, on suffixe le label avec le littéral discriminant de la
-    branche (son ``indicator``), à défaut son nom machine humanisé, et en ultime recours un
-    indice numérique — la liste finale est donc toujours sans doublon. Idempotent : des labels
-    déjà distincts ne sont pas modifiés (pas de churn entre deux générations)."""
-    out = dict(labels)
-    by_value: dict[str, list[str]] = {}
-    for name, lbl in out.items():
-        by_value.setdefault((lbl or "").strip().lower(), []).append(name)
-    for names in by_value.values():
-        if len(names) <= 1:
-            continue
-        for name in names:
-            suffix = _branch_indicator(
-                plans.get(name) or {}, dialect
-            ) or _humanize_branch_name(name)
-            if suffix:
-                out[name] = f"{out[name]} ({suffix})"
-    # Garantie ultime : si des collisions subsistent (suffixes absents ou identiques),
-    # on suffixe un indice pour ne jamais laisser deux labels égaux.
-    seen: dict[str, int] = {}
-    for name, lbl in out.items():
-        key = lbl.strip().lower()
-        count = seen.get(key, 0) + 1
-        seen[key] = count
-        if count > 1:
-            out[name] = f"{lbl} #{count}"
-    return out
-
-
-class _BranchLabel(BaseModel):
-    path: str = Field(
-        description="Le nom machine EXACT de la branche, repris tel quel depuis l'entrée."
-    )
-    label: str = Field(
-        description=(
-            "Groupe nominal court (3-7 mots) qui complète la phrase « Tester ___ », en "
-            "langage métier compréhensible par un non-développeur. Décris CE QUE PRODUIT la "
-            "branche (le sous-ensemble métier qu'elle calcule), pas sa mécanique SQL. "
-            "Jamais de nom de table/colonne brut, de fonction SQL ni de jargon. "
-            "Ex. : « la segmentation des porteurs côté BP », « les ouvertures de compte du mois »."
-        )
-    )
-
-
-class _BranchLabelsOutput(BaseModel):
-    labels: list[_BranchLabel] = Field(
-        description="Un label fonctionnel par branche fournie en entrée."
-    )
-
-
-async def _label_branches(
-    uncovered: list[str],
-    plans: dict,
-    dialect: str,
-    model_context: str | None = None,
-    profile: dict | None = None,
-) -> dict[str, str]:
-    """Label fonctionnel par branche non couverte (best-effort LLM, ``{}`` si échec).
-
-    Reformule un nom machine opaque (``pr_segmentation_bp``) en un groupe nominal métier
-    (« la segmentation des porteurs côté BP ») à partir du ``sliced_sql`` de la branche, pour
-    que la suggestion « Tester … » soit compréhensible. Quand un profil réel est fourni, on
-    injecte par branche les distributions des colonnes qu'elle utilise (``plan.used_columns``)
-    — les ``top_values`` de la colonne discriminante révèlent souvent les catégories métier
-    (ex. OUVERTURE/FERMETURE) et précisent le label. Échec LLM → l'appelant retombe sur
-    ``_humanize_branch_name``."""
-    branch_blocks = []
-    for name in uncovered:
-        plan = plans.get(name) or {}
-        sliced = (plan.get("sliced_sql") or "").strip()
-        if not sliced:
-            continue
-        # Envoie la partie discriminante (le SELECT final, sans le tronc CTE commun) plutôt
-        # que le SQL entier tronqué en tête — sinon le discriminant des branches d'un UNION
-        # ALL (préfixe partagé > 2500 car) est masqué et les labels collisionnent (W5).
-        discriminant = _branch_discriminant_sql(sliced, dialect)
-        block = f"Branche « {name} » :\n<sql>\n{discriminant}\n</sql>"
-        if profile:
-            prof = _format_profile_block(profile, plan.get("used_columns") or [])
-            if prof:
-                if len(prof) > 1500:
-                    prof = prof[:1500] + "\n… (tronqué)"
-                block += (
-                    f"\nDistributions réelles des colonnes de cette branche :\n{prof}"
-                )
-        branch_blocks.append(block)
-    if not branch_blocks:
-        return {}
-
-    context_block = (
-        f"\n\nContexte métier du projet :\n{model_context.strip()}"
-        if model_context and model_context.strip()
-        else ""
-    )
-    prompt_template = ChatPromptTemplate.from_messages(
-        [
-            (
-                "system",
-                MOCKSQL_PRODUCT_PREAMBLE
-                + (
-                    "\n\nTu nommes en langage métier les branches d'un UNION ALL SQL "
-                    f"(dialecte {dialect}). Pour chaque branche, produis un groupe nominal "
-                    "court qui dit CE QU'ELLE CALCULE pour le métier, jamais sa mécanique SQL "
-                    "ni un nom de table brut. Le label doit compléter naturellement « Tester ___ ». "
-                    "Quand des distributions réelles sont fournies, sers-toi des valeurs "
-                    "fréquentes de la colonne discriminante (le filtre propre à la branche) pour "
-                    "nommer la catégorie métier réellement produite — sans citer la valeur brute."
-                ),
-            ),
-            (
-                "user",
-                "Voici les branches à nommer." + context_block + "\n\n{branches}",
-            ),
-        ]
-    )
-    try:
-        llm = make_llm()
-        structured_llm = llm.with_structured_output(_BranchLabelsOutput)
-        result = await (prompt_template | structured_llm).ainvoke(
-            {"branches": "\n\n".join(branch_blocks)}
-        )
-        labels = {
-            item.path.strip(): item.label.strip()
-            for item in (result.labels or [])
-            if item.path and item.path.strip() and item.label and item.label.strip()
-        }
-        # Ne garde que les branches réellement demandées (le LLM peut renvoyer des extras).
-        labels = {k: v for k, v in labels.items() if k in uncovered}
-        logger.diag("[path_labels] %r", labels)
-        return labels
-    except Exception as e:  # pragma: no cover — best-effort, fallback humanize
-        logger.warning("Erreur LLM lors du labeling des branches UNION ALL: %s", e)
-        return {}
-
-
-def _build_path_suggestions(
-    state: QueryState, test_cases: list[dict], labels: dict[str, str] | None = None
-) -> tuple[list[str], dict[str, str]]:
-    """Suggestions DÉTERMINISTES de couverture des branches UNION ALL non couvertes + le
-    path ``all`` (assemblage complet). ``([], {})`` si pas de catalogue.
-
-    ``labels`` : libellés fonctionnels {nom_machine → label} (cf. ``_label_branches``).
-    Quand un label existe, le texte devient « Tester <label> » (compréhensible) au lieu de
-    « Tester le path <nom_machine> » ; sinon fallback sur ``_humanize_branch_name``.
-    Cliquer une de ces suggestions → l'agent pose ``target_path`` (cf. conversational_agent,
-    qui remappe le label vers le nom machine via le ``label`` stocké dans ``path_plans``)."""
+    Pour chaque branche : nom machine, couverture, et SELECT discriminant (sans le tronc CTE
+    commun). Cadre le UNION comme « mêmes sources présentées différemment » et offre le focus
+    par branche comme une suggestion OPTIONNELLE (champ ``target_path`` de ``TestSuggestion``),
+    décidée par le LLM au vu du code et des résultats — jamais une suggestion forcée, une par
+    branche, comme l'ancien track déterministe. ``""`` si pas de catalogue de paths."""
     plans = _parse_path_plans(state)
-    if not plans:
-        return [], {}
-    labels = labels or {}
-
-    covered = _covered_paths(state, test_cases)
-
-    texts: list[str] = []
-    rationales: dict[str, str] = {}
-    for name in plans:
-        if name in covered:
-            continue
-        if name == ALL_PATH:
-            text = "Tester l'assemblage complet (toutes les branches du UNION ALL)"
-            rat = (
-                "Le test d'assemblage complet attrape les bugs de frontière du UNION ALL "
-                "(coercition de types, colonnes désalignées entre branches)."
-            )
-        else:
-            label = labels.get(name) or f"la branche « {_humanize_branch_name(name)} »"
-            text = f"Tester {label}"
-            rat = f"{label[:1].upper()}{label[1:]} n'est couverte par aucun test."
-        texts.append(text)
-        rationales[text] = rat
-    return texts, rationales
+    names = [n for n in plans if n != ALL_PATH and isinstance(plans.get(n), dict)]
+    if not names:
+        return ""
+    lines = []
+    for name in names:
+        plan = plans[name]
+        cov = "déjà couverte" if name in covered else "non couverte"
+        discriminant = _branch_discriminant_sql(
+            (plan.get("sliced_sql") or "").strip(), dialect, limit=600
+        )
+        lines.append(f"- `{name}` ({cov}) :\n<sql>\n{discriminant}\n</sql>")
+    example = names[0]
+    return (
+        "<branches_union_all>\n"
+        "Ce SQL assemble plusieurs présentations des MÊMES sources via UNION ALL : le tronc "
+        "de calcul est partagé (exécuter une branche traite déjà les autres). Le découpage en "
+        "branches est un choix de PRÉSENTATION, pas des pipelines de données indépendants.\n"
+        "Tu PEUX proposer une suggestion focalisée sur UNE branche — uniquement si isoler "
+        "cette branche révèle un cas qu'un test sur l'assemblage complet masquerait — en "
+        f"renseignant son `target_path` avec le nom machine exact (ex. `{example}`). Sinon "
+        "laisse `target_path` vide. Ne propose JAMAIS un focus par branche « pour la forme ».\n"
+        "Branches :\n" + "\n".join(lines) + "\n</branches_union_all>"
+    )
 
 
 # Prompt compact pour la génération d'UNE suggestion enchaînée immédiatement en test
@@ -792,6 +614,8 @@ Ton objectif est d'identifier les cas de tests les plus utiles — ceux où le r
 
 {sql_digest}
 
+{branch_catalog_block}
+
 {instruction_block}
 
 Voici les tests déjà générés avec leurs données d'entrée, résultats d'exécution et verdicts (à ne pas reproduire) :
@@ -884,10 +708,17 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
         "les cas non couverts."
     )
 
-    # Initialisés ici pour survivre à un échec LLM : les suggestions de path
-    # (déterministes) doivent rester émises même si le LLM ne produit rien.
+    # Catalogue des branches UNION ALL : injecté dans le prompt pour que le suggesteur
+    # contextuel puisse, S'IL le juge utile, proposer un test focalisé sur une branche
+    # (via le champ `target_path`). Plus de track déterministe « une suggestion par
+    # branche » : le focus est devenu une suggestion contextuelle parmi les autres.
+    covered_paths = _covered_paths(state, test_cases)
+    branch_catalog_block = _branch_catalog_block(state, covered_paths, dialect)
+
+    # Échec LLM → panneau vide (pas de repli déterministe, cf. décision produit).
     suggestions: list[str] = []
     rationales: dict[str, str] = {}
+    suggestion_paths: dict[str, str] = {}
     gap_analysis = ""
     try:
         try:
@@ -895,6 +726,7 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
                 dialect=dialect,
                 sql=sql_for_prompt,
                 sql_digest=sql_digest,
+                branch_catalog_block=branch_catalog_block,
                 instruction_block=instruction_block,
                 existing_tests_block=existing_tests_block,
                 prior_suggestions_block=prior_suggestions_block,
@@ -919,6 +751,7 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
                 "dialect": dialect,
                 "sql": sql_for_prompt,
                 "sql_digest": sql_digest,
+                "branch_catalog_block": branch_catalog_block,
                 "instruction_block": instruction_block,
                 "existing_tests_block": existing_tests_block,
                 "prior_suggestions_block": prior_suggestions_block,
@@ -943,66 +776,35 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
             for s in items
             if s.text and s.text.strip() and s.rationale and s.rationale.strip()
         }
+        # Focus par branche : le LLM peut marquer une suggestion comme focalisée sur une
+        # branche du catalogue (champ `target_path`). On ne garde que les paths VALIDES
+        # (présents dans path_plans) pour câbler ensuite le clic → focus (cf.
+        # conversational_agent : remap déterministe texte-suggestion → nom machine).
+        plan_names = set(_parse_path_plans(state).keys())
+        suggestion_paths = {
+            s.text.strip(): s.target_path.strip()
+            for s in items
+            if s.text
+            and s.text.strip()
+            and s.target_path
+            and s.target_path.strip() in plan_names
+        }
         logger.diag(
             "[suggestions] suggestions générées (%d):\n%s",
             len(suggestions),
             "\n".join(
-                f"  [{i + 1}] {s}" + (f"  ⟪{rationales[s]}⟫" if s in rationales else "")
+                f"  [{i + 1}] {s}"
+                + (f"  →focus[{suggestion_paths[s]}]" if s in suggestion_paths else "")
+                + (f"  ⟪{rationales[s]}⟫" if s in rationales else "")
                 for i, s in enumerate(suggestions)
             ),
         )
 
     except Exception as e:
         logger.warning("Erreur LLM lors de la génération des suggestions: %s", e)
-        suggestions, rationales = [], {}
+        suggestions, rationales, suggestion_paths = [], {}, {}
 
-    # Suggestions de path (UNION ALL) — déterministes, robustes à un échec LLM. Les noms
-    # machine des branches (table source du FROM, ex. pr_segmentation_bp) sont reformulés en
-    # labels fonctionnels via le LLM ; ces labels sont persistés dans path_plans pour que
-    # l'agent remappe ensuite le clic « Tester <label> » vers le bon target_path.
-    plans = _parse_path_plans(state)
-    covered = _covered_paths(state, test_cases)
-    uncovered = [n for n in plans if n != ALL_PATH and n not in covered]
-    branch_labels: dict[str, str] = {}
-    if uncovered:
-        # W4 — nommage une seule fois : amorce depuis les labels déjà persistés (rechargés
-        # dans path_plans tant que le SQL ne change pas) et n'appelle le LLM que pour les
-        # branches encore sans label. Toutes labellisées → zéro appel LLM.
-        branch_labels = {
-            n: plans[n]["label"].strip()
-            for n in uncovered
-            if isinstance(plans.get(n), dict)
-            and isinstance(plans[n].get("label"), str)
-            and plans[n]["label"].strip()
-        }
-        to_label = [n for n in uncovered if n not in branch_labels]
-        if to_label:
-            branch_labels.update(
-                await _label_branches(
-                    to_label, plans, dialect, state.get("model_context"), profile
-                )
-            )
-        # W5 — filet déterministe : garantit des labels DISTINCTS même si le LLM en rend
-        # d'identiques (branches au long tronc CTE commun ne différant que par leur SELECT).
-        branch_labels = _disambiguate_branch_labels(branch_labels, plans, dialect)
-        # Persiste seulement si le set de labels diffère de ce qui est déjà stocké : évite
-        # une écriture inutile quand tout était en cache et déjà distinct (W4 run-once).
-        if any(
-            not isinstance(plans.get(n), dict) or plans[n].get("label") != lbl
-            for n, lbl in branch_labels.items()
-        ):
-            for name, lbl in branch_labels.items():
-                if isinstance(plans.get(name), dict):
-                    plans[name]["label"] = lbl
-            update_test(
-                state["session"],
-                {"path_plans": json.dumps(plans, ensure_ascii=False)},
-            )
-    path_suggestions, path_rationales = _build_path_suggestions(
-        state, test_cases, branch_labels
-    )
-
-    if not suggestions and not path_suggestions:
+    if not suggestions:
         return {}
 
     # Mode append : on fusionne les nouvelles (en tête = plus récentes) avec celles déjà
@@ -1012,6 +814,10 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
         existing_rationales = stored.get("suggestion_rationales") or {}
         combined_rationales = {**existing_rationales, **rationales}
         rationales = {k: v for k, v in combined_rationales.items() if k in merged}
+        # Idem pour les focus : on conserve les mappings des suggestions encore en attente.
+        existing_paths = stored.get("suggestion_paths") or {}
+        combined_paths = {**existing_paths, **suggestion_paths}
+        suggestion_paths = {k: v for k, v in combined_paths.items() if k in merged}
         logger.diag(
             "[suggestions] append → %d nouvelle(s) + %d en attente = %d après fusion (plafond %d)",
             len(suggestions),
@@ -1021,17 +827,7 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
         )
         suggestions = merged
 
-    # Path en tête (priorité couverture des branches), dédupliqué + plafonné.
-    if path_suggestions:
-        seen: set[str] = set()
-        combined: list[str] = []
-        for s in [*path_suggestions, *suggestions]:
-            if s and s not in seen:
-                seen.add(s)
-                combined.append(s)
-        suggestions = combined[:SUGGESTIONS_CAP]
-        rationales = {**path_rationales, **rationales}
-        rationales = {k: v for k, v in rationales.items() if k in suggestions}
+    suggestion_paths = {k: v for k, v in suggestion_paths.items() if k in suggestions}
 
     # --- 3b. Persistance sur le modèle ---
     # Les suggestions sont un état du modèle (panneau dédié), pas un tour de chat :
@@ -1040,7 +836,11 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
     # l'historique de conversation (cf. history_saver).
     update_test(
         state["session"],
-        {"suggestions": suggestions, "suggestion_rationales": rationales},
+        {
+            "suggestions": suggestions,
+            "suggestion_rationales": rationales,
+            "suggestion_paths": suggestion_paths,
+        },
     )
 
     # --- 4. Détermination du parent_id ---

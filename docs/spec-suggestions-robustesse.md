@@ -3,6 +3,19 @@
 > Issue de la revue du prompt de génération de suggestions et du prompt de nommage des
 > branches `UNION ALL` (cf. `build_query/suggestions_node.py`, `build_query/prompt_tools.py`).
 
+> **MISE À JOUR (2026-06) — W4 & W5 caducs.** Le track DÉTERMINISTE de suggestions de path
+> (une suggestion forcée par branche non couverte + le nommage LLM des branches via
+> `_label_branches` / `_disambiguate_branch_labels`) a été **supprimé**. Raison : sur un
+> `UNION ALL` qui ne fait que présenter les **mêmes sources** différemment (ex. réseaux BP/CE),
+> forcer un focus par branche est du bruit, et nommer la branche à partir des distributions
+> dégénérées des dimensions partagées produisait des labels hallucinés (« le profil des
+> restaurants SAS parisiens »). Le focus par branche est désormais une **suggestion
+> contextuelle optionnelle** : le suggesteur reçoit le catalogue des branches
+> (`_branch_catalog_block`, avec le SELECT discriminant de chaque branche) et peut marquer une
+> suggestion comme focalisée via le champ `target_path`. Le clic est remappé déterministement
+> vers `set_target_path` via la map `suggestion_paths` persistée sur le modèle. Les sections
+> W4/W5 ci-dessous sont conservées pour l'historique.
+
 ## Récap des faiblesses
 
 | #  | Faiblesse                                                          | Gravité | Statut          |

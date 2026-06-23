@@ -173,12 +173,18 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
                     ).items()
                     if k.strip() != consumed
                 }
+                paths = {
+                    k: v
+                    for k, v in ((stored or {}).get("suggestion_paths") or {}).items()
+                    if k.strip() != consumed
+                }
                 update_test(
                     session,
                     {
                         "suggestions": remaining,
                         "accepted_suggestions": accepted,
                         "suggestion_rationales": rationales,
+                        "suggestion_paths": paths,
                     },
                 )
 
