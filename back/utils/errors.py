@@ -6,7 +6,24 @@ import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import HTTPException as FastAPIHTTPException
-from google.api_core.exceptions import BadRequest, Forbidden, NotFound
+
+try:
+    from google.api_core.exceptions import BadRequest, Forbidden, NotFound
+except ImportError:
+    # Extra `bigquery` non installé (cœur DuckDB seul) : ces exceptions ne
+    # peuvent jamais être levées sans le connecteur BigQuery. On expose des
+    # classes sentinelles pour que les `isinstance()` ci-dessous restent
+    # valides et renvoient simplement False.
+    class BadRequest(Exception):  # type: ignore[no-redef]
+        pass
+
+    class Forbidden(Exception):  # type: ignore[no-redef]
+        pass
+
+    class NotFound(Exception):  # type: ignore[no-redef]
+        pass
+
+
 from langchain_core.messages import AIMessage, HumanMessage, BaseMessage
 from sqlglot import ParseError
 from sqlglot.errors import OptimizeError
