@@ -624,6 +624,18 @@ async def conversational_agent(state: QueryState):
             "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
             "renforce le test existant via `add_test_row`."
         )
+        # Focus déterministe : si la suggestion cliquée a été marquée par le suggesteur comme
+        # focalisée sur une branche (suggestion_paths persisté), on impose le nom machine exact
+        # à l'agent → set_target_path sans deviner. Évite tout remap fuzzy texte → branche.
+        _clicked = (state.get("input") or "").strip()
+        _focus_path = (stored.get("suggestion_paths") or {}).get(_clicked)
+        if _focus_path:
+            suggestion_note += (
+                f"\n\nCette suggestion est FOCALISÉE sur la branche « {_focus_path} » (UNION ALL). "
+                f'Appelle d\'abord `set_target_path(path="{_focus_path}")` SANS test_uid '
+                "(nouveau test focalisé sur cette branche), puis laisse le generator produire "
+                "le test. N'utilise pas un autre nom de branche."
+            )
 
     # Canal de raisonnement : quand le thinking natif Gemini est actif (flash/pro),
     # le raisonnement se fait hors du contenu → interdire le texte de réflexion
@@ -668,33 +680,26 @@ async def conversational_agent(state: QueryState):
         }
 
         def _branch_line(name: str) -> str:
-            # Le label fonctionnel (persisté par suggestions_node) permet à l'agent de
-            # remapper un clic « Tester <label> » vers ce nom machine de branche.
-            plan = plans_dict.get(name)
-            label = plan.get("label") if isinstance(plan, dict) else None
-            label_part = f" — « {label} »" if label else ""
             cov = " (couvert)" if name in _covered else " (non couvert)"
-            return f"- {name}{label_part}{cov}"
+            return f"- {name}{cov}"
 
         _branch_lines = "\n".join(
             _branch_line(name) for name in valid_paths if name != ALL_PATH
         )
         path_note = (
-            "\n\nFOCALISATION PAR PATH (UNION ALL) — ce SQL a des branches indépendantes. "
-            'Un test est soit focalisé sur UNE branche (couverture partielle, titre "[Focus X]"), '
-            'soit sur "all" (assemblage complet de toutes les branches).\n'
-            "Branches disponibles (nom machine — « label fonctionnel ») :\n"
+            "\n\nFOCALISATION PAR PATH (UNION ALL) — ce SQL assemble plusieurs présentations "
+            "des MÊMES sources (le tronc de calcul est partagé, ce ne sont pas des pipelines "
+            "indépendants). Un test peut être focalisé sur UNE branche (couverture partielle, "
+            'titre "[Focus X]") ou porter sur "all" (assemblage complet).\n'
+            "Branches disponibles (noms machine) :\n"
             f"{_branch_lines}\n"
             "Utilise `set_target_path(test_uid, path)` pour (re)focaliser un test. `path` est "
-            "TOUJOURS le nom machine ci-dessus, jamais le label. Intentions :\n"
+            "TOUJOURS un nom machine ci-dessus. Intentions :\n"
             "- path précis demandé → ce nom de branche.\n"
             '- « tous les paths » / « assemblage complet » → "all".\n'
             '- ambigu / « je ne sais pas » → "all" (défaut sûr, ne devine PAS une branche).\n'
             "- « peu importe » → la PREMIÈRE branche non couverte ci-dessus.\n"
-            "Un clic de suggestion « Tester <label fonctionnel> » d'une branche non couverte → "
-            "retrouve le nom machine dont le label correspond et appelle `set_target_path(path=ce_nom)` "
-            "SANS test_uid (nouveau test). Pour re-focaliser un test EXISTANT sur une autre "
-            "branche → passe son test_uid."
+            "Pour re-focaliser un test EXISTANT sur une autre branche → passe son test_uid."
         )
 
     # Recettes de jointure (clés dérivées) : sans elles, face à un écart du type

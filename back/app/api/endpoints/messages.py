@@ -272,6 +272,11 @@ async def dismiss_suggestion(body: DismissSuggestionRequest):
             for k, v in (test.get("suggestion_rationales") or {}).items()
             if k.strip() != suggestion
         }
+        paths = {
+            k: v
+            for k, v in (test.get("suggestion_paths") or {}).items()
+            if k.strip() != suggestion
+        }
 
         update_test(
             body.sessionId,
@@ -279,6 +284,7 @@ async def dismiss_suggestion(body: DismissSuggestionRequest):
                 "suggestions": suggestions,
                 "dismissed_suggestions": dismissed,
                 "suggestion_rationales": rationales,
+                "suggestion_paths": paths,
             },
         )
         return {"ok": True}
