@@ -1298,25 +1298,41 @@ function TestCard({
       </Box>
 
       {/* Validation prompt — désync description↔réel (données valides) : l'utilisateur tranche.
-          needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète.
-          Dans les deux cas l'évaluateur a proposé une description corrigée (corrected_description)
+          needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète ;
+          bad_input_description = écart entre valeurs d'entrée annoncées et injectées.
+          Dans les trois cas l'évaluateur a proposé une description corrigée (corrected_description)
           affichée en preview, appliquée au clic « Je valide » via accept_validation. */}
-      {(test.reason_type === 'needs_validation' || test.reason_type === 'bad_description') && (onValidateTest || onCorrectTest) && (() => {
+      {(test.reason_type === 'needs_validation' || test.reason_type === 'bad_description' || test.reason_type === 'bad_input_description') && (onValidateTest || onCorrectTest) && (() => {
         let actual = 0;
         try { actual = (JSON.parse(test.results_json || '[]') || []).length; } catch { /* noop */ }
         const expected = test.expected_row_count;
         const corrected = (test.corrected_description || '').trim();
-        const message = test.reason_type === 'bad_description'
-          ? 'La description annonce une valeur que le calcul ne produit pas. '
-          : (expected != null
-            ? `Le résultat produit ${actual} ligne(s) alors que ce scénario en suppose ${expected}. `
-            : 'Le résultat ne correspond pas à la cardinalité supposée par la description. ');
+        const explanation = (test.evaluation_explanation || '').trim();
+        const summary = test.reason_type === 'bad_input_description'
+          ? (test.user_premise
+            ? 'Les données injectées ne correspondent pas à la prémisse que tu as énoncée. '
+            : 'La description annonce des valeurs d\'entrée qui ne correspondent pas aux données réellement injectées. ')
+          : test.reason_type === 'bad_description'
+            ? 'La description annonce une valeur que le calcul ne produit pas. '
+            : (expected != null
+              ? `Le résultat produit ${actual} ligne(s) alors que ce scénario en suppose ${expected}. `
+              : 'Le résultat ne correspond pas à la cardinalité supposée par la description. ');
         return (
           <Box sx={{ px: 2, pb: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
             <Typography sx={{ fontSize: 12.5, color: '#8a5c00', lineHeight: 1.4 }}>
-              {message}
+              {summary}
               Valides-tu ce résultat (la description sera réalignée) ou faut-il corriger le test ?
             </Typography>
+            {explanation && (
+              <Box sx={{ bgcolor: '#fef9ec', border: '1px solid #e8d5a0', borderRadius: '8px', px: 1.25, py: 1 }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#7a5200', mb: 0.25 }}>
+                  Pourquoi la description actuelle est incorrecte
+                </Typography>
+                <Typography sx={{ fontSize: 12.5, color: '#5c4a1a', lineHeight: 1.45 }}>
+                  {explanation}
+                </Typography>
+              </Box>
+            )}
             {corrected && (
               <Box sx={{ bgcolor: '#fffbf0', border: '1px solid #f0e0c0', borderRadius: '8px', px: 1.25, py: 1 }}>
                 <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#8a5c00', mb: 0.25 }}>
