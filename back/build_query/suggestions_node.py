@@ -145,14 +145,17 @@ def _select_pitfalls(sql: str, dialect: str) -> str:
 class TestSuggestion(BaseModel):
     text: str = Field(
         description=(
-            "La suggestion, formulée en langage métier. Commence par un verbe et décrit un "
-            "comportement observable pour le domaine (ex : un total incohérent, des lignes "
-            "manquantes, un classement incorrect). Évite le jargon d'implémentation — noms de "
-            "fonctions SQL, d'opérateurs, de colonnes ou de CTE (pas de EXTRACT, COUNT DISTINCT, "
-            "LAG, JOIN, CTE, etc.). Un terme d'analyse indispensable au sens "
-            "(référence/baseline, écart-type, seuil, percentile) est toléré s'il est nécessaire "
-            'pour décrire le symptôme. Préfixée par "[PROD] " si et seulement si elle est ancrée '
-            "sur le profil statistique réel fourni."
+            "La suggestion, formulée comme une affirmation directe du symptôme métier observable "
+            '(ex : "Un client présent dans deux régions est compté deux fois dans le total '
+            'national."). Pas de préfixe interrogatif ou injonctif — jamais "Tester si", '
+            '"S\'assurer que", "Vérifier que". Une phrase courte, au présent, qui décrit '
+            "ce qui se passe dans les données quand le cas se produit. Évite le jargon "
+            "d'implémentation — noms de fonctions SQL, d'opérateurs, de colonnes ou de CTE "
+            "(pas de EXTRACT, COUNT DISTINCT, LAG, JOIN, CTE, etc.). Un terme d'analyse "
+            "indispensable au sens (référence/baseline, écart-type, seuil, percentile) est "
+            "toléré s'il est nécessaire pour décrire le symptôme. "
+            'Préfixée par "[PROD] " si et seulement si elle est ancrée sur le profil '
+            "statistique réel fourni."
         )
     )
     rationale: str = Field(
@@ -414,9 +417,10 @@ Tests déjà générés (à ne PAS reproduire — propose un cas distinct) :
 Pièges classiques pertinents pour ce SQL :
 {pitfalls_block}
 
-Génère exactement 1 suggestion de cas de test non couvert, formulée en langage métier
-(commence par un verbe, décris un symptôme métier observable — pas de fonction SQL ni de
-détail d'implémentation). Renseigne aussi `analyse_des_manques` en une phrase.""",
+Génère exactement 1 suggestion de cas de test non couvert, formulée comme une affirmation
+directe décrivant le symptôme métier (jamais "Tester si", "S'assurer que", "Vérifier que" —
+une phrase courte au présent, sans jargon SQL ni détail d'implémentation).
+Renseigne aussi `analyse_des_manques` en une phrase.""",
             ),
         ]
     )
@@ -631,7 +635,7 @@ Le bloc <suggestions_deja_proposees> liste les suggestions déjà traitées, reg
 
 {results_grounding}
 Génère exactement 3 nouvelles suggestions de cas de tests non encore couverts.
-Chaque suggestion doit être une assertion actionnable courte commençant par un verbe (ex : "Vérifie que...", "S'assure que...", "Teste le comportement...").
+Formule chaque suggestion comme une **affirmation directe** décrivant le symptôme métier — une phrase courte au présent qui décrit ce qui se passe dans les données quand le cas se produit. **Jamais** de préfixe "Tester si", "S'assurer que", "Vérifier que" ou équivalent.
 
 **Priorise les cas où le résultat attendu est incertain ou contre-intuitif.** Voici les pièges classiques pertinents pour les constructions détectées dans ce SQL — consulte-les et applique ceux qui s'appliquent réellement :
 
@@ -640,17 +644,17 @@ Chaque suggestion doit être une assertion actionnable courte commençant par un
 Pour ces patterns, formule la suggestion en décrivant le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite le jargon **d'implémentation** — noms de fonctions SQL, d'opérateurs, de colonnes ou de CTE. En revanche, un terme **d'analyse indispensable** au sens (référence/baseline de calcul, écart-type, seuil, percentile, moyenne glissante) reste acceptable s'il est nécessaire pour décrire le symptôme : la prohibition vise le *comment technique*, pas le vocabulaire métier de l'analyse. L'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *par quelle fonction SQL*.
 
 Mauvais exemple (cite une fonction SQL, décrit la mécanique au lieu du symptôme métier) :
-"Vérifie que les incidents de 2024 ne sont pas exclus silencieusement par l'EXTRACT lorsque la date est NULL."
-Bon exemple (symptôme métier observable, chiffrable, sans jargon) :
-"Vérifie que le total annuel d'incidents correspond bien à la somme des totaux mensuels — un écart signalerait des incidents rattachés à aucun mois, donc invisibles dans le rapport annuel."
+"Les incidents de 2024 sont exclus silencieusement par l'EXTRACT lorsque la date est NULL."
+Bon exemple (affirmation directe, symptôme métier observable, sans jargon) :
+"Des incidents sans mois sont invisibles dans le rapport annuel et gonflent le total sans apparaître dans les totaux mensuels."
 
 Autre mauvais exemple (banal, vrai par construction, n'apprend rien) :
-"Vérifie que la requête retourne des lignes quand il y a des données en entrée."
+"La requête retourne des lignes quand il y a des données en entrée."
 Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
-"Vérifie qu'un client présent dans deux régions n'est compté qu'une fois dans le total national — sinon le total national dépasse la somme des effectifs réels."
+"Un client présent dans deux régions est compté deux fois dans le total national, qui dépasse alors la somme des effectifs réels."
 
 Autre bon exemple (cas analytique — **une anomalie en masque une autre**, terme technique indispensable toléré) :
-"Vérifie qu'une hausse brutale un mois n'empêche pas de détecter une hausse comparable le mois suivant : si la première gonfle la référence de calcul (moyenne et écart-type), la seconde repasse sous le seuil d'alerte et reste invisible dans le rapport d'anomalies."
+"Une hausse brutale un mois fait gonfler la référence (moyenne et écart-type), rendant la hausse suivante invisible dans le rapport d'anomalies."
 
 {prod_instruction_block}""",
             ),
