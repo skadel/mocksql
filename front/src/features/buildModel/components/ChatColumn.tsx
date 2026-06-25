@@ -55,6 +55,7 @@ function formatTokenCount(n: number): string {
 
 interface ChatColumnProps {
   fileName: string;
+  filePath?: string;
   onChangeFile: () => void;
   selectedTestIndex: number | null;
   assertionOnly: boolean;
@@ -88,6 +89,7 @@ interface ChatColumnProps {
 
 const ChatColumn: React.FC<ChatColumnProps> = ({
   fileName,
+  filePath,
   onChangeFile,
   selectedTestIndex,
   assertionOnly,
@@ -225,19 +227,27 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           >
             Fichier testé
           </Typography>
-          <Typography
-            sx={{
-              fontWeight: 600,
-              color: '#0f272a',
-              fontSize: 13.5,
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              lineHeight: 1.3,
-            }}
+          <Tooltip
+            title={filePath && filePath !== fileName ? filePath : ''}
+            placement="bottom-start"
+            arrow
+            disableHoverListener={!filePath || filePath === fileName}
           >
-            {fileName}
-          </Typography>
+            <Typography
+              sx={{
+                fontWeight: 600,
+                color: '#0f272a',
+                fontSize: 13.5,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                lineHeight: 1.3,
+                cursor: filePath && filePath !== fileName ? 'help' : 'default',
+              }}
+            >
+              {fileName}
+            </Typography>
+          </Tooltip>
         </Box>
         <Box
           component="button"
