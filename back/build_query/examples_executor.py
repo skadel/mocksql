@@ -1930,8 +1930,14 @@ UNIQUEMENT (aucune autre table) ; anti-trivialité (`1=1`, `col=col`, `IS NOT NU
 non-nulle) ; et, pour valider un TRI, affirmer la relation d'ordre sans épingler de clé technique.
 En bref :
 - `description` : phrase FR métier, ≤12 mots, sans nom de colonne/CTE ni mot-clé SQL.
-- `expected_condition` : booléen POSITIF vrai pour CHAQUE ligne de `__result__` ; uniquement les
-  colonnes de `<result_schema>` (casse exacte) ; pas de `SELECT`/`WHERE`/`FROM` de tête.
+- `expected_condition` : booléen POSITIF ; uniquement les colonnes de `<result_schema>` (casse
+  exacte) ; pas de `SELECT`/`WHERE`/`FROM` de tête.
+- `quantifier` : `"all"` (défaut) = vrai pour CHAQUE ligne ; `"exists"` = vrai pour AU MOINS UNE
+  ligne. ⚠️ FORMAT LONG (une ligne par métrique : colonne label + colonne valeur) : pour figer la
+  valeur d'UNE métrique, utilise SOIT `quantifier: "exists"` avec
+  `expected_condition: "indicateur = 'nb_cartes' AND valeur = 2974"`, SOIT `scope:
+  "indicateur = 'nb_cartes'"` + `expected_condition: "valeur = 2974"` (plus fort). N'écris JAMAIS
+  un sélecteur de ligne en `quantifier: "all"` non scopé : il échouerait sur toutes les autres lignes.
 
 ═══════════════════ PARTIE 2 — ÉVALUER LA QUALITÉ ═══════════════════
 
