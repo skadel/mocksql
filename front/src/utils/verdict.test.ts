@@ -70,6 +70,29 @@ describe('statusToVerdict', () => {
       expect(statusToVerdict('complete', { evaluation: '' })).toBe('good');
     });
   });
+
+  describe('validation state', () => {
+    it('returns validation for needs_validation reason_type', () => {
+      expect(statusToVerdict('complete', { reason_type: 'needs_validation', evaluation: '**Insuffisant** — ...' })).toBe('validation');
+    });
+
+    it('returns validation for bad_description reason_type', () => {
+      expect(statusToVerdict('complete', { reason_type: 'bad_description', evaluation: '**Insuffisant** — ...' })).toBe('validation');
+    });
+
+    it('returns validation for bad_input_description reason_type', () => {
+      expect(statusToVerdict('complete', { reason_type: 'bad_input_description', evaluation: '**Insuffisant** — ...' })).toBe('validation');
+    });
+
+    it('takes priority over evaluation field', () => {
+      // reason_type doit primer sur l'évaluation LLM pour éviter d'afficher « Insuffisant »
+      expect(statusToVerdict('complete', { reason_type: 'needs_validation', evaluation: '**Insuffisant** — écart cardinalité.' })).toBe('validation');
+    });
+
+    it('does not return validation when reason_type is absent', () => {
+      expect(statusToVerdict('complete', { evaluation: '**Insuffisant** — Données trop simples.' })).toBe('warn');
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -197,7 +220,7 @@ describe('getVerdictInfo', () => {
 // ---------------------------------------------------------------------------
 
 describe('VERDICT_META', () => {
-  const verdicts = ['good', 'warn', 'bad', 'pending'] as const;
+  const verdicts = ['good', 'warn', 'bad', 'pending', 'validation'] as const;
   it.each(verdicts)('has label, fg, bg, border for %s', (v) => {
     const meta = VERDICT_META[v];
     expect(meta.label).toBeTruthy();

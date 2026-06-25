@@ -1,4 +1,5 @@
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import HelpOutlineIcon from '@mui/icons-material/HelpOutline';
 import AddIcon from '@mui/icons-material/Add';
 import CancelIcon from '@mui/icons-material/Cancel';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
@@ -285,9 +286,10 @@ function CommentsSection({ comments, onAdd, onDelete }: {
 /* ─── StatusDot ───────────────────────────────────────────────────── */
 function StatusDot({ status, test }: { status: string | undefined; test?: any }) {
   const { verdict } = getVerdictInfo(test ?? { status });
-  if (verdict === 'good')    return <CheckCircleIcon sx={{ fontSize: 18, color: '#23a26d', flexShrink: 0 }} />;
-  if (verdict === 'bad')     return <CancelIcon sx={{ fontSize: 18, color: '#d0503f', flexShrink: 0 }} />;
-  if (verdict === 'warn')    return <WarningAmberIcon sx={{ fontSize: 18, color: '#d89323', flexShrink: 0 }} />;
+  if (verdict === 'good')       return <CheckCircleIcon sx={{ fontSize: 18, color: '#23a26d', flexShrink: 0 }} />;
+  if (verdict === 'bad')        return <CancelIcon sx={{ fontSize: 18, color: '#d0503f', flexShrink: 0 }} />;
+  if (verdict === 'warn')       return <WarningAmberIcon sx={{ fontSize: 18, color: '#d89323', flexShrink: 0 }} />;
+  if (verdict === 'validation') return <HelpOutlineIcon sx={{ fontSize: 18, color: '#1976d2', flexShrink: 0 }} />;
   return <CircularProgress size={14} thickness={5} sx={{ color: TEAL, flexShrink: 0 }} />;
 }
 
@@ -313,9 +315,10 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
     >
       <StatusDot status={test.status} test={test} />
       <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700, justifySelf: 'start' }}>
-        {verdict === 'good' && <CheckCircleIcon sx={{ fontSize: 11 }} />}
-        {verdict === 'warn' && <WarningAmberIcon sx={{ fontSize: 11 }} />}
-        {verdict === 'bad'  && <CancelIcon sx={{ fontSize: 11 }} />}
+        {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 11 }} />}
+        {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 11 }} />}
+        {verdict === 'bad'        && <CancelIcon sx={{ fontSize: 11 }} />}
+        {verdict === 'validation' && <HelpOutlineIcon sx={{ fontSize: 11 }} />}
         {label}
       </Box>
       <Box sx={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 1 }}>
@@ -1218,9 +1221,10 @@ function TestCard({
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.75 }}>
           {test.status !== 'pending' && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '3px', borderRadius: 999, fontSize: 11.5, fontWeight: 700 }}>
-              {verdict === 'good' && <CheckCircleIcon sx={{ fontSize: 11 }} />}
-              {verdict === 'warn' && <WarningAmberIcon sx={{ fontSize: 11 }} />}
-              {verdict === 'bad'  && <CancelIcon sx={{ fontSize: 11 }} />}
+              {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 11 }} />}
+              {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 11 }} />}
+              {verdict === 'bad'        && <CancelIcon sx={{ fontSize: 11 }} />}
+              {verdict === 'validation' && <HelpOutlineIcon sx={{ fontSize: 11 }} />}
               {label}
             </Box>
           )}
@@ -1277,14 +1281,14 @@ function TestCard({
         {/* Décision métier figée (v15 §5) — optional, masked when absent */}
         {test.decision && <DecisionBlock test={test} />}
 
-        {/* Verdict text */}
-        {test.status && test.status !== 'pending' && isLoading && !test.evaluation && (
+        {/* Verdict text — masqué pour 'validation' : l'explication figure dans le bloc de validation ci-dessous */}
+        {test.status && test.status !== 'pending' && verdict !== 'validation' && isLoading && !test.evaluation && (
           <Box sx={{ mt: 1, p: '9px 12px', bgcolor: '#f5f7f8', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <CircularProgress size={10} thickness={5} sx={{ color: TEAL }} />
             <Typography sx={{ fontSize: 12, color: MUTED }}>Évaluation en cours…</Typography>
           </Box>
         )}
-        {test.status && test.status !== 'pending' && (!isLoading || test.evaluation) && (
+        {test.status && test.status !== 'pending' && verdict !== 'validation' && (!isLoading || test.evaluation) && (
           <Box sx={{
             mt: 1, p: '9px 12px', bgcolor: bg, borderRadius: '8px',
             borderLeft: `2px solid ${fg}`, fontSize: 12.5, color: BODY, lineHeight: 1.55,
@@ -1298,25 +1302,41 @@ function TestCard({
       </Box>
 
       {/* Validation prompt — désync description↔réel (données valides) : l'utilisateur tranche.
-          needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète.
-          Dans les deux cas l'évaluateur a proposé une description corrigée (corrected_description)
+          needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète ;
+          bad_input_description = écart entre valeurs d'entrée annoncées et injectées.
+          Dans les trois cas l'évaluateur a proposé une description corrigée (corrected_description)
           affichée en preview, appliquée au clic « Je valide » via accept_validation. */}
-      {(test.reason_type === 'needs_validation' || test.reason_type === 'bad_description') && (onValidateTest || onCorrectTest) && (() => {
+      {(test.reason_type === 'needs_validation' || test.reason_type === 'bad_description' || test.reason_type === 'bad_input_description') && (onValidateTest || onCorrectTest) && (() => {
         let actual = 0;
         try { actual = (JSON.parse(test.results_json || '[]') || []).length; } catch { /* noop */ }
         const expected = test.expected_row_count;
         const corrected = (test.corrected_description || '').trim();
-        const message = test.reason_type === 'bad_description'
-          ? 'La description annonce une valeur que le calcul ne produit pas. '
-          : (expected != null
-            ? `Le résultat produit ${actual} ligne(s) alors que ce scénario en suppose ${expected}. `
-            : 'Le résultat ne correspond pas à la cardinalité supposée par la description. ');
+        const explanation = (test.evaluation_explanation || '').trim();
+        const summary = test.reason_type === 'bad_input_description'
+          ? (test.user_premise
+            ? 'Les données injectées ne correspondent pas à la prémisse que tu as énoncée. '
+            : 'La description annonce des valeurs d\'entrée qui ne correspondent pas aux données réellement injectées. ')
+          : test.reason_type === 'bad_description'
+            ? 'La description annonce une valeur que le calcul ne produit pas. '
+            : (expected != null
+              ? `Le résultat produit ${actual} ligne(s) alors que ce scénario en suppose ${expected}. `
+              : 'Le résultat ne correspond pas à la cardinalité supposée par la description. ');
         return (
           <Box sx={{ px: 2, pb: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
             <Typography sx={{ fontSize: 12.5, color: '#8a5c00', lineHeight: 1.4 }}>
-              {message}
+              {summary}
               Valides-tu ce résultat (la description sera réalignée) ou faut-il corriger le test ?
             </Typography>
+            {explanation && (
+              <Box sx={{ bgcolor: '#fef9ec', border: '1px solid #e8d5a0', borderRadius: '8px', px: 1.25, py: 1 }}>
+                <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#7a5200', mb: 0.25 }}>
+                  Pourquoi la description actuelle est incorrecte
+                </Typography>
+                <Typography sx={{ fontSize: 12.5, color: '#5c4a1a', lineHeight: 1.45 }}>
+                  {explanation}
+                </Typography>
+              </Box>
+            )}
             {corrected && (
               <Box sx={{ bgcolor: '#fffbf0', border: '1px solid #f0e0c0', borderRadius: '8px', px: 1.25, py: 1 }}>
                 <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#8a5c00', mb: 0.25 }}>
@@ -1732,9 +1752,10 @@ function StaleBanner({ info, tests, sqlFileName }: { info: StaleInfo; tests: any
                   return (
                     <Box key={idx} sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 2.5, py: '7px', borderBottom: `1px solid #f0f3f4`, '&:last-of-type': { borderBottom: 'none' } }}>
                       <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '7px', py: '2px', borderRadius: 999, fontSize: 10.5, fontWeight: 700, flexShrink: 0 }}>
-                        {verdict === 'good' && <CheckCircleIcon sx={{ fontSize: 10 }} />}
-                        {verdict === 'warn' && <WarningAmberIcon sx={{ fontSize: 10 }} />}
-                        {verdict === 'bad'  && <CancelIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'bad'        && <CancelIcon sx={{ fontSize: 10 }} />}
+                        {verdict === 'validation' && <HelpOutlineIcon sx={{ fontSize: 10 }} />}
                         {label}
                       </Box>
                       {execSt === 'fail' && (
