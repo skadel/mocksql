@@ -24,6 +24,10 @@ _CACHE_CASE_KEYS: Tuple[str, ...] = (
     "status",
     "results_json",
     "reason_type",
+    # Proposition de description en attente de validation utilisateur : état transitoire,
+    # jamais commité (cf. build_query/description_proposal.py).
+    "proposed_name",
+    "proposed_description",
 )
 
 

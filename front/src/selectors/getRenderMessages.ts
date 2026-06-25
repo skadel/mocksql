@@ -39,7 +39,7 @@ export const isStepMessage = (m: Message): boolean => {
 const MERGEABLE_CT = new Set<string>(['stream_part', 'tool_progress', 'partial', 'intermediate']);
 
 // These types are always rendered as standalone bubbles — never merged into adjacent messages.
-const NON_COALESCING_TYPES = new Set<string>(['suggestions', 'evaluation', 'generate_test_scenario']);
+const NON_COALESCING_TYPES = new Set<string>(['suggestions', 'evaluation', 'generate_test_scenario', 'update_test_proposal']);
 
 const getContentType = (m: Message): string | null =>
   ((m as any).contentType as string | undefined) ?? null;

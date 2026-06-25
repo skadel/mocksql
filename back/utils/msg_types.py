@@ -26,6 +26,7 @@ class MsgType(str, Enum):
     ASSERTION_EDIT = "assertion_edit"
     DELETE_TEST = "delete_test"
     UPDATE_TEST = "update_test"
+    UPDATE_TEST_PROPOSAL = "update_test_proposal"
     SUGGESTIONS = "suggestions"
     GENERATE_TEST_SCENARIO = "generate_test_scenario"
     DEBUG_RUN_CTE = "debug_run_cte"
