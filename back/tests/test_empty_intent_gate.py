@@ -70,11 +70,26 @@ async def test_empty_intended_is_pass_not_bad_data():
     assert "gen_retries" not in update  # pas de correction → pas de décrément
     assert not update.get("empty_results_regen")
 
-    msg = update["messages"][0]
-    assert msg.additional_kwargs.get("type") == MsgType.EVALUATION
-    assert msg.content.startswith("**Bon**")
+    # Deux messages : RESULTS (avec assertion table vide) puis EVALUATION
+    assert len(update["messages"]) == 2
+    results_msg, eval_msg = update["messages"]
+
+    assert results_msg.additional_kwargs.get("type") == MsgType.RESULTS
+    updated_tests = json.loads(results_msg.content)
+    assert len(updated_tests) == 1
+    test = updated_tests[0]
+    assert test["verdict"] == "Bon"
+    assert test["evaluation_explanation"] == "0 ligne est bien le résultat attendu : la date est future."
+    assert len(test["assertion_results"]) == 1
+    assertion = test["assertion_results"][0]
+    assert assertion["passed"] is True
+    assert assertion["sql"] == "SELECT * FROM __result__"
+
+    assert eval_msg.additional_kwargs.get("type") == MsgType.EVALUATION
+    assert eval_msg.additional_kwargs.get("parent") == results_msg.id
+    assert eval_msg.content.startswith("**Bon**")
     # Le message utilisateur porte l'explication LLM, pas le jargon structurel.
-    assert "contraintes" not in msg.content
+    assert "contraintes" not in eval_msg.content
 
 
 @pytest.mark.asyncio
