@@ -200,6 +200,142 @@ def _is_valid_positive_condition(cond: str) -> bool:
     return not _has_negative_form(parsed)
 
 
+def _flatten_top_level_and(expr: exp.Expression) -> List[exp.Expression]:
+    """Aplati un ``AND`` de tête en liste de conjoints (gère l'imbrication sqlglot
+    ``And(And(a, b), c)`` et les parenthèses via ``unnest``). Une expression non-``AND``
+    renvoie ``[expr]``."""
+    node = expr.unnest()
+    if isinstance(node, exp.And):
+        return _flatten_top_level_and(node.this) + _flatten_top_level_and(
+            node.expression
+        )
+    return [node]
+
+
+# Borne anti-explosion combinatoire : au-delà, on n'énumère pas les partitions (2^n).
+_MAX_AUTOSCOPE_CONJUNCTS = 5
+
+
+def _autoscope_conjunction(
+    expected_condition: str, view_name: str, con
+) -> Optional[tuple[str, str]]:
+    """Relève mécaniquement le sélecteur d'une ``expected_condition`` conjonctive qui
+    échoue à tort sur un résultat MULTI-lignes (pattern « format long » : une ligne par
+    indicateur, ex. ``indicateur = 'nb_cartes' AND valeur = 2974``).
+
+    Une ``expected_condition`` est testée sur CHAQUE ligne via ``(cond) IS NOT TRUE`` ; un
+    conjoint qui agit comme sélecteur de ligne (``indicateur = 'nb_cartes'``) est faux sur
+    les autres lignes → celles-ci remontent à tort comme violantes. La forme correcte est
+    ``scope = "indicateur = 'nb_cartes'"`` + ``expected_condition = "valeur = 2974"`` (cf.
+    le champ ``scope`` de ``_Assertion``). On la dérive ici, sans LLM.
+
+    Retourne ``(scope_sql, condition_sql)`` si une partition rend l'assertion verte, sinon
+    ``None``. Énumère les partitions scope/condition (scope MINIMAL d'abord : on relève le
+    moins de conjoints possible pour garder à la condition un maximum de pouvoir de test) et
+    valide chaque candidat contre les données réelles.
+
+    Garde-fous (cohérents avec l'anti-vacuité de ``_evaluate_assertions``) :
+      - le scope sélectionne un sous-ensemble STRICT (≥1 et < toutes les lignes) → c'est un
+        vrai sélecteur, pas un invariant universel relevé pour rien ;
+      - la condition restante reste une condition positive non triviale ;
+      - l'assertion scopée passe (0 ligne violante dans le périmètre).
+
+    Le contrat du générateur interdit déjà d'``AND`` entre intentions distinctes (« découpe
+    en plusieurs assertions ») : un ``AND`` survivant entre colonnes distinctes s'interprète
+    donc comme sélecteur + valeur, pas comme invariant universel — d'où la légitimité du
+    relevage.
+    """
+    from itertools import combinations
+
+    try:
+        parsed = sqlglot.parse_one(expected_condition, dialect="duckdb")
+    except Exception:
+        return None
+    if parsed is None or isinstance(parsed, exp.Select):
+        return None
+    conjuncts = _flatten_top_level_and(parsed)
+    n = len(conjuncts)
+    if n < 2 or n > _MAX_AUTOSCOPE_CONJUNCTS:
+        return None
+    parts = [c.sql(dialect="duckdb") for c in conjuncts]
+    try:
+        total = con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0]
+    except Exception:
+        return None
+    if not total:
+        return None
+
+    for scope_size in range(1, n):
+        for scope_idx in combinations(range(n), scope_size):
+            scope_set = set(scope_idx)
+            scope_sql = " AND ".join(f"({parts[i]})" for i in scope_idx)
+            cond_sql = " AND ".join(
+                f"({parts[i]})" for i in range(n) if i not in scope_set
+            )
+            if not _is_valid_positive_condition(cond_sql):
+                continue
+            try:
+                covered = con.execute(
+                    f"SELECT COUNT(*) FROM {view_name} WHERE ({scope_sql})"
+                ).fetchone()[0]
+            except Exception:
+                continue
+            # Sélecteur = sous-ensemble strict non vide. Un scope qui couvre 0 ligne serait
+            # vacuité ; un scope qui couvre TOUTES les lignes ne narrow rien (invariant).
+            if not covered or covered >= total:
+                continue
+            try:
+                failing = con.execute(
+                    f"SELECT COUNT(*) FROM {view_name} "
+                    f"WHERE ({scope_sql}) AND (({cond_sql}) IS NOT TRUE)"
+                ).fetchone()[0]
+            except Exception:
+                continue
+            if failing == 0:
+                return scope_sql, cond_sql
+    return None
+
+
+def _autoscope_failing_assertions(
+    assertion_results: List[Dict[str, Any]], view_name: str, con
+) -> List[Dict[str, Any]]:
+    """Relève en ``scope`` le sélecteur des assertions conjonctives qui échouent à tort sur
+    un résultat multi-lignes (pattern format long). Déterministe, sans LLM — s'exécute AVANT
+    le fixer LLM (``_fix_logically_failing_assertions``) pour rattraper mécaniquement le cas
+    le plus fréquent (le fixer garde alors les cas qui exigent du contexte métier).
+
+    N'agit que sur les assertions ``passed=False`` sans erreur SQL et sans ``scope`` déjà
+    posé. Conservateur : si aucune partition valide n'existe, l'assertion reste intacte
+    (en échec). Idempotent."""
+    out = list(assertion_results)
+    for i, a in enumerate(out):
+        if a.get("passed") or a.get("error") or (a.get("scope") or "").strip():
+            continue
+        cond = (a.get("expected_condition") or "").strip()
+        if not cond:
+            continue
+        split = _autoscope_conjunction(cond, view_name, con)
+        if not split:
+            continue
+        scope_sql, cond_sql = split
+        new_assertion = {
+            "description": a.get("description", ""),
+            "expected_condition": cond_sql,
+            "scope": scope_sql,
+            "sql": _assertion_sql_from_condition(cond_sql, scope_sql),
+        }
+        new_eval = _evaluate_assertions([new_assertion], view_name, con)
+        if new_eval[0].get("passed"):
+            logger.diag(
+                "[autoscope] #%s relevé en scope : scope=%r condition=%r",
+                i,
+                scope_sql,
+                cond_sql,
+            )
+            out[i] = new_eval[0]
+    return out
+
+
 class _Assertion(BaseModel):
     description: str = Field(
         description=(
@@ -253,6 +389,14 @@ class _Assertion(BaseModel):
             "Ex. « la ligne de date la plus ancienne est le dataset X » → "
             '`scope: "date = (SELECT MIN(date) FROM __result__)"`, '
             "`expected_condition: \"dataset_id = 'X'\"`. "
+            "⚠️ FORMAT LONG (une ligne par métrique : colonne label `indicateur`/`metric`/"
+            "`type` + colonne `valeur`/`value`) — pour affirmer la valeur d'UNE métrique, "
+            "le sélecteur de label va dans `scope`, jamais dans `expected_condition`. "
+            "Ex. « le nombre de cartes vaut 2974 » → `scope: \"indicateur = 'nb_cartes'\"`, "
+            '`expected_condition: "valeur = 2974"`. JAMAIS '
+            "`expected_condition: \"indicateur = 'nb_cartes' AND valeur = 2974\"` : la forme "
+            "AND est fausse sur toutes les AUTRES lignes (où `indicateur` diffère) → elles "
+            "remontent à tort comme violantes. "
             "Laisse `null` si la condition vaut pour TOUTES les lignes. "
             "Un `scope` qui ne sélectionne aucune ligne fait ÉCHOUER l'assertion "
             "(elle ne testerait rien) — choisis un sélecteur qui matche au moins une ligne. "
@@ -2188,7 +2332,8 @@ colonne, condition inversée, etc.) ?
   ne fabrique JAMAIS une assertion qui « passe » artificiellement.
 - Si l'assertion est **incorrecte** (tu as fait une erreur de logique) → régénère-la en
   fournissant une **`expected_condition` POSITIVE** (l'affirmation métier qui doit être VRAIE
-  sur chaque ligne) : `{"id": <id>, "correct": false, "description": "...", "expected_condition": "..."}`
+  sur chaque ligne), et un **`scope` optionnel** (sélecteur de lignes) si l'affirmation ne vaut
+  que pour une ligne précise : `{"id": <id>, "correct": false, "description": "...", "expected_condition": "...", "scope": "..."}`
 
 **Règles de l'`expected_condition` :**
 - Condition booléenne POSITIVE exprimée directement (jamais sa négation). MockSQL la négocie
@@ -2200,11 +2345,22 @@ colonne, condition inversée, etc.) ?
 - Utilise UNIQUEMENT les colonnes de `<result_schema>` (casse exacte). Pour une valeur relative,
   une sous-requête sur `__result__` uniquement. Jamais d'alias SELECT dans une condition.
 
+**Champ `scope` (cause fréquente d'échec à corriger) :** `expected_condition` est testée sur
+CHAQUE ligne de `__result__`. Si l'affirmation ne concerne qu'UNE ligne d'un résultat
+multi-lignes, mettre le sélecteur dans `expected_condition` la fait échouer sur toutes les
+autres lignes. Mets alors le sélecteur dans `scope` (la condition n'est testée que sur les
+lignes où `scope` est vrai). Cas typique du FORMAT LONG (colonne label `indicateur`/`type` +
+colonne `valeur`) : une assertion `indicateur = 'nb_cartes' AND valeur = 2974` qui remonte les
+lignes des AUTRES indicateurs doit être réécrite `scope: "indicateur = 'nb_cartes'"`,
+`expected_condition: "valeur = 2974"`. Un `scope` qui ne sélectionne aucune ligne fait ÉCHOUER
+l'assertion — choisis un sélecteur qui matche au moins une ligne.
+
 **Règle de la `description` (si tu régénères une assertion) :** phrase EN FRANÇAIS, courte
 (max 12 mots), en langage métier — jamais en anglais, sans noms de colonnes/CTEs ni mots-clés SQL.
 
-Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion :
-{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "..."}]}"""
+Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion
+(`scope` optionnel, à omettre si l'affirmation vaut pour toutes les lignes) :
+{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "...", "scope": "..."}]}"""
 
     # ── Bloc <failing_assertions> : une entrée par assertion échouée, indexée par `id` local. ──
     blocks = []
