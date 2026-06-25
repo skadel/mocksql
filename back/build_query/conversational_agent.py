@@ -467,8 +467,9 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
     - `data_batch` (patch/ajout/suppression de lignes) : n'affiche que le tableau
       patché → on verbalise l'action ;
     - `generate_suggestions` : ne rafraîchit que le panneau dédié → on l'annonce.
-    `update_test_description` / `delete_test` ont déjà leur propre confirmation →
-    retourne None (comme pour tout outil de debug/réévaluation/clarification).
+    `update_test_description` ne fait que PROPOSER (propose_description_node émet sa propre
+    narration + le panneau porte les boutons Valider/Refuser) ; `delete_test` a déjà sa
+    confirmation → retourne None (comme pour tout outil de debug/réévaluation/clarification).
     """
     if agent_tool_call == "generate_test_data":
         return "C'est noté — je te prépare un nouveau test pour ce scénario."
@@ -617,8 +618,11 @@ async def conversational_agent(state: QueryState):
             "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
             "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
             "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
-            "- S'il recoupe largement un test existant → étends/ajuste ce test "
-            "(`add_test_row` ou `update_test_data`) plutôt que de créer un doublon, et explique-le.\n"
+            "- S'il recoupe largement un test existant → DIS-LE à l'utilisateur (quel test "
+            "ressemble) et étends/ajuste ce test (`add_test_row` ou `update_test_data`) plutôt "
+            "que de créer un doublon. Si seule la DESCRIPTION du test existant gagnerait à être "
+            "ajustée, n'écris JAMAIS la nouvelle description toi-même : appelle "
+            "`update_test_description` qui ne fait que la PROPOSER à l'utilisateur (il valide).\n"
             "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
             "`ask_clarification`.\n"
             "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
@@ -805,12 +809,22 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
 
     @tool
     def update_test_description(
-        test_uid: str, new_name: str = "", new_description: str = ""
+        test_uid: str,
+        new_name: str = "",
+        new_description: str = "",
+        reason: str = "",
     ) -> str:
-        """Met à jour le nom et/ou la description d'un test existant identifié par test_uid.
-        new_name : nouveau titre du test (laisser vide pour ne pas modifier).
-        new_description : nouvelle description (laisser vide pour ne pas modifier)."""
-        return f"{test_uid}:{new_name}:{new_description}"
+        """PROPOSE une mise à jour du nom et/ou de la description d'un test existant (test_uid).
+        ⚠️ Cet outil n'applique JAMAIS le changement directement : il le PROPOSE à
+        l'utilisateur, qui valide (ou refuse) via le panneau. Utilise-le notamment quand un
+        test existant recoupe la demande de l'utilisateur et que sa description gagnerait à
+        être ajustée — dis-lui dans `reason` quel test ressemble et pourquoi tu proposes ce
+        changement.
+        new_name : nouveau titre proposé (laisser vide pour ne pas modifier).
+        new_description : nouvelle description proposée (laisser vide pour ne pas modifier).
+        reason : courte explication adressée à l'utilisateur (ex : « Le test n°2 couvre déjà
+            ce cas — je propose d'en préciser la description »)."""
+        return f"{test_uid}:{new_name}:{new_description}:{reason}"
 
     @tool
     def generate_suggestions(instructions: str = "", replace: bool = False) -> str:

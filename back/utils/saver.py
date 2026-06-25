@@ -154,7 +154,13 @@ async def history_saver(state: QueryState) -> Dict[str, str]:
     # Consommation d'une suggestion : quand l'utilisateur clique une suggestion pour en faire
     # un test (`suggestion_intent`), le texte cliqué EST `input` → on retire cette entrée de
     # la liste stockée sur le modèle pour qu'elle ne réapparaisse pas au rechargement.
-    if state.get("suggestion_intent"):
+    # Une simple PROPOSITION de description (update_test_description) ne consomme PAS la
+    # suggestion : tant que l'utilisateur n'a pas validé/refusé, le besoin de couverture
+    # reste ouvert (et il peut refuser la proposition).
+    if (
+        state.get("suggestion_intent")
+        and state.get("agent_tool_call") != "update_test_description"
+    ):
         consumed = (state.get("input") or "").strip()
         if consumed:
             stored = get_test(session)

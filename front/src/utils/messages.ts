@@ -119,6 +119,20 @@ export function formatMessage(message: any): Message {
       break;
     }
 
+    // Proposition (non appliquée) de mise à jour de description : narration dans le fil ;
+    // les boutons Valider/Refuser vivent dans le panneau (état test.proposed_*).
+    case 'update_test_proposal': {
+      const parsed = JSON.parse(message.content);
+      (newMessage.contents as any).testIndex = parsed.test_index;
+      (newMessage.contents as any).newName = parsed.new_name;
+      (newMessage.contents as any).newDescription = parsed.new_description;
+      (newMessage.contents as any).reason = parsed.reason;
+      if (message.additional_kwargs?.test_index !== undefined) {
+        newMessage.testIndex = message.additional_kwargs.test_index;
+      }
+      break;
+    }
+
     case 'suggestions': {
       try {
         newMessage.contents.suggestions = JSON.parse(message.content);
