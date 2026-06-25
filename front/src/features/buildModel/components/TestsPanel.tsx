@@ -352,6 +352,8 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
 interface AssertionItem {
   description: string;
   expected_condition?: string;
+  scope?: string;
+  quantifier?: string;
   sql?: string;
   passed: boolean;
   failing_rows?: any[];
@@ -453,8 +455,22 @@ function AssertionRow({ a, expanded, onToggle, onDelete, onEdit, editable, disab
           ) : a.expected_condition && (
             <Box sx={{ mb: 1 }}>
               <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
-                Condition attendue (vraie pour chaque ligne)
+                {a.quantifier === 'exists'
+                  ? 'Condition attendue (vraie pour au moins une ligne)'
+                  : a.scope
+                    ? 'Condition attendue (vraie sur les lignes ciblées)'
+                    : 'Condition attendue (vraie pour chaque ligne)'}
               </Typography>
+              {a.scope && (
+                <Box sx={{ mb: 0.6 }}>
+                  <Typography sx={{ fontSize: 10, fontWeight: 500, color: MUTED, mb: 0.3 }}>
+                    Lignes ciblées (scope)
+                  </Typography>
+                  <Box component="pre" sx={{ m: 0, p: '6px 10px', fontSize: 11, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#f4f0fb', borderRadius: '7px', overflowX: 'auto', color: '#5b3ea8', lineHeight: 1.5, border: '1px solid #e4dbf5' }}>
+                    {a.scope}
+                  </Box>
+                </Box>
+              )}
               <Box component="pre" sx={{ m: 0, p: '8px 10px', fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace", bgcolor: '#eef2f3', borderRadius: '7px', overflowX: 'auto', color: '#2b3b3e', lineHeight: 1.5, border: '1px solid #dce4e6' }}>
                 {a.expected_condition}
               </Box>
@@ -501,7 +517,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
   outputData: any[];
   assertionResults: AssertionItem[];
   onEditAssertions?: () => void;
-  onApplyAssertions?: (assertions: { description: string; expected_condition: string }[]) => Promise<void> | void;
+  onApplyAssertions?: (assertions: { description: string; expected_condition: string; scope?: string; quantifier?: string }[]) => Promise<void> | void;
 }) {
   const [expandedSet, setExpandedSet] = useState<Set<number>>(() => {
     const s = new Set<number>();
@@ -537,7 +553,14 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
     setApplying(true);
     try {
       await onApplyAssertions(
-        next.map(a => ({ description: a.description ?? '', expected_condition: a.expected_condition ?? '' })),
+        // On préserve scope/quantifier : sans cela, le backend rebâtirait le SQL en mode
+        // « all » non scopé et casserait les assertions scopées ou en mode exists.
+        next.map(a => ({
+          description: a.description ?? '',
+          expected_condition: a.expected_condition ?? '',
+          ...(a.scope ? { scope: a.scope } : {}),
+          ...(a.quantifier && a.quantifier !== 'all' ? { quantifier: a.quantifier } : {}),
+        })),
       );
     } finally {
       setApplying(false);
@@ -1165,7 +1188,7 @@ interface TestCardProps {
   onDeleteComment: (id: string) => void;
   onSelectForModification: () => void;
   onEditAssertions?: () => void;
-  onApplyAssertions?: (assertions: { description: string; expected_condition: string }[]) => Promise<void> | void;
+  onApplyAssertions?: (assertions: { description: string; expected_condition: string; scope?: string; quantifier?: string }[]) => Promise<void> | void;
   onRerunTest?: () => void;
   onValidateTest?: () => void;
   onCorrectTest?: () => void;
@@ -1934,7 +1957,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
 
   const handleApplyAssertions = async (
     testIndex: any,
-    assertions: { description: string; expected_condition: string }[],
+    assertions: { description: string; expected_condition: string; scope?: string; quantifier?: string }[],
   ) => {
     if (!currentModelId) return;
     const res = await dispatch(
