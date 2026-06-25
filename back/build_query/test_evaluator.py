@@ -339,18 +339,59 @@ async def evaluate_tests(state: QueryState):
                     "[evaluator] empty_results jugé INTENTIONNEL par le LLM (%s) → PASS",
                     verdict,
                 )
+                empty_assertion = {
+                    "description": "La requête doit retourner 0 ligne (table vide intentionnelle)",
+                    "sql": "SELECT * FROM __result__",
+                    "passed": True,
+                }
+                updated_test = {
+                    **current_test,
+                    "assertion_results": [empty_assertion],
+                    "verdict": verdict,
+                    "evaluation_explanation": explanation,
+                }
+                updated_all_tests = [
+                    updated_test
+                    if t.get("test_index") == current_test.get("test_index")
+                    else t
+                    for t in all_tests
+                ]
+                parent = last_results.additional_kwargs.get("parent") or state.get(
+                    "parent_message_id"
+                )
+                sql_kw = state.get("query", "").strip()
+                optimized_kw = state.get("optimized_sql", "").strip()
+                new_results_id = str(uuid.uuid4())
+                eval_msg_id = str(uuid.uuid4())
                 return {
                     "messages": [
                         AIMessage(
+                            content=json.dumps(
+                                updated_all_tests,
+                                ensure_ascii=False,
+                                indent=2,
+                                default=str,
+                            ),
+                            id=new_results_id,
+                            additional_kwargs={
+                                **last_results.additional_kwargs,
+                                "type": MsgType.RESULTS,
+                                "parent": parent,
+                                "request_id": state.get("request_id"),
+                                **({"sql": sql_kw} if sql_kw else {}),
+                                **({"optimized_sql": optimized_kw} if optimized_kw else {}),
+                            },
+                        ),
+                        AIMessage(
                             content=f"**{verdict}** — {explanation}",
-                            id=str(uuid.uuid4()),
+                            id=eval_msg_id,
                             additional_kwargs={
                                 "type": MsgType.EVALUATION,
-                                "parent": last_results.id,
+                                "parent": new_results_id,
                                 "request_id": state.get("request_id"),
                                 "test_index": current_test.get("test_index"),
                             },
-                        )
+                        ),
                     ],
                     "evaluation_feedback": None,
                     "status": "complete",
