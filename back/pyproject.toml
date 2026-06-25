@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "mocksql"
-version = "0.1.15"
+version = "0.2.0"
 description = "SQL unit test data generator for Analytics Engineers — SQLGlot extracts constraints, LLM generates fixtures, DuckDB validates with automatic retry on empty results"
 authors = ["Adel Skhiri <skhiriadel92@gmail.com>"]
 license = "MIT"
