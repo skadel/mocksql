@@ -233,10 +233,10 @@ export const buildModelSlice = createSlice({
             ...(newName ? { test_name: newName } : {}),
             ...(newDescription ? { unit_test_description: newDescription } : {}),
             // Validation acceptée (accept_validation) : la désync est résolue → on retire le
-            // marqueur (needs_validation OU bad_description) pour faire disparaître le prompt
-            // (le verdict Bon arrive via le message EVALUATION qui suit).
-            ...(t.reason_type === 'needs_validation' || t.reason_type === 'bad_description'
-              ? { reason_type: null, expected_row_count: undefined, corrected_description: undefined, corrected_name: undefined }
+            // marqueur (needs_validation / bad_description / bad_input_description) pour faire
+            // disparaître le prompt (le verdict Bon arrive via le message EVALUATION qui suit).
+            ...(t.reason_type === 'needs_validation' || t.reason_type === 'bad_description' || t.reason_type === 'bad_input_description'
+              ? { reason_type: null, expected_row_count: undefined, corrected_description: undefined, corrected_name: undefined, evaluation_explanation: undefined }
               : {}),
           };
         });
