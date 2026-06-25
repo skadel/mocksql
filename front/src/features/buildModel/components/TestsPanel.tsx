@@ -1169,6 +1169,8 @@ interface TestCardProps {
   onRerunTest?: () => void;
   onValidateTest?: () => void;
   onCorrectTest?: () => void;
+  onApplyDescription?: () => void;
+  onRejectDescription?: () => void;
   onUpload?: (data: Record<string, any[]>) => void;
 }
 
@@ -1180,7 +1182,7 @@ function TestCard({
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
-  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onUpload,
+  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onUpload,
 }: TestCardProps) {
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   const tags: string[] = test.tags ?? [];
@@ -1374,6 +1376,59 @@ function TestCard({
           </Box>
         );
       })()}
+
+      {/* Proposition de description (agent) — jamais appliquée d'office : l'utilisateur valide.
+          Pilotée par l'état du test (proposed_*), survit au rechargement. */}
+      {(test.proposed_description || test.proposed_name) && (onApplyDescription || onRejectDescription) && (
+        <Box sx={{ px: 2, pb: 1.5, display: 'flex', flexDirection: 'column', gap: 1 }}>
+          <Typography sx={{ fontSize: 12.5, color: '#8a5c00', lineHeight: 1.4 }}>
+            L'assistant propose de mettre à jour {test.proposed_name && test.proposed_description ? 'le titre et la description' : test.proposed_name ? 'le titre' : 'la description'} de ce test.
+          </Typography>
+          {test.proposed_name && (
+            <Box sx={{ bgcolor: '#fffbf0', border: '1px solid #f0e0c0', borderRadius: '8px', px: 1.25, py: 1 }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#8a5c00', mb: 0.25 }}>
+                Titre proposé
+              </Typography>
+              <Typography sx={{ fontSize: 12.5, color: '#5c4a1a', lineHeight: 1.45 }}>
+                {test.proposed_name}
+              </Typography>
+            </Box>
+          )}
+          {test.proposed_description && (
+            <Box sx={{ bgcolor: '#fffbf0', border: '1px solid #f0e0c0', borderRadius: '8px', px: 1.25, py: 1 }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#8a5c00', mb: 0.25 }}>
+                Description proposée
+              </Typography>
+              <Typography sx={{ fontSize: 12.5, color: '#5c4a1a', lineHeight: 1.45 }}>
+                {test.proposed_description}
+              </Typography>
+            </Box>
+          )}
+          <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+            {onApplyDescription && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+                onClick={onApplyDescription}
+                sx={{ fontSize: 12, boxShadow: 'none', bgcolor: '#23a26d', '&:hover': { boxShadow: 'none', bgcolor: '#1c8459' } }}
+              >
+                Appliquer
+              </Button>
+            )}
+            {onRejectDescription && (
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={onRejectDescription}
+                sx={{ fontSize: 12, borderColor: '#d89323', color: '#8a5c00', '&:hover': { borderColor: '#b37820', bgcolor: '#fffbf0' } }}
+              >
+                Garder l'actuelle
+              </Button>
+            )}
+          </Box>
+        </Box>
+      )}
 
       {/* Retry prompt — affiché quand bad_data retries épuisés */}
       {showRetryPrompt && onRerunTest && (
@@ -1806,6 +1861,8 @@ interface TestsPanelProps {
   onRerunTest?: (idx: number) => void;
   onValidateTest?: (idx: number) => void;
   onCorrectTest?: (idx: number) => void;
+  onApplyDescription?: (idx: number) => void;
+  onRejectDescription?: (idx: number) => void;
   onOpenChat?: () => void;
   onSuggestionClick?: (text: string) => void;
   onDismissSuggestion?: (text: string) => void;
@@ -1819,7 +1876,7 @@ interface TestsPanelProps {
 /* ═══════════════════════════════════════════════════════════════════ */
 const TestsPanel: React.FC<TestsPanelProps> = ({
   onSelectForModification, onEditAssertions, selectedTestIndex,
-  onUpload, onRerunTest, onValidateTest, onCorrectTest, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions,
+  onUpload, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onOpenChat, onSuggestionClick, onDismissSuggestion, onRegenerateSuggestions,
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
@@ -2122,6 +2179,8 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
                   onValidateTest={onValidateTest ? () => onValidateTest(idx) : undefined}
                   onCorrectTest={onCorrectTest ? () => onCorrectTest(idx) : undefined}
+                  onApplyDescription={onApplyDescription ? () => onApplyDescription(idx) : undefined}
+                  onRejectDescription={onRejectDescription ? () => onRejectDescription(idx) : undefined}
                   onUpload={onUpload}
                   showRetryPrompt={retryBadDataTestIndex != null && retryBadDataTestIndex === test.test_index}
                 />

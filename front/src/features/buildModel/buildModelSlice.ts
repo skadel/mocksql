@@ -238,8 +238,28 @@ export const buildModelSlice = createSlice({
             ...(t.reason_type === 'needs_validation' || t.reason_type === 'bad_description' || t.reason_type === 'bad_input_description'
               ? { reason_type: null, expected_row_count: undefined, corrected_description: undefined, corrected_name: undefined, evaluation_explanation: undefined }
               : {}),
+            // Une description appliquée consomme la proposition en attente (apply_description).
+            proposed_name: undefined,
+            proposed_description: undefined,
           };
         });
+      }
+
+      // Proposition de description (non appliquée) : on la pose sur le test pour que le panneau
+      // affiche les boutons Valider/Refuser (state du test, survit au rechargement côté back).
+      if (msg.contentType === 'update_test_proposal') {
+        const testIndex = (msg.contents as any).testIndex ?? msg.testIndex;
+        const newName = (msg.contents as any).newName;
+        const newDescription = (msg.contents as any).newDescription;
+        state.testResults = (state.testResults || []).map((t: any) =>
+          String(t.test_index) !== String(testIndex)
+            ? t
+            : {
+                ...t,
+                ...(newName ? { proposed_name: newName } : {}),
+                ...(newDescription ? { proposed_description: newDescription } : {}),
+              }
+        );
       }
     },
     removeMessage(state, action: PayloadAction<string>) {
@@ -320,6 +340,15 @@ export const buildModelSlice = createSlice({
       state.suggestions = state.suggestions.filter((s) => s !== action.payload);
       const { [action.payload]: _removed, ...rest } = state.suggestionRationales ?? {};
       state.suggestionRationales = rest;
+    },
+    // Retrait optimiste d'une proposition de description (clic « Garder l'actuelle ») :
+    // le back l'efface aussi (reject_description) pour qu'elle ne réapparaisse pas au reload.
+    dismissDescriptionProposal(state, action: PayloadAction<number>) {
+      state.testResults = (state.testResults || []).map((t: any) =>
+        String(t.test_index) !== String(action.payload)
+          ? t
+          : { ...t, proposed_name: undefined, proposed_description: undefined }
+      );
     },
     pushSqlHistory(state, action: PayloadAction<SqlHistoryEntry>) {
       const last = state.sqlHistory[state.sqlHistory.length - 1];
@@ -651,7 +680,7 @@ export const { setError, resetMessages, setLoadingMessage, appendComponentToLast
   appendQueryComponentMessage, setTransformationName, setQueryComponentGraph,
   setValidateDataSuccess, setLoadingTestDataSuccess, resetContext, removeMessage, setSelectedChildIndex,
   setLoading, setQuery, setOptimizedQuery, setUserInput, addTextMessage, setSelectedDatabases,
-  setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId,
+  setTestResults, dismissSuggestion, dismissDescriptionProposal, pushSqlHistory, setRestoredMessageId,
   appendStreamingReasoning, clearStreamingReasoning, setWorkspaceMode, patchMessageContents } = buildModelSlice.actions;
 
 export default buildModelSlice.reducer;

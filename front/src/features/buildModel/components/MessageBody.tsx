@@ -470,6 +470,43 @@ const MessageBody: React.FC<MessageBodyProps> = ({
         </Box>
       )}
 
+      {/* Proposition (non appliquée) de mise à jour de description : l'agent prévient
+          l'utilisateur ; il valide/refuse depuis le panneau (boutons sur la carte du test). */}
+      {msg.contentType === 'update_test_proposal' && (
+        <Box
+          sx={{
+            mt: 1,
+            p: 1.5,
+            bgcolor: '#fffbf0',
+            borderRadius: '10px',
+            border: '1px solid #f0e0c0',
+            borderLeft: '3px solid #d89323',
+          }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 700, color: '#8a5c00', mb: 0.5 }}>
+            💡 Proposition pour le test n°{((msg.contents as any).testIndex ?? 0) + 1}
+          </Typography>
+          {(msg.contents as any).reason && (
+            <Typography variant="body2" sx={{ color: '#5c4a1a', mb: 0.75, lineHeight: 1.45 }}>
+              {(msg.contents as any).reason}
+            </Typography>
+          )}
+          {(msg.contents as any).newDescription && (
+            <Box sx={{ bgcolor: '#fff', border: '1px solid #f0e0c0', borderRadius: '8px', px: 1.25, py: 1 }}>
+              <Typography sx={{ fontSize: 11, fontWeight: 600, color: '#8a5c00', mb: 0.25 }}>
+                Description proposée
+              </Typography>
+              <Typography sx={{ fontSize: 12.5, color: '#5c4a1a', lineHeight: 1.45 }}>
+                {(msg.contents as any).newDescription}
+              </Typography>
+            </Box>
+          )}
+          <Typography variant="caption" sx={{ display: 'block', mt: 0.75, color: '#8a5c00' }}>
+            Valide ou refuse cette proposition depuis la carte du test, à gauche.
+          </Typography>
+        </Box>
+      )}
+
       {/* Texte */}
       {msg.contents.text && msg.contentType !== 'evaluation' && msg.contentType !== 'generate_test_scenario' && (
         msg.type === 'user' ? (

@@ -37,6 +37,18 @@ async def routing(state: QueryState):
         logger.diag("[routing] → accept_validation (validate_intent présent)")
         return {"route": "accept_validation"}
 
+    # Clic « Appliquer / Garder » sur une proposition de description : action déterministe
+    # déclenchée par un bouton du panneau → on applique (ou on écarte) la proposition
+    # stockée, sans repasser par l'agent conversationnel.
+    if state.get("apply_description_intent"):
+        logger.diag("[routing] → apply_description (apply_description_intent présent)")
+        return {"route": "apply_description"}
+    if state.get("reject_description_intent"):
+        logger.diag(
+            "[routing] → reject_description (reject_description_intent présent)"
+        )
+        return {"route": "reject_description"}
+
     # Régénération explicite des suggestions (bouton du panneau) : court-circuite l'agent
     # conversationnel pour aller directement régénérer, sans appel LLM de routage.
     if state.get("regenerate_suggestions"):
