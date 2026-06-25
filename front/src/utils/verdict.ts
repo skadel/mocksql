@@ -1,4 +1,4 @@
-export type Verdict = 'good' | 'warn' | 'bad' | 'pending';
+export type Verdict = 'good' | 'warn' | 'bad' | 'pending' | 'validation';
 export type ExecStatus = 'pass' | 'fail' | 'pending';
 
 export interface VerdictMeta {
@@ -9,11 +9,14 @@ export interface VerdictMeta {
 }
 
 export const VERDICT_META: Record<Verdict, VerdictMeta> = {
-  good:    { label: 'Bon',         fg: '#23a26d', bg: '#e9f7f0', border: '#23a26d' },
-  warn:    { label: 'Insuffisant', fg: '#d89323', bg: '#fcf3e1', border: '#d89323' },
-  bad:     { label: 'Incorrect',   fg: '#d0503f', bg: '#fbeceb', border: '#d0503f' },
-  pending: { label: 'En attente',  fg: '#888',    bg: '#f4f7f7', border: '#ccc'    },
+  good:       { label: 'Bon',         fg: '#23a26d', bg: '#e9f7f0', border: '#23a26d' },
+  warn:       { label: 'Insuffisant', fg: '#d89323', bg: '#fcf3e1', border: '#d89323' },
+  bad:        { label: 'Incorrect',   fg: '#d0503f', bg: '#fbeceb', border: '#d0503f' },
+  pending:    { label: 'En attente',  fg: '#888',    bg: '#f4f7f7', border: '#ccc'    },
+  validation: { label: 'À valider',   fg: '#1565c0', bg: '#e8f0fd', border: '#1976d2' },
 };
+
+const VALIDATION_REASON_TYPES = new Set(['needs_validation', 'bad_description', 'bad_input_description']);
 
 function testExpectsEmpty(test: any): boolean {
   const desc = (test.unit_test_description ?? '').toLowerCase();
@@ -21,6 +24,8 @@ function testExpectsEmpty(test: any): boolean {
 }
 
 export function statusToVerdict(status: string | undefined, test?: any): Verdict {
+  // Description désync → état neutre « À valider », ni Insuffisant ni Bon.
+  if (test?.reason_type && VALIDATION_REASON_TYPES.has(test.reason_type)) return 'validation';
   if (test?.evaluation) {
     if (/Excellent|Bon/.test(test.evaluation))  return 'good';
     if (/Insuffisant/.test(test.evaluation))    return 'warn';
