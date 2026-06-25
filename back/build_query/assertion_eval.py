@@ -47,11 +47,14 @@ def _evaluate_assertions(
             continue
         sql = raw_sql.replace("__result__", view_name)
         scope = (a.get("scope") or "").strip().rstrip(";").strip()
+        quantifier = (a.get("quantifier") or "all").strip() or "all"
         try:
             # Garde anti-vacuité du scope : une assertion scopée dont le périmètre ne
             # sélectionne AUCUNE ligne du résultat ne teste rien (0 ligne violante →
             # « passe » à tort). On l'échoue explicitement plutôt que de la laisser verte.
-            if scope:
+            # Inapplicable au mode `exists` : un scope (fondu dans l'EXISTS) qui ne couvre
+            # aucune ligne fait DÉJÀ échouer l'assertion (rien à matcher) — pas de vacuité.
+            if scope and quantifier != "exists":
                 scope_sql = scope.replace("__result__", view_name)
                 covered = con.execute(
                     f"SELECT COUNT(*) FROM {view_name} WHERE ({scope_sql})"
@@ -73,16 +76,23 @@ def _evaluate_assertions(
                     continue
             fail_df = con.execute(sql).fetchdf()
             passed = len(fail_df) == 0
+            # Mode `exists` : l'échec = « aucune ligne ne satisfait la condition ». La
+            # requête renvoie une ligne sentinelle (`_no_match`) sans valeur métier — on
+            # n'expose pas de contre-exemple (l'absence n'est pas une ligne du résultat).
+            failing_rows = (
+                []
+                if (passed or quantifier == "exists")
+                else fail_df.to_dict(orient="records")
+            )
             results.append(
                 {
                     "description": a.get("description", ""),
                     "expected_condition": a.get("expected_condition", ""),
                     **({"scope": a.get("scope", "")} if scope else {}),
+                    **({"quantifier": quantifier} if quantifier != "all" else {}),
                     "sql": a.get("sql", ""),
                     "passed": passed,
-                    "failing_rows": fail_df.to_dict(orient="records")
-                    if not passed
-                    else [],
+                    "failing_rows": failing_rows,
                 }
             )
         except Exception as e:

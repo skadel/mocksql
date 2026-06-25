@@ -68,6 +68,7 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
 
     from build_query.examples_executor import (
         _assertion_to_executable,
+        _autoscope_failing_assertions,
         _evaluate_assertions_with_retry,
         _fix_logically_failing_assertions,
         _generate_assertions_and_evaluate,
@@ -111,6 +112,13 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 assertion_results = await _evaluate_assertions_with_retry(
                     [_assertion_to_executable(a) for a in eval_result.assertions],
                     **retry_kwargs,
+                )
+                # Rattrapage déterministe (sans LLM) du pattern « format long » : une
+                # expected_condition conjonctive (ex. `indicateur='nb_cartes' AND valeur=2974`)
+                # échoue à tort sur les autres lignes → on relève le sélecteur en `scope`.
+                # Exécuté avant le fixer LLM, qui ne traite ensuite que le résidu.
+                assertion_results = _autoscope_failing_assertions(
+                    assertion_results, view_name, con
                 )
                 try:
                     assertion_results = await _fix_logically_failing_assertions(

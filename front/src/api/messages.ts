@@ -112,6 +112,8 @@ export const patchModelTests = createAsyncThunk(
 export interface AssertionInput {
   description: string;
   expected_condition: string;
+  scope?: string;
+  quantifier?: string;
 }
 
 export interface ApplyAssertionsResult {
