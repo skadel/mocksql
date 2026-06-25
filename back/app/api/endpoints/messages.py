@@ -185,14 +185,22 @@ async def apply_assertions(body: ApplyAssertionsRequest):
         session_id = body.sessionId.replace("-", "_")
         view_name = f"__result__{session_id}{current.get('test_index', '1')}"
 
-        execs = [
-            {
-                "description": a.get("description", ""),
-                "expected_condition": a.get("expected_condition", ""),
-                "sql": _assertion_sql_from_condition(a.get("expected_condition", "")),
-            }
-            for a in body.assertions
-        ]
+        execs = []
+        for a in body.assertions:
+            cond = a.get("expected_condition", "")
+            scope = (a.get("scope") or "").strip()
+            quantifier = (a.get("quantifier") or "all").strip() or "all"
+            execs.append(
+                {
+                    "description": a.get("description", ""),
+                    "expected_condition": cond,
+                    **({"scope": scope} if scope else {}),
+                    **({"quantifier": quantifier} if quantifier != "all" else {}),
+                    "sql": _assertion_sql_from_condition(
+                        cond, scope or None, quantifier
+                    ),
+                }
+            )
 
         with initialize_duckdb(DB_PATH) as con:
             con.register(view_name, result_df)

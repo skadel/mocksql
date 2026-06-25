@@ -37,31 +37,45 @@ logger = logging.getLogger(__name__)
 
 
 def _assertion_sql_from_condition(
-    expected_condition: str, scope: Optional[str] = None
+    expected_condition: str,
+    scope: Optional[str] = None,
+    quantifier: str = "all",
 ) -> str:
-    """Wrappe une condition positive (vérité métier qui doit tenir sur chaque ligne)
-    en requête dbt-style retournant les lignes VIOLANTES (0 ligne = OK).
+    """Wrappe une condition positive en requête dbt-style retournant les lignes/faits
+    VIOLANTS (0 ligne = OK). Deux quantificateurs :
+
+    - ``quantifier="all"`` (défaut) : la condition doit tenir sur CHAQUE ligne (de
+      ``scope`` si fourni). C'est le mode « invariant universel ».
+    - ``quantifier="exists"`` : il suffit qu'AU MOINS UNE ligne satisfasse la condition.
+      Mode « il existe une ligne telle que … » — idéal pour affirmer la présence d'une
+      ligne précise dans un résultat MULTI-lignes (ex. « il existe une ligne où
+      ``indicateur = 'nb_cartes' AND valeur = 2974`` ») sans piéger les autres lignes.
 
     Le LLM exprime l'affirmation attendue (ex. ``date = '2016-01-02'``) ; la négation
     est gérée ici, mécaniquement — le LLM n'écrit donc jamais d'assertion inversée
     (``!=`` / ``NOT``), ce qui supprime les inversions par erreur et garde la
     description lisible comme une affirmation.
 
-    On utilise ``IS NOT TRUE`` (et non ``NOT (...)``) pour que les NULL comptent comme
-    violations : ``NOT(NULL)`` vaut NULL et laisserait passer un NULL là où une valeur
-    est attendue, alors que ``(NULL) IS NOT TRUE`` est vrai → la ligne est remontée.
-
+    Mode ``all`` — on utilise ``IS NOT TRUE`` (et non ``NOT (...)``) pour que les NULL
+    comptent comme violations : ``NOT(NULL)`` vaut NULL et laisserait passer un NULL là où
+    une valeur est attendue, alors que ``(NULL) IS NOT TRUE`` est vrai → la ligne remonte.
     ``scope`` (optionnel) restreint l'univers : la condition n'est testée QUE sur les
-    lignes que ``scope`` sélectionne. Indispensable pour affirmer un fait sur UNE ligne
-    précise d'un résultat MULTI-lignes (ex. « la ligne au montant le plus ancien est X »)
-    sans que les autres lignes ne soient comptées comme violantes. Reste POSITIF :
-    ``scope = "d = (SELECT MIN(d) FROM __result__)"`` + ``condition = "id = 'X'"`` plutôt
-    que la forme ``id = 'X' AND d = (SELECT MIN(d) …)`` qui échoue à tort sur toute autre
-    ligne. La couverture du scope (≥1 ligne) est vérifiée à l'exécution — un scope vide
-    rend l'assertion vacuité et la fait échouer (cf. ``_evaluate_assertions``).
+    lignes que ``scope`` sélectionne. La couverture du scope (≥1 ligne) est vérifiée à
+    l'exécution — un scope vide rend l'assertion vacuité et la fait échouer (cf.
+    ``_evaluate_assertions``).
+
+    Mode ``exists`` — requête ``... WHERE NOT EXISTS (SELECT 1 FROM __result__ WHERE
+    (cond))`` : renvoie une ligne (= échec) ssi AUCUNE ligne ne satisfait la condition.
+    Un ``scope`` éventuel est fondu dans le filtre EXISTS (``WHERE (scope) AND (cond)``).
     """
     cond = expected_condition.strip().rstrip(";").strip()
     sc = (scope or "").strip().rstrip(";").strip()
+    if quantifier == "exists":
+        inner = f"({sc}) AND ({cond})" if sc else f"({cond})"
+        return (
+            "SELECT 1 AS _no_match WHERE NOT EXISTS "
+            f"(SELECT 1 FROM __result__ WHERE {inner})"
+        )
     if sc:
         return f"SELECT * FROM __result__ WHERE ({sc}) AND (({cond}) IS NOT TRUE)"
     return f"SELECT * FROM __result__ WHERE ({cond}) IS NOT TRUE"
@@ -403,6 +417,25 @@ class _Assertion(BaseModel):
             "Mêmes colonnes que `__result__` ; pas de `SELECT`/`WHERE`/`FROM` de tête."
         ),
     )
+    quantifier: Literal["all", "exists"] = Field(
+        default="all",
+        description=(
+            "Quantificateur de l'assertion sur les lignes de `__result__` :\n"
+            '- `"all"` (défaut) : `expected_condition` doit être VRAIE sur CHAQUE ligne '
+            "(de `scope` si fourni). Pour un invariant universel (`montant > 0`) ou pour "
+            "affirmer un fait sur une ligne précise via `scope`.\n"
+            '- `"exists"` : il suffit qu\'AU MOINS UNE ligne satisfasse '
+            "`expected_condition`. À privilégier pour affirmer la PRÉSENCE d'une ligne "
+            "précise dans un résultat MULTI-lignes — notamment le FORMAT LONG (une ligne "
+            'par métrique). Ex. « le nombre de cartes vaut 2974 » → `quantifier: "exists"`, '
+            "`expected_condition: \"indicateur = 'nb_cartes' AND valeur = 2974\"`. "
+            "Pas besoin de `scope` : la condition combine sélecteur (`indicateur`) et "
+            "valeur, et n'est exigée que sur une ligne. "
+            "⚠️ `exists` est plus FAIBLE que `all` (il ne vérifie pas les autres lignes) : "
+            "ne l'utilise que pour une affirmation de présence, pas pour un invariant qui "
+            "doit tenir partout."
+        ),
+    )
 
 
 class _AssertionFix(BaseModel):
@@ -504,11 +537,13 @@ def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
     et dérive `sql` — l'artefact dbt-style réellement exécuté par `_evaluate_assertions`.
     """
     scope = getattr(a, "scope", None)
+    quantifier = getattr(a, "quantifier", "all") or "all"
     return {
         "description": a.description,
         "expected_condition": a.expected_condition,
         **({"scope": scope} if scope and scope.strip() else {}),
-        "sql": _assertion_sql_from_condition(a.expected_condition, scope),
+        **({"quantifier": quantifier} if quantifier != "all" else {}),
+        "sql": _assertion_sql_from_condition(a.expected_condition, scope, quantifier),
     }
 
 
@@ -2345,22 +2380,26 @@ colonne, condition inversée, etc.) ?
 - Utilise UNIQUEMENT les colonnes de `<result_schema>` (casse exacte). Pour une valeur relative,
   une sous-requête sur `__result__` uniquement. Jamais d'alias SELECT dans une condition.
 
-**Champ `scope` (cause fréquente d'échec à corriger) :** `expected_condition` est testée sur
-CHAQUE ligne de `__result__`. Si l'affirmation ne concerne qu'UNE ligne d'un résultat
-multi-lignes, mettre le sélecteur dans `expected_condition` la fait échouer sur toutes les
-autres lignes. Mets alors le sélecteur dans `scope` (la condition n'est testée que sur les
-lignes où `scope` est vrai). Cas typique du FORMAT LONG (colonne label `indicateur`/`type` +
-colonne `valeur`) : une assertion `indicateur = 'nb_cartes' AND valeur = 2974` qui remonte les
-lignes des AUTRES indicateurs doit être réécrite `scope: "indicateur = 'nb_cartes'"`,
-`expected_condition: "valeur = 2974"`. Un `scope` qui ne sélectionne aucune ligne fait ÉCHOUER
-l'assertion — choisis un sélecteur qui matche au moins une ligne.
+**Affirmer un fait sur UNE ligne d'un résultat multi-lignes (cause fréquente d'échec) :**
+`expected_condition` en mode `all` est testée sur CHAQUE ligne ; mettre le sélecteur dans
+`expected_condition` la fait échouer sur toutes les autres lignes. Deux corrections possibles,
+au choix :
+- `"quantifier": "exists"` : l'assertion passe dès qu'AU MOINS UNE ligne satisfait la condition.
+  Le plus simple pour une affirmation de PRÉSENCE. Ex. FORMAT LONG (colonne label
+  `indicateur`/`type` + colonne `valeur`) : `indicateur = 'nb_cartes' AND valeur = 2974` qui
+  remonte les autres indicateurs se répare en `{"quantifier": "exists", "expected_condition":
+  "indicateur = 'nb_cartes' AND valeur = 2974"}`.
+- `"scope"` : restreint l'univers ; la condition n'est testée que sur les lignes où `scope` est
+  vrai. Même cas → `{"scope": "indicateur = 'nb_cartes'", "expected_condition": "valeur = 2974"}`.
+  Plus FORT que `exists` (vérifie TOUTES les lignes nb_cartes). Un `scope` qui ne sélectionne
+  aucune ligne fait ÉCHOUER l'assertion — choisis un sélecteur qui matche au moins une ligne.
 
 **Règle de la `description` (si tu régénères une assertion) :** phrase EN FRANÇAIS, courte
 (max 12 mots), en langage métier — jamais en anglais, sans noms de colonnes/CTEs ni mots-clés SQL.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion
-(`scope` optionnel, à omettre si l'affirmation vaut pour toutes les lignes) :
-{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "...", "scope": "..."}]}"""
+(`scope` et `quantifier` optionnels — omets-les si l'affirmation vaut pour toutes les lignes) :
+{"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "...", "quantifier": "exists"}]}"""
 
     # ── Bloc <failing_assertions> : une entrée par assertion échouée, indexée par `id` local. ──
     blocks = []
@@ -2454,11 +2493,22 @@ et réponds selon le format du message système (un objet `decisions` listant un
             # une assertion scopée serait « réparée » en une forme non scopée potentiellement
             # vacuité. La couverture du scope est revalidée par _evaluate_assertions (Garde 2).
             new_scope = (dec.get("scope") or results[target].get("scope") or "").strip()
+            # Quantificateur : `exists` (au moins une ligne) si le fixer le demande, sinon
+            # on conserve celui d'origine (ou `all` par défaut). Permet de réparer le
+            # pattern format long via une présence plutôt qu'un scope (cf. _Assertion).
+            new_quantifier = (
+                dec.get("quantifier") or results[target].get("quantifier") or "all"
+            ).strip() or "all"
+            if new_quantifier not in ("all", "exists"):
+                new_quantifier = "all"
             new_assertion = {
                 "description": dec.get("description", results[target]["description"]),
                 "expected_condition": new_cond,
                 **({"scope": new_scope} if new_scope else {}),
-                "sql": _assertion_sql_from_condition(new_cond, new_scope or None),
+                **({"quantifier": new_quantifier} if new_quantifier != "all" else {}),
+                "sql": _assertion_sql_from_condition(
+                    new_cond, new_scope or None, new_quantifier
+                ),
             }
             new_eval = _evaluate_assertions([new_assertion], view_name, con)
             # Garde 2 — anti-blanchiment : si la réécriture échoue toujours (ou erreur), le
