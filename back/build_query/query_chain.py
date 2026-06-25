@@ -9,11 +9,15 @@ from utils.sqlglot_ast import pop_with
 from build_query.assertion_corrector import correct_assertions
 from build_query.assertion_modifier import modify_assertions
 from build_query.accept_validation import accept_validation
+from build_query.description_proposal import (
+    apply_description,
+    propose_description_node,
+    reject_description,
+)
 from build_query.conversational_agent import conversational_agent
 from build_query.data_patcher import data_patcher_node
 from build_query.debug_node import debug_test_node
 from build_query.delete_test_node import delete_test_node
-from build_query.update_test_node import update_test_node
 from build_query.assertion_generator import generate_assertions
 from build_query.final_response_node import final_response
 from build_query.examples_executor import run_on_examples
@@ -384,7 +388,9 @@ def route_agent_output(state: QueryState):
     if tool_call == "delete_test":
         return "delete_test_node"
     if tool_call == "update_test_description":
-        return "update_test_node"
+        # Jamais d'application directe : on PROPOSE la nouvelle description (l'utilisateur
+        # valide depuis le panneau via apply_description / reject_description).
+        return "propose_description_node"
     if tool_call == "generate_suggestions":
         return "suggestions_generator"
     if tool_call in ("run_cte", "debug_batch"):
@@ -542,7 +548,9 @@ def build_query_graph():
     add_timed_node("data_patcher", data_patcher_node)
     add_timed_node("debug_node", debug_test_node)
     add_timed_node("delete_test_node", delete_test_node)
-    add_timed_node("update_test_node", update_test_node)
+    add_timed_node("propose_description_node", propose_description_node)
+    add_timed_node("apply_description", apply_description)
+    add_timed_node("reject_description", reject_description)
     add_timed_node("accept_validation", accept_validation)
     add_timed_node("generator", generate_examples)
     add_timed_node("assertion_modifier", modify_assertions)
@@ -566,6 +574,12 @@ def build_query_graph():
         if route == "accept_validation":
             logger.diag("[route_input] → accept_validation")
             return "accept_validation"
+        if route == "apply_description":
+            logger.diag("[route_input] → apply_description")
+            return "apply_description"
+        if route == "reject_description":
+            logger.diag("[route_input] → reject_description")
+            return "reject_description"
         if route == "conversational_agent":
             logger.diag("[route_input] → conversational_agent")
             return "conversational_agent"
@@ -625,7 +639,9 @@ def build_query_graph():
     # Debug tools are removed from the agent's toolset when debug_retries == 0 (safety).
     builder.add_edge("debug_node", "conversational_agent")
     builder.add_edge("delete_test_node", "history_saver")
-    builder.add_edge("update_test_node", "history_saver")
+    builder.add_edge("propose_description_node", "history_saver")
+    builder.add_edge("apply_description", "history_saver")
+    builder.add_edge("reject_description", "history_saver")
     builder.add_conditional_edges("accept_validation", route_after_accept)
     builder.add_edge("data_patcher", "executor")
     builder.add_edge("generator", "executor")

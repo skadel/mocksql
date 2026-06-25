@@ -123,6 +123,16 @@ class QueryState(TypedDict):
         bool
     ]  # set by the front when the user clicks « Je valide l'état actuel » on a
     # needs_validation test → routing routes to accept_validation (deterministic).
+    apply_description_intent: Optional[
+        bool
+    ]  # set by the front when the user accepts a proposed description update (panel button) →
+    # routing routes to apply_description (deterministic). The agent NEVER applies a
+    # description change directly: update_test_description only ever proposes (propose_description
+    # node), and the change is applied here once the user accepts. test_index targets the test.
+    reject_description_intent: Optional[
+        bool
+    ]  # set by the front when the user declines a proposed description update (panel button) →
+    # routing routes to reject_description (clears the pending proposal, keeps the actual desc).
     revalidated: Optional[
         bool
     ]  # set by accept_validation when it successfully validated a test → reprise post-éval :

@@ -30,7 +30,7 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage, appendQueryComponentMessage } from '../buildModelSlice';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, dismissDescriptionProposal, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage, appendQueryComponentMessage } from '../buildModelSlice';
 import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi, queueInstructionApi, flushInstructionsApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
@@ -1279,6 +1279,54 @@ const ChatComponent: React.FC = () => {
     handleSelectTestForModification(idx);
   }, [handleSelectTestForModification]);
 
+  // « Appliquer » une description proposée par l'agent (jamais appliquée d'office) :
+  // action déterministe → apply_description écrit la description proposée sur le test.
+  const handleApplyDescription = useCallback((idx: number) => {
+    if (isSending) return;
+    const test = (testResults || [])[idx];
+    if (!test) return;
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
+    dispatchChatQuery({
+      userInput: '',
+      sessionId: currentModelId || '',
+      project: '',
+      dialect: DIALECT,
+      query: '',
+      ChangedMessageId: '',
+      t,
+      parentMessageId,
+      testUid: test?.test_uid,
+      testIndex: test?.test_index,
+      applyDescriptionIntent: true,
+      silent: true,
+    });
+  }, [isSending, currentModelId, DIALECT, renderMessages, selectedChildIndices, t, testResults, dispatchChatQuery]);
+
+  // « Garder l'actuelle » : retrait optimiste de la proposition + nettoyage backend.
+  const handleRejectDescription = useCallback((idx: number) => {
+    if (isSending) return;
+    const test = (testResults || [])[idx];
+    if (!test) return;
+    dispatch(dismissDescriptionProposal(test.test_index));
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const parentMessageId = test?.threadParentId || (lastMessage ? lastMessage.id : '');
+    dispatchChatQuery({
+      userInput: '',
+      sessionId: currentModelId || '',
+      project: '',
+      dialect: DIALECT,
+      query: '',
+      ChangedMessageId: '',
+      t,
+      parentMessageId,
+      testUid: test?.test_uid,
+      testIndex: test?.test_index,
+      rejectDescriptionIntent: true,
+      silent: true,
+    });
+  }, [isSending, currentModelId, DIALECT, renderMessages, selectedChildIndices, t, testResults, dispatch, dispatchChatQuery]);
+
 
   return (
     <Container
@@ -1779,6 +1827,8 @@ const ChatComponent: React.FC = () => {
                 onRerunTest={handleRerunTest}
                 onValidateTest={handleValidateTest}
                 onCorrectTest={handleCorrectTest}
+                onApplyDescription={handleApplyDescription}
+                onRejectDescription={handleRejectDescription}
                 onSuggestionClick={handleSuggestionClick}
                 onDismissSuggestion={handleDismissSuggestion}
                 onRegenerateSuggestions={handleRegenerateSuggestions}
