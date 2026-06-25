@@ -1702,7 +1702,14 @@ const ChatComponent: React.FC = () => {
             flexShrink: 0,
           }}>
           <ChatColumn
-            fileName={currentModelName ? `${currentModelName}.sql` : 'requête.sql'}
+            fileName={(() => {
+              const name = currentModelName || (selectedModelName ? selectedModelName.split('/').pop() : '');
+              return name ? `${name}.sql` : 'requête.sql';
+            })()}
+            filePath={(() => {
+              const path = currentModelPath || selectedModelName;
+              return path ? `${path}.sql` : undefined;
+            })()}
             onChangeFile={() => {
               dispatch(resetContext());
               dispatch(setCurrentId(''));
