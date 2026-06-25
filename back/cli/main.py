@@ -409,7 +409,8 @@ def _print_test_results(model_results: list) -> None:
             label = {"pass": "PASS", "fail": "FAIL", "error": "ERR ", "skip": "SKIP"}[
                 status
             ]
-            typer.echo(f"  [{label}] {c.get('name', f'Test {c['index']}')}")
+            idx = c.get("index", "?")
+            typer.echo(f"  [{label}] {c.get('name', f'Test {idx}')}")
 
             if status in ("fail", "error"):
                 if c.get("error"):

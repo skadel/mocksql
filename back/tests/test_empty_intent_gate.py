@@ -79,7 +79,10 @@ async def test_empty_intended_is_pass_not_bad_data():
     assert len(updated_tests) == 1
     test = updated_tests[0]
     assert test["verdict"] == "Bon"
-    assert test["evaluation_explanation"] == "0 ligne est bien le résultat attendu : la date est future."
+    assert (
+        test["evaluation_explanation"]
+        == "0 ligne est bien le résultat attendu : la date est future."
+    )
     assert len(test["assertion_results"]) == 1
     assertion = test["assertion_results"][0]
     assert assertion["passed"] is True

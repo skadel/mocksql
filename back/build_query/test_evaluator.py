@@ -379,7 +379,11 @@ async def evaluate_tests(state: QueryState):
                                 "parent": parent,
                                 "request_id": state.get("request_id"),
                                 **({"sql": sql_kw} if sql_kw else {}),
-                                **({"optimized_sql": optimized_kw} if optimized_kw else {}),
+                                **(
+                                    {"optimized_sql": optimized_kw}
+                                    if optimized_kw
+                                    else {}
+                                ),
                             },
                         ),
                         AIMessage(
