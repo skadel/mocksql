@@ -1105,8 +1105,18 @@ const ChatComponent: React.FC = () => {
 
   const handleClearHistory = async () => {
     if (!currentModelId) return;
-    await clearHistoryApi(currentModelId);
+    // Vide le fil immédiatement : l'UI doit répondre au clic même si l'appel
+    // réseau échoue ou traîne. Avant, le `await` précédait le reset — si
+    // clearHistoryApi levait ou bloquait, `resetMessages` n'était jamais
+    // dispatché et le bouton paraissait inerte (« ne déclenche rien »).
     dispatch(resetMessages());
+    try {
+      await clearHistoryApi(currentModelId);
+    } catch {
+      // Purge serveur échouée : le fil est vidé localement mais réapparaîtra
+      // au prochain chargement. On le signale plutôt que d'échouer en silence.
+      dispatch(setError('La conversation a été vidée localement, mais la purge côté serveur a échoué.'));
+    }
   };
 
   const handleRestoreState = useCallback((sql?: string, optimizedSql?: string, messageId?: string, restoredTestResults?: any[]) => {
