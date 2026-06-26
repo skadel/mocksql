@@ -3376,6 +3376,168 @@ class TestDerivedExprReusedAlias(unittest.TestCase):
             self._assert_no_forward_join_refs(broken)
 
 
+# ─── derived-expression profiling: partition bounding ────────────────────────
+
+
+class TestDerivedExprPartitioned(unittest.TestCase):
+    """Derived-expression branches bound each partitioned source to its last N
+    partitions — mirroring the join branches — so profiling a SAFE_CAST/SAFE_DIVIDE
+    over a large partitioned table doesn't scan the whole table."""
+
+    _USED = [
+        {"table": "project.dataset.events", "used_columns": ["raw_amount", "user_id"]},
+        {"table": "project.dataset.sessions", "used_columns": ["tag", "user_id"]},
+    ]
+
+    @staticmethod
+    def _schema():
+        return {
+            "tables": [
+                {
+                    "name": "project.dataset.events",
+                    "columns": [
+                        {"name": "event_date", "type": "DATE"},
+                        {"name": "raw_amount", "type": "STRING"},
+                        {"name": "user_id", "type": "STRING"},
+                    ],
+                    "partition": {"type": "time", "field": "event_date"},
+                },
+                {
+                    "name": "project.dataset.sessions",
+                    "columns": [
+                        {"name": "session_date", "type": "DATE"},
+                        {"name": "tag", "type": "STRING"},
+                        {"name": "user_id", "type": "STRING"},
+                    ],
+                    "partition": {"type": "time", "field": "session_date"},
+                },
+            ]
+        }
+
+    def _derived_branch(self, sql, options):
+        q = build_profile_query(
+            self._schema(),
+            self._USED,
+            dialect="bigquery",
+            sql_query=sql,
+            options=options,
+        )
+        branches = [b for b in q.split("UNION ALL") if "'derived_expr'" in b]
+        self.assertGreaterEqual(len(branches), 1, "expected a derived branch")
+        return branches[0]
+
+    def test_single_table_expr_bounded_by_partition(self):
+        sql = (
+            "SELECT SAFE_CAST(e.raw_amount AS INT64) AS amt "
+            "FROM project.dataset.events e"
+        )
+        branch = self._derived_branch(sql, {"partition_limit": 3})
+        # The aggregate query AND the top-values subquery both carry the predicate,
+        # qualified with the table alias (column rendered backtick-quoted in BigQuery).
+        self.assertEqual(branch.count("e.`event_date`"), 2)
+        self.assertIn("LIMIT 3", branch)
+
+    def test_multi_table_expr_bounds_each_side_by_its_own_partition(self):
+        sql = (
+            "SELECT SAFE_DIVIDE(e.raw_amount, s.tag) AS r "
+            "FROM project.dataset.events e "
+            "JOIN project.dataset.sessions s ON e.user_id = s.user_id"
+        )
+        branch = self._derived_branch(sql, {"partition_limit": 3})
+        # Each side restricted by its own partition column, qualified with its alias.
+        self.assertIn("e.`event_date`", branch)
+        self.assertIn("s.`session_date`", branch)
+
+    def test_no_partition_when_limit_none(self):
+        sql = (
+            "SELECT SAFE_CAST(e.raw_amount AS INT64) AS amt "
+            "FROM project.dataset.events e"
+        )
+        branch = self._derived_branch(sql, {"partition_limit": None})
+        self.assertNotIn("event_date", branch)
+
+    def test_branch_parses(self):
+        sql = (
+            "SELECT SAFE_DIVIDE(e.raw_amount, s.tag) AS r "
+            "FROM project.dataset.events e "
+            "JOIN project.dataset.sessions s ON e.user_id = s.user_id"
+        )
+        branch = self._derived_branch(sql, {"partition_limit": 3})
+        sqlglot.parse_one(branch, dialect="bigquery")  # must parse
+
+    def test_only_partitioned_side_bounded(self):
+        # Right table has no partition info → only the events side is bounded.
+        schema = self._schema()
+        del schema["tables"][1]["partition"]
+        q = build_profile_query(
+            schema,
+            self._USED,
+            dialect="bigquery",
+            sql_query=(
+                "SELECT SAFE_DIVIDE(e.raw_amount, s.tag) AS r "
+                "FROM project.dataset.events e "
+                "JOIN project.dataset.sessions s ON e.user_id = s.user_id"
+            ),
+            options={"partition_limit": 3},
+        )
+        branch = [b for b in q.split("UNION ALL") if "'derived_expr'" in b][0]
+        self.assertIn("e.`event_date`", branch)
+        self.assertNotIn("session_date", branch)
+
+
+class TestQualifyPartitionPreds(unittest.TestCase):
+    """Unit tests for _qualify_partition_preds."""
+
+    def test_literal_in_predicate_qualified_with_alias(self):
+        from build_query.profiler import _qualify_partition_preds
+
+        out = _qualify_partition_preds(
+            [("project.dataset.events", "e")],
+            {"project.dataset.events": "event_date IN (DATE '2026-01-01')"},
+            None,
+            "bigquery",
+        )
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith("e.event_date IN"))
+
+    def test_subquery_inner_column_left_unqualified(self):
+        # The fallback `col IN (SELECT DISTINCT col FROM t …)` form: only the outer
+        # column is aliased; the subquery's column stays bound to its physical table.
+        from build_query.profiler import _qualify_partition_preds
+
+        pw = (
+            "event_date IN (SELECT DISTINCT event_date "
+            "FROM `project.dataset.events` ORDER BY event_date DESC LIMIT 3)"
+        )
+        out = _qualify_partition_preds(
+            [("project.dataset.events", "e")],
+            {"project.dataset.events": pw},
+            None,
+            "bigquery",
+        )[0]
+        self.assertTrue(out.startswith("e.event_date IN"))
+        # Inner SELECT must not be aliased with the outer alias.
+        self.assertIn("SELECT DISTINCT event_date", out)
+        self.assertNotIn("e.event_date DESC", out)
+
+    def test_cte_source_skipped(self):
+        from build_query.profiler import _qualify_partition_preds
+
+        self.assertEqual(
+            _qualify_partition_preds(
+                [("mycte", "mycte")], {"mycte": "d IN (1)"}, {"mycte"}, "bigquery"
+            ),
+            [],
+        )
+
+    def test_none_map_returns_empty(self):
+        from build_query.profiler import _qualify_partition_preds
+
+        self.assertEqual(
+            _qualify_partition_preds([("t", "t")], None, None, "bigquery"), []
+        )
+
+
 # ─── build_profile_queries: branch isolation ─────────────────────────────────
 
 
