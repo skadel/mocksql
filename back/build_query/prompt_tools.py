@@ -353,6 +353,17 @@ def _format_profile_block(
             lines.extend(col_lines)
 
     joins = profile.get("joins", [])
+    # Tables profilées par fenêtre de partition (last-N) : le match_rate d'une
+    # jointure les impliquant est une estimation intra-fenêtre, pas un taux absolu.
+    partitioned_tables: set[str] = set()
+    for _tk, _td in profile["tables"].items():
+        if _td.get("partition_window"):
+            partitioned_tables.add(_tk)
+            partitioned_tables.add(_tk.split(".")[-1])
+
+    def _side_partitioned(tbl: str) -> bool:
+        return tbl in partitioned_tables or tbl.split(".")[-1] in partitioned_tables
+
     join_lines: List[str] = []
     # CTE bodies are dumped once globally — the profiler attaches the same CTE SQL to
     # every join the CTE participates in, and that SQL is already present in the main
@@ -369,8 +380,12 @@ def _format_profile_block(
         # préfixe table (lt/rt) qui ne fait que rallonger.
         line = f"  - {_dedup_and_parts(lk)} ↔ {_dedup_and_parts(rk)}"
         stats_parts: List[str] = []
+        window_disjoint = bool(j.get("window_disjoint"))
         match_rate = j.get("left_match_rate")
-        if match_rate is not None:
+        # Quand les deux côtés sont partitionnés et que le match mesuré est 0, c'est
+        # presque sûrement un artefact de fenêtres disjointes (chaque côté borné à ses
+        # propres dernières partitions) — on masque le 0% trompeur (caveat plus bas).
+        if not window_disjoint and match_rate is not None:
             stats_parts.append(f"match={match_rate:.0%}")
         fanout = j.get("avg_right_per_left_key")
         if fanout is not None:
@@ -386,6 +401,20 @@ def _format_profile_block(
             line += f" ({', '.join(stats_parts)})"
         if j.get("right_filter"):
             line += f" [filtre: {j['right_filter']}]"
+        if window_disjoint:
+            line += (
+                " [match indéterminé : les deux tables sont profilées sur leurs"
+                " dernières partitions et les fenêtres ne se recouvrent pas —"
+                " ne pas conclure que la jointure est vide]"
+            )
+        elif stats_parts and (_side_partitioned(lt) or _side_partitioned(rt)):
+            # Match ET cardinalité (fanout) sont mesurés par côté sur la fenêtre :
+            # des doublons s'étalant entre partitions peuvent faire lire un
+            # many-to-* comme one-to-*. On le signale pour cadrer le LLM.
+            line += (
+                " [stats bornées aux dernières partitions de chaque côté"
+                " (match et cardinalité)]"
+            )
         join_lines.append(line)
         # CTE SQL stored at profile-build time (phase 1) — display once per unique body.
         for side_cte_key, label, side_tbl in (
