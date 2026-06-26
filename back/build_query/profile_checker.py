@@ -458,6 +458,11 @@ async def build_profile_request(
     Returns profile_sql, profile_queries (within budget), missing_columns
     (resolved), expected_joins, profile_billing_tb, deferred, budget_tb.
     """
+    # Parité avec get_profile_budget_tb() : un budget <= 0 (ou absent) signifie
+    # « pas de budget » (on profile tout), pas « différer toutes les tables ».
+    if budget_tb is not None and budget_tb <= 0:
+        budget_tb = None
+
     if profile is None:
         profile = _normalize_profile(_load_model_profile()) or {
             "tables": {},
