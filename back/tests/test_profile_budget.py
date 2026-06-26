@@ -37,7 +37,7 @@ def _resolve(missing, schemas):
     ]
 
 
-async def _fake_estimate(sql, billing):
+async def _fake_estimate(sql, _billing):
     # The "big" table query scans 5 TB, the "small" one a sliver.
     return 5.0 if "big" in sql else 0.01
 
