@@ -104,6 +104,9 @@ const ChatComponent: React.FC = () => {
   const [budgetTarget, setBudgetTarget] = useLocalStorageState('profileBudgetTb', 0.3);
   const budgetTargetRef = useRef(budgetTarget);
   useEffect(() => { budgetTargetRef.current = budgetTarget; }, [budgetTarget]);
+  // Texte brut du champ budget : découplé de la valeur numérique committée pour
+  // autoriser les états intermédiaires ("", "0.") sans que React ne les écrase.
+  const [budgetInput, setBudgetInput] = useState(String(budgetTarget));
   // Profil partiel : tables différées (au-dessus du budget) que l'utilisateur peut
   // compléter à la demande via "Compléter le profil". null = profil complet.
   const [partialProfile, setPartialProfile] = useState<{
@@ -358,6 +361,10 @@ const ChatComponent: React.FC = () => {
       setMissingTables(null);
       setPendingAutoProfile(null);
       setIsAutoProfileRunning(false);
+      // Bannières liées au profil : appartiennent au modèle quitté, sinon elles
+      // restent affichées (et actionnables) sur le modèle suivant.
+      setPartialProfile(null);
+      setAutoProfileWarning(null);
       setLastErrorDismissed(false);
       awaitingGetMessagesRef.current = false;
       autoFixedIds.current.clear();
@@ -2056,8 +2063,8 @@ const ChatComponent: React.FC = () => {
 
                 {/* Budget de scan : profilage automatique sous ce seuil. Au-delà,
                     les tables sont différées (profil partiel) et profilables à la
-                    demande. Affiché seulement si aucun budget n'est configuré. */}
-                {pendingAutoProfile.needsProfiling && (
+                    demande. BigQuery uniquement (DuckDB/Postgres = scan gratuit). */}
+                {pendingAutoProfile.needsProfiling && DIALECT === 'bigquery' && (
                   pendingAutoProfile.configBudget != null ? (
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
                       <Typography variant="caption" sx={{ color: '#888' }}>Budget de scan :</Typography>
@@ -2076,12 +2083,22 @@ const ChatComponent: React.FC = () => {
                         <TextField
                           type="number"
                           size="small"
-                          value={budgetTarget}
+                          value={budgetInput}
                           onChange={(e) => {
-                            const v = parseFloat(e.target.value);
-                            if (!Number.isNaN(v) && v >= 0) setBudgetTarget(v);
+                            const raw = e.target.value;
+                            setBudgetInput(raw);
+                            // Ne committe que les valeurs > 0 ; 0 / vide / invalide
+                            // ne deviennent jamais le budget (0 différerait tout).
+                            const v = parseFloat(raw);
+                            if (!Number.isNaN(v) && v > 0) setBudgetTarget(v);
                           }}
-                          inputProps={{ min: 0, step: 0.1, style: { width: 70 } }}
+                          onBlur={() => {
+                            // Remet l'affichage sur la dernière valeur valide si le
+                            // champ a été laissé vide / à 0 / invalide.
+                            const v = parseFloat(budgetInput);
+                            if (Number.isNaN(v) || v <= 0) setBudgetInput(String(budgetTarget));
+                          }}
+                          inputProps={{ min: 0.01, step: 0.1, style: { width: 70 } }}
                           InputProps={{ endAdornment: <InputAdornment position="end">To</InputAdornment> }}
                           disabled={isAutoProfileRunning}
                         />

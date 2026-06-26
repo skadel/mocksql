@@ -75,6 +75,13 @@ class TestProfileBudget:
         assert len(r["profile_queries"]) == 2
         assert r["deferred"] == []
 
+    async def test_zero_budget_treated_as_no_budget(self):
+        # Parité avec la config (<=0 => non configuré) : 0 ne doit PAS tout différer.
+        r = await _build(budget_tb=0)
+        assert len(r["profile_queries"]) == 2
+        assert r["deferred"] == []
+        assert r["budget_tb"] is None
+
 
 class TestBudgetConfig:
     def test_unset_returns_none(self):
