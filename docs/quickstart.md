@@ -221,6 +221,24 @@ def replace_vars(sql: str) -> str:
     return re.sub(r"@(\w+)", lambda m: defaults.get(m.group(1), "NULL"), sql)
 ```
 
+### Profiling budget (auto-profiling)
+
+Profiling real tables runs a BigQuery dry-run to estimate the scan, then queries
+each table. To make the "click Generate and walk away" flow fully hands-off, set a
+**scan budget** (in TB): tables whose estimated scan fits under the budget are
+profiled automatically; tables above it are **deferred** (the profile is marked
+partial and a *"Compléter le profil"* button lets you profile them on demand).
+
+```yaml
+# mocksql.yml
+profile_budget_tb: 0.3   # auto-profile under 0.3 TB; defer larger tables
+```
+
+Also settable via the `PROFILE_BUDGET_TB` env var. When **unset**, the UI asks for a
+budget before profiling (default 0.3 TB, remembered per browser). Set it to a value
+≤ 0 / leave it out to keep the historical behaviour (no budget — profile everything).
+Only applies to BigQuery (DuckDB/Postgres profiling is free, so no budget is needed).
+
 ### Full example
 
 ```bash

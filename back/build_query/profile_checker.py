@@ -6,7 +6,7 @@ from typing import Optional
 from build_query.profiler import (
     _join_pair_key,
     build_profile_query,
-    build_profile_queries,
+    build_profile_queries_labeled,
 )
 from build_query.state import QueryState
 from storage.test_repository import get_test
@@ -438,7 +438,10 @@ async def check_profile(state: QueryState) -> dict:
 
 
 async def build_profile_request(
-    state: QueryState, missing: list, profile: Optional[dict] = None
+    state: QueryState,
+    missing: list,
+    profile: Optional[dict] = None,
+    budget_tb: Optional[float] = None,
 ) -> dict:
     """
     Build the profile SQL request for the given missing columns and joins.
@@ -446,7 +449,14 @@ async def build_profile_request(
     Joins already present in the stored profile (matched by table-set, regardless
     of order) are excluded from the generated SQL — only new joins are profiled.
 
-    Returns profile_sql, missing_columns (resolved), expected_joins, profile_billing_tb.
+    When *budget_tb* is provided (BigQuery only), each profile query is dry-run to
+    estimate its scan; queries whose estimate exceeds the budget are **deferred**
+    (left out of ``profile_queries``) and reported under ``deferred`` so the UI can
+    surface a partial profile + a "compléter" affordance. ``budget_tb=None`` keeps
+    the historical behaviour (profile everything).
+
+    Returns profile_sql, profile_queries (within budget), missing_columns
+    (resolved), expected_joins, profile_billing_tb, deferred, budget_tb.
     """
     if profile is None:
         profile = _normalize_profile(_load_model_profile()) or {
@@ -481,7 +491,7 @@ async def build_profile_request(
         options=profiler_options,
         exclude_join_pairs=exclude_join_pairs,
     )
-    queries = build_profile_queries(
+    labeled = build_profile_queries_labeled(
         schema=profiler_schema,
         used_columns=missing_resolved,
         dialect=dialect,
@@ -495,28 +505,53 @@ async def build_profile_request(
         profile, _extract_expected_join_pairs(sql_query or "", dialect)
     )
 
-    profile_billing_tb: Optional[float] = None
-    if dialect == "bigquery" and queries:
+    # Per-query scan estimate (BigQuery only). Used both for the displayed total
+    # and — when a budget is set — to defer the queries that would scan too much.
+    per_query_tb: list[Optional[float]] = [None] * len(labeled)
+    if dialect == "bigquery" and labeled:
         from models.env_variables import BQ_TEST_PROJECT
 
         billing_project = BQ_TEST_PROJECT
         if billing_project:
             billing_results = await asyncio.gather(
-                *[_estimate_profile_bytes(q, billing_project) for q in queries],
+                *[_estimate_profile_bytes(sql, billing_project) for _, sql in labeled],
                 return_exceptions=True,
             )
-            total: float = 0.0
-            for r in billing_results:
+            for i, r in enumerate(billing_results):
                 if isinstance(r, float):
-                    total += r
-            profile_billing_tb = total if total > 0 else None
+                    per_query_tb[i] = r
+
+    within_queries: list[str] = []
+    deferred: list[dict] = []
+    within_total = 0.0
+    have_estimate = False
+    for (label, sql), est in zip(labeled, per_query_tb):
+        if est is not None:
+            have_estimate = True
+        # Defer only when we have an estimate AND it exceeds an explicit budget.
+        # Unknown estimates (None) are always profiled — the partition window
+        # already bounds their cost.
+        if budget_tb is not None and est is not None and est > budget_tb:
+            deferred.append({"scope": label, "billing_tb": round(est, 4)})
+        else:
+            within_queries.append(sql)
+            if est is not None:
+                within_total += est
+
+    profile_billing_tb: Optional[float] = (
+        round(within_total, 4) if have_estimate and within_total > 0 else None
+    )
 
     return {
         "profile_sql": profile_sql,
-        "profile_queries": queries,
+        "profile_queries": within_queries,
         "missing_columns": missing_resolved,
         "expected_joins": expected_joins,
         "profile_billing_tb": profile_billing_tb,
+        # Tables/relations dont le scan estimé dépasse le budget : non profilées,
+        # complétables à la demande ("Compléter le profil").
+        "deferred": deferred,
+        "budget_tb": budget_tb,
         # Echoed back so /auto-profile records the same window the SQL scanned,
         # instead of defaulting to 3.
         "partition_limit": partition_limit,

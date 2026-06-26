@@ -56,6 +56,11 @@ export interface ProfileRequest {
   billing_tb?: number;
   profileStatus?: 'complete' | 'partial' | 'failed';
   profileErrors?: Array<{ query_index: number; error: string }>;
+  // Tables/relations différées car leur scan estimé dépasse le budget. Alimentent
+  // la bannière "profil partiel" + le bouton "Compléter le profil".
+  deferred?: Array<{ scope: string; billing_tb: number }>;
+  // Budget appliqué lors de la construction de cette requête (null = aucun).
+  budget_tb?: number | null;
 }
 
 export interface QueryUnderstanding {
