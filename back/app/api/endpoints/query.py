@@ -266,10 +266,15 @@ async def check_profile_route(body: CheckProfileRequest):
 
         missing_columns = checked["missing_columns"]
 
+    from storage.config import get_profile_budget_tb
+
     return {
         "profile_complete": False,
         "auto_profile_available": AUTO_PROFILING,
         "missing_columns": missing_columns,
+        # Budget de scan configuré (mocksql.yml / env). None => le front demande
+        # une valeur à l'utilisateur (défaut proposé 0.3 To).
+        "profile_budget_tb": get_profile_budget_tb(),
     }
 
 
@@ -291,6 +296,8 @@ class BuildProfileRequestBody(BaseModel):
     dialect: str
     session: str
     missing_columns: list
+    # Budget de scan (To). None => profile tout (pas de budget appliqué).
+    budget_tb: Optional[float] = None
 
 
 @router.post("/build-profile-request")
@@ -312,7 +319,9 @@ async def build_profile_request_route(body: BuildProfileRequestBody):
     }
 
     try:
-        request = await build_profile_request(state, body.missing_columns)
+        request = await build_profile_request(
+            state, body.missing_columns, budget_tb=body.budget_tb
+        )
     except Exception as exc:
         logging.getLogger(__name__).error("[build_profile_request] error: %s", exc)
         raise HTTPException(status_code=500, detail=str(exc))
@@ -323,6 +332,10 @@ async def build_profile_request_route(body: BuildProfileRequestBody):
         "missing_columns": request.get("missing_columns", []),
         "expected_joins": request.get("expected_joins", []),
         "partition_limit": request.get("partition_limit", 3),
+        # Tables différées (au-dessus du budget) + budget appliqué — pilotent la
+        # bannière "profil partiel" et le bouton "Compléter le profil".
+        "deferred": request.get("deferred", []),
+        "budget_tb": request.get("budget_tb"),
     }
     billing_tb = request.get("profile_billing_tb")
     if billing_tb is not None:

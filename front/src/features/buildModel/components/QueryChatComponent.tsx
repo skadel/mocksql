@@ -13,6 +13,7 @@ import DownloadIcon from '@mui/icons-material/Download';
 import SearchIcon from '@mui/icons-material/Search';
 import ScienceIcon from '@mui/icons-material/Science';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { Container } from '../../../style/StyledComponents';
 import { getLastMessage, formatMessage } from '../../../utils/messages';
 import MissingTablesAlert from './MissingTablesAlert';
@@ -88,12 +89,33 @@ const ChatComponent: React.FC = () => {
     // grosse-maille la durée de génération dans le popup : plus il y a de colonnes
     // à fabriquer, plus c'est long. Cf. estimateGenerationMinutes().
     nUsedCols?: number;
+    // Budget de scan configuré côté projet (mocksql.yml / env). undefined/null =>
+    // non configuré : on demande la valeur à l'utilisateur (champ "Budget de scan").
+    configBudget?: number | null;
     onConfirm: (testsTarget: number) => Promise<void>;
     onSkip: (testsTarget: number) => Promise<void>;
     onCancel: () => void;
   } | null>(null);
   // Nombre de tests à générer d'emblée (1–3, total). Réinitialisé à 1 à chaque ouverture.
   const [testsTarget, setTestsTarget] = useState(1);
+  // Budget de scan (To) choisi par l'utilisateur quand aucun n'est configuré.
+  // Mémorisé en localStorage (défaut 0.3 To) — au-delà, les tables sont profilées
+  // à la demande ("profil partiel"). Cf. flux budget-aware du profiling.
+  const [budgetTarget, setBudgetTarget] = useLocalStorageState('profileBudgetTb', 0.3);
+  const budgetTargetRef = useRef(budgetTarget);
+  useEffect(() => { budgetTargetRef.current = budgetTarget; }, [budgetTarget]);
+  // Texte brut du champ budget : découplé de la valeur numérique committée pour
+  // autoriser les états intermédiaires ("", "0.") sans que React ne les écrase.
+  const [budgetInput, setBudgetInput] = useState(String(budgetTarget));
+  // Profil partiel : tables différées (au-dessus du budget) que l'utilisateur peut
+  // compléter à la demande via "Compléter le profil". null = profil complet.
+  const [partialProfile, setPartialProfile] = useState<{
+    deferred: Array<{ scope: string; billing_tb: number }>;
+    budget: number | null;
+    sql: string;
+    usedColumns: any[];
+    sessionId: string;
+  } | null>(null);
   const [isAutoProfileRunning, setIsAutoProfileRunning] = useState(false);
   // Timestamp ISO du dernier profilage (profil global, partagé entre modèles) — affiché
   // sous forme « profilé il y a N j » à côté du bouton Rafraîchir pour donner une raison
@@ -339,6 +361,10 @@ const ChatComponent: React.FC = () => {
       setMissingTables(null);
       setPendingAutoProfile(null);
       setIsAutoProfileRunning(false);
+      // Bannières liées au profil : appartiennent au modèle quitté, sinon elles
+      // restent affichées (et actionnables) sur le modèle suivant.
+      setPartialProfile(null);
+      setAutoProfileWarning(null);
       setLastErrorDismissed(false);
       awaitingGetMessagesRef.current = false;
       autoFixedIds.current.clear();
@@ -446,6 +472,77 @@ const ChatComponent: React.FC = () => {
     [currentModelId, modelName, dispatch, t]
   );
 
+  // -------- Profilage budgété (best-effort) : construit la requête de profiling
+  // sous le budget donné, exécute les requêtes qui tiennent sous le budget, et
+  // mémorise les tables différées pour proposer "Compléter le profil".
+  // budget=null => aucun budget (on profile tout). Ne lève jamais.
+  const runBudgetedProfiling = useCallback(async (args: {
+    sessionId: string; sql: string; usedColumns: any[]; missingColumns: any[]; budget: number | null;
+  }) => {
+    const { sessionId, sql, usedColumns, missingColumns, budget } = args;
+    setIsAutoProfileRunning(true);
+    try {
+      const { profile_request } = await buildProfileRequestApi({
+        sql, project: '', dialect: DIALECT, session: sessionId,
+        missing_columns: missingColumns,
+        budget_tb: budget ?? undefined,
+      });
+      if (profile_request.profile_queries && profile_request.profile_queries.length) {
+        const result = await autoProfileApi({
+          profile_sql: profile_request.profile_query,
+          profile_queries: profile_request.profile_queries,
+          project: '', session: sessionId,
+          partition_limit: profile_request.partition_limit,
+        });
+        if (result.profile_status !== 'complete') {
+          setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
+        }
+      }
+      if (profile_request.deferred && profile_request.deferred.length) {
+        setPartialProfile({
+          deferred: profile_request.deferred,
+          budget: profile_request.budget_tb ?? budget,
+          sql, usedColumns, sessionId,
+        });
+      } else {
+        setPartialProfile(null);
+      }
+    } catch { /* profilage best-effort */ }
+    setIsAutoProfileRunning(false);
+  }, []);
+
+  // -------- "Compléter le profil" : reprofile les tables différées SANS budget
+  // (l'utilisateur accepte explicitement le scan complet). Les colonnes différées
+  // sont toujours "manquantes" dans le profil → check-profile les redonne.
+  const handleCompleteProfile = useCallback(async () => {
+    const pp = partialProfile;
+    if (!pp) return;
+    setIsAutoProfileRunning(true);
+    try {
+      const r = await checkProfileApi({ sql: pp.sql, project: '', dialect: DIALECT, session: pp.sessionId, used_columns: pp.usedColumns });
+      if (!r.profile_complete && r.missing_columns?.length) {
+        const { profile_request } = await buildProfileRequestApi({
+          sql: pp.sql, project: '', dialect: DIALECT, session: pp.sessionId,
+          missing_columns: r.missing_columns, // pas de budget_tb => profile tout
+        });
+        if (profile_request.profile_queries?.length) {
+          const result = await autoProfileApi({
+            profile_sql: profile_request.profile_query,
+            profile_queries: profile_request.profile_queries,
+            project: '', session: pp.sessionId,
+            partition_limit: profile_request.partition_limit,
+          });
+          if (result.profile_status !== 'complete') {
+            setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
+          }
+        }
+      }
+      setPartialProfile(null);
+      getProfileMetaApi().then((m) => setProfiledAt(m.profiled_at)).catch(() => {});
+    } catch { /* best-effort */ }
+    setIsAutoProfileRunning(false);
+  }, [partialProfile]);
+
   // -------- Shared validate → profile → generate flow
   const runSqlSubmissionFlow = useCallback(async (sql: string, sessionId: string) => {
     setSubmissionStep(t('loading.validating_sql'));
@@ -503,24 +600,22 @@ const ChatComponent: React.FC = () => {
           isGeneratingRef.current = true;
           dispatchChatQuery({ userInput: '', sessionId, project: '', dialect: DIALECT, query: sql, ChangedMessageId: '', t, parentMessageId: '', testsTarget: testsTargetN });
         };
-        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
+        // Budget de scan : si configuré côté projet on l'applique d'office (zéro
+        // friction) ; sinon on demande la valeur dans le popup (défaut 0.3 To).
+        const configBudget = profileResult.profile_budget_tb ?? null;
+        const missingCols = profileResult.missing_columns;
         setTestsTarget(1);
         setPendingAutoProfile({
           profileRequest: null,
           needsProfiling: true,
           step: 'count',
           nUsedCols: countUsedColumns(usedColumns),
+          configBudget,
+          // One-click : profilage budgété (best-effort) PUIS génération, sans
+          // étape intermédiaire ni clic manuel sur « Lancer le profiling ».
           onConfirm: async (n) => {
-            const req = resolvedReq;
-            if (!req) return;
-            setIsAutoProfileRunning(true);
-            try {
-              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: sessionId, partition_limit: req.partition_limit });
-              if (result.profile_status !== 'complete') {
-                setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
-              }
-            } catch { /* profilage best-effort */ }
-            setIsAutoProfileRunning(false);
+            const budget = configBudget ?? budgetTargetRef.current ?? null;
+            await runBudgetedProfiling({ sessionId, sql, usedColumns, missingColumns: missingCols, budget });
             setPendingAutoProfile(null);
             doStream(n);
           },
@@ -536,12 +631,6 @@ const ChatComponent: React.FC = () => {
             navigate('/');
           },
         });
-        buildProfileRequestApi({ sql, project: '', dialect: DIALECT, session: sessionId, missing_columns: profileResult.missing_columns })
-          .then(({ profile_request }) => {
-            resolvedReq = profile_request;
-            setPendingAutoProfile((prev) => prev ? { ...prev, profileRequest: profile_request } : prev);
-          })
-          .catch(() => {});
         pendingSessionRef.current = null;
         setIsSending(false);
         return;
@@ -1819,6 +1908,30 @@ const ChatComponent: React.FC = () => {
                 onClose={() => setAutoProfileWarning(null)}
               />
             )}
+            {partialProfile && (
+              <Alert
+                severity="info"
+                icon={<InfoOutlinedIcon fontSize="inherit" />}
+                onClose={() => setPartialProfile(null)}
+                sx={{ mb: 1, borderRadius: 2, alignItems: 'center' }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    disabled={isAutoProfileRunning}
+                    onClick={handleCompleteProfile}
+                    startIcon={isAutoProfileRunning ? <CircularProgress size={13} /> : undefined}
+                    sx={{ textTransform: 'none', fontWeight: 700, whiteSpace: 'nowrap' }}
+                  >
+                    {isAutoProfileRunning ? 'Profilage…' : 'Compléter le profil'}
+                  </Button>
+                }
+              >
+                Profil partiel — {partialProfile.deferred.length} {partialProfile.deferred.length > 1 ? 'tables ont été différées' : 'table a été différée'}
+                {partialProfile.budget != null ? ` (scan estimé > ${partialProfile.budget} To)` : ''} :{' '}
+                {partialProfile.deferred.map((d) => d.scope).join(', ')}. La génération utilise le profil disponible ; complète-le si besoin.
+              </Alert>
+            )}
             <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
               <TestsPanel
                 onAddTest={handleAddTest}
@@ -1944,8 +2057,69 @@ const ChatComponent: React.FC = () => {
                 {pendingAutoProfile.nUsedCols != null && (
                   <EtaNotice
                     eta={estimateGenerationMinutes(pendingAutoProfile.nUsedCols, testsTarget)}
-                    launchesNow={!pendingAutoProfile.needsProfiling}
+                    launchesNow
                   />
+                )}
+
+                {/* Budget de scan : profilage automatique sous ce seuil. Au-delà,
+                    les tables sont différées (profil partiel) et profilables à la
+                    demande. BigQuery uniquement (DuckDB/Postgres = scan gratuit). */}
+                {pendingAutoProfile.needsProfiling && DIALECT === 'bigquery' && (
+                  pendingAutoProfile.configBudget != null ? (
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
+                      <Typography variant="caption" sx={{ color: '#888' }}>Budget de scan :</Typography>
+                      <Chip
+                        size="small"
+                        label={`${pendingAutoProfile.configBudget} To · auto`}
+                        sx={{ bgcolor: '#f0faf5', color: '#1e5c38', border: '1px solid #a5d6b7', fontWeight: 600, fontSize: 11 }}
+                      />
+                    </Box>
+                  ) : (
+                    <Box sx={{ mt: 2 }}>
+                      <Typography variant="body2" sx={{ color: '#555', fontWeight: 600, mb: 0.5 }}>
+                        Budget de scan BigQuery
+                      </Typography>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <TextField
+                          type="number"
+                          size="small"
+                          value={budgetInput}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setBudgetInput(raw);
+                            // Ne committe que les valeurs > 0 ; 0 / vide / invalide
+                            // ne deviennent jamais le budget (0 différerait tout).
+                            const v = parseFloat(raw);
+                            if (!Number.isNaN(v) && v > 0) setBudgetTarget(v);
+                          }}
+                          onBlur={() => {
+                            // Remet l'affichage sur la dernière valeur valide si le
+                            // champ a été laissé vide / à 0 / invalide.
+                            const v = parseFloat(budgetInput);
+                            if (Number.isNaN(v) || v <= 0) setBudgetInput(String(budgetTarget));
+                          }}
+                          inputProps={{ min: 0.01, step: 0.1, style: { width: 70 } }}
+                          InputProps={{ endAdornment: <InputAdornment position="end">To</InputAdornment> }}
+                          disabled={isAutoProfileRunning}
+                        />
+                        <Typography variant="caption" sx={{ color: '#999' }}>
+                          Les tables dont le scan dépasse ce seuil sont profilées à la demande.
+                        </Typography>
+                      </Box>
+                    </Box>
+                  )
+                )}
+
+                {pendingAutoProfile.needsProfiling && isAutoProfileRunning && (
+                  <Box sx={{ mt: 2 }}>
+                    <LinearProgress
+                      variant="indeterminate"
+                      sx={{ height: 6, borderRadius: 3, bgcolor: '#e0f7f5', '& .MuiLinearProgress-bar': { bgcolor: '#1ca8a4' } }}
+                    />
+                    <Typography variant="caption" sx={{ color: '#555', mt: 0.5, display: 'block' }}>
+                      {t('loading.profiling')}
+                    </Typography>
+                  </Box>
                 )}
               </Box>
             )}
@@ -2067,19 +2241,16 @@ const ChatComponent: React.FC = () => {
             {pendingAutoProfile.step === 'count' ? (
               <Button
                 variant="contained"
-                onClick={() => {
-                  // Étape suivante si profiling requis (le calcul de la requête tourne déjà en
-                  // fond), sinon génération directe avec le nombre de tests choisi.
-                  if (pendingAutoProfile.needsProfiling) {
-                    setPendingAutoProfile((prev) => prev ? { ...prev, step: 'profiling' } : prev);
-                  } else {
-                    pendingAutoProfile.onConfirm(testsTarget);
-                  }
+                disabled={isAutoProfileRunning}
+                onClick={() => pendingAutoProfile.onConfirm(testsTarget)}
+                startIcon={isAutoProfileRunning ? <CircularProgress size={14} sx={{ color: 'white' }} /> : undefined}
+                sx={{
+                  textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' },
+                  '&.Mui-disabled': { bgcolor: '#1ca8a4', color: 'white', opacity: 0.85 },
                 }}
-                sx={{ textTransform: 'none', bgcolor: '#1ca8a4', '&:hover': { bgcolor: '#159e9a' } }}
               >
-                {pendingAutoProfile.needsProfiling
-                  ? 'Continuer'
+                {isAutoProfileRunning
+                  ? t('loading.profiling_short')
                   : `Générer ${testsTarget} test${testsTarget > 1 ? 's' : ''}`}
               </Button>
             ) : (
