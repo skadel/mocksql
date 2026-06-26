@@ -197,6 +197,31 @@ def is_native_thinking_active() -> bool:
     return False
 
 
+def get_profile_budget_tb() -> float | None:
+    """Budget de scan BigQuery (en To) pour le profiling automatique.
+
+    Déclaré dans mocksql.yml (``profile_budget_tb: 0.3``) ou via l'env
+    ``PROFILE_BUDGET_TB``. Quand il est défini, le profiling ne lance que les
+    requêtes dont le scan estimé tient sous le budget — les tables trop
+    volumineuses sont *différées* (profil partiel, complétable à la demande).
+
+    Retourne ``None`` quand rien n'est configuré : le front demande alors une
+    valeur à l'utilisateur (défaut proposé 0.3 To). ``None`` => comportement
+    historique (aucun budget, on profile tout) si le front ne passe rien.
+    """
+    cfg = load_config()
+    val = cfg.get("profile_budget_tb")
+    if val is None:
+        val = os.getenv("PROFILE_BUDGET_TB")
+    if val is None:
+        return None
+    try:
+        budget = float(val)
+    except (ValueError, TypeError):
+        return None
+    return budget if budget > 0 else None
+
+
 def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 

@@ -384,6 +384,9 @@ export interface CheckProfileResult {
   profile_error?: string;
   auto_profile_available?: boolean;
   missing_columns?: any[];
+  // Budget de scan configuré (mocksql.yml / env). null => non configuré : le
+  // front demande une valeur à l'utilisateur (défaut proposé 0.3 To).
+  profile_budget_tb?: number | null;
 }
 
 export interface ProfileMetaResult {
@@ -428,6 +431,8 @@ export interface BuildProfileRequestParams {
   dialect: string;
   session: string;
   missing_columns: any[];
+  // Budget de scan (To). Absent/undefined => profile tout (aucun budget appliqué).
+  budget_tb?: number | null;
 }
 
 export interface BuildProfileRequestResult {

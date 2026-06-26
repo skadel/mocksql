@@ -2731,6 +2731,82 @@ def _build_sql_relation_branches(
     return join_parts, derived_parts, ctes
 
 
+def build_profile_queries_labeled(
+    schema: dict,
+    used_columns: list[dict],
+    dialect: str = "bigquery",
+    options: dict | None = None,
+    sql_query: str | None = None,
+    exclude_join_pairs: set[frozenset] | None = None,
+) -> list[tuple[str, str]]:
+    """Like :func:`build_profile_queries` but tag each query with a scope label.
+
+    Returns a list of ``(label, sql)`` pairs, in the same order/layout as
+    :func:`build_profile_queries`. The label is the (short) table name for a
+    column-profile query, ``"jointures"`` for the combined JOIN query, and
+    ``"expression dérivée"`` for each derived-expression query.
+
+    The labels let callers attribute a per-query scan estimate to a concrete
+    scope — used by the budget-aware profiling path to name which tables it
+    *deferred* because their estimated scan exceeded the configured budget.
+    """
+    labeled: list[tuple[str, str]] = []
+
+    # 1. Column profiles — one isolated query per table (no relation branches).
+    for entry in used_columns:
+        try:
+            q = build_profile_query(
+                schema=schema,
+                used_columns=[entry],
+                dialect=dialect,
+                options=options,
+                sql_query=None,
+            )
+        except ValueError:
+            # Table not in schema / no profilable columns — skip, don't abort.
+            continue
+        raw_label = entry.get("table") or ""
+        label = raw_label.split(".")[-1] if raw_label else "table"
+        labeled.append((label, q))
+
+    # 2. Join + derived branches as their own queries, shielded from column
+    #    profiling and from each other.
+    if sql_query:
+        join_parts, derived_parts, ctes = _build_sql_relation_branches(
+            schema,
+            used_columns,
+            sql_query,
+            dialect,
+            exclude_join_pairs=exclude_join_pairs,
+        )
+        preamble = _cte_preamble(ctes)
+        if join_parts:
+            labeled.append(
+                ("jointures", preamble + "\n\nUNION ALL\n\n".join(join_parts))
+            )
+        for derived in derived_parts:
+            labeled.append(("expression dérivée", preamble + derived))
+
+    if not labeled:
+        # Nothing matched at all — fall back to the combined builder so the
+        # caller gets a single (possibly erroring) query rather than silence.
+        return [
+            (
+                "profil",
+                build_profile_query(
+                    schema,
+                    used_columns,
+                    dialect,
+                    options,
+                    sql_query,
+                    exclude_join_pairs=exclude_join_pairs,
+                ),
+            )
+        ]
+
+    return labeled
+
+
 def build_profile_queries(
     schema: dict,
     used_columns: list[dict],
@@ -2760,54 +2836,17 @@ def build_profile_queries(
     Falls back to the single combined :func:`build_profile_query` only when
     nothing matched, to surface a clear error to the caller.
     """
-    queries: list[str] = []
-
-    # 1. Column profiles — one isolated query per table (no relation branches).
-    for entry in used_columns:
-        try:
-            q = build_profile_query(
-                schema=schema,
-                used_columns=[entry],
-                dialect=dialect,
-                options=options,
-                sql_query=None,
-            )
-        except ValueError:
-            # Table not in schema / no profilable columns — skip, don't abort.
-            continue
-        queries.append(q)
-
-    # 2. Join + derived branches as their own queries, shielded from column
-    #    profiling and from each other.
-    if sql_query:
-        join_parts, derived_parts, ctes = _build_sql_relation_branches(
+    return [
+        sql
+        for _, sql in build_profile_queries_labeled(
             schema,
             used_columns,
-            sql_query,
-            dialect,
+            dialect=dialect,
+            options=options,
+            sql_query=sql_query,
             exclude_join_pairs=exclude_join_pairs,
         )
-        preamble = _cte_preamble(ctes)
-        if join_parts:
-            queries.append(preamble + "\n\nUNION ALL\n\n".join(join_parts))
-        for derived in derived_parts:
-            queries.append(preamble + derived)
-
-    if not queries:
-        # Nothing matched at all — fall back to the combined builder so the
-        # caller gets a single (possibly erroring) query rather than silence.
-        return [
-            build_profile_query(
-                schema,
-                used_columns,
-                dialect,
-                options,
-                sql_query,
-                exclude_join_pairs=exclude_join_pairs,
-            )
-        ]
-
-    return queries
+    ]
 
 
 # ─── Derived-expression profiling ────────────────────────────────────────────
