@@ -2559,6 +2559,142 @@ class TestBuildProfileQueryPartitioned(unittest.TestCase):
             self.assertNotIn("region_id", branch)
 
 
+_JOIN_PARTITIONED_SCHEMA = {
+    "tables": [
+        {
+            "name": "project.dataset.events",
+            "columns": [
+                {"name": "event_date", "type": "DATE"},
+                {"name": "user_id", "type": "STRING"},
+            ],
+            "partition": {"type": "time", "field": "event_date"},
+        },
+        {
+            "name": "project.dataset.sessions",
+            "columns": [
+                {"name": "session_date", "type": "DATE"},
+                {"name": "user_id", "type": "STRING"},
+            ],
+            "partition": {"type": "time", "field": "session_date"},
+        },
+    ]
+}
+
+
+class TestJoinProfilePartitioned(unittest.TestCase):
+    """build_profile_query bounds each JOIN side to its own last-N partitions."""
+
+    _USED = [
+        {"table": "project.dataset.events", "used_columns": ["user_id"]},
+        {"table": "project.dataset.sessions", "used_columns": ["user_id"]},
+    ]
+    _SQL = (
+        "SELECT e.user_id FROM project.dataset.events e "
+        "JOIN project.dataset.sessions s ON e.user_id = s.user_id"
+    )
+
+    def _join_branch(self, options):
+        q = build_profile_query(
+            _JOIN_PARTITIONED_SCHEMA,
+            self._USED,
+            dialect="bigquery",
+            sql_query=self._SQL,
+            options=options,
+        )
+        branches = [b for b in q.split("UNION ALL") if "'join'" in b]
+        self.assertEqual(len(branches), 1, "expected exactly one join branch")
+        return branches[0]
+
+    def test_both_sides_bounded_by_their_own_partition(self):
+        branch = self._join_branch({"partition_limit": 3})
+        # Each side restricted by its own partition field, last 3 partitions.
+        self.assertIn("event_date", branch)
+        self.assertIn("session_date", branch)
+        self.assertIn("LIMIT 3", branch)
+
+    def test_no_partition_when_limit_none(self):
+        branch = self._join_branch({"partition_limit": None})
+        self.assertNotIn("event_date", branch)
+        self.assertNotIn("session_date", branch)
+
+    def test_join_branch_parseable(self):
+        q = build_profile_query(
+            _JOIN_PARTITIONED_SCHEMA,
+            self._USED,
+            dialect="bigquery",
+            sql_query=self._SQL,
+            options={"partition_limit": 3},
+        )
+        parsed = sqlglot.parse(
+            q, dialect="bigquery", error_level=sqlglot.ErrorLevel.RAISE
+        )
+        self.assertGreater(len(parsed), 0)
+
+    def test_only_partitioned_side_bounded(self):
+        # Right table has no partition info → only the left (events) side is bounded.
+        schema = {
+            "tables": [
+                _JOIN_PARTITIONED_SCHEMA["tables"][0],
+                {
+                    "name": "project.dataset.sessions",
+                    "columns": [{"name": "user_id", "type": "STRING"}],
+                },
+            ]
+        }
+        q = build_profile_query(
+            schema,
+            self._USED,
+            dialect="bigquery",
+            sql_query=self._SQL,
+            options={"partition_limit": 3},
+        )
+        branch = [b for b in q.split("UNION ALL") if "'join'" in b][0]
+        self.assertIn("event_date", branch)
+        self.assertNotIn("session_date", branch)
+
+    def test_partition_where_not_applied_to_cte_side(self):
+        # A CTE sharing a real partitioned table's short name must NOT inherit
+        # that table's partition predicate (it lacks the column).
+        from build_query.profiler import _build_join_query
+
+        sql = _build_join_query(
+            [
+                {
+                    "left_table": "events",  # CTE name, collides with real `events`
+                    "right_table": "project.dataset.dim",
+                    "left_expr_sql": "events.k",
+                    "right_expr_sql": "dim.id",
+                }
+            ],
+            dialect="bigquery",
+            idx=0,
+            cte_names={"events"},
+            partition_where_by_table={"events": "event_date IN (DATE '2026-01-01')"},
+        )
+        self.assertNotIn("event_date", sql)
+
+    def test_partition_where_applied_to_real_table_side(self):
+        from build_query.profiler import _build_join_query
+
+        sql = _build_join_query(
+            [
+                {
+                    "left_table": "project.dataset.events",
+                    "right_table": "project.dataset.dim",
+                    "left_expr_sql": "events.user_id",
+                    "right_expr_sql": "dim.user_id",
+                }
+            ],
+            dialect="bigquery",
+            idx=0,
+            cte_names=None,
+            partition_where_by_table={
+                "project.dataset.events": "event_date IN (DATE '2026-01-01')"
+            },
+        )
+        self.assertIn("event_date", sql)
+
+
 # ─── _collect_join_specs: function expressions in ON clause ───────────────────
 
 

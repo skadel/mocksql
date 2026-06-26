@@ -1902,6 +1902,7 @@ def _build_join_query(
     l_source: dict | None = None,
     r_source: dict | None = None,
     cte_names: set[str] | None = None,
+    partition_where_by_table: dict[str, str] | None = None,
 ) -> str:
     """Build one SELECT that profiles the cardinality of a join between two tables.
 
@@ -1913,6 +1914,19 @@ def _build_join_query(
     When *l_source* / *r_source* are provided (from :func:`_resolve_cte_source`),
     the subqueries are built against the real source tables with the CTE's WHERE
     conditions applied, rather than querying the CTE alias directly.
+
+    When *partition_where_by_table* maps a side's resolved physical table to a
+    partition-restricting WHERE fragment (from :func:`_build_partition_where`),
+    that predicate is ANDed into the per-side scan so a join on a large
+    partitioned table only reads its last N partitions instead of the whole
+    table.  Sides queried as CTEs directly (not resolved to a physical table)
+    are absent from the map and stay unbounded — the CTE body carries its own
+    filters.  Note: each side is bounded by *its own* partitions, so **both**
+    the cardinality *type* and ``left_match_rate`` are within-window estimates,
+    not the global relationship: a key whose duplicates span partition
+    boundaries can be under-counted (a true many-to-* read as one-to-*), and
+    non-overlapping windows drive the match rate toward 0.  The prompt formatter
+    flags partition-bounded joins so the LLM reads these stats as windowed.
 
     Extra output columns:
 
@@ -1958,6 +1972,28 @@ def _build_join_query(
         _effective_l_source["source_table"] if _effective_l_source else left_table
     )
     r_src_table = r_source["source_table"] if r_source else right_table
+
+    # Per-side partition predicate keyed by the resolved physical table. Absent
+    # for CTE-direct sides (they carry their own filters), so they stay unbounded.
+    def _parse_pw(tbl: str) -> exp.Expression | None:
+        # A side queried directly as a CTE (cte_names) must never receive a
+        # physical table's partition predicate: a CTE sharing a real table's
+        # short name would otherwise be filtered on a column it doesn't expose.
+        if not partition_where_by_table or (cte_names and tbl in cte_names):
+            return None
+        pw = partition_where_by_table.get(tbl)
+        if not pw:
+            return None
+        try:
+            return sqlglot.parse_one(pw, dialect=dialect)
+        except Exception:
+            return None
+
+    l_pw_expr = _parse_pw(l_src_table)
+    r_pw_expr = _parse_pw(r_src_table)
+
+    def _with_pw(sel: exp.Select, pw_expr: exp.Expression | None) -> exp.Select:
+        return sel.where(pw_expr.copy()) if pw_expr is not None else sel
 
     def _table_ref(name: str) -> exp.Expression:
         # CTE names resolved via the WITH clause must not be backtick-quoted in
@@ -2027,32 +2063,41 @@ def _build_join_query(
     r_alias = f"_jr_{idx}"
     ks_alias = f"_ks_{idx}"
 
-    l_sub = _apply_where(
-        exp.select(
-            exp.alias_(l_key_expr, "join_key"),
-            exp.alias_(exp.Count(this=exp.Star()), "cnt"),
-        )
-        .from_(_table_ref(l_src_table))
-        .group_by(exp.Literal.number(1)),
-        _effective_l_source,
+    l_sub = _with_pw(
+        _apply_where(
+            exp.select(
+                exp.alias_(l_key_expr, "join_key"),
+                exp.alias_(exp.Count(this=exp.Star()), "cnt"),
+            )
+            .from_(_table_ref(l_src_table))
+            .group_by(exp.Literal.number(1)),
+            _effective_l_source,
+        ),
+        l_pw_expr,
     )
-    r_sub = _apply_where(
-        exp.select(
-            exp.alias_(r_key_expr, "join_key"),
-            exp.alias_(exp.Count(this=exp.Star()), "cnt"),
-        )
-        .from_(_table_ref(r_src_table))
-        .group_by(exp.Literal.number(1)),
-        r_source,
+    r_sub = _with_pw(
+        _apply_where(
+            exp.select(
+                exp.alias_(r_key_expr, "join_key"),
+                exp.alias_(exp.Count(this=exp.Star()), "cnt"),
+            )
+            .from_(_table_ref(r_src_table))
+            .group_by(exp.Literal.number(1)),
+            r_source,
+        ),
+        r_pw_expr,
     )
 
     # Key-sample subquery: up to 100 distinct left key values, STRING_AGG'd into one string
-    ks_inner = _apply_where(
-        exp.select(exp.alias_(l_key_expr, "join_key"))
-        .from_(_table_ref(l_src_table))
-        .group_by(exp.Literal.number(1))
-        .limit(100),
-        _effective_l_source,
+    ks_inner = _with_pw(
+        _apply_where(
+            exp.select(exp.alias_(l_key_expr, "join_key"))
+            .from_(_table_ref(l_src_table))
+            .group_by(exp.Literal.number(1))
+            .limit(100),
+            _effective_l_source,
+        ),
+        l_pw_expr,
     )
     ks_outer = exp.select(
         exp.Anonymous(
@@ -2487,6 +2532,7 @@ def build_profile_query(
             dialect,
             start_idx=idx,
             exclude_join_pairs=exclude_join_pairs,
+            partition_limit=partition_limit,
         )
         parts.extend(join_parts)
         parts.extend(derived_parts)
@@ -2521,6 +2567,7 @@ def _build_sql_relation_branches(
     dialect: str,
     start_idx: int = 0,
     exclude_join_pairs: set[frozenset] | None = None,
+    partition_limit: int | None = 3,
 ) -> tuple[list[str], list[str], list[tuple[str, str]]]:
     """Build join-cardinality and derived-expression UNION-ALL branches for *sql_query*.
 
@@ -2541,6 +2588,22 @@ def _build_sql_relation_branches(
     join_parts: list[str] = []
     derived_parts: list[str] = []
     idx = start_idx
+
+    # Partition-restricting WHERE per physical table, so join subqueries only scan
+    # the last N partitions of large partitioned tables instead of the whole table.
+    # Keyed by both full and short table name; the join builder looks up the side's
+    # resolved physical table (CTE-direct sides are absent → stay unbounded).
+    partition_where_by_table: dict[str, str] = {}
+    if partition_limit:
+        for _t in schema.get("tables", []):
+            _tname = _t.get("name", "")
+            _part = _t.get("partition") or {}
+            if not _tname or not _part:
+                continue
+            _pw = _build_partition_where(_tname, _part, dialect, partition_limit)
+            if _pw:
+                partition_where_by_table[_tname] = _pw
+                partition_where_by_table.setdefault(_tname.split(".")[-1], _pw)
 
     # Hoist inline FROM-clause subqueries (e.g. FROM (...) a inside a CTE body)
     # into top-level CTEs before any further processing.  This makes local aliases
@@ -2712,6 +2775,7 @@ def _build_sql_relation_branches(
                         l_source=l_src,
                         r_source=r_src,
                         cte_names=set(full_alias_map) if full_alias_map else None,
+                        partition_where_by_table=partition_where_by_table,
                     )
                 )
                 idx += 1
@@ -2778,6 +2842,7 @@ def build_profile_queries_labeled(
             sql_query,
             dialect,
             exclude_join_pairs=exclude_join_pairs,
+            partition_limit=(options or {}).get("partition_limit", 3),
         )
         preamble = _cte_preamble(ctes)
         if join_parts:
