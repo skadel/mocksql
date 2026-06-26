@@ -378,6 +378,7 @@ async def auto_profile_route(body: AutoProfileRequest):
         _save_model_profile,
         enrich_joins_with_cte_context,
         enrich_tables_with_partition_window,
+        flag_disjoint_partition_joins,
     )
 
     _bq = import_bigquery()
@@ -426,6 +427,10 @@ async def auto_profile_route(body: AutoProfileRequest):
         incoming_profile = enrich_tables_with_partition_window(
             incoming_profile, _schemas or [], body.partition_limit
         )
+        # A 0% match between two partitioned tables is almost always disjoint
+        # per-side windows, not an empty join → flag it so the prompt formatter
+        # masks the misleading 0% (the join is kept, so no re-profiling loop).
+        incoming_profile = flag_disjoint_partition_joins(incoming_profile)
     except Exception as _pw_exc:
         import logging
 

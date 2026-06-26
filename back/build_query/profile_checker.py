@@ -248,6 +248,47 @@ def enrich_tables_with_partition_window(
     return profile
 
 
+def flag_disjoint_partition_joins(profile: Optional[dict]) -> Optional[dict]:
+    """Flag joins whose 0% match rate is likely a partition-window artifact.
+
+    Each join side is profiled over *its own* last-N partitions (see
+    ``_build_join_query``). When **both** sides are time-partitioned (each table
+    carries a ``partition_window``) and the measured ``left_match_rate`` is 0,
+    the most likely cause is that the two windows don't overlap — not that the
+    join is genuinely empty. Such joins get ``window_disjoint=True`` so the
+    prompt formatter suppresses the misleading ``match=0%`` and emits a caveat
+    instead. The cardinality ``join_type`` is left untouched (it is per-side
+    exact and survives independent bounding).
+
+    Joins with at least one non-partitioned side are left as-is: there a 0%
+    match is real signal (a genuinely empty/broken join), not an artifact.
+
+    Must run **after** :func:`enrich_tables_with_partition_window` so the
+    per-table windows it reads are already attached. Mutates *profile* in place
+    and returns it; a falsy profile or one without joins is returned unchanged.
+    """
+    if not profile or not profile.get("joins"):
+        return profile
+    tables = profile.get("tables", {})
+
+    def _has_window(tbl: str) -> bool:
+        for key in (tbl, tbl.split(".")[-1]):
+            t = tables.get(key)
+            if t and t.get("partition_window"):
+                return True
+        return False
+
+    for j in profile["joins"]:
+        rate = j.get("left_match_rate")
+        if rate is None or rate > 0:
+            continue
+        lt = j.get("left_table", "")
+        rt = j.get("right_table", "")
+        if lt and rt and _has_window(lt) and _has_window(rt):
+            j["window_disjoint"] = True
+    return profile
+
+
 def _to_profiler_schema(schemas: list) -> dict:
     """Convert state["schemas"] (list of table dicts with "table_name") to
     the {"tables": [{"name": ..., "columns": [...], "partition": ...}]} format
