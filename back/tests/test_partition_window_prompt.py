@@ -131,5 +131,140 @@ class TestProfileBlockCrossProjectLeak(unittest.TestCase):
         self.assertNotIn("protein_abundance_log2ratio", block)
 
 
+class TestProfileBlockJoinPartitionHint(unittest.TestCase):
+    """Le bloc profil annote les match_rate de jointures bornés par fenêtre, et
+    masque le 0% trompeur quand les fenêtres sont disjointes."""
+
+    @staticmethod
+    def _two_partitioned_tables() -> dict:
+        return {
+            "project.dataset.events": {
+                "columns": {},
+                "partition_window": {
+                    "field": "event_date",
+                    "limit": 3,
+                    "exact": False,
+                },
+            },
+            "project.dataset.sessions": {
+                "columns": {},
+                "partition_window": {
+                    "field": "session_date",
+                    "limit": 3,
+                    "exact": False,
+                },
+            },
+        }
+
+    def test_disjoint_join_masks_zero_and_warns(self):
+        profile = {
+            "tables": self._two_partitioned_tables(),
+            "joins": [
+                {
+                    "left_table": "project.dataset.events",
+                    "right_table": "project.dataset.sessions",
+                    "left_expr": "e.user_id",
+                    "right_expr": "s.user_id",
+                    "left_match_rate": 0.0,
+                    "window_disjoint": True,
+                }
+            ],
+        }
+        block = _format_profile_block(profile, [])
+        self.assertIn("Jointures profilées", block)
+        self.assertIn("match indéterminé", block)
+        self.assertNotIn("match=0%", block)
+
+    def test_partitioned_join_with_match_gets_bounded_note(self):
+        profile = {
+            "tables": self._two_partitioned_tables(),
+            "joins": [
+                {
+                    "left_table": "project.dataset.events",
+                    "right_table": "project.dataset.sessions",
+                    "left_expr": "e.user_id",
+                    "right_expr": "s.user_id",
+                    "left_match_rate": 0.6,
+                }
+            ],
+        }
+        block = _format_profile_block(profile, [])
+        self.assertIn("match=60%", block)
+        self.assertIn("stats bornées aux dernières partitions", block)
+
+    def test_unpartitioned_join_no_bounded_note(self):
+        profile = {
+            "tables": {
+                "project.dataset.events": {"columns": {}},
+                "project.dataset.sessions": {"columns": {}},
+            },
+            "joins": [
+                {
+                    "left_table": "project.dataset.events",
+                    "right_table": "project.dataset.sessions",
+                    "left_expr": "e.user_id",
+                    "right_expr": "s.user_id",
+                    "left_match_rate": 0.6,
+                }
+            ],
+        }
+        block = _format_profile_block(profile, [])
+        self.assertIn("match=60%", block)
+        self.assertNotIn("stats bornées", block)
+
+
+class TestFlagDisjointPartitionJoins(unittest.TestCase):
+    """flag_disjoint_partition_joins ne marque un join que si les DEUX côtés sont
+    partitionnés et que le match mesuré est 0."""
+
+    @staticmethod
+    def _profile(left_window: bool, right_window: bool, rate) -> dict:
+        events: dict = {"columns": {}}
+        sessions: dict = {"columns": {}}
+        if left_window:
+            events["partition_window"] = {"field": "event_date", "limit": 3}
+        if right_window:
+            sessions["partition_window"] = {"field": "session_date", "limit": 3}
+        return {
+            "tables": {
+                "project.dataset.events": events,
+                "project.dataset.sessions": sessions,
+            },
+            "joins": [
+                {
+                    "left_table": "project.dataset.events",
+                    "right_table": "project.dataset.sessions",
+                    "left_match_rate": rate,
+                }
+            ],
+        }
+
+    def test_both_partitioned_zero_match_flagged(self):
+        from build_query.profile_checker import flag_disjoint_partition_joins
+
+        p = flag_disjoint_partition_joins(self._profile(True, True, 0.0))
+        self.assertTrue(p["joins"][0].get("window_disjoint"))
+
+    def test_one_side_unpartitioned_not_flagged(self):
+        from build_query.profile_checker import flag_disjoint_partition_joins
+
+        p = flag_disjoint_partition_joins(self._profile(True, False, 0.0))
+        self.assertNotIn("window_disjoint", p["joins"][0])
+
+    def test_both_partitioned_nonzero_match_not_flagged(self):
+        from build_query.profile_checker import flag_disjoint_partition_joins
+
+        p = flag_disjoint_partition_joins(self._profile(True, True, 0.42))
+        self.assertNotIn("window_disjoint", p["joins"][0])
+
+    def test_no_joins_returned_unchanged(self):
+        from build_query.profile_checker import flag_disjoint_partition_joins
+
+        self.assertEqual(
+            flag_disjoint_partition_joins({"tables": {}, "joins": []}),
+            {"tables": {}, "joins": []},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
