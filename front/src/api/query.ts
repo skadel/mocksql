@@ -31,7 +31,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, testUid, testIndex, context, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget
+      parentMessageId, userTables, testUid, testIndex, context, rerunAll, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget
     } = params;
 
     if (!userInput && !query && !userTables && !validateIntent && !applyDescriptionIntent && !rejectDescriptionIntent) return;
@@ -130,7 +130,7 @@ export const chatQuery = createAsyncThunk(
             query_decomposed: '',
             test_uid: testUid ?? null,
             test_index: testIndex ?? null,
-            rerun_all_tests: context === 'sql_update',
+            rerun_all_tests: context === 'sql_update' || !!rerunAll,
             assertion_only: assertionOnly ?? false,
             suggestion_intent: suggestionIntent ?? false,
             regenerate_suggestions: regenerateSuggestions ?? false,
@@ -158,7 +158,9 @@ export const chatQuery = createAsyncThunk(
             step = pd.name;
             const loadingMap: Record<string, string> = {
               parser:                t('loading.validate_query'),
-              generator:             t('loading.generating_examples'),
+              // En re-run pur, le nœud generator tourne mais saute la génération
+              // (rerun_all → données existantes réutilisées) : ne pas mentir « génération ».
+              generator:             rerunAll ? t('loading.rerunning_tests') : t('loading.generating_examples'),
               executor:              t('loading.executing_query'),
               test_evaluator:        t('loading.evaluating_tests'),
               conversational_agent:  t('loading.correcting_data'),

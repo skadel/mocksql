@@ -18,6 +18,7 @@
   "loading": {
     "generating_query": "Generating query",
     "generating_examples": "Generating examples",
+    "rerunning_tests": "Re-running tests",
     "fixing_query": "Query compilation failed, trying to fix query",
     "executing_query": "Executing query",
     "executing_query_examples": "Executing query on examples",
