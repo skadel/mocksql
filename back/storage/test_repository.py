@@ -20,6 +20,9 @@ _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
 )
 
+# Namespace fixe pour dériver un test_id stable d'un model_name (uuid5).
+_TEST_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00cf4fc964ff")
+
 # Tests créés mais pas encore persistés (en attente de validation réussie).
 _pending_tests: Dict[str, Dict[str, Any]] = {}
 
@@ -42,10 +45,43 @@ def _test_path(model_name: str) -> Path:
     return p
 
 
+def _derive_model_name_from_path(p: Path) -> Optional[str]:
+    """`.../tests/<rel>.json` → `<rel>` (posix), ou None si hors de la racine tests."""
+    try:
+        rel = p.relative_to(_tests_root())
+    except ValueError:
+        return None
+    return rel.with_suffix("").as_posix()
+
+
+def _backfill_identity(p: Path, data: Dict[str, Any]) -> None:
+    """Dérive `model_name` + `test_id` depuis le chemin quand ils manquent.
+
+    Un fichier produit par la CLI (`mocksql generate`) ou écrit à la main ne porte
+    que la définition (`sql`, `used_columns`, `test_cases`, `suggestions`). Or le
+    serveur indexe toute recherche sur `test_id` (`GET /models` renvoie
+    `session_id = test_id`, `get_test` matche par `test_id`) → sans ces champs le
+    modèle s'affiche avec 0 test dans l'UI. Le chemin EST l'identité du modèle, donc
+    on la dérive ; le `test_id` est déterministe (uuid5) pour que `GET /models` et
+    `get_test` s'accordent sans écriture au moment de la lecture.
+    """
+    if data.get("test_id") and data.get("model_name"):
+        return
+    model_name = data.get("model_name") or _derive_model_name_from_path(p)
+    if not model_name:
+        return
+    data["model_name"] = model_name
+    if not data.get("test_id"):
+        data["test_id"] = str(uuid.uuid5(_TEST_ID_NAMESPACE, model_name))
+
+
 def _read_json(p: Path) -> Optional[Dict[str, Any]]:
     # Définition (commitée) + cache sidecar (gitignoré) fusionnés de façon
     # transparente — le dict renvoyé a la même forme qu'avant le split.
-    return read_test_doc(p)
+    data = read_test_doc(p)
+    if data is not None:
+        _backfill_identity(p, data)
+    return data
 
 
 def _write_json(p: Path, data: Dict[str, Any]) -> None:
