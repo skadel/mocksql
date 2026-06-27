@@ -90,19 +90,11 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 test_description=test_description,
             )
 
-            # Consultation à chaud des « instructions supplémentaires » saisies par
-            # l'utilisateur pendant la génération (peek non-destructif : le replay de
-            # fin de run rejoue ce qui n'a pas été consommé par le conversational_agent).
-            from build_query.pending_instructions import peek_instructions
-
-            extra_instructions = peek_instructions(state["session"])
-
             eval_result = await _generate_assertions_and_evaluate(
                 duckdb_sql=sql,
                 test_data=test_data,
                 result_df=result_df,
                 test_description=test_description,
-                extra_instructions=extra_instructions,
             )
 
             async with atimed("assertion_gen:eval+fix"):

@@ -50,17 +50,6 @@ class DismissSuggestionRequest(BaseModel):
     suggestion: str
 
 
-class QueueInstructionRequest(BaseModel):
-    sessionId: str
-    text: str
-    dialect: str = "bigquery"
-    parentMessageId: Optional[str] = None
-
-
-class FlushInstructionsRequest(BaseModel):
-    sessionId: str
-
-
 @router.post("/getMessages")
 async def get_messages(body: MessageRequest):
     if not is_initialized():
@@ -299,49 +288,6 @@ async def dismiss_suggestion(body: DismissSuggestionRequest):
     except Exception as e:
         print(e)
         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
-@router.post("/query/instruction")
-async def queue_instruction(body: QueueInstructionRequest):
-    """Traite un message saisi pendant qu'une génération est déjà en cours.
-
-    Classe l'intention (cf. build_query/inflight_message) :
-    - **instruction** (l'utilisateur veut influencer la génération) → mise en file,
-      consultée à chaud par le run en vol (peek), rejouée par le flush si non consommée.
-    - **question** (« pourquoi ce résultat ? ») → répondue en direct par un appel LLM
-      indépendant (read-only), persistée dans le fil et renvoyée pour affichage immédiat,
-      sans toucher la génération en cours.
-    """
-    from build_query.inflight_message import (
-        answer_inflight_question,
-        classify_inflight_message,
-    )
-    from build_query.pending_instructions import add_instruction
-
-    kind = await classify_inflight_message(body.sessionId, body.text, body.dialect)
-
-    if kind == "question":
-        try:
-            qa = await answer_inflight_question(
-                body.sessionId, body.text, body.dialect, body.parentMessageId
-            )
-            return {"kind": "question", **qa}
-        except Exception as exc:
-            logger.warning("inflight question answering failed: %s", exc)
-            # Repli : on dégrade en instruction plutôt que de perdre le message.
-            kind = "instruction"
-
-    queued = add_instruction(body.sessionId, body.text)
-    return {"kind": "instruction", "queued": queued}
-
-
-@router.post("/query/instruction/flush")
-async def flush_instructions_route(body: FlushInstructionsRequest):
-    """Renvoie les instructions non consommées en vol et vide la session — appelé en
-    fin de run par le front pour le replay."""
-    from build_query.pending_instructions import flush_instructions
-
-    return {"instructions": flush_instructions(body.sessionId)}
 
 
 @router.post("/clearHistory")

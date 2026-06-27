@@ -1153,24 +1153,6 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     elif user_input:
         messages_for_llm = messages_for_llm + [HumanMessage(content=user_input)]
 
-    # Instructions supplémentaires saisies par l'utilisateur pendant la génération :
-    # consultées à chaud ici et CONSOMMÉES (marquées appliquées) pour qu'elles ne soient
-    # pas rejouées par le flush de fin de run. Cf. build_query/pending_instructions.
-    from build_query.pending_instructions import (
-        consume_instructions,
-        peek_instructions,
-    )
-
-    extra_instructions = peek_instructions(state["session"])
-    if extra_instructions:
-        instructions_block = (
-            "Instructions supplémentaires ajoutées par l'utilisateur pendant la "
-            "génération (à prendre en compte, dans l'ordre) :\n"
-            + "\n".join(f"{i + 1}. {t}" for i, t in enumerate(extra_instructions))
-        )
-        messages_for_llm = messages_for_llm + [HumanMessage(content=instructions_block)]
-        consume_instructions(state["session"])
-
     # Leçons déjà notées plus tôt dans ce run (note_lesson) : les montrer pour que
     # l'agent puisse en corriger une (la ré-émettre amendée) ou en ajouter une autre,
     # sans redonner à l'identique une leçon déjà notée (le symptôme cible : une leçon
