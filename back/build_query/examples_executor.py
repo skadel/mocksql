@@ -1865,7 +1865,6 @@ async def _generate_assertions_and_evaluate(
     test_data: list,
     result_df,
     test_description: str,
-    extra_instructions: list[str] | None = None,
 ) -> _AssertionsAndEvaluation:
     """
     Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
@@ -1891,9 +1890,6 @@ Le message suivant contient ces sections, délimitées par des balises :
 - `<query>` : la requête SQL testée.
 - `<input_data>` : les données d'entrée injectées dans DuckDB.
 - `<result_sample>` : le résultat après exécution (nombre de lignes + exemples).
-- `<user_instructions>` (optionnel) : consignes ajoutées par l'utilisateur pendant la génération.
-  Prends-les en compte dans ton verdict et tes assertions sans jamais enfreindre les règles
-  ci-dessous (notamment l'interdiction des assertions triviales et négatives).
 - `<task>` : ce que tu dois produire.
 
 **Méthode — raisonne d'abord brièvement dans `reasoning`, puis produis assertions + verdict :**
@@ -2011,15 +2007,6 @@ Sinon → "Bon" / "Excellent", avec `reason_type`, `assertion_fix` et `diagnosti
 ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data)."""
 
     # ── Human : sections balisées dans l'ordre contexte → tables → SQL → input → output → ask ──
-    user_instructions_block = ""
-    if extra_instructions:
-        numbered = "\n".join(f"{i + 1}. {t}" for i, t in enumerate(extra_instructions))
-        user_instructions_block = f"""
-
-<user_instructions>
-{numbered}
-</user_instructions>"""
-
     human_content = f"""<test_context>
 {test_description}
 </test_context>
@@ -2041,7 +2028,7 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
 <result_sample>
 {row_count} ligne(s) :
 {json.dumps(sample, ensure_ascii=False, default=str)}
-</result_sample>{user_instructions_block}
+</result_sample>
 
 <task>
 Produis, conformément aux règles du message système :

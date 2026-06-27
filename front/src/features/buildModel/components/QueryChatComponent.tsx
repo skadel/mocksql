@@ -15,7 +15,7 @@ import ScienceIcon from '@mui/icons-material/Science';
 import AccessTimeIcon from '@mui/icons-material/AccessTime';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { Container } from '../../../style/StyledComponents';
-import { getLastMessage, formatMessage } from '../../../utils/messages';
+import { getLastMessage } from '../../../utils/messages';
 import MissingTablesAlert from './MissingTablesAlert';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
@@ -31,8 +31,8 @@ import { useSqlFileLoader } from '../hooks/useSqlFileLoader';
 import { FIX_ERROR_COMMAND } from '../constants';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { setCurrentId } from '../../appBar/appBarSlice';
-import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, dismissDescriptionProposal, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage, appendQueryComponentMessage } from '../buildModelSlice';
-import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi, queueInstructionApi, flushInstructionsApi } from '../../../api/messages';
+import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, dismissDescriptionProposal, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage } from '../buildModelSlice';
+import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
@@ -148,9 +148,13 @@ const ChatComponent: React.FC = () => {
   const [sqlCollapseSignal, setSqlCollapseSignal] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
   const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
-  // Instructions supplémentaires saisies pendant qu'une génération est en cours :
-  // mises en file côté backend (peek à chaud), comptées ici pour l'indicateur UI.
-  const [queuedCount, setQueuedCount] = useState(0);
+  // Messages tapés pendant qu'une génération est en cours : mis en file côté front,
+  // affichés en « en attente » dans le fil, puis traités automatiquement et dans l'ordre
+  // une fois le run terminé. Jamais injectés dans le run en cours. queuedRef = source de
+  // vérité pour le drainage (pas de closure périmée dans l'effet) ; queuedMessages = miroir
+  // pour le rendu.
+  const queuedRef = useRef<{ id: string; text: string }[]>([]);
+  const [queuedMessages, setQueuedMessages] = useState<{ id: string; text: string }[]>([]);
   const skipValidationRef = useRef(false);
   const forceNewRef = useRef(false);
   const [demoZoom, setDemoZoom] = useState<'chat' | 'tests' | null>(null);
@@ -825,39 +829,25 @@ const ChatComponent: React.FC = () => {
     [sqlQuery, renderMessages, selectedChildIndices, sendMessage, isSending, selectedTestIndex, assertionOnly, testResults]
   );
 
-  // Traite un message envoyé pendant qu'un run est déjà en cours. Le backend classe
-  // l'intention :
-  //  - `instruction` → mise en file (consultée à chaud par l'évaluateur / le
-  //    conversational_agent, rejouée en fin de run si non consommée — cf. effet de
-  //    complétion plus bas). On incrémente le compteur de file.
-  //  - `question` → répondue en direct sans toucher la génération : on insère la
-  //    question + la réponse dans le fil immédiatement.
-  const queueInstruction = useCallback(async (text: string): Promise<boolean> => {
+  // Met en file un message tapé pendant qu'un run est déjà en cours. On NE touche PAS au
+  // run en vol : le message s'affiche en « en attente » dans le fil et sera rejoué comme un
+  // message normal une fois le run terminé (cf. effet de complétion → drainage séquentiel).
+  const enqueueMessage = useCallback((text: string): Promise<boolean> => {
     const trimmed = (text ?? '').trim();
-    if (!trimmed || !currentModelId) return false;
-    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
-    const parentId = lastMessage ? lastMessage.id : null;
-    try {
-      const res = await queueInstructionApi(currentModelId, trimmed, DIALECT, parentId);
-      if (res.kind === 'question') {
-        if (res.question) dispatch(appendQueryComponentMessage(formatMessage(res.question)));
-        if (res.answer) dispatch(appendQueryComponentMessage(formatMessage(res.answer)));
-        return true;
-      }
-      setQueuedCount(typeof res.queued === 'number' ? res.queued : (n) => n + 1);
-    } catch {
-      setQueuedCount((n) => n + 1);
-    }
-    return true;
-  }, [currentModelId, DIALECT, dispatch, renderMessages, selectedChildIndices]);
+    if (!trimmed) return Promise.resolve(false);
+    queuedRef.current = [...queuedRef.current, { id: uuidv4(), text: trimmed }];
+    setQueuedMessages(queuedRef.current);
+    return Promise.resolve(true);
+  }, []);
 
   const onSendClick = useCallback((text: string): Promise<boolean> => {
-    // Pendant une génération en cours : le message devient une instruction en file.
+    // Pendant une génération en cours : le message est mis en file (affiché « en attente »)
+    // et traité automatiquement après la fin du run. Sinon : envoi immédiat.
     if (loading || isSending) {
-      return queueInstruction(text);
+      return enqueueMessage(text);
     }
     return handleSendMessage(text);
-  }, [loading, isSending, queueInstruction, handleSendMessage]);
+  }, [loading, isSending, enqueueMessage, handleSendMessage]);
 
   // -------- SQL bar update (re-run with new SQL)
   const handleSQLUpdate = useCallback(
@@ -1191,25 +1181,17 @@ const ChatComponent: React.FC = () => {
           notif.close();
         };
       }
-      // Replay des instructions supplémentaires non consommées en vol : on les
-      // récupère + on vide la session, puis on relance un message de suivi (route
-      // conversational_agent). Si l'agent les a déjà appliquées en vol, le flush
-      // renvoie vide → pas de replay → terminaison garantie. Pas de replay en cas
-      // d'erreur : on garde la file pour le prochain run.
-      if (currentModelId && !error) {
-        (async () => {
-          try {
-            const { instructions } = await flushInstructionsApi(currentModelId);
-            setQueuedCount(0);
-            if (instructions && instructions.length) {
-              const joined = instructions.length === 1
-                ? instructions[0]
-                : 'Instructions supplémentaires :\n' + instructions.map((s, i) => `${i + 1}. ${s}`).join('\n');
-              const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
-              sendMessage(joined, sqlQuery, '', lastMessage ? lastMessage.id : '');
-            }
-          } catch { /* flush best-effort */ }
-        })();
+      // Drainage de la file : un message tapé pendant le run vient d'attendre la fin du
+      // thread. On en prend UN (le plus ancien) et on le rejoue comme un message normal —
+      // il devient un vrai tour de conversation. Sa complétion re-déclenchera cet effet →
+      // le suivant est drainé → traitement séquentiel, dans l'ordre. On draine même après
+      // une erreur pour ne jamais laisser un message bloqué « en attente ».
+      if (currentModelId && queuedRef.current.length > 0) {
+        const [next, ...rest] = queuedRef.current;
+        queuedRef.current = rest;
+        setQueuedMessages(rest);
+        const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+        sendMessage(next.text, sqlQuery, '', lastMessage ? lastMessage.id : '');
       }
     }
     prevLoadingRef.current = loading;
@@ -1893,7 +1875,7 @@ const ChatComponent: React.FC = () => {
             isSending={isSending}
             loading={loading}
             loading_message={loading_message}
-            queuedCount={queuedCount}
+            queuedMessages={queuedMessages}
             understandingDraft={understandingDraft}
             validationMs={validationMs}
             error={error}

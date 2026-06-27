@@ -66,7 +66,7 @@ interface ChatColumnProps {
   isSending: boolean;
   loading: boolean | null;
   loading_message?: string | null;
-  queuedCount?: number;
+  queuedMessages?: { id: string; text: string }[];
   understandingDraft?: Array<{ database?: string; table: string; columns: string[] }> | null;
   validationMs?: number | null;
   error: string | null;
@@ -100,7 +100,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
   isSending,
   loading,
   loading_message,
-  queuedCount = 0,
+  queuedMessages = [],
   understandingDraft,
   validationMs,
   error,
@@ -606,16 +606,31 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           bgcolor: '#f3f6f7',
         }}
       >
-        {queuedCount > 0 && (
-          <Box
-            sx={{
-              display: 'inline-flex', alignItems: 'center', gap: 0.5,
-              alignSelf: 'flex-start', mb: 0.75, px: 1, py: 0.25,
-              borderRadius: '12px', bgcolor: 'rgba(28,168,164,0.12)',
-              color: '#1ca8a4', fontSize: 11, fontWeight: 600,
-            }}
-          >
-            {queuedCount} instruction{queuedCount > 1 ? 's' : ''} en file · prise{queuedCount > 1 ? 's' : ''} en compte après la génération
+        {queuedMessages.length > 0 && (
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 0.5, mb: 1 }}>
+            {queuedMessages.map((m) => (
+              <Box
+                key={m.id}
+                sx={{
+                  alignSelf: 'flex-end', maxWidth: '85%',
+                  display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 0.25,
+                }}
+              >
+                <Box
+                  sx={{
+                    px: 1.25, py: 0.75, borderRadius: '12px',
+                    bgcolor: 'rgba(28,168,164,0.10)', color: '#0b6e6b',
+                    fontSize: 13, lineHeight: 1.35, whiteSpace: 'pre-wrap',
+                    border: '1px dashed rgba(28,168,164,0.45)',
+                  }}
+                >
+                  {m.text}
+                </Box>
+                <Box sx={{ color: '#1ca8a4', fontSize: 10.5, fontWeight: 600 }}>
+                  en attente · traité après la génération
+                </Box>
+              </Box>
+            ))}
           </Box>
         )}
         <ChatInput
