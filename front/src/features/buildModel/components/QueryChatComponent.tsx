@@ -927,17 +927,49 @@ const ChatComponent: React.FC = () => {
     [isSending, currentModelId, optimizedSql, renderMessages, selectedChildIndices, dispatch, t, restoredMessageId]
   );
 
+  // -------- Re-run pur : ré-exécute tous les tests existants SANS présenter ça comme
+  // une mise à jour SQL (pas de divider « SQL mis à jour », pas d'entrée d'historique,
+  // loader « Relance des tests » plutôt que « Génération des exemples »). Le backend
+  // réutilise les données existantes (rerun_all → generator skip).
+  const handleRerunAll = useCallback(async () => {
+    if (!currentModelId || isSending) return;
+    setIsSending(true);
+    const lastMessage = getLastMessage(renderMessages, selectedChildIndices);
+    const parentMessageId = lastMessage ? lastMessage.id : '';
+    try {
+      await dispatchChatQuery({
+        userInput: '',
+        sessionId: currentModelId,
+        project: '',
+        dialect: DIALECT,
+        query: sqlQuery,
+        ChangedMessageId: '',
+        t,
+        parentMessageId,
+        rerunAll: true,
+        silent: true,
+      }).unwrap?.();
+    } catch { /* re-run best-effort */ }
+    setIsSending(false);
+  }, [currentModelId, isSending, renderMessages, selectedChildIndices, sqlQuery, t, dispatchChatQuery]);
+
   // -------- Ré-évaluer (reload file + rerun)
+  // « Relancer » recharge le fichier sur disque (détection de dérive) puis :
+  //  - SQL identique  → re-run pur (pas de divider trompeur)
+  //  - SQL différent  → vraie mise à jour SQL (divider légitime)
   const handleReevaluate = useCallback(async () => {
     if (!currentModelPath || isSending) return;
+    let diskSql = '';
     try {
-      const newSql = await fetchModelSql(currentModelPath);
-      if (newSql && newSql.trim()) await handleSQLUpdate(newSql);
-      else await handleSQLUpdate(sqlQuery);
-    } catch {
-      await handleSQLUpdate(sqlQuery);
+      diskSql = (await fetchModelSql(currentModelPath)) || '';
+    } catch { /* lecture best-effort → on retombe sur le SQL courant */ }
+    const effectiveSql = diskSql.trim() ? diskSql : sqlQuery;
+    if (effectiveSql.trim() === (sqlQuery || '').trim()) {
+      await handleRerunAll();
+    } else {
+      await handleSQLUpdate(effectiveSql);
     }
-  }, [currentModelPath, isSending, handleSQLUpdate, sqlQuery]);
+  }, [currentModelPath, isSending, handleSQLUpdate, handleRerunAll, sqlQuery]);
 
   // -------- Restore SQL from history
   const handleHistorySelect = useCallback((entry: SqlHistoryEntry) => {

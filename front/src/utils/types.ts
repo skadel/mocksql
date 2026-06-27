@@ -339,6 +339,7 @@ export interface ChatQueryParams {
   testUid?: string;       // stable test identity to target (preferred over testIndex)
   testIndex?: number;
   context?: 'sql_update';
+  rerunAll?: boolean;     // re-exécute tous les tests existants SANS présenter une mise à jour SQL
   assertionOnly?: boolean;
   rerunOnly?: boolean;
   forceRoute?: string;
