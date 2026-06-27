@@ -331,6 +331,37 @@ def _format_data_indexed(data: dict) -> str:
     return "\n".join(lines) if lines else "(aucune donnée)"
 
 
+def _format_existing_test_line(rank: int, t: dict) -> str:
+    """Rend une ligne du bloc « Tests existants » du prompt système.
+
+    Porte ce que l'utilisateur voit dans le panneau : numéro d'ordre écran (#1, #2…),
+    verdict qualité, statut d'exécution et le texte du verdict. Sans ça, une demande du
+    type « corrige le test en échec » / « le test 2 » est insoluble : l'agent ne voit ni
+    quel test échoue ni comment mapper le rang écran vers un test (cf. le contexte riche
+    réservé à la boucle de retry auto dans `_build_agent_eval_context`).
+
+    Le `test_uid` est une **référence outil interne** : l'agent en a besoin pour cibler
+    ses outils, mais l'utilisateur ne le voit jamais à l'écran — il est donc explicitement
+    étiqueté « réf. outil » et le prompt interdit de l'afficher en réponse (cf. la règle
+    dans `system_content`). À l'oral, un test se désigne par son numéro ou son titre.
+    """
+    uid = t.get("test_uid", "?")
+    name = t.get("test_name") or t.get("unit_test_description", "")
+    verdict = t.get("verdict") or "—"  # Excellent / Bon / Insuffisant
+    exec_state = {
+        "empty_results": "0 ligne — ÉCHEC",
+        "bad_data_error": "erreur — ÉCHEC",
+    }.get(t.get("status"), "OK")
+    line = (
+        f"#{rank} · {name}  [réf. outil : {uid}]\n"
+        f"   └ Verdict : {verdict} · Exécution : {exec_state}"
+    )
+    evaluation = (t.get("evaluation") or "").strip()
+    if evaluation:
+        line += f"\n   └ {evaluation[:200]}"
+    return line
+
+
 def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
     """Construit le bloc de contexte injecté dans le prompt système du conversational_agent
     après un verdict ``bad_data``.
@@ -549,8 +580,7 @@ async def conversational_agent(state: QueryState):
     existing_tests = await retrieve_existing_tests(state["session"], state)
     tests_summary = (
         "\n".join(
-            f"[{t.get('test_uid', '?')}] {t.get('test_name', '')} — {t.get('unit_test_description', '')}"
-            for t in existing_tests
+            _format_existing_test_line(i, t) for i, t in enumerate(existing_tests, 1)
         )
         or "Aucun test pour l'instant."
     )
@@ -633,7 +663,25 @@ async def conversational_agent(state: QueryState):
         # à l'agent → set_target_path sans deviner. Évite tout remap fuzzy texte → branche.
         _clicked = (state.get("input") or "").strip()
         _focus_path = (stored.get("suggestion_paths") or {}).get(_clicked)
-        if _focus_path:
+        # Boucle multi-tests : la couverture déterministe (priorité 1 branches, priorité 2
+        # assemblage « all ») pose directement `target_path` dans le state — pas via
+        # suggestion_paths. On le prend comme focus autoritaire, validé contre le catalogue
+        # de paths, pour que l'agent appelle set_target_path sans inventer de nom.
+        if not _focus_path and state.get("target_path"):
+            try:
+                _plan_keys = set(json.loads(state.get("path_plans") or "{}").keys())
+            except Exception:
+                _plan_keys = set()
+            if state["target_path"] == ALL_PATH or state["target_path"] in _plan_keys:
+                _focus_path = state["target_path"]
+        if _focus_path == ALL_PATH:
+            suggestion_note += (
+                "\n\nCe test doit porter sur l'ASSEMBLAGE COMPLET du UNION ALL (toutes les "
+                'branches réunies, cas nominal). Appelle d\'abord `set_target_path(path="all")` '
+                "SANS test_uid (nouveau test sur la requête complète), puis laisse le generator "
+                "produire le test."
+            )
+        elif _focus_path:
             suggestion_note += (
                 f"\n\nCette suggestion est FOCALISÉE sur la branche « {_focus_path} » (UNION ALL). "
                 f'Appelle d\'abord `set_target_path(path="{_focus_path}")` SANS test_uid '
@@ -727,7 +775,10 @@ SQL testé (dialecte {state.get("dialect", "bigquery")}):
 {join_recipes_block}
 Étapes inspectables avec run_cte : {cte_names_str}
 
-Tests existants :
+Tests existants (numérotés comme à l'écran : #1, #2…). La « réf. outil » entre crochets
+est l'identifiant à passer à tes outils ET à utiliser pour référencer un test dans ta
+réponse (voir la syntaxe `[[test:RÉF]]` plus bas) — l'utilisateur, lui, ne voit que le
+numéro et le titre.
 {tests_summary}
 
 Suggestions de couverture actives ({suggestions_count}/{SUGGESTIONS_CAP} — maximum {SUGGESTIONS_CAP}, proposées à l'utilisateur dans le panneau dédié, numérotées comme à l'écran) :
@@ -740,6 +791,13 @@ Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
 Réponds en français, de manière concise et naturelle.
+
+⚠️ Pour mentionner un test dans ta réponse, écris-le TOUJOURS sous la forme `[[test:RÉF]]`
+(ex. `[[test:88eb]]`, en reprenant la « réf. outil » du bloc « Tests existants »).
+L'interface remplace automatiquement ce marqueur par un lien cliquable « test 2 » qui
+mène au bon test. N'écris jamais la réf. outil brute en dehors de cette syntaxe, n'invente
+pas de réf, et n'expose pas non plus le test_index — l'utilisateur ne connaît que le
+numéro d'écran et le titre.
 
 ⚠️ Ne réponds JAMAIS à l'aveugle sur ce que produit la requête. Dès qu'une question
 porte sur le comportement réel du SQL (« qu'est-ce que renvoie cette CTE ? », « pourquoi
@@ -764,6 +822,12 @@ Si la demande suppose un comportement SQL que tu n'observes pas dans la requête
 (ex : l'utilisateur attend un tri par volume mais la requête utilise MAX() alphabétique,
 ou une notion de "plus pertinent" qui est en réalité arbitraire ou alphabétique),
 utilise `ask_clarification` pour signaler l'incohérence et demander confirmation avant d'agir.
+
+Si l'utilisateur désigne un test par son rang écran (« le test 2 »), par son état
+(« le test en échec / rouge / Insuffisant ») ou par son verdict, et qu'un seul test du
+bloc « Tests existants » correspond, agis dessus directement — ne redemande pas son
+identifiant. S'il y a plusieurs candidats (deux tests en échec…), demande lequel via
+`ask_clarification`.
 
 Si la demande n'indique pas clairement s'il faut CRÉER UN NOUVEAU TEST ou
 MODIFIER UN TEST EXISTANT, et que le contexte (test ancré, formulation) ne lève pas
