@@ -371,6 +371,45 @@ async def generate_single_suggestion(state: QueryState):
 
     test_cases = await retrieve_existing_tests(state["session"], state)
 
+    # Priorité de couverture sur une requête UNION ALL (cf. règle produit) :
+    #   1. couvrir CHAQUE branche (test focalisé déterministe) avant tout cas contextuel ;
+    #   2. puis un test nominal sur l'assemblage complet (target_path="all").
+    # On pose `target_path` directement dans le state : l'agent (suggestion_intent) le lit
+    # comme focus autoritaire et appelle `set_target_path` sans deviner de nom de branche
+    # (cf. _focus_path dans conversational_agent). Ne s'applique qu'aux SQL à branches
+    # (path_plans présent) ; sinon la suggestion LLM contextuelle ci-dessous est inchangée.
+    plans = _parse_path_plans(state)
+    if plans:
+        covered = _covered_paths(state, test_cases)
+        next_branch = next(
+            (name for name in plans if name != ALL_PATH and name not in covered), None
+        )
+        if next_branch is not None:
+            base["target_path"] = next_branch
+            base["input"] = (
+                f"Génère un nouveau test focalisé sur la branche « {next_branch} » du "
+                "UNION ALL : le cas spécifique de cette présentation, non couvert par les "
+                "tests existants."
+            )
+            logger.diag(
+                "[single_suggestion] tour %d → branche prioritaire %r (UNION ALL)",
+                built,
+                next_branch,
+            )
+            return base
+        if ALL_PATH not in covered:
+            base["target_path"] = ALL_PATH
+            base["input"] = (
+                "Génère un test nominal sur l'assemblage complet de la requête (toutes les "
+                "branches du UNION ALL réunies, cas standard de bout en bout)."
+            )
+            logger.diag(
+                "[single_suggestion] tour %d → assemblage complet (nominal, all)", built
+            )
+            return base
+        # Toutes les branches + l'assemblage sont couverts → on retombe sur la suggestion
+        # LLM contextuelle (cas limites : NULL, vide, ex æquo, format…) ci-dessous.
+
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
     dialect = state.get("dialect", "bigquery")
     profile = state.get("profile")
