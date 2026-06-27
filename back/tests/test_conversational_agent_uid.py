@@ -248,6 +248,80 @@ async def test_generate_test_data_clears_stale_target(monkeypatch):
     assert update["test_index"] is None
 
 
+def _state_with_failing_test():
+    """Deux tests persistés (un Bon, un Insuffisant/0 ligne) pour vérifier que le bloc
+    « Tests existants » du prompt système porte verdict + statut + rang écran — sinon
+    « corrige le test en échec » / « le test 2 » est insoluble pour l'agent."""
+    results_content = json.dumps(
+        [
+            {
+                "test_uid": "a3f9",
+                "test_index": "1",
+                "test_name": "Ouverture client",
+                "unit_test_description": "ouverture nominale",
+                "verdict": "Bon",
+                "status": "complete",
+                "data": {"t": [{"x": 1}]},
+                "results_json": "[]",
+                "assertion_results": [],
+            },
+            {
+                "test_uid": "88eb",
+                "test_index": "2",
+                "test_name": "MEG changement de segment",
+                "unit_test_description": "changement de regroupement",
+                "verdict": "Insuffisant",
+                "status": "empty_results",
+                "evaluation": "La requête n'a retourné aucune ligne. Vérifiez les données d'entrée.",
+                "data": {"t": [{"x": 2}]},
+                "results_json": "[]",
+                "assertion_results": [],
+            },
+        ]
+    )
+    results_msg = AIMessage(
+        content=results_content, additional_kwargs={"type": MsgType.RESULTS}
+    )
+    return {
+        "session": "sess1",
+        "messages": [results_msg],
+        "dialect": "duckdb",
+        "query": "SELECT 1",
+        "optimized_sql": "",
+        "query_decomposed": "[]",
+        "input": "explique pourquoi le test 2 echoue",
+        "gen_retries": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_existing_tests_block_carries_verdict_and_status(monkeypatch):
+    """Le bloc « Tests existants » doit exposer rang écran, verdict, statut d'exécution
+    et texte du verdict — c'est ce que l'utilisateur voit dans le panneau et la seule
+    façon pour l'agent de résoudre « corrige le test en échec ». Le uid n'est qu'une
+    réf. outil interne, étiquetée comme telle et interdite d'affichage."""
+    fake = FakeLLM([AIMessage(content="Le test 2 ne renvoie aucune ligne car…")])
+    monkeypatch.setattr("build_query.conversational_agent.make_llm", lambda: fake)
+
+    await conversational_agent(_state_with_failing_test())
+
+    system_msg = fake.calls[0][0].content
+    # Rang écran pour mapper « le test 2 » → le bon test, + uid comme réf. outil interne
+    assert "#2 · MEG changement de segment" in system_msg
+    assert "#1 · Ouverture client" in system_msg
+    assert "réf. outil : 88eb" in system_msg
+    # Verdict + statut d'exécution pour identifier le test en échec
+    assert "Insuffisant" in system_msg
+    assert "0 ligne — ÉCHEC" in system_msg
+    assert "Verdict : Bon · Exécution : OK" in system_msg
+    # Texte du verdict (ce que l'utilisateur lit à l'écran)
+    assert "La requête n'a retourné aucune ligne" in system_msg
+    # Le uid n'est référençable que via la syntaxe de lien [[test:RÉF]] (rendue
+    # côté front en lien cliquable « test N »), jamais en réf. outil brute.
+    assert "[[test:RÉF]]" in system_msg
+    assert "lien cliquable" in system_msg
+
+
 @pytest.mark.asyncio
 async def test_resume_after_clarification_allows_text_answer(monkeypatch):
     """Reprise après clarification : la consigne ne doit PLUS forcer « génère ou

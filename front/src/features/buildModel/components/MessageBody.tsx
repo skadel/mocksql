@@ -12,6 +12,8 @@ import DisplayTable from './DisplayTable';
 import QueryUnderstandingCard from './QueryUnderstandingCard';
 import { getVerdictInfo } from '../../../utils/verdict';
 import { isStaleSchemaError } from '../../../utils/staleSchema';
+import { buildTestUidIndex, linkifyTestRefs, testRankFromHref } from '../../../utils/testRefs';
+import { useAppSelector } from '../../../app/hooks';
 import type { DebugCountStep, DebugCountStepsResult, DebugRunCteResult, DiagnosticBlock, Message } from '../../../utils/types';
 
 type MessageBodyProps = {
@@ -44,6 +46,70 @@ const markdownBodySx = {
   '& strong': { fontWeight: 700 },
   '& ul, & ol': { paddingLeft: '1.5em', marginTop: '4px', marginBottom: '4px' },
   '& li': { marginBottom: '2px' },
+};
+
+/** Fait défiler jusqu'à la carte du test `rank` (1-based) et la fait flasher brièvement.
+ *  La carte porte `id="test-{rank}"` (cf. TestsPanel). Le flash est inline + réversible
+ *  pour ne pas dépendre d'une feuille de style globale. */
+function scrollToTestCard(rank: number): void {
+  const el = document.getElementById(`test-${rank}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  const prevShadow = el.style.boxShadow;
+  const prevTransition = el.style.transition;
+  el.style.transition = 'box-shadow 0.25s ease';
+  el.style.boxShadow = '0 0 0 3px rgba(28,168,164,0.6)';
+  window.setTimeout(() => {
+    el.style.boxShadow = prevShadow;
+    window.setTimeout(() => { el.style.transition = prevTransition; }, 300);
+  }, 1100);
+}
+
+/** Composants markdown pour le texte des bots : un lien issu d'un marqueur `[[test:UID]]`
+ *  (linkifié en « test N ») devient un chip cliquable qui scrolle vers la carte ; tout autre
+ *  lien reste un lien externe classique. */
+const botMarkdownComponents = {
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+    const rank = testRankFromHref(href);
+    if (rank !== null) {
+      return (
+        <Box
+          component="span"
+          role="button"
+          tabIndex={0}
+          onClick={() => scrollToTestCard(rank)}
+          onKeyDown={(e: React.KeyboardEvent) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              scrollToTestCard(rank);
+            }
+          }}
+          sx={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            px: '6px',
+            py: '1px',
+            mx: '1px',
+            borderRadius: '6px',
+            bgcolor: 'rgba(28,168,164,0.12)',
+            color: '#13807d',
+            fontWeight: 600,
+            fontSize: '0.92em',
+            lineHeight: 1.4,
+            cursor: 'pointer',
+            '&:hover': { bgcolor: 'rgba(28,168,164,0.22)' },
+          }}
+        >
+          {children}
+        </Box>
+      );
+    }
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer">
+        {children}
+      </a>
+    );
+  },
 };
 
 const DebugRunCteContent: React.FC<{ d: DebugRunCteResult }> = ({ d }) => {
@@ -330,6 +396,11 @@ const MessageBody: React.FC<MessageBodyProps> = ({
   const [reasoningOpen, setReasoningOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
 
+  // Table test_uid → rang d'écran, pour transformer les marqueurs `[[test:UID]]` émis
+  // par le conversational_agent en liens cliquables « test N » dans ses réponses.
+  const testResults = useAppSelector((s) => s.buildModel.testResults);
+  const testUidIndex = React.useMemo(() => buildTestUidIndex(testResults), [testResults]);
+
   return (
     <>
       {/* Carte "Compréhension de la requête" */}
@@ -518,7 +589,9 @@ const MessageBody: React.FC<MessageBodyProps> = ({
           </Typography>
         ) : (
           <Box sx={{ mt: 0.5, overflowX: 'auto', ...markdownBodySx }}>
-            <ReactMarkdown>{msg.contents.text}</ReactMarkdown>
+            <ReactMarkdown components={botMarkdownComponents}>
+              {linkifyTestRefs(msg.contents.text, testUidIndex)}
+            </ReactMarkdown>
           </Box>
         )
       )}
