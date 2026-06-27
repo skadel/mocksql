@@ -461,9 +461,39 @@ def get_all_columns_with_sources(
                 )
         return out
 
+    def _source_by_qualifier(scope):
+        """Map case-insensitive {alias, table, db.table} → (project, db, table, alias)
+        des tables de base du scope.
+
+        Permet de rattacher une colonne dont le qualificateur est le **nom** de la table
+        (ou ``db.table``) plutôt que son alias assigné. Cas produit par la restauration de
+        casse d'``optimize_query`` sur une table référencée par son nom complet backtické
+        sans alias (``\\`DS.TABLE\\`.col``) : qualify aliase la table (``AS TABLE``) mais
+        laisse le qualificateur de colonne sous le nom complet (``ds.table``), qui ne
+        matche alors plus aucune clé de ``scope.sources`` (l'alias). Sans ce repli, la
+        colonne tombe dans la « table fantôme » et disparaît de used_columns (incident c3).
+        """
+        out: dict[str, tuple] = {}
+        for alias_key, source in scope.sources.items():
+            if not isinstance(source, exp.Table):
+                continue
+            table_token = source.this
+            table_name_text = table_token.this if table_token else alias_key
+            alias = source.args.get("alias")
+            alias_text = alias.text("this") if alias else table_name_text
+            ident = (source.catalog, source.db, table_name_text, alias_text)
+            keys = {alias_key.lower(), (alias_text or "").lower(), table_name_text.lower()}
+            if source.db:
+                keys.add(f"{source.db}.{table_name_text}".lower())
+            for k in keys:
+                if k:
+                    out.setdefault(k, ident)
+        return out
+
     def _extract(scope) -> None:
         base_tables = None  # résolu paresseusement, seulement si besoin
         pivot_aliases = None  # résolu paresseusement, seulement si besoin
+        source_resolver = None  # résolu paresseusement, seulement si besoin
         for column in scope.columns:
             table_alias = column.table
 
@@ -540,6 +570,29 @@ def get_all_columns_with_sources(
                         )
                         continue
                     # Colonne générée par le pivot : pas une colonne de base.
+                    continue
+                # Repli avant la « table fantôme » : le qualificateur peut être le NOM de
+                # la table (ou ``db.table``) plutôt que son alias — on le rattache à la
+                # table de base correspondante (case-insensitive) pour ne pas perdre la
+                # colonne. cf. _source_by_qualifier (incident c3).
+                if source_resolver is None:
+                    source_resolver = _source_by_qualifier(scope)
+                candidates = [table_alias.lower()]
+                if column.db:
+                    candidates.insert(0, f"{column.db}.{table_alias}".lower())
+                resolved = next(
+                    (source_resolver[c] for c in candidates if c in source_resolver),
+                    None,
+                )
+                if resolved is not None:
+                    project_text, database_text, table_name_text, alias_text = resolved
+                    _record(
+                        project_text,
+                        database_text,
+                        table_name_text,
+                        alias_text,
+                        column.name,
+                    )
                     continue
                 _record(None, None, table_alias, table_alias, column.name)
 

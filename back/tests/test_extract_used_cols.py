@@ -121,6 +121,40 @@ class TestExtractUsedColumns:
         result = await _extract(query, tables)
         assert _used_cols(result) == expected
 
+    async def test_uppercase_table_referenced_by_full_name_qualifier(self):
+        """Régression (incident c3) : une table en CASSE MAJUSCULE référencée au niveau
+        supérieur SANS alias, dont les colonnes du SELECT final sont qualifiées par son
+        nom complet ``DATASET.TABLE`` (et non un alias), et aussi utilisée aliasée dans
+        un CTE.
+
+        La restauration de casse d'``optimize_query`` laisse le qualificateur de colonne
+        top-level sous le nom complet (``my_ds.facts.label``) au lieu de l'alias assigné
+        (``FACTS``). Le qualificateur ne matchait alors aucune source du scope → la colonne
+        tombait dans le fallback « table fantôme » puis était DROPPÉE de used_columns → la
+        table DuckDB de test était créée sans elle → ``Binder Error`` à l'exécution
+        (colonne projetée par le SELECT final mais absente de la table).
+        """
+        query = """
+        WITH agg AS (
+          SELECT f.id AS id, SUM(f.amount) AS total
+          FROM `MY_DS.FACTS` AS f
+          GROUP BY f.id
+        )
+        SELECT
+          `MY_DS.FACTS`.id AS id,
+          `MY_DS.FACTS`.label AS label,
+          agg.total AS total
+        FROM `MY_DS.FACTS`
+        LEFT JOIN agg ON `MY_DS.FACTS`.id = agg.id
+        """
+        tables = {"MY_DS.FACTS": {"id": "INT64", "amount": "FLOAT64", "label": "STRING"}}
+        result = await _extract(query, tables)
+        cols = {e["table"]: sorted(e["used_columns"]) for e in result["used_columns"]}
+        # `label` n'est référencée QUE par le qualificateur nom-complet du SELECT final.
+        assert "FACTS" in cols, f"FACTS absente de used_columns: {cols}"
+        assert "label" in cols["FACTS"], f"colonne 'label' droppée: {cols}"
+        assert cols["FACTS"] == ["amount", "id", "label"]
+
     async def test_nested_cte(self):
         query = """
         WITH filtered_users AS (
