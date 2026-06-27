@@ -340,6 +340,7 @@ export interface ChatQueryParams {
   testIndex?: number;
   context?: 'sql_update';
   rerunAll?: boolean;     // re-exécute tous les tests existants SANS présenter une mise à jour SQL
+  reevaluate?: boolean;   // réévaluation suite à un changement du fichier modèle (loader « Réévaluation » au lieu de « Génération »)
   assertionOnly?: boolean;
   rerunOnly?: boolean;
   forceRoute?: string;

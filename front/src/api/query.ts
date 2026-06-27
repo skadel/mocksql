@@ -31,7 +31,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, testUid, testIndex, context, rerunAll, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget
+      parentMessageId, userTables, testUid, testIndex, context, rerunAll, reevaluate, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget
     } = params;
 
     if (!userInput && !query && !userTables && !validateIntent && !applyDescriptionIntent && !rejectDescriptionIntent) return;
@@ -160,7 +160,9 @@ export const chatQuery = createAsyncThunk(
               parser:                t('loading.validate_query'),
               // En re-run pur, le nœud generator tourne mais saute la génération
               // (rerun_all → données existantes réutilisées) : ne pas mentir « génération ».
-              generator:             rerunAll ? t('loading.rerunning_tests') : t('loading.generating_examples'),
+              // En réévaluation (fichier modèle changé), on régénère bien des données, mais
+              // l'intention utilisateur est « réévaluer » → libellé représentatif.
+              generator:             rerunAll ? t('loading.rerunning_tests') : reevaluate ? t('loading.reevaluating_tests') : t('loading.generating_examples'),
               executor:              t('loading.executing_query'),
               test_evaluator:        t('loading.evaluating_tests'),
               conversational_agent:  t('loading.correcting_data'),
