@@ -58,6 +58,10 @@ def _collect_run_context(state: QueryState) -> dict:
         action = "modifié"
     elif agent_call == "generate_test_data":
         action = "ajouté"
+    elif state.get("rerun_all_tests"):
+        # SQL mis à jour ou réévaluation déclenchée depuis la bannière « fichier modifié » :
+        # les tests existaient déjà, on les re-exécute / réévalue — surtout pas « généré ».
+        action = "réévalué"
     else:
         action = "généré"
 
@@ -78,9 +82,12 @@ def _collect_run_context(state: QueryState) -> dict:
 def _fallback_message(ctx: dict) -> str:
     """Message templaté utilisé si l'appel LLM échoue."""
     action = ctx["action"]
-    if ctx["action"] == "généré":
-        n = ctx["n_tests"] or 1
-        head = f"J'ai généré {n} test{'s' if n > 1 else ''} pour ta requête."
+    n = ctx["n_tests"] or 1
+    plural = "s" if n > 1 else ""
+    if action == "généré":
+        head = f"J'ai généré {n} test{plural} pour ta requête."
+    elif action == "réévalué":
+        head = f"J'ai réévalué {'tes' if n > 1 else 'ton'} test{plural}."
     else:
         head = f"J'ai {action} ton test."
     tail = (
@@ -123,10 +130,14 @@ async def final_response(state: QueryState):
 
     system_lines = [
         "Tu es l'assistant MockSQL qui aide à tester des requêtes SQL. "
-        "Tu viens de finir une opération sur les tests d'un utilisateur. "
-        "Réponds-lui directement, en français, ton chaleureux et professionnel. "
-        "Dis ce que tu as fait (créé / modifié / généré le(s) test(s)) et si tout "
-        "s'exécute bien. Ne répète pas le SQL, ne mets pas de titre.",
+        "Tu viens de terminer une opération sur les tests d'un utilisateur. "
+        "Réponds-lui directement, en français, sur un ton sobre et factuel. "
+        "Reprends EXACTEMENT l'action indiquée dans les faits ci-dessous "
+        "(généré / ajouté / modifié / réévalué) — n'en invente pas une autre, "
+        "et ne dis pas « généré » si l'action est une réévaluation. Annonce "
+        "l'état d'exécution sans emphase : pas de « ravi de confirmer », de "
+        "« parfaitement » ni d'autres superlatifs. Ne répète pas le SQL, ne "
+        "mets pas de titre.",
     ]
     if gap_analysis:
         system_lines.append(
@@ -142,9 +153,10 @@ async def final_response(state: QueryState):
             "Réponds en 1 à 2 phrases courtes. Ne liste pas de suggestions."
         )
     system = SystemMessage(content=" ".join(system_lines))
+    n_tests = ctx["n_tests"] or 1
+    plural = "s" if n_tests > 1 else ""
     facts = [
-        f"Action réalisée : test {ctx['action']}.",
-        f"Nombre de tests concernés : {ctx['n_tests'] or 1}.",
+        f"Action réalisée : {n_tests} test{plural} {ctx['action']}{plural}.",
         f"Exécution DuckDB : {'OK' if ctx['exec_ok'] else 'à vérifier'}.",
     ]
     if ctx["scenario"]:

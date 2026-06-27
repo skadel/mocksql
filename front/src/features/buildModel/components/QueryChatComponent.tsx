@@ -851,7 +851,7 @@ const ChatComponent: React.FC = () => {
 
   // -------- SQL bar update (re-run with new SQL)
   const handleSQLUpdate = useCallback(
-    async (newSql: string) => {
+    async (newSql: string, reevaluate = false) => {
       if (isSending || !newSql.trim() || !currentModelId) return;
       setPendingFileSql(null);
       setIsSending(true);
@@ -908,6 +908,7 @@ const ChatComponent: React.FC = () => {
           t,
           parentMessageId: effectiveParentId,
           context: 'sql_update',
+          reevaluate,
           silent: true,
         }).unwrap?.();
       } catch { /* mise à jour SQL best-effort */ }
@@ -957,7 +958,7 @@ const ChatComponent: React.FC = () => {
     if (effectiveSql.trim() === (sqlQuery || '').trim()) {
       await handleRerunAll();
     } else {
-      await handleSQLUpdate(effectiveSql);
+      await handleSQLUpdate(effectiveSql, true);
     }
   }, [currentModelPath, isSending, handleSQLUpdate, handleRerunAll, sqlQuery]);
 
@@ -1980,7 +1981,7 @@ const ChatComponent: React.FC = () => {
                         isStale: true,
                         commitsSince: 0,
                         lastTestedAt: currentModel?.updateDate,
-                        onReevaluate: () => handleSQLUpdate(pendingFileSql),
+                        onReevaluate: () => handleSQLUpdate(pendingFileSql, true),
                         currentSql: sqlQuery,
                         onFetchNewSql: async () => pendingFileSql,
                       }

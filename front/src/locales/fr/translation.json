@@ -23,6 +23,7 @@
     "generating_query": "Génération de la requête SQL en cours",
     "generating_examples": "Génération des exemples en cours",
     "rerunning_tests": "Relance des tests en cours",
+    "reevaluating_tests": "Réévaluation des tests en cours",
     "fixing_query": "Tentative de correction de la requête SQL en cours",
     "executing_query": "Exécution des tests",
     "executing_query_examples": "Exécution de la requête SQL sur les exemples en cours",
