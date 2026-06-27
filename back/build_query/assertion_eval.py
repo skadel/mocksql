@@ -10,6 +10,83 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import sqlglot
+from sqlglot import exp
+
+# Fonctions de string-slicing dont le 1er argument DOIT être du texte en DuckDB. Appliquées
+# à une colonne DATE/TIMESTAMP/numérique → `Binder Error` (ex. left(TIMESTAMP, INTEGER)).
+_STRING_SLICE_FUNCS = (exp.Left, exp.Right, exp.Substring)
+_STRING_SLICE_NAMES = {"LEFT", "RIGHT", "SUBSTR", "SUBSTRING"}
+
+
+def _is_text_type(duckdb_type: str) -> bool:
+    """Vrai si le type DuckDB est un type texte (sur lequel LEFT/SUBSTR est légitime)."""
+    t = (duckdb_type or "").upper()
+    return "CHAR" in t or "TEXT" in t or "STRING" in t
+
+
+def _nontext_columns(view_name: str, con) -> set[str]:
+    """Colonnes de la vue résultat dont le type DuckDB n'est PAS texte (lowercase).
+
+    Ce sont exactement celles sur lesquelles un string-slicing (LEFT/SUBSTR…) échoue —
+    on s'y limite pour ne jamais toucher un slicing légitime d'une vraie colonne string.
+    Best-effort : DESCRIBE en échec → set vide (la garde devient un no-op).
+    """
+    try:
+        rows = con.execute(f"DESCRIBE {view_name}").fetchall()
+    except Exception:
+        return set()
+    return {r[0].lower() for r in rows if not _is_text_type(r[1])}
+
+
+def _cast_nontext_string_slicing(
+    sql: str, non_text_cols: set[str], dialect: str = "duckdb"
+) -> str:
+    """Enveloppe dans ``CAST(... AS TEXT)`` l'argument d'un LEFT/RIGHT/SUBSTR qui est une
+    colonne NON-texte (présente dans ``non_text_cols``), pour rendre le string-slicing
+    valide en DuckDB sans changer la sémantique voulue (slicer la représentation chaîne).
+
+    Idempotent (saute un argument déjà casté) et best-effort (parsing en échec → SQL
+    inchangé, jamais bloquant — même posture que ``_autoscope_failing_assertions``).
+    """
+    if not sql or not non_text_cols:
+        return sql
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+    except Exception:
+        return sql
+    if tree is None:
+        return sql
+
+    def _maybe_cast(arg):
+        if not isinstance(arg, exp.Column) or isinstance(arg, exp.Cast):
+            return None
+        if arg.name.lower() not in non_text_cols:
+            return None
+        return exp.cast(arg.copy(), "TEXT")
+
+    changed = False
+    try:
+        for node in tree.find_all(*_STRING_SLICE_FUNCS):
+            casted = _maybe_cast(node.this)
+            if casted is not None:
+                node.set("this", casted)
+                changed = True
+        for node in tree.find_all(exp.Anonymous):
+            if (node.name or "").upper() not in _STRING_SLICE_NAMES:
+                continue
+            args = node.expressions
+            if not args:
+                continue
+            casted = _maybe_cast(args[0])
+            if casted is not None:
+                node.set("expressions", [casted, *args[1:]])
+                changed = True
+    except Exception:
+        return sql
+
+    return tree.sql(dialect=dialect) if changed else sql
+
 
 def _evaluate_assertions(
     assertions: List[Dict[str, Any]], view_name: str, con
@@ -28,6 +105,11 @@ def _evaluate_assertions(
     Ne pas confondre avec une assertion positive (WHERE col = 'X') qui retournerait
     des lignes quand la condition est vraie — ce serait l'inverse de la convention.
     """
+    # Garde déterministe : une assertion qui string-slice (LEFT/SUBSTR…) une colonne
+    # NON-texte est invalide en DuckDB (ex. left(TIMESTAMP, …)). On caste l'argument en
+    # TEXT avant exécution — calcul des types de la vue une seule fois (cf. incident c3).
+    non_text_cols = _nontext_columns(view_name, con)
+
     results = []
     for a in assertions:
         raw_sql = (a.get("sql") or "").strip()
@@ -39,14 +121,16 @@ def _evaluate_assertions(
                 {
                     "description": a.get("description", ""),
                     "expected_condition": a.get("expected_condition", ""),
-                    "sql": a.get("sql", ""),
+                    "sql": raw_sql,
                     "passed": False,
                     "error": "assertion SQL vide (aucune requête à exécuter)",
                 }
             )
             continue
+        raw_sql = _cast_nontext_string_slicing(raw_sql, non_text_cols)
         sql = raw_sql.replace("__result__", view_name)
         scope = (a.get("scope") or "").strip().rstrip(";").strip()
+        scope = _cast_nontext_string_slicing(scope, non_text_cols)
         quantifier = (a.get("quantifier") or "all").strip() or "all"
         try:
             # Garde anti-vacuité du scope : une assertion scopée dont le périmètre ne
@@ -65,7 +149,7 @@ def _evaluate_assertions(
                             "description": a.get("description", ""),
                             "expected_condition": a.get("expected_condition", ""),
                             "scope": a.get("scope", ""),
-                            "sql": a.get("sql", ""),
+                            "sql": raw_sql,
                             "passed": False,
                             "error": (
                                 "le périmètre (scope) ne sélectionne aucune ligne du "
@@ -90,7 +174,7 @@ def _evaluate_assertions(
                     "expected_condition": a.get("expected_condition", ""),
                     **({"scope": a.get("scope", "")} if scope else {}),
                     **({"quantifier": quantifier} if quantifier != "all" else {}),
-                    "sql": a.get("sql", ""),
+                    "sql": raw_sql,
                     "passed": passed,
                     "failing_rows": failing_rows,
                 }
@@ -100,7 +184,7 @@ def _evaluate_assertions(
                 {
                     "description": a.get("description", ""),
                     "expected_condition": a.get("expected_condition", ""),
-                    "sql": a.get("sql", ""),
+                    "sql": raw_sql,
                     "passed": False,
                     "error": str(e),
                 }
