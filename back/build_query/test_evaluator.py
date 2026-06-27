@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import uuid
@@ -31,6 +32,90 @@ def _format_input_for_judge(input_data) -> str:
         return json.dumps(input_data, ensure_ascii=False, indent=2)
     except Exception:
         return str(input_data)
+
+
+def _format_trace_for_intent_judge(failing_cte: str, cte_trace: dict) -> str:
+    """Bloc de trace d'exécution pour le juge d'intention (« le vide est-il voulu ? »).
+
+    Donne au juge OÙ les lignes disparaissent au lieu de lui faire simuler de tête une
+    requête à 15 CTE (sinon il hallucine un « jeu de données tronqué/incomplet »). Trois
+    informations : l'échelle de lignes par étape, la transition qui élimine les lignes,
+    et la décomposition du prédicat bloquant.
+
+    **Neutre par construction** : contrairement à `examples_generator._format_cte_trace_hint`
+    (orienté générateur, qui se termine par « ajoute/patche les données »), ce bloc ne pousse
+    vers aucune conclusion — le juge doit pouvoir conclure « vide voulu » comme « données mal
+    construites » à partir du même signal.
+    """
+    if not cte_trace:
+        return ""
+    lines = [
+        "Trace d'exécution (lignes produites par étape, dans l'ordre du flux de données) :"
+    ]
+    past_failing = False
+    for name, info in cte_trace.items():
+        if not isinstance(info, dict):
+            continue
+        rc = info.get("row_count", -1)
+        if past_failing:
+            # En aval de l'étape bloquante : 0 ligne propagé, replié en une ligne.
+            lines.append(
+                f"- `{name}` : {max(rc, 0)} ligne(s) (propagation du vide amont)"
+            )
+            continue
+        if rc == -1:
+            lines.append(f"- `{name}` : erreur d'exécution")
+        else:
+            marker = " ← première étape vide" if name == failing_cte else ""
+            lines.append(f"- `{name}` : {rc} ligne(s){marker}")
+        if name == failing_cte:
+            past_failing = True
+
+    # Transition bloquante (dernière étape > 0 → première à 0) + décomposition de prédicat.
+    info = cte_trace.get(failing_cte) or {}
+    detail: list[str] = []
+    steps = info.get("steps") or []
+    blocker_idx = next(
+        (i for i, s in enumerate(steps) if s.get("count", -1) == 0), None
+    )
+    if blocker_idx is not None:
+        prev = steps[blocker_idx - 1] if blocker_idx > 0 else None
+        if prev:
+            detail.append(f"- {prev.get('label', '?')} → {prev.get('count')} ligne(s)")
+        blk = steps[blocker_idx]
+        detail.append(
+            f"- {blk.get('label', '?')} → 0 ligne(s) ← les lignes sont éliminées ici"
+        )
+    for bl in info.get("join_breakdown") or []:
+        detail.append(f"- {bl}")
+    if detail:
+        lines.append("")
+        lines.append(f"Là où les lignes disparaissent (`{failing_cte}`) :")
+        lines.extend(detail)
+    return "\n".join(lines)
+
+
+def _empty_intent_fingerprint(sql, input_data, scenario, failing_cte) -> str:
+    """Empreinte du verdict d'intention vide pour memoïsation.
+
+    Le verdict ne dépend que de : le SQL, les données injectées, le texte du scénario et
+    la CTE où le vide apparaît. Inchangés → on réutilise le verdict stocké sans rappeler
+    le LLM. Le SQL est normalisé (whitespace) pour qu'un reformatage cosmétique ne casse
+    pas le cache.
+    """
+    norm_sql = " ".join((sql or "").split())
+    payload = json.dumps(
+        {
+            "sql": norm_sql,
+            "data": input_data,
+            "scenario": scenario or "",
+            "failing_cte": failing_cte or "",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 class _ReevalResult(BaseModel):
@@ -132,6 +217,22 @@ async def _classify_empty_intent(
     test_desc = current_test.get("unit_test_description", "")
     input_data = current_test.get("data", {})
     input_summary = _format_input_for_judge(input_data)
+    cte_trace = current_test.get("cte_trace") or {}
+    failing_cte = current_test.get("failing_cte") or ""
+
+    # Cache de verdict : SQL + données + scénario + CTE bloquante inchangés → on réutilise
+    # le verdict déjà jugé sans rappeler le LLM (cf. _empty_intent_fingerprint).
+    fingerprint = _empty_intent_fingerprint(sql, input_data, test_desc, failing_cte)
+    cached = current_test.get("empty_intent_cache") or {}
+    if cached.get("fingerprint") == fingerprint and cached.get("verdict"):
+        logger.diag(
+            "[evaluator] intent vide: verdict en cache réutilisé (%s)",
+            cached["verdict"],
+        )
+        return cached["verdict"], cached.get("explanation", "")
+
+    trace_block = _format_trace_for_intent_judge(failing_cte, cte_trace)
+    trace_section = f"\n{trace_block}\n" if trace_block else ""
 
     prompt = f"""SQL testé (dialecte {state.get("dialect", "bigquery")}) :
 {sql}
@@ -142,12 +243,17 @@ Données d'entrée injectées dans DuckDB :
 {input_summary}
 
 Résultat DuckDB : 0 ligne retournée.
-
+{trace_section}
 Le fait que la requête retourne 0 ligne est-il le comportement ATTENDU pour ce scénario ?
 - "Excellent" ou "Bon" si 0 ligne est précisément ce que le scénario veut démontrer
   (filtre qui exclut tout, plage vide, branche d'UNION ALL non concernée, anti-jointure…).
 - "Insuffisant" si le scénario suppose des lignes en sortie et que leur absence trahit
   des données d'entrée mal construites.
+
+Appuie-toi sur la trace ci-dessus : l'étape où les lignes disparaissent indique si le vide
+est voulu (un filtre/anti-join/plage vide précisément ciblé par le scénario) ou s'il trahit
+des données mal construites en amont. Attention aux comparaisons sur NULL (`<>`, `=`, `IN`)
+qui éliminent silencieusement une ligne — c'est un vide non voulu, pas un cas limite.
 
 Rédige `explanation` pour un utilisateur (data engineer) en une phrase claire, SANS jargon
 de CTE interne : dis pourquoi le vide est correct, ou ce qui manque dans les données pour
@@ -349,6 +455,17 @@ async def evaluate_tests(state: QueryState):
                     "assertion_results": [empty_assertion],
                     "verdict": verdict,
                     "evaluation_explanation": explanation,
+                    # Memoïse le verdict : prochain run inchangé → pas de rappel LLM.
+                    "empty_intent_cache": {
+                        "fingerprint": _empty_intent_fingerprint(
+                            sql,
+                            current_test.get("data", {}),
+                            current_test.get("unit_test_description", ""),
+                            failing_cte,
+                        ),
+                        "verdict": verdict,
+                        "explanation": explanation,
+                    },
                 }
                 updated_all_tests = [
                     updated_test
