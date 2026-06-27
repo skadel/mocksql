@@ -2790,6 +2790,7 @@ def _build_sql_relation_branches(
         top_k=5,
         start_idx=idx,
         schema=schema,
+        partition_where_by_table=partition_where_by_table,
     )
 
     return join_parts, derived_parts, ctes
@@ -2963,6 +2964,7 @@ def _build_derived_expr_profile_branches(
     top_k: int = 5,
     start_idx: int = 0,
     schema: dict | None = None,
+    partition_where_by_table: dict[str, str] | None = None,
 ) -> list[str]:
     """Build UNION ALL branches profiling derived expressions found in *sql_query*.
 
@@ -2976,6 +2978,13 @@ def _build_derived_expr_profile_branches(
     resolved base-table names, ``col_name``=expression SQL,
     ``top_values``=STRING_AGG of top-k non-null values.  Other stat columns
     are NULL.
+
+    When *partition_where_by_table* maps a physical table to a partition-restricting
+    WHERE fragment (from :func:`_build_partition_where`), that predicate is qualified
+    with the table's alias and ANDed into each branch's WHERE so a derived expression
+    sourced from a large partitioned table only scans its last N partitions instead
+    of the whole table.  CTE-sourced tables carry their own filters and stay
+    unbounded (they are absent from the map and excluded by name).
 
     Never raises — per-expression failures are silently skipped.
 
@@ -3038,6 +3047,18 @@ def _build_derived_expr_profile_branches(
             join_nbrs[lt].add(rt)
             join_nbrs[rt].add(lt)
 
+    # CTE names referenced in the query — a derived branch must never apply a
+    # physical table's partition predicate to a CTE that happens to share its
+    # short name (the CTE may not expose the partition column).
+    cte_names: set[str] = set()
+    try:
+        _tree = sqlglot.parse_one(
+            sql_query, dialect=dialect, error_level=sqlglot.ErrorLevel.WARN
+        )
+        cte_names = {cte.alias for cte in _tree.find_all(exp.CTE) if cte.alias}
+    except Exception:
+        cte_names = set()
+
     str_t = _str_type(dialect)
     parts: list[str] = []
     idx = start_idx
@@ -3055,6 +3076,8 @@ def _build_derived_expr_profile_branches(
                 top_k,
                 idx,
                 schema_cols,
+                partition_where_by_table=partition_where_by_table,
+                cte_names=cte_names,
             )
             if branch:
                 parts.append(branch)
@@ -3063,6 +3086,59 @@ def _build_derived_expr_profile_branches(
             pass
 
     return parts
+
+
+def _qualify_partition_preds(
+    chain_tables: list[tuple[str, str]],
+    partition_where_by_table: dict[str, str] | None,
+    cte_names: set[str] | None,
+    dialect: str,
+) -> list[str]:
+    """Qualified partition predicates for the partitioned tables of a FROM/JOIN chain.
+
+    For each ``(physical_table, alias)`` carrying a partition fragment in
+    *partition_where_by_table* (from :func:`_build_partition_where`), parse the
+    fragment and qualify its top-level column references with *alias* — leaving any
+    nested subquery untouched — so the predicate is unambiguous when ANDed into a
+    multi-table query.  CTE-sourced tables (names in *cte_names*) are skipped: they
+    may not expose the partition column.
+
+    Examples:
+        >>> _qualify_partition_preds(
+        ...     [("proj.ds.events", "e")],
+        ...     {"proj.ds.events": "event_date IN (DATE '2026-01-01')"},
+        ...     None,
+        ...     "bigquery",
+        ... )[0].startswith("e.event_date IN")
+        True
+        >>> _qualify_partition_preds([("c", "c")], {"c": "d IN (1)"}, {"c"}, "bigquery")
+        []
+    """
+    if not partition_where_by_table:
+        return []
+    cte = cte_names or set()
+    preds: list[str] = []
+    for tbl, alias in chain_tables:
+        if tbl in cte:
+            continue
+        pw = partition_where_by_table.get(tbl) or partition_where_by_table.get(
+            tbl.split(".")[-1]
+        )
+        if not pw:
+            continue
+        try:
+            node = sqlglot.parse_one(pw, dialect=dialect)
+        except Exception:
+            continue
+        alias_id = exp.to_identifier(alias)
+        for col in node.find_all(exp.Column):
+            # Columns inside a nested subquery (the `SELECT DISTINCT col FROM t`
+            # fallback) reference the physical table, not the outer alias — leave them.
+            if col.find_ancestor(exp.Select) is not None:
+                continue
+            col.set("table", alias_id.copy())
+        preds.append(node.sql(dialect=dialect))
+    return preds
 
 
 def _build_one_derived_expr_branch(
@@ -3076,6 +3152,8 @@ def _build_one_derived_expr_branch(
     top_k: int,
     idx: int,
     schema_cols: dict[str, set[str]] | None = None,
+    partition_where_by_table: dict[str, str] | None = None,
+    cte_names: set[str] | None = None,
 ) -> str | None:
     """Build one UNION ALL row for a single derived expression.
 
@@ -3089,6 +3167,12 @@ def _build_one_derived_expr_branch(
     lowercased column names. When provided, a branch is skipped if it references
     a column absent from its resolved base table — guarding against expressions
     whose columns are CTE/PIVOT outputs that don't exist on the base table.
+
+    ``partition_where_by_table`` maps a physical table to its partition-restricting
+    WHERE fragment; the predicate is qualified with the table's FROM/JOIN alias and
+    ANDed into the branch so a partitioned source table only scans its last N
+    partitions. ``cte_names`` lists CTE aliases to never bound (they may not expose
+    the partition column).
     """
     expr_sql = expr_info["expr_sql"]
     # source_tables: base-table names resolved via lineage (for table_name column)
@@ -3149,6 +3233,10 @@ def _build_one_derived_expr_branch(
     from_clause = f"{primary_sql} AS {primary_alias}"
     join_parts: list[str] = []
 
+    # (physical table, alias) for every table actually placed in the FROM/JOIN
+    # chain — used below to bound each partitioned source to its last N partitions.
+    chain_tables: list[tuple[str, str]] = [(primary, primary_alias)]
+
     if len(tables_list) > 1:
         connected: set[str] = {primary}
         remaining = set(tables_list[1:])
@@ -3172,6 +3260,7 @@ def _build_one_derived_expr_branch(
                     join_parts.append(
                         f"JOIN {tgt_sql} AS {tgt_alias} ON {' AND '.join(conds)}"
                     )
+                    chain_tables.append((tgt, tgt_alias))
                     connected.add(tgt)
                     remaining.discard(tgt)
                     progress = True
@@ -3184,11 +3273,20 @@ def _build_one_derived_expr_branch(
     join_clause = "\n".join(join_parts)
     join_part = f"\n{join_clause}" if join_clause else ""
 
+    # Partition-bound each physical source table to its last N partitions, qualifying
+    # the partition column with that table's alias so the predicate is unambiguous in
+    # the multi-table FROM/JOIN scope. CTE-sourced tables stay unbounded.
+    partition_preds = _qualify_partition_preds(
+        chain_tables, partition_where_by_table, cte_names, dialect
+    )
+    part_where = (" AND " + " AND ".join(partition_preds)) if partition_preds else ""
+
     inner = (
         f"SELECT DISTINCT CAST(({expr_sql}) AS {str_t}) AS _v"
         f"\nFROM {from_clause}"
         f"{join_part}"
         f"\nWHERE ({expr_sql}) IS NOT NULL"
+        f"{part_where}"
         f"\nLIMIT {top_k}"
     )
 
@@ -3240,6 +3338,7 @@ def _build_one_derived_expr_branch(
         f" NULL AS date_regularity"
         f"\nFROM {from_clause}"
         f"{join_part}"
+        f"{(chr(10) + 'WHERE ' + ' AND '.join(partition_preds)) if partition_preds else ''}"
     )
 
 
