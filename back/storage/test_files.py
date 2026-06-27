@@ -24,6 +24,9 @@ _CACHE_CASE_KEYS: Tuple[str, ...] = (
     "status",
     "results_json",
     "reason_type",
+    # Memoïsation du verdict d'intention vide (hash runtime) : bruit dans un fichier
+    # commité lisible, et dérivable → cache gitignoré (cf. test_evaluator._classify_empty_intent).
+    "empty_intent_cache",
     # Proposition de description en attente de validation utilisateur : état transitoire,
     # jamais commité (cf. build_query/description_proposal.py).
     "proposed_name",
