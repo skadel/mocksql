@@ -147,7 +147,9 @@ class TestExtractUsedColumns:
         FROM `MY_DS.FACTS`
         LEFT JOIN agg ON `MY_DS.FACTS`.id = agg.id
         """
-        tables = {"MY_DS.FACTS": {"id": "INT64", "amount": "FLOAT64", "label": "STRING"}}
+        tables = {
+            "MY_DS.FACTS": {"id": "INT64", "amount": "FLOAT64", "label": "STRING"}
+        }
         result = await _extract(query, tables)
         cols = {e["table"]: sorted(e["used_columns"]) for e in result["used_columns"]}
         # `label` n'est référencée QUE par le qualificateur nom-complet du SELECT final.

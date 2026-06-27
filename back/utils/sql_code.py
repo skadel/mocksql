@@ -482,7 +482,11 @@ def get_all_columns_with_sources(
             alias = source.args.get("alias")
             alias_text = alias.text("this") if alias else table_name_text
             ident = (source.catalog, source.db, table_name_text, alias_text)
-            keys = {alias_key.lower(), (alias_text or "").lower(), table_name_text.lower()}
+            keys = {
+                alias_key.lower(),
+                (alias_text or "").lower(),
+                table_name_text.lower(),
+            }
             if source.db:
                 keys.add(f"{source.db}.{table_name_text}".lower())
             for k in keys:
