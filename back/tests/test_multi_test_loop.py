@@ -7,6 +7,8 @@ UNE suggestion à la fois (``generate_single_suggestion``) puis en l'enchaînant
 ou de clore via le ``suggestions_generator`` (qui remplit le panneau, sans boucler).
 """
 
+import json
+
 import pytest
 from langchain_core.runnables import RunnableLambda
 
@@ -126,3 +128,99 @@ async def test_single_suggestion_fallback_on_llm_error(monkeypatch):
     assert out["suggestion_intent"] is True
     assert out["auto_tests_built"] == 1
     assert "cas limite" in out["input"]
+
+
+# --- Priorité de couverture UNION ALL : branches d'abord, puis assemblage --------
+#
+# Quand l'utilisateur demande N tests sur une requête UNION ALL, la boucle multi-tests
+# doit d'abord couvrir CHAQUE branche (priorité 1, test focalisé déterministe), puis un
+# test nominal sur l'assemblage complet (priorité 2, target_path="all"), et SEULEMENT
+# ensuite retomber sur la suggestion LLM contextuelle (cas limites). Le test 1 est déjà
+# la 1ʳᵉ branche (défaut du generator) ; ces cas concernent les tests auto suivants.
+
+
+def _paths_state(test_cases, last_target_path):
+    """State de boucle batch avec un catalogue de paths à 2 branches + assemblage."""
+    return {
+        "session": "s1",
+        "query": "SELECT 1",
+        "dialect": "bigquery",
+        "messages": [],
+        "auto_tests_built": 1,
+        "tests_target": 4,
+        "target_path": last_target_path,
+        "path_plans": json.dumps(
+            {
+                "ouverture": {"branch_index": 0, "host_cte": "final_query"},
+                "fermeture": {"branch_index": 1, "host_cte": "final_query"},
+                "all": {"branch_index": None, "host_cte": None},
+            }
+        ),
+    }
+
+
+def _no_llm_guard(monkeypatch):
+    monkeypatch.setattr(
+        suggestions_node,
+        "make_llm",
+        lambda: pytest.fail(
+            "le LLM ne doit pas être appelé pour une couverture de branche déterministe"
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_batch_prioritizes_next_uncovered_union_branch(monkeypatch):
+    """1ʳᵉ branche déjà couverte → la boucle cible la branche suivante, SANS LLM."""
+    test_cases = [{"test_index": "1", "target_path": "ouverture"}]
+
+    async def _tests(_session, _state):
+        return test_cases
+
+    monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _tests)
+    _no_llm_guard(monkeypatch)
+
+    out = await generate_single_suggestion(_paths_state(test_cases, "ouverture"))
+    assert out["target_path"] == "fermeture"
+    assert out["suggestion_intent"] is True
+    assert out["auto_tests_built"] == 2
+    assert "fermeture" in out["input"]
+
+
+@pytest.mark.asyncio
+async def test_batch_falls_to_full_assembly_after_all_branches(monkeypatch):
+    """Toutes les branches couvertes → test nominal sur l'assemblage complet (all)."""
+    test_cases = [
+        {"test_index": "1", "target_path": "ouverture"},
+        {"test_index": "2", "target_path": "fermeture"},
+    ]
+
+    async def _tests(_session, _state):
+        return test_cases
+
+    monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _tests)
+    _no_llm_guard(monkeypatch)
+
+    out = await generate_single_suggestion(_paths_state(test_cases, "fermeture"))
+    assert out["target_path"] == "all"
+    assert out["suggestion_intent"] is True
+
+
+@pytest.mark.asyncio
+async def test_batch_falls_to_llm_once_branches_and_assembly_covered(monkeypatch):
+    """Branches + assemblage couverts → suggestion LLM contextuelle (cas limites)."""
+    test_cases = [
+        {"test_index": "1", "target_path": "ouverture"},
+        {"test_index": "2", "target_path": "fermeture"},
+        {"test_index": "3", "target_path": "all"},
+    ]
+
+    async def _tests(_session, _state):
+        return test_cases
+
+    monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _tests)
+    _patch_llm(monkeypatch, text="Vérifie le format de date en sortie")
+
+    out = await generate_single_suggestion(_paths_state(test_cases, "all"))
+    assert out.get("target_path") is None  # pas de focalisation déterministe imposée
+    assert out["input"] == "Vérifie le format de date en sortie"
