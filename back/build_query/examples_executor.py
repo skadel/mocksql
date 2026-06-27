@@ -374,6 +374,10 @@ class _Assertion(BaseModel):
             "(ordre d'agrégation, précision). Pince via `ROUND(col, 2) = 1.35` ou "
             "`ABS(col - 1.35) < 0.01`. L'égalité exacte n'est sûre que pour entiers, dates "
             "et chaînes. "
+            "⚠️ TEMPOREL — n'applique JAMAIS de fonction chaîne (LEFT/RIGHT/SUBSTR/SUBSTRING) "
+            "à une colonne DATE/TIMESTAMP : compare-la directement (`date = '2026-01-01'`) ou "
+            "caste (`CAST(date AS DATE) = '2026-01-01'`) ; si tu dois absolument slicer, caste "
+            "d'abord en texte (`LEFT(CAST(date AS STRING), 10)`). "
             "⚠️ Testée sur CHAQUE ligne : `z_score = (SELECT MAX(z_score) FROM __result__)` "
             "n'est correcte que si `__result__` a UNE seule ligne. Sur un résultat "
             "MULTI-lignes, viser une ligne précise (le min/max, la 1ʳᵉ) échoue sur toutes "
@@ -1915,7 +1919,9 @@ assertion fige la valeur exacte que CE scénario doit produire, lue dans `<resul
 **Floats — JAMAIS d'égalité stricte :** pour une colonne flottante (z-score, moyenne, STDDEV,
 ratio, pourcentage), `col = 1.234` est non-déterministe (ordre d'agrégation, précision) → assertion
 fragile. Pince via `ROUND(col, 2) = 1.23` ou `ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre
-que pour les entiers, dates et chaînes. Date/timestamp : format `'YYYY-MM-DD'` sans la partie heure.
+que pour les entiers, dates et chaînes. **Temporel (DATE/TIMESTAMP) :** compare directement à un jour
+(`date = '2026-01-01'`) ou caste (`CAST(date AS DATE) = '2026-01-01'`) ; n'applique JAMAIS LEFT/SUBSTR à
+une colonne temporelle (invalide en DuckDB) — si tu dois slicer, caste d'abord : `LEFT(CAST(date AS STRING), 10)`.
 
 **Cible les bonnes colonnes :** concentre tes assertions sur les colonnes NOMMÉES ou impliquées par
 `<test_context>` (la cible du scénario) ; n'épingle pas les colonnes intermédiaires ou techniques.
@@ -2180,6 +2186,9 @@ Le message suivant contient ces sections, délimitées par des balises :
 **Règles de réécriture :**
 - Corrige UNIQUEMENT le SQL pour qu'il soit valide en DuckDB.
 - L'assertion doit retourner 0 ligne si OK, des lignes si KO (convention dbt-style).
+- TEMPOREL : n'applique JAMAIS LEFT/RIGHT/SUBSTR à une colonne DATE/TIMESTAMP (cause fréquente
+  d'erreur `left(TIMESTAMP, …)`) — compare directement (`date = '2026-01-01'`), caste
+  (`CAST(date AS DATE) = '2026-01-01'`), ou caste en texte avant de slicer (`LEFT(CAST(date AS STRING), 10)`).
 - INTERDIT absolu : ne référence AUCUNE table en dehors de `__result__`. Si l'assertion
   originale référençait une autre table (source ou suffixée), réécris-la pour n'utiliser que
   `__result__` et ses colonnes de `<result_schema>`.
