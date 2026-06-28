@@ -17,7 +17,7 @@ from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.sqlglot_ast import get_from, set_from
 from build_query.assertion_eval import _evaluate_assertions
-from build_query.path_slicer import resolve_active_sql
+from build_query.path_slicer import ALL_PATH, resolve_active_sql
 from build_query.state import QueryState
 from utils.examples import (
     run_query_on_test_dataset,
@@ -582,8 +582,9 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     for uc in used_columns:
         logger.debug(f"      - {uc}")
 
-    # filtered_schemas est résolu PAR TEST dans la boucle (active_schemas), car chaque
-    # test peut cibler un path différent → used_columns réduits différents.
+    # filtered_schemas est résolu UNE fois sur le SQL complet (active_schemas, hors boucle) :
+    # l'exécution ne slice jamais par branche, donc le used_columns/schéma est le même pour
+    # tous les tests (le focus par branche n'agit qu'à la génération des données).
 
     # Détermination de la liste de tests à exécuter
     if rerun_all:
@@ -612,19 +613,20 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
 
     # Exécution des tests
     all_tests_results: List[Dict[str, Any]] = []
+    # L'exécution porte TOUJOURS sur le SCRIPT COMPLET, jamais sur une branche slicée.
+    # Le `target_path` d'un test ne focalise QUE la génération des données (fabriquer des
+    # lignes qui allument une branche du UNION ALL) ; un test doit refléter la sortie RÉELLE
+    # du modèle. Slicer l'exécution masquerait les lignes des autres branches — qui partagent
+    # souvent les mêmes tables source — et induirait en erreur sur ce que le script renvoie
+    # (décision produit, cf. discussion 2026-06-27). `resolve_active_sql(state, ALL_PATH)`
+    # renvoie l'`optimized_sql` complet + le `used_columns` complet, donc TOUTES les tables
+    # référencées sont créées (les branches non ciblées lisent des tables éventuellement vides).
+    active_sql, active_used_columns = resolve_active_sql(state, ALL_PATH)
+    active_schemas = filter_schemas_by_used_columns(schemas, active_used_columns)
     with initialize_duckdb(DB_PATH) as con:
         for loop_index, test_case in enumerate(unit_tests):
-            # Résolution PAR TEST du SQL actif : une suite peut mélanger des tests
-            # focalisés sur des paths différents (chacun porte son `target_path`).
-            # resolve_active_sql retombe sur le SQL complet pour all/None/sans catalogue.
-            active_sql, active_used_columns = resolve_active_sql(
-                state, test_case.get("target_path")
-            )
-            active_schemas = filter_schemas_by_used_columns(
-                schemas, active_used_columns
-            )
             logger.debug(
-                f"\n[DEBUG] >>> Lancement test {loop_index} (path={test_case.get('target_path') or 'all'}) avec table(s) : {list(test_case.get('data', {}).keys())}"
+                f"\n[DEBUG] >>> Lancement test {loop_index} (génération focus={test_case.get('target_path') or 'all'}, exécution=script complet) avec table(s) : {list(test_case.get('data', {}).keys())}"
             )
             test_result = await _run_single_test_case(
                 state=state,
@@ -1602,9 +1604,11 @@ async def _run_single_test_case(
     # l'agent de correction (boucle bad_data) le retrouve dans les RESULTS.
     if test_case.get("branch_plan"):
         base["branch_plan"] = test_case["branch_plan"]
-    # Path UNION ALL ciblé : préservé à travers l'exécution (persistance + dédup
-    # suggestions + affichage [Focus X]). Le juge évalue déjà le SQL slicé (active_sql),
-    # donc il n'évalue QUE la branche — pas de pénalité de couverture partielle.
+    # Path UNION ALL ciblé : préservé à travers l'exécution pour la persistance, la dédup
+    # des suggestions, l'affichage [Focus X] ET le contexte du juge. C'est un focus de
+    # GÉNÉRATION uniquement : l'exécution et le verdict portent sur le SCRIPT COMPLET (cf.
+    # active_sql ci-dessus). Le juge reçoit ce path pour comprendre que les données ont été
+    # ciblées sur une branche — sans pénaliser les autres branches éventuellement vides.
     if test_case.get("target_path"):
         base["target_path"] = test_case["target_path"]
     # Prémisse utilisateur (TICKET-1) : tracée à la création d'un test issu d'une
@@ -1865,6 +1869,7 @@ async def _generate_assertions_and_evaluate(
     test_data: list,
     result_df,
     test_description: str,
+    focus_path: str = "",
 ) -> _AssertionsAndEvaluation:
     """
     Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
@@ -1890,6 +1895,7 @@ Le message suivant contient ces sections, délimitées par des balises :
 - `<query>` : la requête SQL testée.
 - `<input_data>` : les données d'entrée injectées dans DuckDB.
 - `<result_sample>` : le résultat après exécution (nombre de lignes + exemples).
+- `<focus_context>` : présent si les données ont été générées en focus sur une branche d'un UNION ALL (l'exécution et cette évaluation portent quand même sur le script complet).
 - `<task>` : ce que tu dois produire.
 
 **Méthode — raisonne d'abord brièvement dans `reasoning`, puis produis assertions + verdict :**
@@ -2006,6 +2012,20 @@ Sinon → "Bon" / "Excellent", avec `reason_type`, `assertion_fix` et `diagnosti
 Évalue si les données d'entrée sont bien construites pour produire ce vide (Bon/Excellent),
 ou si les données ne semblent pas configurées pour ce scénario (Insuffisant + bad_data)."""
 
+    # Focus de génération (branche UNION ALL) : on prévient le juge que les données ont été
+    # ciblées sur une branche mais que l'exécution/évaluation porte sur le script complet. Une
+    # asymétrie entre branches complémentaires est un RÉSULTAT MÉTIER valide, pas un défaut.
+    focus_block = ""
+    if focus_path and focus_path != ALL_PATH:
+        focus_block = f"""
+
+<focus_context>
+Les données d'entrée de ce test ont été GÉNÉRÉES en focus sur la branche « {focus_path} » d'un UNION ALL (pour allumer cette branche). L'exécution ci-dessus et CETTE évaluation portent sur le SCRIPT COMPLET (toutes les branches réunies). En conséquence :
+- Une ASYMÉTRIE entre branches complémentaires (un même sujet présent dans une branche, absent dans l'autre — ex. « activité » sans « parc ») est un RÉSULTAT MÉTIER VALIDE, pas un défaut : ni bad_data ni bad_description. Ne réclame pas d'office les indicateurs des autres branches.
+- Si la description explicite correctement cette asymétrie (« ce sujet a de l'activité mais n'est pas dans le parc »), c'est CORRECT.
+- Juge la cohérence entre la description, les données et la sortie RÉELLE du script complet (`<result_sample>`).
+</focus_context>"""
+
     # ── Human : sections balisées dans l'ordre contexte → tables → SQL → input → output → ask ──
     human_content = f"""<test_context>
 {test_description}
@@ -2028,7 +2048,7 @@ ou si les données ne semblent pas configurées pour ce scénario (Insuffisant +
 <result_sample>
 {row_count} ligne(s) :
 {json.dumps(sample, ensure_ascii=False, default=str)}
-</result_sample>
+</result_sample>{focus_block}
 
 <task>
 Produis, conformément aux règles du message système :

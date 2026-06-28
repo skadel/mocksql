@@ -789,8 +789,10 @@ async def generate_examples(state: QueryState):
         ]
     }
 
-    # Propage le path ciblé dans le state pour que l'executor exécute le même SQL
-    # slicé (via resolve_active_sql) que celui sur lequel le test a été généré.
+    # Propage le path ciblé sur le test : il trace le focus de GÉNÉRATION (branche dont les
+    # données ont été ciblées) pour la persistance, l'affichage [Focus X] et le contexte du
+    # juge. L'exécution reste sur le script complet (cf. examples_executor) — le path ne
+    # slice PAS l'exécution.
     if generated_test.get("target_path"):
         result["target_path"] = generated_test["target_path"]
 
@@ -1131,6 +1133,7 @@ async def generate_examples_(
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
             multi_branch=multi_branch,
+            focus_path=target_path or "",
         )
     if prompt is None:
         return None, None
@@ -1392,6 +1395,7 @@ async def create_appropriate_prompt(
     native_thinking: bool = False,
     join_recipes_block: str = "",
     multi_branch: bool = False,
+    focus_path: str = "",
 ):
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
@@ -1412,6 +1416,7 @@ async def create_appropriate_prompt(
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
             multi_branch=multi_branch,
+            focus_path=focus_path,
         )
     elif state.get("input", "").strip():
         if state.get("test_uid") or state.get("test_index") is not None:
@@ -1444,6 +1449,9 @@ async def create_appropriate_prompt(
                 existing_test=existing_test,
                 model_context=model_context,
                 eval_history=eval_history,
+                # Focus de génération du test édité : lu sur le test lui-même (robuste si
+                # state["target_path"] est absent lors d'une simple édition), fallback focus_path.
+                focus_path=(existing_test or {}).get("target_path") or focus_path,
             )
         return generate_data_prompt(
             history,
@@ -1459,6 +1467,7 @@ async def create_appropriate_prompt(
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
             multi_branch=multi_branch,
+            focus_path=focus_path,
         )
     elif state.get("status") == "empty_results":
         failing_cte, cte_trace = _get_failing_cte_from_results(
@@ -1481,6 +1490,7 @@ async def create_appropriate_prompt(
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
             multi_branch=multi_branch,
+            focus_path=focus_path,
         )
     else:
         return None

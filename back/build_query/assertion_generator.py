@@ -65,6 +65,10 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
     sql = (state.get("optimized_sql") or state.get("query", "")).strip()
     test_data = current_test.get("data", {})
     test_description = current_test.get("unit_test_description", "")
+    # Focus de génération (branche UNION ALL) : transmis au juge en CONTEXTE seulement.
+    # L'exécution et l'évaluation portent sur le script complet (`sql` = optimized_sql complet,
+    # non slicé) — le focus n'a servi qu'à cibler les données d'entrée.
+    focus_path = current_test.get("target_path", "")
 
     from build_query.examples_executor import (
         _assertion_to_executable,
@@ -95,6 +99,7 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 test_data=test_data,
                 result_df=result_df,
                 test_description=test_description,
+                focus_path=focus_path,
             )
 
             async with atimed("assertion_gen:eval+fix"):

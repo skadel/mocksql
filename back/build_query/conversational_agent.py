@@ -536,8 +536,11 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
     if agent_tool_call == "set_target_path":
         path = agent_tool_args.get("path")
         if path in (ALL_PATH, "all"):
-            return "Je régénère ce test sur l'assemblage complet (toutes les branches du UNION ALL)."
-        return f"Je focalise ce test sur le path « {path} » et je le régénère."
+            return "Je régénère ce test sans focus : données et exécution sur le script complet."
+        return (
+            f"Je cible les données de ce test sur la branche « {path} » et je le régénère "
+            "(l'exécution reste sur le script complet)."
+        )
     return None
 
 
@@ -683,10 +686,11 @@ async def conversational_agent(state: QueryState):
             )
         elif _focus_path:
             suggestion_note += (
-                f"\n\nCette suggestion est FOCALISÉE sur la branche « {_focus_path} » (UNION ALL). "
+                f"\n\nCette suggestion CIBLE LA GÉNÉRATION sur la branche « {_focus_path} » (UNION ALL) "
+                "— l'exécution restera sur le script complet. "
                 f'Appelle d\'abord `set_target_path(path="{_focus_path}")` SANS test_uid '
-                "(nouveau test focalisé sur cette branche), puis laisse le generator produire "
-                "le test. N'utilise pas un autre nom de branche."
+                "(nouveau test dont les données ciblent cette branche), puis laisse le generator "
+                "produire le test. N'utilise pas un autre nom de branche."
             )
 
     # Canal de raisonnement : quand le thinking natif Gemini est actif (flash/pro),
@@ -741,11 +745,13 @@ async def conversational_agent(state: QueryState):
         path_note = (
             "\n\nFOCALISATION PAR PATH (UNION ALL) — ce SQL assemble plusieurs présentations "
             "des MÊMES sources (le tronc de calcul est partagé, ce ne sont pas des pipelines "
-            "indépendants). Un test peut être focalisé sur UNE branche (couverture partielle, "
-            'titre "[Focus X]") ou porter sur "all" (assemblage complet).\n'
+            "indépendants). Un test peut FOCALISER LA GÉNÉRATION DE SES DONNÉES sur UNE branche "
+            '(titre "[Focus X]") ou ne pas focaliser ("all"). ⚠️ Le focus ne change QUE les '
+            "données générées : l'exécution et le verdict portent TOUJOURS sur le script complet "
+            "(les autres branches restent calculées, possiblement à 0 ligne).\n"
             "Branches disponibles (noms machine) :\n"
             f"{_branch_lines}\n"
-            "Utilise `set_target_path(test_uid, path)` pour (re)focaliser un test. `path` est "
+            "Utilise `set_target_path(test_uid, path)` pour (re)focaliser la génération d'un test. `path` est "
             "TOUJOURS un nom machine ci-dessus. Intentions :\n"
             "- path précis demandé → ce nom de branche.\n"
             '- « tous les paths » / « assemblage complet » → "all".\n'
@@ -974,12 +980,17 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
 
     @tool
     def set_target_path(path: str, test_uid: str = "") -> str:
-        """Focalise un test sur une branche d'un UNION ALL (ou "all" = assemblage complet).
-        path : nom exact d'une branche disponible, ou "all" pour le SQL complet.
-        test_uid : LAISSER VIDE pour créer un NOUVEAU test focalisé sur ce path — cas d'un
-          clic sur une suggestion « Tester le path X » d'une branche non couverte. Renseigner
-          l'uid d'un test EXISTANT pour le RE-focaliser sur une autre branche.
-        Le test est (re)généré sur la branche : données + titre [Focus X]."""
+        """Focalise la GÉNÉRATION DES DONNÉES d'un test sur une branche d'un UNION ALL
+        (ou "all" = pas de focus). ⚠️ L'exécution et le verdict portent TOUJOURS sur le
+        script complet : le focus ne fait que cibler des données qui allument cette branche,
+        il ne slice PAS la requête exécutée. Les autres branches restent calculées (et peuvent
+        sortir 0 ligne pour ces données).
+        path : nom exact d'une branche disponible, ou "all" pour ne pas focaliser.
+        test_uid : LAISSER VIDE pour créer un NOUVEAU test dont les données ciblent ce path —
+          cas d'un clic sur une suggestion « Tester le path X » d'une branche non couverte.
+          Renseigner l'uid d'un test EXISTANT pour reporter son focus de génération sur une
+          autre branche.
+        Le test est (re)généré avec des données ciblées sur la branche + titre [Focus X]."""
         return f"{test_uid}:{path}"
 
     @tool
