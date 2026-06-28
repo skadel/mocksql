@@ -783,6 +783,25 @@ _FEW_SHOT_MESSAGES: list[tuple[str, str]] = [
 ]
 
 
+def _focus_note(focus_path: str) -> str:
+    """Note injectée quand la génération d'un test cible une branche d'un UNION ALL.
+
+    Le `focus_path` ne pilote QUE la génération des données ; le test s'EXÉCUTE sur le script
+    complet. La description doit donc décrire la sortie complète — et une ASYMÉTRIE entre
+    branches complémentaires (un même sujet présent dans une branche, absent dans l'autre) est
+    une information métier VALIDE à expliciter, pas un défaut à masquer. ``""`` si pas de focus
+    (``focus_path`` vide ou ``"all"``). Partagée par generate_data_prompt et update_data_prompt.
+    """
+    if not focus_path or focus_path == "all":
+        return ""
+    return f"""
+
+**Focus de génération — branche « {focus_path} » d'un UNION ALL** : tu cibles les DONNÉES pour allumer cette branche (le schéma et les contraintes ci-dessus sont déjà réduits à elle). ⚠️ MAIS le test s'EXÉCUTE sur le SCRIPT COMPLET (toutes les branches du UNION ALL), pas sur cette seule branche. Conséquences :
+- `unit_test_description` décrit la sortie du SCRIPT COMPLET pour ces données.
+- Les branches complémentaires (ex. « activité » vs « parc ») peuvent produire un résultat ASYMÉTRIQUE : un même sujet peut apparaître dans une branche et PAS dans l'autre. C'est une INFORMATION MÉTIER valide (ex. « ce contrat a de l'activité mais n'apparaît pas dans le parc ») — décris-la explicitement quand elle se produit, ne la masque pas et n'invente pas d'office les indicateurs des autres branches.
+- N'annonce que des valeurs de sortie réellement produites par le script complet sur ces données."""
+
+
 def generate_data_prompt(
     history: list[BaseMessage],
     dialect: str,
@@ -798,6 +817,7 @@ def generate_data_prompt(
     native_thinking: bool = False,
     join_recipes_block: str = "",
     multi_branch: bool = False,
+    focus_path: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour générer un test unitaire,
@@ -907,6 +927,10 @@ def generate_data_prompt(
         consigne_3 = """\
 3. **Une seule branche** : quand le SQL contient plusieurs alternatives (`condition_A OR condition_B`, `CASE WHEN … THEN … ELSE …`, plusieurs chemins de jointure), choisir **une seule branche** et construire des données qui satisfont uniquement celle-ci. Ne pas couvrir plusieurs alternatives à la fois. La description nomme explicitement la branche choisie (ex. "Pour un utilisateur premium …", pas "Pour un utilisateur premium ou avec cumulated_montant > 1000 …"). Les tables propres aux autres branches peuvent rester à null ; les tables PARTAGÉES doivent rester cohérentes avec la branche choisie. Les autres branches alimentent les suggestions."""
 
+    # Focus de GÉNÉRATION sur une branche UNION ALL (cf. _focus_note) : données ciblées sur la
+    # branche, mais exécution sur le script complet → la description couvre la sortie complète.
+    focus_note = _focus_note(focus_path)
+
     system_message_content = (
         """
 Vous êtes un data QA, expert en test de requêtes SQL et en génération de données de test JSON.
@@ -928,6 +952,7 @@ La conversation contient ces sections, délimitées par des balises. Le schéma,
         + consignes_1_2
         + "\n"
         + consigne_3
+        + focus_note
         + """
 4. **Clés de jointure DÉRIVÉES (le point le plus important)** : quand une clé de JOIN est le produit d'un `CASE` / `CAST` / `SAFE_CAST` / `SUBSTR` / `SPLIT` / `REGEXP`, générez la valeur SOURCE qui, APRÈS transformation, égale la clé de l'autre côté — **pas** la valeur finale.
    - `JOIN ON a.k = CASE WHEN t.reseau='BP' THEN '1' END` et `a.k` vient de `t2` → mettez `t2.k = '1'`.
@@ -1064,6 +1089,7 @@ def update_data_prompt(
     existing_test: Optional[dict] = None,
     model_context: str = "",
     eval_history: list | None = None,
+    focus_path: str = "",
 ) -> ChatPromptTemplate:
     """
     Construit un prompt pour mettre à jour des données JSON (utilisées pour tester une requête SQL),
@@ -1102,6 +1128,7 @@ def update_data_prompt(
         "- **Règle Jointures** : Pour les clauses INNER JOIN, assurez-vous que les clés correspondent exactement ET qu'elles ne sont pas nulles.\n"
         "- **Règle Cas Limites** : Ne testez qu'une seule branche OR ou CASE WHEN à la fois.\n\n"
         "Répondez uniquement avec l'objet JSON demandé, sans texte additionnel.\n"
+        + _focus_note(focus_path)
         + context_block
     )
     system_msg = SystemMessage(content=system_message_content)

@@ -900,3 +900,150 @@ class TestSelectFailingCte:
         assert failing == "main"
         assert trace["main"].get("blocking") is True
         assert trace["opt_dim"].get("blocking") is False
+
+
+# ---------------------------------------------------------------------------
+# Exécution = script complet (le focus par branche ne pilote QUE la génération)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_execution_runs_full_script_despite_branch_focus(monkeypatch):
+    """Régression : un test focalisé (target_path = branche) s'EXÉCUTE sur le script COMPLET.
+
+    Le `target_path` ne pilote que la génération des données ; l'exécuteur résout toujours
+    le SQL complet (resolve_active_sql(ALL_PATH)) — slicer l'exécution masquerait les lignes
+    des autres branches du UNION ALL et mentirait sur la sortie du script.
+    """
+    import contextlib
+    import build_query.examples_executor as ex
+
+    full_sql = "SELECT 'BP' AS reseau UNION ALL SELECT 'CE' AS reseau"
+    state = {
+        "session": "s1",
+        "project": "proj",
+        "dialect": "duckdb",
+        "messages": [],
+        "optimized_sql": full_sql,
+        "used_columns": [],
+        # Catalogue de paths : la branche 'bp' a un SQL slicé DIFFÉRENT du complet.
+        "path_plans": json.dumps(
+            {
+                "bp": {
+                    "sliced_sql": "SELECT 'BP' AS reseau",
+                    "used_columns": [],
+                    "branch_index": 0,
+                },
+                "all": {
+                    "sliced_sql": full_sql,
+                    "used_columns": [],
+                    "branch_index": None,
+                },
+            }
+        ),
+    }
+
+    async def _fake_get_schemas(project_id):
+        return []
+
+    monkeypatch.setattr("models.schemas.get_schemas", _fake_get_schemas)
+    # Un seul test, focalisé sur la branche 'bp'.
+    monkeypatch.setattr(
+        ex,
+        "_parse_unit_tests_from_state",
+        lambda _s: [{"test_index": "1", "target_path": "bp", "data": {}}],
+    )
+
+    @contextlib.contextmanager
+    def _fake_duckdb(_path):
+        yield None
+
+    monkeypatch.setattr(ex, "initialize_duckdb", _fake_duckdb)
+
+    captured: dict = {}
+
+    async def _fake_run_single(**kwargs):
+        captured["query"] = kwargs["query"]
+        return {"test_index": kwargs["test_case"]["test_index"], "status": "complete"}
+
+    monkeypatch.setattr(ex, "_run_single_test_case", _fake_run_single)
+
+    await ex.run_on_examples(state)
+
+    # Le SQL exécuté est le script COMPLET, pas la branche 'bp' slicée.
+    assert captured["query"] == full_sql
+    assert "UNION ALL" in captured["query"]
+
+
+def test_focus_missing_used_columns_inserted_as_null():
+    """Quand le focus génère une ligne SANS certaines colonnes `used` (celles d'une branche
+    complémentaire), l'INSERT les liste quand même et y met NULL.
+
+    Conséquence métier : la branche complémentaire (ex. PARC, qui filtre sur cette colonne) ne
+    produit aucune ligne → asymétrie « activité sans parc », un résultat VALIDE (cf. exécution
+    sur le script complet). On vérifie le comportement réel sur DuckDB de bout en bout.
+    """
+    from utils.examples import create_test_tables, execute_queries
+    from utils.insert_examples import insert_examples
+
+    con = duckdb.connect(":memory:")
+    suffix = "s1"
+
+    # Table partagée par les 2 branches : id (commun), activity_amount (branche ACTIVITE),
+    # parc_flag (branche PARC).
+    schemas = [
+        {
+            "table_name": "proj.ds.contracts",
+            "columns": [
+                {"name": "id", "type": "STRING"},
+                {"name": "activity_amount", "type": "FLOAT64"},
+                {"name": "parc_flag", "type": "STRING"},
+            ],
+            "primary_keys": ["id"],
+        }
+    ]
+    used_columns = [
+        {
+            "project": "proj",
+            "database": "ds",
+            "table": "contracts",
+            "used_columns": ["id", "activity_amount", "parc_flag"],
+        }
+    ]
+    # Génération FOCALISÉE sur ACTIVITE : la ligne ne porte PAS parc_flag (colonne `used` de
+    # l'autre branche).
+    test_data = {"proj.ds.contracts": [{"id": "C1", "activity_amount": 100.0}]}
+
+    ddb_schema = create_test_tables(
+        tables=schemas, suffix=suffix, overwrite=True, con=con, dialect="bigquery"
+    )
+    inserts = list(
+        insert_examples(
+            data_dict=test_data,
+            schemas=ddb_schema,
+            suffix=suffix,
+            used_columns=used_columns,
+        )
+    )
+    # L'INSERT liste TOUTES les colonnes used (y compris parc_flag) et y met NULL.
+    assert '"parc_flag"' in inserts[0]
+    assert "NULL" in inserts[0]
+    execute_queries(inserts, con)
+
+    t = f"ds_contracts_{suffix}"
+    row = con.execute(f"SELECT id, activity_amount, parc_flag FROM {t}").fetchone()
+    assert row == ("C1", 100.0, None)  # parc_flag non généré → NULL
+
+    # Script COMPLET : la branche PARC (filtre parc_flag='Y') tombe à 0 ligne → seule
+    # l'ACTIVITE sort. Asymétrie métier honnête, pas un défaut.
+    full = f"""
+        SELECT id, 'activite' AS indicateur, activity_amount AS valeur
+        FROM {t} WHERE activity_amount IS NOT NULL
+        UNION ALL
+        SELECT id, 'parc' AS indicateur, 1.0 AS valeur
+        FROM {t} WHERE parc_flag = 'Y'
+    """
+    out = con.execute(full).fetchall()
+    con.close()
+    assert out == [("C1", "activite", 100.0)]
+    assert all(r[1] != "parc" for r in out)  # la branche parc est absente
