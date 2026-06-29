@@ -410,7 +410,12 @@ def _print_test_results(model_results: list) -> None:
                 status
             ]
             idx = c.get("index", "?")
-            typer.echo(f"  [{label}] {c.get('name', f'Test {idx}')}")
+            title = c.get("name") or f"Test {idx}"
+            typer.echo(f"  [{label}] {title}")
+            # Description complète en sous-ligne quand elle apporte plus que le titre.
+            desc = c.get("description")
+            if desc and desc != title:
+                typer.echo(f"           {desc}")
 
             if status in ("fail", "error"):
                 if c.get("error"):
