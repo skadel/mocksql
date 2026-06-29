@@ -190,6 +190,100 @@ def has_used_column_changed(formatted_used_columns, state):
     return previous != formatted_used_columns
 
 
+def _normalize_used_columns(used_columns):
+    """Normalise une liste ``used_columns`` (dicts OU strings JSON) en
+    ``{table_key: set(colonnes)}``.
+
+    ``table_key`` = ``project.database.table`` (les parties absentes sont omises) pour
+    apparier les tables d'avant/après même quand seul le nom court diffère.
+    """
+    out: dict[str, set[str]] = {}
+    for entry in used_columns or []:
+        if isinstance(entry, str):
+            try:
+                entry = json.loads(entry)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        if not isinstance(entry, dict):
+            continue
+        parts = [
+            str(entry[k]) for k in ("project", "database", "table") if entry.get(k)
+        ]
+        key = ".".join(parts)
+        if not key:
+            continue
+        out.setdefault(key, set()).update(entry.get("used_columns") or [])
+    return out
+
+
+def compute_used_columns_delta(old_used_columns, new_used_columns) -> dict:
+    """Compare deux jeux de ``used_columns`` (format ``{project, database, table,
+    used_columns}``, dicts ou strings JSON) et retourne un delta structuré.
+
+    Sert à piloter la régénération PARTIELLE des tests sur changement de source : on ne
+    veut toucher que les tables/colonnes réellement modifiées. Format de retour ::
+
+        {
+          "tables_added":    [{"table": "...", "columns": [...]}],
+          "tables_removed":  [{"table": "...", "columns": [...]}],
+          "columns_added":   [{"table": "...", "columns": [...]}],
+          "columns_removed": [{"table": "...", "columns": [...]}],
+        }
+    """
+    old = _normalize_used_columns(old_used_columns)
+    new = _normalize_used_columns(new_used_columns)
+
+    tables_added = [
+        {"table": t, "columns": sorted(new[t])} for t in new.keys() - old.keys()
+    ]
+    tables_removed = [
+        {"table": t, "columns": sorted(old[t])} for t in old.keys() - new.keys()
+    ]
+    columns_added = []
+    columns_removed = []
+    for t in old.keys() & new.keys():
+        added = new[t] - old[t]
+        removed = old[t] - new[t]
+        if added:
+            columns_added.append({"table": t, "columns": sorted(added)})
+        if removed:
+            columns_removed.append({"table": t, "columns": sorted(removed)})
+
+    return {
+        "tables_added": sorted(tables_added, key=lambda x: x["table"]),
+        "tables_removed": sorted(tables_removed, key=lambda x: x["table"]),
+        "columns_added": sorted(columns_added, key=lambda x: x["table"]),
+        "columns_removed": sorted(columns_removed, key=lambda x: x["table"]),
+    }
+
+
+def is_delta_patchable(delta: dict, new_used_columns) -> bool:
+    """Heuristique « delta assez petit pour un patch incrémental » (sinon regen complète).
+
+    Non patchable si une table AJOUTÉE n'a AUCUNE colonne en commun avec les tables
+    conservées : c'est une vraie table neuve (schéma sans rapport), il n'y a aucune ligne
+    existante à relabelliser/patcher → la régénération complète est plus honnête. Un simple
+    swap de source (la nouvelle table reprend les colonnes de l'ancienne) ou un ajustement de
+    quelques colonnes reste patchable. Tunable.
+    """
+    if not delta or not any(delta.values()):
+        return False
+    new = _normalize_used_columns(new_used_columns)
+    added_tables = {t["table"] for t in delta.get("tables_added", [])}
+
+    # Colonnes de référence des tables conservées (pour mesurer le recouvrement).
+    kept_columns: set[str] = set()
+    for table, cols in new.items():
+        if table not in added_tables:
+            kept_columns |= cols
+
+    for entry in delta.get("tables_added", []):
+        if not (set(entry.get("columns") or []) & kept_columns):
+            return False  # table neuve sans recouvrement → non patchable
+
+    return True
+
+
 async def evaluate_and_fix_query(query, mapping, dialect="bigquery", optimize=False):
     """
     Évalue et optimise une requête SQL en remplaçant les variables et en extrayant les informations nécessaires.

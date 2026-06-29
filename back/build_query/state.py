@@ -43,6 +43,15 @@ class QueryState(TypedDict):
     user_tables: str
     used_columns: list
     used_columns_changed: bool
+    used_columns_delta: Optional[
+        dict
+    ]  # structured schema diff (tables/columns added/removed) vs the stored used_columns,
+    # computed by validator.compute_used_columns_delta. Drives the PARTIAL test-data
+    # regeneration loop (schema_diff_to_agent) instead of a full regen.
+    partial_regen: Optional[
+        bool
+    ]  # set by the frontend (sql_update + partial mode): patch existing test data
+    # incrementally via the conversational_agent rather than regenerating from scratch.
     optimize: bool
     save: Union[str, None]
     test_uid: Optional[

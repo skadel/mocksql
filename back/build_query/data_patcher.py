@@ -159,89 +159,116 @@ async def data_patcher_node(state: QueryState):
             logger.warning("[data_patcher] data_batch: liste d'opérations vide")
             return {}
 
-        test_index = next(
-            (
-                op["args"].get("test_index")
-                for op in ops
-                if op.get("args", {}).get("test_index") is not None
-            ),
-            None,
-        )
-        if test_index is None:
+        # Regroupement des opérations par test_index : un seul data_batch peut désormais
+        # patcher PLUSIEURS tests (régénération partielle sur changement de source — chaque
+        # test reçoit le même delta minimal). Le cas mono-test (boucle bad_data) reste
+        # strictement identique : un seul groupe → un seul message EXAMPLES.
+        groups: dict = {}
+        for op in ops:
+            ti = op.get("args", {}).get("test_index")
+            if ti is None:
+                continue
+            groups.setdefault(str(ti), []).append(op)
+        if not groups:
             logger.warning(
                 "[data_patcher] data_batch: aucun test_index résolu dans les ops"
             )
             return {}
 
         existing_tests = await retrieve_existing_tests(state["session"], state)
-        test_case = next(
-            (t for t in existing_tests if str(t.get("test_index")) == str(test_index)),
-            None,
-        )
-        if test_case is None:
-            logger.warning(
-                "[data_patcher] data_batch: test_index=%s introuvable", test_index
+        examples_msgs = []
+        last_test_index = None
+        parent = state.get("agent_message_id") or state.get("user_message_id")
+        for test_index, ti_ops in groups.items():
+            test_case = next(
+                (
+                    t
+                    for t in existing_tests
+                    if str(t.get("test_index")) == str(test_index)
+                ),
+                None,
             )
+            if test_case is None:
+                logger.warning(
+                    "[data_patcher] data_batch: test_index=%s introuvable", test_index
+                )
+                continue
+
+            data = copy.deepcopy(test_case.get("data") or {})
+
+            failing_assertions = [
+                a
+                for a in (test_case.get("assertion_results") or [])
+                if a.get("status") != "pass"
+            ]
+            if failing_assertions:
+                logger.diag(
+                    "[data_patcher] data_batch test=%s — %d assertion(s) en échec avant patch:\n%s",
+                    test_index,
+                    len(failing_assertions),
+                    json.dumps(
+                        [
+                            {
+                                "description": a.get("description", "?"),
+                                "error": a.get("error", ""),
+                            }
+                            for a in failing_assertions
+                        ],
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                )
+
+            logger.diag(
+                "[data_patcher] data_batch test=%s — %d opération(s): %s",
+                test_index,
+                len(ti_ops),
+                [op["tool"] for op in ti_ops],
+            )
+            for op in ti_ops:
+                data = await apply_single_patch(
+                    state, test_case, data, op["tool"], op["args"]
+                )
+
+            updated_test = {**test_case, "data": data}
+            examples_msgs.append(
+                AIMessage(
+                    content=json.dumps(updated_test, default=str),
+                    id=str(uuid.uuid4()),
+                    additional_kwargs={
+                        "type": MsgType.EXAMPLES,
+                        "parent": parent,
+                        "request_id": state.get("request_id"),
+                    },
+                )
+            )
+            last_test_index = test_index
+
+        if not examples_msgs:
             return {}
 
-        data = copy.deepcopy(test_case.get("data") or {})
-
-        failing_assertions = [
-            a
-            for a in (test_case.get("assertion_results") or [])
-            if a.get("status") != "pass"
-        ]
-        if failing_assertions:
-            logger.diag(
-                "[data_patcher] data_batch test=%s — %d assertion(s) en échec avant patch:\n%s",
-                test_index,
-                len(failing_assertions),
-                json.dumps(
-                    [
-                        {
-                            "description": a.get("description", "?"),
-                            "error": a.get("error", ""),
-                        }
-                        for a in failing_assertions
-                    ],
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-            )
-
-        logger.diag(
-            "[data_patcher] data_batch test=%s — %d opération(s): %s",
-            test_index,
-            len(ops),
-            [op["tool"] for op in ops],
-        )
-        for op in ops:
-            data = await apply_single_patch(
-                state, test_case, data, op["tool"], op["args"]
-            )
-
-        updated_test = {**test_case, "data": data}
-        parent = state.get("agent_message_id") or state.get("user_message_id")
-        msg = AIMessage(
-            content=json.dumps(updated_test, default=str),
-            id=str(uuid.uuid4()),
-            additional_kwargs={
-                "type": MsgType.EXAMPLES,
-                "parent": parent,
-                "request_id": state.get("request_id"),
-            },
-        )
         update = {
-            "examples": [msg],
-            "test_index": int(test_index) if str(test_index).isdigit() else None,
+            "examples": examples_msgs,
+            "test_index": int(last_test_index)
+            if str(last_test_index).isdigit()
+            else None,
         }
         # Ledger de la boucle bad_data : mémorise les ops du lot pour que le round
         # suivant les voie (l'outcome est complété par bad_data_to_agent si la
         # boucle re-rentre). Sans lui, le round 2 ne sait pas que le round 1 a
         # déjà patché telle colonne sans effet et peut répéter/défaire le patch.
-        if state.get("evaluation_feedback") == "bad_data":
+        # Mono-test uniquement (la boucle bad_data ne traite qu'un test à la fois).
+        if state.get("evaluation_feedback") == "bad_data" and len(groups) == 1:
+            only_test = next(
+                (
+                    t
+                    for t in existing_tests
+                    if str(t.get("test_index")) == str(last_test_index)
+                ),
+                None,
+            )
             update["correction_attempts"] = append_correction_attempt(
-                state, test_case.get("test_uid"), ops
+                state, (only_test or {}).get("test_uid"), ops
             )
         return update
 

@@ -12,7 +12,7 @@ import {
   setLoadingMessage
 } from "../features/buildModel/buildModelSlice";
 import { formatMessage } from "../utils/messages";
-import { ChatQueryParams } from '../utils/types';
+import { ChatQueryParams, SchemaDelta } from '../utils/types';
 import { updateModelName } from "../features/appBar/appBarSlice";
 import { apiRequest, streamThunk } from "./utils";
 
@@ -31,7 +31,7 @@ export const chatQuery = createAsyncThunk(
     const {
       userInput, sessionId, project,
       query, ChangedMessageId, t, user,
-      parentMessageId, userTables, testUid, testIndex, context, rerunAll, reevaluate, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget
+      parentMessageId, userTables, testUid, testIndex, context, rerunAll, reevaluate, assertionOnly, rerunOnly, forceRoute, silent, suggestionIntent, regenerateSuggestions, validateIntent, applyDescriptionIntent, rejectDescriptionIntent, testsTarget, partialRegen, schemaDelta
     } = params;
 
     if (!userInput && !query && !userTables && !validateIntent && !applyDescriptionIntent && !rejectDescriptionIntent) return;
@@ -131,6 +131,8 @@ export const chatQuery = createAsyncThunk(
             test_uid: testUid ?? null,
             test_index: testIndex ?? null,
             rerun_all_tests: context === 'sql_update' || !!rerunAll,
+            partial_regen: partialRegen ?? false,
+            used_columns_delta: schemaDelta ?? null,
             assertion_only: assertionOnly ?? false,
             suggestion_intent: suggestionIntent ?? false,
             regenerate_suggestions: regenerateSuggestions ?? false,
@@ -351,6 +353,8 @@ export interface ValidateQueryResult {
   query_decomposed?: string;
   optimized_sql?: string;
   sql_message_id?: string;
+  used_columns_changed?: boolean;     // le schéma utilisé a-t-il changé vs le dernier test ?
+  schema_delta?: SchemaDelta | null;  // diff structuré tables/colonnes (pilote la regen partielle)
 }
 
 export const validateQueryApi = async (params: ValidateQueryParams): Promise<ValidateQueryResult> => {

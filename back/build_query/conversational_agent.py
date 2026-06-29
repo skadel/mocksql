@@ -1091,7 +1091,35 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     is_auto_correct = bool(state.get("auto_correct")) or (
         not user_input and evaluation_feedback == "bad_data"
     )
-    if is_auto_correct:
+    # Mode régénération PARTIELLE (changement de source) : un delta de schéma est présent →
+    # on patche TOUS les tests de façon minimale en un seul data_batch, au lieu du diagnostic
+    # CTE mono-test de la boucle bad_data.
+    is_schema_diff = is_auto_correct and bool(state.get("used_columns_delta"))
+    if is_schema_diff:
+        from build_query.query_chain import _format_schema_delta
+
+        uids = ", ".join(
+            f"[{t.get('test_uid') or t.get('test_index')}]" for t in existing_tests
+        )
+        delta_txt = _format_schema_delta(state["used_columns_delta"])
+        trigger = (
+            "La source du modèle a changé (le SQL a été mis à jour). Voici le DIFF de schéma "
+            "à répercuter sur les données de test :\n"
+            f"{delta_txt}\n\n"
+            "Applique le CHANGEMENT MINIMAL sur CHAQUE test existant "
+            f"({uids}) en UN SEUL appel `data_batch` regroupant toutes les opérations :\n"
+            "- TABLE AJOUTÉE → ajoute des lignes cohérentes (mêmes clés de JOIN que les "
+            "lignes existantes des autres tables) via `add_test_row` ;\n"
+            "- TABLE RETIRÉE → retire ses lignes via `remove_test_row` ;\n"
+            "- COLONNES AJOUTÉES/RETIRÉES → ajuste uniquement ces champs via "
+            "`patch_test_field`.\n"
+            "⚠️ NE touche à AUCUNE autre table, ligne ou valeur : tout ce qui n'est pas dans "
+            "le diff doit rester identique. N'emploie `update_test_data` (régénération "
+            "complète d'un test) qu'en dernier recours si un patch ciblé est impossible. "
+            "Utilise `run_cte` d'abord si tu dois vérifier des valeurs réelles."
+        )
+        messages_for_llm = messages_for_llm + [HumanMessage(content=trigger)]
+    elif is_auto_correct:
         failing_test_obj = next(
             (
                 t

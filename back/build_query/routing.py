@@ -62,6 +62,28 @@ async def routing(state: QueryState):
         logger.diag("[routing] → resume_batch (reprise boucle multi-tests)")
         return {"route": "resume_batch"}
 
+    # Régénération PARTIELLE sur changement de source (sql_update + partial_regen) : au lieu
+    # de réécrire toutes les données via le générateur, on patche de façon incrémentale les
+    # tests existants via l'agent (schema_diff_to_agent). Conditions : un delta de schéma est
+    # présent, des tests existent, et le delta est « assez petit » pour un patch ciblé — sinon
+    # on retombe sur le comportement historique (generator, regen complète).
+    if (
+        state.get("partial_regen")
+        and state.get("has_existing_tests")
+        and state.get("used_columns_delta")
+    ):
+        from build_query.validator import is_delta_patchable
+
+        delta = state["used_columns_delta"]
+        if is_delta_patchable(delta, state.get("used_columns")):
+            logger.diag(
+                "[routing] → schema_diff (régénération partielle, delta patchable)"
+            )
+            return {"route": "schema_diff"}
+        logger.diag(
+            "[routing] partial_regen demandé mais delta trop gros → generator (regen complète)"
+        )
+
     user_tables = state.get("user_tables")
     if user_tables:
         logger.diag("[routing] → executor (user_tables présent)")
