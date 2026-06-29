@@ -238,11 +238,12 @@ async def _run_one_case(
     from utils.insert_examples import insert_examples, replace_missing_with_null
 
     test_index = str(test_case.get("test_index", "0"))
-    name = (
-        test_case.get("unit_test_description")
-        or test_case.get("test_name")
-        or f"Test {test_index}"
-    )
+    # Titre court (`test_name`, 3–6 mots) affiché en tête de chaque test ; la
+    # `unit_test_description` (phrase complète) sert de sous-ligne descriptive.
+    test_name = (test_case.get("test_name") or "").strip()
+    description = (test_case.get("unit_test_description") or "").strip()
+    name = test_name or description or f"Test {test_index}"
+    meta = {"name": name, "description": description}
     data: dict = test_case.get("data") or {}
     saved_assertions = [
         a for a in (test_case.get("assertion_results") or []) if a.get("sql")
@@ -251,7 +252,7 @@ async def _run_one_case(
     if not data:
         return {
             "index": test_index,
-            "name": name,
+            **meta,
             "status": "skip",
             "reason": "no data",
             "assertions": [],
@@ -259,7 +260,7 @@ async def _run_one_case(
     if not saved_assertions:
         return {
             "index": test_index,
-            "name": name,
+            **meta,
             "status": "skip",
             "reason": "no assertions",
             "assertions": [],
@@ -308,14 +309,14 @@ async def _run_one_case(
         all_passed = all(a.get("passed", False) for a in assertion_results)
         return {
             "index": test_index,
-            "name": name,
+            **meta,
             "status": "pass" if all_passed else "fail",
             "assertions": assertion_results,
         }
     except Exception as exc:
         return {
             "index": test_index,
-            "name": name,
+            **meta,
             "status": "error",
             "error": str(exc),
             "assertions": [],
