@@ -510,14 +510,18 @@ export const buildModelSlice = createSlice({
         state.streamingReasoning = undefined;
         state.lastReasoning = undefined;
         state.retryBadDataTestIndex = undefined;
-        const { testIndex, assertionOnly, validateIntent } = action.meta.arg;
+        const { testIndex, assertionOnly, validateIntent, applyDescriptionIntent, rejectDescriptionIntent } = action.meta.arg;
         state.loadingTestIndex = testIndex;
-        // « Je valide l'état actuel » : ce n'est PAS une régénération. Les données, résultats
-        // et assertions stockés restent valides (input + SQL inchangés) — accept_validation ne
-        // ré-exécute rien. Passer le test en `pending` afficherait un loader « Exécution… » qui
-        // ne se résoudrait jamais (aucun message RESULTS ne suit). On garde donc l'état affiché ;
-        // seuls la description (UPDATE_TEST) et le verdict (EVALUATION) seront mis à jour.
-        if (testIndex !== undefined && state.testResults?.length && !validateIntent) {
+        // « Je valide l'état actuel » (validateIntent) ainsi que l'application/refus d'une
+        // description proposée (applyDescriptionIntent / rejectDescriptionIntent) ne sont PAS des
+        // régénérations : ce sont des actions déterministes (accept_validation / apply_description /
+        // reject_description) qui routent direct vers history_saver sans repasser par l'executor.
+        // Les données, résultats et assertions stockés restent valides (input + SQL inchangés) —
+        // rien n'est ré-exécuté. Passer le test en `pending` afficherait un loader « Exécution
+        // DuckDB… » qui ne se résoudrait jamais (aucun message RESULTS ne suit). On garde donc
+        // l'état affiché ; seuls la description (UPDATE_TEST) et le verdict (EVALUATION) seront mis à jour.
+        const isDeterministicTestOp = validateIntent || applyDescriptionIntent || rejectDescriptionIntent;
+        if (testIndex !== undefined && state.testResults?.length && !isDeterministicTestOp) {
           state.testResults = state.testResults.map((t: any) => {
             if (t.test_index !== testIndex) return t;
             if (assertionOnly) {
