@@ -351,6 +351,21 @@ export interface ChatQueryParams {
   applyDescriptionIntent?: boolean;   // « Appliquer » une description proposée par l'agent
   rejectDescriptionIntent?: boolean;  // « Garder l'actuelle » — écarte la proposition
   testsTarget?: number;      // N tests à générer d'emblée (1–3, total) — boucle multi-tests
+  partialRegen?: boolean;    // changement de source : patcher les tests de façon incrémentale (delta) plutôt que tout régénérer
+  schemaDelta?: SchemaDelta | null; // diff de schéma (tables/colonnes ajoutées/retirées) renvoyé par validateQueryApi
+}
+
+// Diff structuré entre l'ancien et le nouveau schéma utilisé (used_columns), calculé par le
+// backend (validator.compute_used_columns_delta). Pilote la régénération PARTIELLE des tests.
+export interface SchemaDeltaEntry {
+  table: string;
+  columns: string[];
+}
+export interface SchemaDelta {
+  tables_added: SchemaDeltaEntry[];
+  tables_removed: SchemaDeltaEntry[];
+  columns_added: SchemaDeltaEntry[];
+  columns_removed: SchemaDeltaEntry[];
 }
 
 

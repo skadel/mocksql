@@ -145,6 +145,41 @@ async def _bad_data_to_agent(state: QueryState):
     return update
 
 
+def _format_schema_delta(delta: dict) -> str:
+    """Rend le delta de schéma (tables/colonnes ajoutées/retirées) en texte lisible
+    pour le diagnostic injecté à l'agent."""
+    lines: list[str] = []
+    for entry in delta.get("tables_added", []):
+        cols = ", ".join(entry.get("columns") or [])
+        lines.append(f"  • TABLE AJOUTÉE : {entry['table']} (colonnes : {cols})")
+    for entry in delta.get("tables_removed", []):
+        cols = ", ".join(entry.get("columns") or [])
+        lines.append(f"  • TABLE RETIRÉE : {entry['table']} (colonnes : {cols})")
+    for entry in delta.get("columns_added", []):
+        cols = ", ".join(entry.get("columns") or [])
+        lines.append(f"  • COLONNES AJOUTÉES sur {entry['table']} : {cols}")
+    for entry in delta.get("columns_removed", []):
+        cols = ", ".join(entry.get("columns") or [])
+        lines.append(f"  • COLONNES RETIRÉES sur {entry['table']} : {cols}")
+    return "\n".join(lines)
+
+
+async def _schema_diff_to_agent(state: QueryState):
+    """Entrée de la régénération PARTIELLE des tests sur changement de source.
+
+    Pose ``auto_correct`` (l'agent prend sa branche de correction automatique malgré
+    l'absence d'``input``) et ``rerun_all_tests`` (le patch doit ré-exécuter TOUS les tests
+    existants, pas juste un). Le delta de schéma est déjà dans ``state['used_columns_delta']``
+    (fourni par le front, calculé par ``compute_used_columns_delta`` à la validation) et sera
+    rendu dans le trigger de l'agent.
+
+    Objectif « changement minimal » : l'agent ne doit toucher QUE les tables/colonnes du delta,
+    en réutilisant les outils ``add_test_row`` / ``remove_test_row`` / ``patch_test_field``
+    (regroupés en un ``data_batch`` multi-tests). Le garde-fou ``route_agent_output`` retombe
+    sur le ``generator`` (regen complète) si l'agent ne produit rien d'actionnable."""
+    return {"auto_correct": True, "rerun_all_tests": True}
+
+
 async def _bad_data_exhausted(state: QueryState):
     """Signal the frontend that bad_data retries are exhausted — show retry button."""
     return {
@@ -559,6 +594,7 @@ def build_query_graph():
     add_timed_node("assertion_corrector", correct_assertions)
     add_timed_node("test_evaluator", evaluate_tests)
     add_timed_node("bad_data_to_agent", _bad_data_to_agent)
+    add_timed_node("schema_diff_to_agent", _schema_diff_to_agent)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
     add_timed_node("suggestions_generator", generate_suggestions)
     add_timed_node("generate_single_suggestion", generate_single_suggestion)
@@ -583,6 +619,9 @@ def build_query_graph():
         if route == "conversational_agent":
             logger.diag("[route_input] → conversational_agent")
             return "conversational_agent"
+        if route == "schema_diff":
+            logger.diag("[route_input] → schema_diff_to_agent (régénération partielle)")
+            return "schema_diff_to_agent"
         if route == "assertion_modifier":
             logger.diag("[route_input] → assertion_modifier")
             return "assertion_modifier"
@@ -650,6 +689,7 @@ def build_query_graph():
     builder.add_edge("assertion_generator", "test_evaluator")
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("bad_data_to_agent", "conversational_agent")
+    builder.add_edge("schema_diff_to_agent", "conversational_agent")
     builder.add_edge("bad_data_exhausted", "history_saver")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_conditional_edges("suggestions_generator", route_after_suggestions)

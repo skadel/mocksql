@@ -17,6 +17,7 @@ import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { Container } from '../../../style/StyledComponents';
 import { getLastMessage } from '../../../utils/messages';
 import MissingTablesAlert from './MissingTablesAlert';
+import TestDataDiff from './TestDataDiff';
 import TestsPanel from './TestsPanel';
 import DuckDBFooter from './DuckDBFooter';
 import ChatColumn from './ChatColumn';
@@ -34,7 +35,7 @@ import { setCurrentId } from '../../appBar/appBarSlice';
 import { setError, setQueryComponentGraph, setQuery, setOptimizedQuery, setTestResults, dismissSuggestion, dismissDescriptionProposal, pushSqlHistory, setRestoredMessageId as setRestoredMessageIdAction, setWorkspaceMode, resetContext, resetMessages, setLoadingMessage } from '../buildModelSlice';
 import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi } from '../../../api/messages';
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
-import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
+import { ChatQueryParams, ProfileRequest, SqlHistoryEntry, SchemaDelta } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
 
 // Dialect is read from the current project — fallback to bigquery for backward compat.
@@ -153,6 +154,19 @@ const ChatComponent: React.FC = () => {
   const [sqlCollapseSignal, setSqlCollapseSignal] = useState(0);
   const [assertionOnly, setAssertionOnly] = useState(false);
   const [pendingFileSql, setPendingFileSql] = useState<string | null>(null);
+  // Confirmation de régénération sur changement de source : quand la validation détecte que
+  // les colonnes/tables utilisées ont changé, on demande à l'utilisateur s'il veut patcher
+  // les tests de façon incrémentale (delta) ou tout réécrire — au lieu de régénérer d'office.
+  const [schemaChangePrompt, setSchemaChangePrompt] = useState<{
+    newSql: string;
+    reevaluate: boolean;
+    parentId: string;
+    optimizedSql: string;
+    delta: SchemaDelta;
+  } | null>(null);
+  // Snapshot des données d'entrée AVANT un patch partiel — sert à afficher le diff de données.
+  const [preUpdateSnapshot, setPreUpdateSnapshot] = useState<any[] | null>(null);
+  const [showDataDiff, setShowDataDiff] = useState(false);
   // Messages tapés pendant qu'une génération est en cours : mis en file côté front,
   // affichés en « en attente » dans le fil, puis traités automatiquement et dans l'ordre
   // une fois le run terminé. Jamais injectés dans le run en cours. queuedRef = source de
@@ -854,6 +868,50 @@ const ChatComponent: React.FC = () => {
     return handleSendMessage(text);
   }, [loading, isSending, enqueueMessage, handleSendMessage]);
 
+  // -------- Lance effectivement la mise à jour SQL (commune aux deux chemins : régénération
+  // complète OU patch partiel sur changement de source). En mode partiel on snapshot d'abord
+  // les données d'entrée actuelles pour pouvoir afficher le diff de données après le patch.
+  const finalizeSqlUpdate = useCallback(
+    async (
+      newSql: string,
+      reevaluate: boolean,
+      effectiveParentId: string,
+      resolvedOptimizedSql: string,
+      partialRegen: boolean,
+      schemaDelta: SchemaDelta | null,
+    ) => {
+      if (!currentModelId) return;
+      setIsSending(true);
+      if (partialRegen) {
+        // Copie profonde des données d'entrée courantes (avant patch) pour le diff.
+        try {
+          setPreUpdateSnapshot(JSON.parse(JSON.stringify(testResults || [])));
+        } catch { setPreUpdateSnapshot(null); }
+      }
+      dispatch(pushSqlHistory({ id: uuidv4(), sql: newSql, optimizedSql: resolvedOptimizedSql, parentMessageId: effectiveParentId }));
+      try {
+        await dispatchChatQuery({
+          userInput: '',
+          sessionId: currentModelId,
+          project: '',
+          dialect: DIALECT,
+          query: newSql,
+          ChangedMessageId: '',
+          t,
+          parentMessageId: effectiveParentId,
+          context: 'sql_update',
+          reevaluate,
+          silent: true,
+          partialRegen,
+          schemaDelta,
+        }).unwrap?.();
+      } catch { /* mise à jour SQL best-effort */ }
+      setSqlDirty(false);
+      setIsSending(false);
+    },
+    [currentModelId, dispatch, t, testResults, dispatchChatQuery]
+  );
+
   // -------- SQL bar update (re-run with new SQL)
   const handleSQLUpdate = useCallback(
     async (newSql: string, reevaluate = false) => {
@@ -869,6 +927,7 @@ const ChatComponent: React.FC = () => {
       setRestoredMessageId(undefined);
 
       let resolvedOptimizedSql = optimizedSql;
+      let detectedDelta: SchemaDelta | null = null;
 
       if (skipValidationRef.current) {
         skipValidationRef.current = false;
@@ -895,32 +954,32 @@ const ChatComponent: React.FC = () => {
           }
           resolvedOptimizedSql = validateResult.optimized_sql ?? '';
           setOptimizedSql(resolvedOptimizedSql);
+          if (validateResult.used_columns_changed && validateResult.schema_delta) {
+            detectedDelta = validateResult.schema_delta;
+          }
         } catch {
           setSubmitError(t('errors.validation_error'));
           setIsSending(false);
           return;
         }
       }
-      dispatch(pushSqlHistory({ id: uuidv4(), sql: newSql, optimizedSql: resolvedOptimizedSql, parentMessageId: effectiveParentId }));
-      try {
-        await dispatchChatQuery({
-          userInput: '',
-          sessionId: currentModelId,
-          project: '',
-          dialect: DIALECT,
-          query: newSql,
-          ChangedMessageId: '',
-          t,
-          parentMessageId: effectiveParentId,
-          context: 'sql_update',
+
+      // Diff de schéma détecté + tests existants → demander à l'utilisateur (régénération
+      // partielle vs complète) au lieu de réécrire d'office. Sinon, mise à jour SQL normale.
+      if (detectedDelta && (testResults?.length ?? 0) > 0) {
+        setSchemaChangePrompt({
+          newSql,
           reevaluate,
-          silent: true,
-        }).unwrap?.();
-      } catch { /* mise à jour SQL best-effort */ }
-      setSqlDirty(false);
-      setIsSending(false);
+          parentId: effectiveParentId,
+          optimizedSql: resolvedOptimizedSql,
+          delta: detectedDelta,
+        });
+        setIsSending(false); // en attente du choix utilisateur ; finalizeSqlUpdate reprend
+        return;
+      }
+      await finalizeSqlUpdate(newSql, reevaluate, effectiveParentId, resolvedOptimizedSql, false, null);
     },
-    [isSending, currentModelId, optimizedSql, renderMessages, selectedChildIndices, dispatch, t, restoredMessageId]
+    [isSending, currentModelId, optimizedSql, renderMessages, selectedChildIndices, dispatch, t, restoredMessageId, testResults, finalizeSqlUpdate]
   );
 
   // -------- Re-run pur : ré-exécute tous les tests existants SANS présenter ça comme
@@ -2035,6 +2094,77 @@ const ChatComponent: React.FC = () => {
             <DuckDBFooter />
           </Box>
         </Box>
+      )}
+
+      {/* ── Confirmation de régénération sur changement de source ── */}
+      {schemaChangePrompt && (
+        <Dialog open maxWidth="sm" fullWidth onClose={() => setSchemaChangePrompt(null)}>
+          <DialogTitle>Le schéma utilisé a changé</DialogTitle>
+          <DialogContent dividers>
+            <Typography variant="body2" sx={{ color: '#555', mb: 1.5 }}>
+              La mise à jour du SQL modifie les tables/colonnes utilisées. MockSQL peut
+              répercuter ce changement sur tes tests <strong>de façon minimale</strong> (patch
+              incrémental : seules les données impactées bougent, le reste est conservé), ou
+              tout réécrire.
+            </Typography>
+            <Box sx={{ fontFamily: 'monospace', fontSize: 12, color: '#5f6368', bgcolor: '#fafafa', border: '1px solid #e0e0e0', borderRadius: 1, p: 1 }}>
+              {schemaChangePrompt.delta.tables_added.map((e) => (
+                <Box key={`ta-${e.table}`} sx={{ color: '#137333' }}>+ table {e.table}</Box>
+              ))}
+              {schemaChangePrompt.delta.tables_removed.map((e) => (
+                <Box key={`tr-${e.table}`} sx={{ color: '#c5221f' }}>− table {e.table}</Box>
+              ))}
+              {schemaChangePrompt.delta.columns_added.map((e) => (
+                <Box key={`ca-${e.table}`} sx={{ color: '#137333' }}>+ {e.table} : {e.columns.join(', ')}</Box>
+              ))}
+              {schemaChangePrompt.delta.columns_removed.map((e) => (
+                <Box key={`cr-${e.table}`} sx={{ color: '#c5221f' }}>− {e.table} : {e.columns.join(', ')}</Box>
+              ))}
+            </Box>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setSchemaChangePrompt(null)}>Annuler</Button>
+            <Button
+              onClick={() => {
+                const p = schemaChangePrompt;
+                setSchemaChangePrompt(null);
+                finalizeSqlUpdate(p.newSql, p.reevaluate, p.parentId, p.optimizedSql, false, null);
+              }}
+            >
+              Tout réécrire
+            </Button>
+            <Button
+              variant="contained"
+              onClick={() => {
+                const p = schemaChangePrompt;
+                setSchemaChangePrompt(null);
+                finalizeSqlUpdate(p.newSql, p.reevaluate, p.parentId, p.optimizedSql, true, p.delta);
+              }}
+            >
+              Régénérer (minimal)
+            </Button>
+          </DialogActions>
+        </Dialog>
+      )}
+
+      {/* ── Accès au diff des données après un patch partiel ── */}
+      {preUpdateSnapshot && !loading && (
+        <Button
+          size="small"
+          variant="outlined"
+          onClick={() => setShowDataDiff(true)}
+          sx={{ position: 'fixed', bottom: 16, right: 16, zIndex: 1300, bgcolor: 'white', textTransform: 'none' }}
+        >
+          Voir les changements de données
+        </Button>
+      )}
+      {showDataDiff && (
+        <TestDataDiff
+          open
+          before={preUpdateSnapshot || []}
+          after={testResults || []}
+          onClose={() => setShowDataDiff(false)}
+        />
       )}
 
       {/* ── Auto-profiling confirmation dialog ── */}

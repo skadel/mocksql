@@ -185,6 +185,18 @@ async def validate_query_route(body: ValidateQueryRequest):
         except Exception:
             pass
 
+    # Diff de schéma (avant d'écraser used_columns en base) : pilote la régénération
+    # PARTIELLE des tests côté front. La comparaison se fait contre l'ancien used_columns
+    # stocké sur la session, pas contre le state (vide) du endpoint.
+    old_used_columns = (cached_session or {}).get("used_columns") or []
+    schema_delta = None
+    used_columns_changed = False
+    if old_used_columns:
+        from build_query.validator import compute_used_columns_delta
+
+        schema_delta = compute_used_columns_delta(old_used_columns, used_columns)
+        used_columns_changed = any(schema_delta.values())
+
     if body.session:
         model_name = (cached_session or {}).get("model_name", "")
         source_sha = get_model_file_git_sha(model_name) if model_name else None
@@ -211,6 +223,8 @@ async def validate_query_route(body: ValidateQueryRequest):
         "optimized_sql": optimized_sql,
         "sql_message_id": "",
         "sql_history_id": "",
+        "used_columns_changed": used_columns_changed,
+        "schema_delta": schema_delta,
     }
 
 

@@ -590,18 +590,20 @@ async def run_on_examples(state: "QueryState") -> Dict[str, Any]:
     if rerun_all:
         # Charger tous les tests existants depuis la DB
         existing_tests = _load_existing_tests(state["session"])
-        # Ajouter/remplacer avec le nouveau test du générateur (s'il y en a un)
+        # Ajouter/remplacer avec les nouveaux tests produits ce tour (générateur OU patch
+        # incrémental). On fusionne TOUS les messages EXAMPLES, pas seulement le dernier :
+        # la régénération partielle (schema_diff) patche plusieurs tests en un seul tour et
+        # émet un message EXAMPLES par test — il faut tous les appliquer.
         examples_msgs = examples_state_retriever(state)
-        if examples_msgs:
-            new_test = json.loads(examples_msgs[-1].content)
-            if isinstance(new_test, dict):
-                merged = {t["test_index"]: t for t in existing_tests}
+        merged = {t["test_index"]: t for t in existing_tests}
+        for m in examples_msgs:
+            try:
+                new_test = json.loads(m.content)
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if isinstance(new_test, dict) and "test_index" in new_test:
                 merged[new_test["test_index"]] = new_test
-                unit_tests = sorted(merged.values(), key=lambda x: int(x["test_index"]))
-            else:
-                unit_tests = existing_tests
-        else:
-            unit_tests = existing_tests
+        unit_tests = sorted(merged.values(), key=lambda x: int(x["test_index"]))
     else:
         unit_tests = _parse_unit_tests_from_state(state)
         if unit_tests is None:
