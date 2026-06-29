@@ -56,6 +56,11 @@ const countUsedColumns = (usedColumns: unknown[] | undefined): number =>
 const estimateGenerationMinutes = (nUsedCols: number, testsTarget: number): number =>
   Math.max(1, Math.round((nUsedCols / COLS_PER_MINUTE) * Math.max(1, testsTarget)));
 
+// Formate un volume de scan BigQuery (en To) pour l'affichage. En dessous de
+// 0.001 To l'arrondi à 3 décimales donne "0.000" — trompeur car ce n'est pas
+// gratuit — donc on bascule sur "<0.001". Même convention que le chip du popup.
+const formatTb = (tb: number): string => (tb < 0.001 ? '<0.001' : tb.toFixed(3));
+
 const ChatComponent: React.FC = () => {
   const { t } = useTranslation();
   const dispatch = useAppDispatch();
@@ -1923,30 +1928,49 @@ const ChatComponent: React.FC = () => {
                 onClose={() => setAutoProfileWarning(null)}
               />
             )}
-            {partialProfile && (
+            {partialProfile && (() => {
+              // Coût restant si l'utilisateur complète le profil : somme des scans
+              // estimés des scopes différés (BigQuery, To). Affiché pour qu'il sache
+              // combien il paiera en plus avant de cliquer « Compléter le profil ».
+              const remainingTb = partialProfile.deferred.reduce((sum, d) => sum + (d.billing_tb || 0), 0);
+              const hasEstimate = remainingTb > 0;
+              return (
               <Alert
                 severity="info"
                 icon={<InfoOutlinedIcon fontSize="inherit" />}
                 onClose={() => setPartialProfile(null)}
                 sx={{ mb: 1, borderRadius: 2, alignItems: 'center' }}
                 action={
-                  <Button
-                    color="inherit"
-                    size="small"
-                    disabled={isAutoProfileRunning}
-                    onClick={handleCompleteProfile}
-                    startIcon={isAutoProfileRunning ? <CircularProgress size={13} /> : undefined}
-                    sx={{ textTransform: 'none', fontWeight: 700, whiteSpace: 'nowrap' }}
-                  >
-                    {isAutoProfileRunning ? 'Profilage…' : 'Compléter le profil'}
-                  </Button>
+                  <Tooltip title={hasEstimate ? `Scan BigQuery estimé : ~${formatTb(remainingTb)} To facturés` : ''}>
+                    <Button
+                      color="inherit"
+                      size="small"
+                      disabled={isAutoProfileRunning}
+                      onClick={handleCompleteProfile}
+                      startIcon={isAutoProfileRunning ? <CircularProgress size={13} /> : undefined}
+                      sx={{ textTransform: 'none', fontWeight: 700, whiteSpace: 'nowrap' }}
+                    >
+                      {isAutoProfileRunning
+                        ? 'Profilage…'
+                        : hasEstimate
+                          ? `Compléter le profil (~${formatTb(remainingTb)} To)`
+                          : 'Compléter le profil'}
+                    </Button>
+                  </Tooltip>
                 }
               >
                 Profil partiel — {partialProfile.deferred.length} {partialProfile.deferred.length > 1 ? 'tables ont été différées' : 'table a été différée'}
                 {partialProfile.budget != null ? ` (scan estimé > ${partialProfile.budget} To)` : ''} :{' '}
-                {partialProfile.deferred.map((d) => d.scope).join(', ')}. La génération utilise le profil disponible ; complète-le si besoin.
+                {partialProfile.deferred
+                  .map((d) => (d.billing_tb ? `${d.scope} (~${formatTb(d.billing_tb)} To)` : d.scope))
+                  .join(', ')}
+                . La génération utilise le profil disponible.{' '}
+                {hasEstimate
+                  ? `Compléter le profil scannera ~${formatTb(remainingTb)} To supplémentaires sur BigQuery (0 € sinon).`
+                  : 'Complète-le si besoin.'}
               </Alert>
-            )}
+              );
+            })()}
             <Box sx={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
               <TestsPanel
                 onAddTest={handleAddTest}
