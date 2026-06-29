@@ -128,18 +128,39 @@ const DrawerComponent: React.FC = () => {
           }}
         >
           <Box
+            component={RouterLink}
+            to="/"
+            onClick={(e: React.MouseEvent) => {
+              // Laisser le navigateur gérer ctrl/cmd/clic-molette (nouvel onglet)
+              // sans réinitialiser l'état de l'onglet courant.
+              if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return;
+              dispatch(setCurrentId(''));
+              dispatch(resetContext());
+            }}
             sx={{
-              width: 30, height: 30, borderRadius: '8px',
-              bgcolor: TEAL, color: '#fff',
-              display: 'grid', placeItems: 'center', flexShrink: 0,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              flex: 1,
+              minWidth: 0,
+              textDecoration: 'none',
+              color: 'inherit',
             }}
           >
-            <DbIcon />
-          </Box>
+            <Box
+              sx={{
+                width: 30, height: 30, borderRadius: '8px',
+                bgcolor: TEAL, color: '#fff',
+                display: 'grid', placeItems: 'center', flexShrink: 0,
+              }}
+            >
+              <DbIcon />
+            </Box>
 
-          <Typography sx={{ fontSize: 14, fontWeight: 700, color: INK, flex: 1, letterSpacing: '-0.2px' }}>
-            MockSQL
-          </Typography>
+            <Typography sx={{ fontSize: 14, fontWeight: 700, color: INK, letterSpacing: '-0.2px' }}>
+              MockSQL
+            </Typography>
+          </Box>
 
           <Tooltip title="Rafraîchir la liste" placement="right">
             <IconButton
