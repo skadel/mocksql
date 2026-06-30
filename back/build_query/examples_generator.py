@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -281,6 +282,35 @@ def _run_simplify_and_hint(
         _hint_cache.pop(next(iter(_hint_cache)))
     _hint_cache[cache_key] = hint_str
     return sim_result, hint_str
+
+
+def _prepare_generation_constraints(sql: str, schema: list[dict] | None, dialect: str):
+    """Travail sqlglot pur-CPU de la génération, regroupé pour pouvoir être offloadé.
+
+    1) fail-fast sur un seuil HAVING insatisfiable ;
+    2) passe qualify + simplify + conditions-hint (coûteuse — plusieurs secondes sur
+       les requêtes larges).
+
+    Isolé en helper synchrone pour être poussé hors de la boucle asyncio via
+    :func:`_aprepare_generation_constraints` : un onglet qui analyse une requête large
+    ne doit pas figer les streams SSE des autres onglets.
+    """
+    from build_query.constraint_simplifier import check_having_cardinality
+
+    check_having_cardinality(sql, dialect)
+    return _run_simplify_and_hint(sql, schema=schema, dialect=dialect)
+
+
+async def _aprepare_generation_constraints(
+    sql: str, schema: list[dict] | None, dialect: str
+):
+    """Offloade :func:`_prepare_generation_constraints` sur un thread worker pour que
+    la passe sqlglot lourde ne bloque pas la boucle asyncio unique partagée par tous
+    les onglets ouverts. (Le GIL empêche le vrai parallélisme CPU, mais la boucle reste
+    libre pour faire avancer l'I/O LLM/DuckDB des autres sessions.)"""
+    return await asyncio.to_thread(
+        _prepare_generation_constraints, sql, schema, dialect
+    )
 
 
 def _strip_unconstrained_from_sql(
@@ -936,17 +966,15 @@ async def generate_examples_(
             {**state, "target_path": target_path}
         )
 
-    # Fail fast if the query has an unsatisfiable HAVING threshold
-    from build_query.constraint_simplifier import check_having_cardinality
     from utils.timing import timed
 
-    check_having_cardinality(optimized_sql, dialect)
-
-    # Single shared parse + qualify for both the SimplificationResult (reused for the
-    # mandatory set + unconstrained columns) and the conditions hint.
+    # Fail-fast HAVING + passe partagée parse/qualify/simplify/hint : travail sqlglot
+    # pur-CPU (plusieurs secondes sur requêtes larges) poussé hors de la boucle asyncio
+    # pour ne pas figer les streams SSE des autres onglets. Le `check_having_cardinality`
+    # interne peut lever — l'exception est re-levée telle quelle par `to_thread`.
     with timed("gen:simplify+hint"):
-        sim_result, constraints = _run_simplify_and_hint(
-            optimized_sql, schema=schema, dialect=dialect
+        sim_result, constraints = await _aprepare_generation_constraints(
+            optimized_sql, schema, dialect
         )
 
     logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
