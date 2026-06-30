@@ -112,6 +112,10 @@ const paginationBtnSx = {
 
 const MAX_LENGTH = 120;
 
+/** Pagination client par défaut quand l'API ne pagine pas (données locales DuckDB). */
+const CLIENT_PAGE_SIZE = 50;
+const CLIENT_PAGE_OPTIONS = [25, 50, 100];
+
 const DisplayTable: React.FC<DisplayTableProps> = ({
   jsonData,
   tableName,
@@ -123,6 +127,9 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
   const { t } = useTranslation();
   const [loading, setLoading] = React.useState(false);
   const [expandedCells, setExpandedCells] = React.useState<Set<string>>(new Set());
+  // Pagination client (utilisée seulement quand l'API ne renvoie pas de `meta`).
+  const [clientPage, setClientPage] = React.useState(0);
+  const [clientRowsPerPage, setClientRowsPerPage] = React.useState(CLIENT_PAGE_SIZE);
 
   React.useEffect(() => {
     if (!loading) return;
@@ -138,6 +145,24 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
     const firstValidRow = dataArray.find((r) => r && typeof r === "object");
     return firstValidRow ? Object.keys(firstValidRow) : [];
   }, [dataArray]);
+
+  // Pagination client : active uniquement sans pagination serveur (`meta`) et au-delà
+  // de la taille de page par défaut, pour ne pas tout rendre d'un coup.
+  const clientPaginated = !meta && dataArray.length > CLIENT_PAGE_SIZE;
+
+  React.useEffect(() => {
+    setClientPage(0);
+  }, [dataArray]);
+
+  // Lignes effectivement rendues : déjà tranchées par le serveur (`meta`), sinon
+  // découpées localement quand la pagination client est active.
+  const visibleRows = React.useMemo(() => {
+    if (!clientPaginated) return dataArray;
+    const start = clientPage * clientRowsPerPage;
+    return dataArray.slice(start, start + clientRowsPerPage);
+  }, [dataArray, clientPaginated, clientPage, clientRowsPerPage]);
+
+  const rowOffset = clientPaginated ? clientPage * clientRowsPerPage : 0;
 
   const currentPage = React.useMemo(
     () => (meta ? Math.floor(meta.offset / meta.limit) : 0),
@@ -265,7 +290,9 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
               </TableRow>
             </TableHead>
             <TableBody>
-              {dataArray.map((row, rowIdx) => (
+              {visibleRows.map((row, i) => {
+                const rowIdx = rowOffset + i;
+                return (
                 <TableRow
                   key={rowIdx}
                   sx={{
@@ -329,7 +356,8 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
                     );
                   })}
                 </TableRow>
-              ))}
+                );
+              })}
             </TableBody>
           </Table>
 
@@ -349,6 +377,38 @@ const DisplayTable: React.FC<DisplayTableProps> = ({
                 onPageChange={handlePageChange}
                 onRowsPerPageChange={handleRowsPerPageChange}
                 rowsPerPageOptions={[10, 20, 50, 100]}
+                labelRowsPerPage={t("rows_per_page")}
+                ActionsComponent={TablePaginationActions}
+                sx={{
+                  "& .MuiTablePagination-selectLabel, & .MuiTablePagination-displayedRows": {
+                    fontSize: "0.78rem",
+                    color: "text.secondary",
+                  },
+                  "& .MuiSelect-select": { fontSize: "0.78rem" },
+                }}
+              />
+            </Box>
+          )}
+
+          {/* Pagination client (données locales, pas de pagination serveur) */}
+          {clientPaginated && (
+            <Box
+              sx={{
+                borderTop: `1px solid ${BORDER_COLOR}`,
+                backgroundColor: "#f9fafb",
+              }}
+            >
+              <TablePagination
+                component="div"
+                count={dataArray.length}
+                page={clientPage}
+                rowsPerPage={clientRowsPerPage}
+                onPageChange={(_e, newPage) => setClientPage(newPage)}
+                onRowsPerPageChange={(e) => {
+                  setClientRowsPerPage(parseInt(e.target.value, 10));
+                  setClientPage(0);
+                }}
+                rowsPerPageOptions={CLIENT_PAGE_OPTIONS}
                 labelRowsPerPage={t("rows_per_page")}
                 ActionsComponent={TablePaginationActions}
                 sx={{
