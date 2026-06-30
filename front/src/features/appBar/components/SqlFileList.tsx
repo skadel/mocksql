@@ -14,7 +14,9 @@ import { useTranslation } from 'react-i18next';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { resetContext, setTestResults } from '../../buildModel/buildModelSlice';
 import { patchModelTests } from '../../../api/messages';
+import { deleteModel } from '../../../api/models';
 import { setCurrentId } from '../appBarSlice';
+import ConfirmationDialog from '../../../shared/ConfirmationDialog';
 import { Model } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
 import { getVerdictInfo } from '../../../utils/verdict';
@@ -188,6 +190,7 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
   const dispatch = useAppDispatch();
   const navigate = useNavigate();
   const { t } = useTranslation();
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const isTested = model.isTested ?? true;
   const isActive = isTested && model.session_id === currentModelId;
 
@@ -199,6 +202,18 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
     } else {
       navigate(`/?model=${encodeURIComponent(model.session_id)}`);
     }
+  };
+
+  const handleConfirmDelete = () => {
+    setConfirmOpen(false);
+    // Si on supprime le modèle actuellement ouvert, on quitte la vue avant le retrait
+    // de la liste pour éviter de pointer vers un /models/{id} qui n'existe plus.
+    if (isActive) {
+      dispatch(resetContext());
+      dispatch(setCurrentId(''));
+      navigate('/');
+    }
+    dispatch(deleteModel(model.session_id));
   };
 
   const testResults: any[] = useAppSelector(s => s.buildModel.testResults ?? []);
@@ -221,6 +236,7 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
           cursor: 'pointer',
           bgcolor: isActive ? '#e6f4f3' : 'transparent',
           '&:hover': { bgcolor: isActive ? '#e6f4f3' : '#edf0f1' },
+          '&:hover .model-delete-btn': { opacity: 1 },
           transition: 'background .12s',
         }}
       >
@@ -257,10 +273,32 @@ const FileRow: React.FC<FileRowProps> = ({ model, depth, currentModelId }) => {
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: TEAL }}>{testCount}</Typography>
           </Box>
         )}
+        {isTested && (
+          <Tooltip title="Supprimer ce modèle et tous ses tests">
+            <IconButton
+              className="model-delete-btn"
+              size="small"
+              data-testid={`delete-model-${model.name || model.session_id}`}
+              onClick={(e) => { e.stopPropagation(); setConfirmOpen(true); }}
+              sx={{ p: '2px', opacity: 0, transition: 'opacity .12s', color: '#8a9ba0', flexShrink: 0, '&:hover': { color: '#d0503f' } }}
+            >
+              <DeleteOutlineIcon sx={{ fontSize: 14 }} />
+            </IconButton>
+          </Tooltip>
+        )}
       </Box>
       {isActive && testCount > 0 && (
         <SidebarTestList modelId={model.session_id} depth={depth} />
       )}
+      <ConfirmationDialog
+        open={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        onConfirm={handleConfirmDelete}
+        title="Supprimer ce modèle ?"
+        message={`Tous les tests de « ${model.name || model.session_id} », leurs données et l'historique de conversation seront définitivement supprimés. Le fichier .sql source n'est pas affecté.`}
+        confirmText="Supprimer"
+        cancelText="Annuler"
+      />
     </>
   );
 };

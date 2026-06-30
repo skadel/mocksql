@@ -6,6 +6,7 @@ from build_query.complexity_scorer import (
     compute_complexity_score,
     compute_priority_score,
 )
+from models.message_service import delete_all_messages
 from storage.test_repository import (
     list_models,
     list_all_tests,
@@ -13,6 +14,7 @@ from storage.test_repository import (
     get_test,
     create_test,
     delete_test,
+    delete_model,
     read_model_sql,
     _test_path,
     _read_json,
@@ -188,6 +190,31 @@ async def create_test_route(body: CreateTestRequest):
     try:
         test = create_test(body.model_name)
         return JSONResponse(content=test, status_code=201)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/models/{session_id}")
+async def delete_model_route(session_id: str):
+    """Supprime intégralement un modèle testé : ses fichiers de test
+    (`.mocksql/tests/{model}.json` + cache gitignoré) ET toutes ses conversations
+    (`common_history`). Le `session_id` reçu est le `test_id`, qui sert de clé aux deux.
+
+    Le fichier `.sql` source dans `models_path` n'est jamais touché : on ne supprime que
+    les tests générés et leur historique, pas le modèle métier de l'utilisateur.
+    """
+    try:
+        model_name = delete_model(session_id)
+        if model_name is None:
+            raise HTTPException(status_code=404, detail="Model not found")
+        # Purge les conversations associées (même clé session_id que /clearHistory).
+        await delete_all_messages(session_id)
+        return JSONResponse(
+            status_code=200,
+            content={"ok": True, "session_id": session_id, "model_name": model_name},
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

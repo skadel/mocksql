@@ -3214,6 +3214,18 @@ def _build_one_derived_expr_branch(
     if has_qualified and has_unqualified:
         return None
 
+    # Guard: a self-join — several *distinct* aliases of the *same* physical
+    # table (e.g. a COALESCE over fcis9 … fcis4, each a LEFT JOIN of `fcis` on a
+    # shorter BIN prefix) — cannot be reconstructed here. The FROM/JOIN chain
+    # below is keyed by *physical table* (``query_tables`` is a set, one alias
+    # per table), so the aliases collapse to one (`FROM fcis AS fcis9`) leaving
+    # the others unbound → "Unrecognized name: fcis8". Skip rather than emit
+    # invalid SQL (best-effort enrichment).
+    qualified_aliases = {alias for alias, _ in col_refs if alias}
+    distinct_src_tables = {alias_map.get(a, a) for a in qualified_aliases}
+    if len(qualified_aliases) > len(distinct_src_tables):
+        return None
+
     # Determine the query-level tables to JOIN (using original aliases from the SQL)
     # These may be CTE names or base-table aliases — the WITH preamble handles CTEs.
     query_tables: set[str] = set()

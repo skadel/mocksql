@@ -3376,6 +3376,65 @@ class TestDerivedExprReusedAlias(unittest.TestCase):
             self._assert_no_forward_join_refs(broken)
 
 
+# ─── derived-expression profiling: self-join (same table, many aliases) ───────
+
+
+# Mirrors the production crash "Unrecognized name: fcis8; Did you mean fcis9?":
+# a BIN-fallback query that self-joins the same table (fcis) under several
+# *distinct explicit aliases* (fcis9 … fcis4), each on a shorter prefix.  The
+# COALESCE references every alias.  Because the FROM/JOIN chain is reconstructed
+# keyed by *physical table*, the six aliases collapse to one (`FROM fcis AS
+# fcis9`), leaving fcis8…fcis4 unbound — invalid SQL.  Such a self-join over one
+# physical table cannot be reconstructed table-keyed, so the branch is skipped.
+_DERIVED_SELF_JOIN_SQL = (
+    "WITH fcis AS (SELECT cd_bin FROM `DS.REF`), "
+    "bins AS (SELECT substr(no_carte, 1, 9) AS bin9 FROM `DS.SRC`) "
+    "SELECT bins.bin9, COALESCE(fcis9.cd_bin, fcis8.cd_bin) AS fcis_bin "
+    "FROM bins "
+    "LEFT JOIN fcis fcis9 ON substr(bins.bin9, 1, 9) = fcis9.cd_bin "
+    "  AND length(fcis9.cd_bin) = 9 "
+    "LEFT JOIN fcis fcis8 ON substr(bins.bin9, 1, 8) = fcis8.cd_bin "
+    "  AND length(fcis8.cd_bin) = 8"
+)
+
+
+class TestDerivedExprSelfJoin(unittest.TestCase):
+    """Regression for "Unrecognized name: fcis8; Did you mean fcis9?".
+
+    An expression referencing several distinct aliases of the *same* physical
+    table (a self-join) cannot be profiled by the table-keyed FROM/JOIN
+    reconstruction — the aliases collapse to one and the others go out of scope.
+    Such a branch must be skipped, not emitted as invalid SQL.
+    """
+
+    def test_self_join_expr_not_profiled(self):
+        branches = _build_derived_expr_profile_branches(
+            _DERIVED_SELF_JOIN_SQL, [], "bigquery"
+        )
+        # The collapsed FROM bound only fcis9 while the expression referenced
+        # fcis8 — no branch may leave a referenced alias unbound.
+        for b in branches:
+            self.assertNotIn(
+                "fcis8",
+                b,
+                "self-join derived expr must not be profiled with an unbound alias",
+            )
+
+    def test_non_self_join_expr_still_profiled(self):
+        # Two *different* tables under two aliases is a normal join, not a
+        # self-join — it must still be profiled.
+        sql = (
+            "WITH a AS (SELECT x FROM `DS.A`), b AS (SELECT y, k FROM `DS.B`) "
+            "SELECT COALESCE(ta.x, tb.y) AS v "
+            "FROM a ta JOIN b tb ON ta.x = tb.k"
+        )
+        branches = _build_derived_expr_profile_branches(sql, [], "bigquery")
+        self.assertTrue(
+            any("coalesce" in b.lower() for b in branches),
+            "a genuine two-table join expression should still be profiled",
+        )
+
+
 # ─── derived-expression profiling: partition bounding ────────────────────────
 
 
