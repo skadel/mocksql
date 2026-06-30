@@ -14,7 +14,7 @@ from storage.config import (
     get_preprocessor_fn,
     load_preprocessor_fn,
 )
-from storage.test_files import read_test_doc, write_test_doc
+from storage.test_files import cache_path_for, read_test_doc, write_test_doc
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -330,8 +330,61 @@ def delete_test(session_id: str, model_name: str) -> bool:
     data = _read_json(p)
     if not data or data.get("test_id") != session_id:
         return False
-    p.unlink()
+    _unlink_test_files(p)
     return True
+
+
+def _unlink_test_files(p: Path) -> None:
+    """Supprime le fichier de définition commité ET son cache sidecar gitignoré
+    (`.../cache/<rel>.json`). Sans ça, le cache (`results_json`, statuts, raisonnement…)
+    survit en orphelin après la suppression du modèle."""
+    cp = cache_path_for(p)
+    p.unlink(missing_ok=True)
+    if cp and cp.exists():
+        cp.unlink()
+
+
+def delete_model(session_id: str, model_name: Optional[str] = None) -> Optional[str]:
+    """Supprime intégralement un modèle testé : fichier de définition commité
+    (`.mocksql/tests/{model}.json`) ET cache sidecar gitignoré
+    (`.mocksql/cache/{model}.json`).
+
+    Contrairement à `delete_test`, retrouve le modèle par `session_id` seul (le front
+    n'envoie que le test_id) et renvoie le `model_name` supprimé — None si aucun test
+    ne correspond. Les données de test synthétiques vivent dans ces fichiers : il n'y a
+    pas de table DuckDB persistante à purger (exécution en `:memory:`). L'appelant reste
+    responsable de purger les conversations (`common_history`) liées au `session_id`.
+    """
+    # Un test créé mais jamais flushé sur disque (validation échouée) vit en mémoire.
+    _pending_tests.pop(session_id, None)
+
+    target: Optional[Path] = None
+    resolved_name: Optional[str] = model_name
+
+    if model_name:
+        cand = _test_path(model_name)
+        if cand.exists():
+            data = _read_json(cand)
+            if data and data.get("test_id") == session_id:
+                target = cand
+
+    if target is None:
+        root = _tests_root()
+        if root.exists():
+            for f in root.rglob("*.json"):
+                data = _read_json(f)
+                if data and data.get("test_id") == session_id:
+                    target = f
+                    resolved_name = data.get(
+                        "model_name"
+                    ) or _derive_model_name_from_path(f)
+                    break
+
+    if target is None:
+        return None
+
+    _unlink_test_files(target)
+    return resolved_name or _derive_model_name_from_path(target)
 
 
 def merge_test_cases(

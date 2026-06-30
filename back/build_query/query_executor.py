@@ -71,7 +71,11 @@ def run_query_duckdb(
 async def run_query(
     sql: str, *, dialect: str, project_id: str = None, limit: int = 30, offset: int = 0
 ) -> Tuple[List[Dict[str, Any]], int]:
-    return run_query_duckdb(sql, DUCKDB_PATH, limit=limit, offset=offset)
+    # `run_query_duckdb` est synchrone (connexion + exécution + COUNT) : offloadé sur un
+    # thread worker pour ne pas bloquer la boucle asyncio pendant l'exécution DuckDB.
+    return await asyncio.to_thread(
+        run_query_duckdb, sql, DUCKDB_PATH, limit=limit, offset=offset
+    )
 
 
 async def format_result(res: pd.DataFrame) -> str:
