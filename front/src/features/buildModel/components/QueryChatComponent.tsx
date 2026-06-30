@@ -1174,24 +1174,33 @@ const ChatComponent: React.FC = () => {
     if (loading === true && Notification.permission === 'default') {
       Notification.requestPermission();
     }
-    if (prevLoadingRef.current === true && loading === false && isGeneratingRef.current) {
-      isGeneratingRef.current = false;
-      if (error && !pendingFirstLoad) {
-        setSubmitError(error);
-      }
-      if (Notification.permission === 'granted') {
-        const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
-        const notif = new Notification('MockSQL', { body, icon: '/favicon.ico' });
-        notif.onclick = () => {
-          window.focus();
-          notif.close();
-        };
+    if (prevLoadingRef.current === true && loading === false) {
+      // Notification de fin : RÉSERVÉE aux vraies générations (isGeneratingRef). On ne
+      // notifie pas après un simple chargement (getMessages) ni une opération annexe.
+      if (isGeneratingRef.current) {
+        isGeneratingRef.current = false;
+        if (error && !pendingFirstLoad) {
+          setSubmitError(error);
+        }
+        if (Notification.permission === 'granted') {
+          const body = error ? t('notifications.generation_failed') : t('notifications.generation_success');
+          const notif = new Notification('MockSQL', { body, icon: '/favicon.ico' });
+          notif.onclick = () => {
+            window.focus();
+            notif.close();
+          };
+        }
       }
       // Drainage de la file : un message tapé pendant le run vient d'attendre la fin du
       // thread. On en prend UN (le plus ancien) et on le rejoue comme un message normal —
       // il devient un vrai tour de conversation. Sa complétion re-déclenchera cet effet →
       // le suivant est drainé → traitement séquentiel, dans l'ordre. On draine même après
       // une erreur pour ne jamais laisser un message bloqué « en attente ».
+      //
+      // ⚠️ Indépendant de isGeneratingRef : un message peut être tapé pendant N'IMPORTE
+      // quel run (génération, mise à jour SQL via la barre, « Relancer », profilage…), or
+      // certains de ces chemins ne posent pas isGeneratingRef. Gater le drainage dessus
+      // laissait le message bloqué « en attente » indéfiniment (question ignorée).
       if (currentModelId && queuedRef.current.length > 0) {
         const [next, ...rest] = queuedRef.current;
         queuedRef.current = rest;
