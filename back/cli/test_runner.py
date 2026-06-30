@@ -167,6 +167,17 @@ def _infer_schema_from_rows(table_name: str, rows: list[dict]) -> dict:
     }
 
 
+def _flatten_table_key(name: str) -> str:
+    """Aplati un nom de table (`proj.dataset.table` ou clé de données déjà plate)
+    vers la forme `dataset_table` minuscule — le même format que le nom de table
+    DuckDB créé (`create_test_tables`) et que la référence réécrite dans le SQL
+    (`strip_qualifiers_with_scope`). Sert à rapprocher schémas et tables de données.
+    """
+    parts = name.replace("`", "").split(".")
+    base = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+    return base.lower()
+
+
 def _resolve_model_schemas(
     used_columns_raw: list[str],
     schema_cache: list[dict],
@@ -180,16 +191,30 @@ def _resolve_model_schemas(
     cas par table pour que la table couvre chaque colonne vue dans n'importe quel cas
     (une colonne NULL dans un cas mais typée dans un autre est ainsi correctement résolue).
     """
-    if used_columns_raw and schema_cache:
-        schemas = _schemas_from_cache(used_columns_raw, schema_cache)
-        if schemas:
-            return schemas
+    # Lignes fusionnées par table de données — sert au fallback complet ET à
+    # compléter une couverture de cache PARTIELLE (cf. plus bas).
     merged: dict[str, list] = {}
     for tc in test_cases:
         data = tc.get("data") or {}
         for tname, rows in data.items():
             if isinstance(rows, list) and rows:
                 merged.setdefault(tname, []).extend(rows)
+
+    if used_columns_raw and schema_cache:
+        schemas = _schemas_from_cache(used_columns_raw, schema_cache)
+        if schemas:
+            # La résolution par cache peut être PARTIELLE : une table présente dans les
+            # données (et donc référencée par le SQL) mais absente du schema_cache — par
+            # ex. ajoutée au modèle après le dernier profilage — ne reçoit aucun schéma.
+            # Aucune table DuckDB n'est alors créée pour elle, alors que le SQL réécrit
+            # quand même sa référence avec le suffixe → "Catalog Error: Table ... does not
+            # exist". On complète donc avec un schéma inféré depuis les lignes pour chaque
+            # table de données non couverte par le cache.
+            covered = {_flatten_table_key(s["table_name"]) for s in schemas}
+            for tname, rows in merged.items():
+                if rows and _flatten_table_key(tname) not in covered:
+                    schemas.append(_infer_schema_from_rows(tname, rows))
+            return schemas
     return [_infer_schema_from_rows(t, r) for t, r in merged.items() if r]
 
 
