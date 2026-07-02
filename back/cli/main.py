@@ -635,6 +635,12 @@ def refresh_schemas(
         "-t",
         help="Re-import only these tables (project.dataset.table). Default: all cached BQ tables.",
     ),
+    from_tests: bool = typer.Option(
+        False,
+        "--from-tests",
+        help="Re-import every table referenced by saved tests (.mocksql/tests/), "
+        "even those not yet cached. Ce que `mocksql test` exige.",
+    ),
 ) -> None:
     """Re-import schemas from BigQuery to pick up partition info on existing tables."""
 
@@ -670,6 +676,20 @@ def refresh_schemas(
             invalid = [t for t in tables if not validate_bq_ref(t)]
             if invalid:
                 typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+        elif from_tests:
+            from cli.test_runner import collect_test_table_refs
+
+            tests_root = config.parent / ".mocksql" / "tests"
+            all_refs = collect_test_table_refs(tests_root)
+            refs = [t for t in all_refs if validate_bq_ref(t)]
+            invalid = [t for t in all_refs if not validate_bq_ref(t)]
+            if invalid:
+                typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+            if not refs:
+                typer.echo(
+                    "No BigQuery tables referenced by saved tests in .mocksql/tests/."
+                )
+                raise typer.Exit()
         else:
             refs = [
                 t["table_name"]
