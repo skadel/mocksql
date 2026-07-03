@@ -18,44 +18,16 @@ from typing import Any
 from cli.assertions import (
     add_assertion,
     ensure_assertion_uids,
-    find_test_case,
     remove_assertion,
     update_assertion,
 )
+from cli.doc_io import (
+    TestDocError as AssertError,
+    load_doc as _load_doc,
+    require_test_case as _require_test_case,
+    save_doc as _save_doc,
+)
 from cli.test_runner import run_tests
-from storage.test_files import read_test_doc, write_test_doc
-
-
-class AssertError(Exception):
-    """Erreur métier de la CLI assert (modèle/test/assertion introuvable)."""
-
-
-def _model_file(config_path: Path, model: str) -> Path:
-    return config_path.parent / ".mocksql" / "tests" / f"{model}.json"
-
-
-def _load_doc(config_path: Path, model: str) -> tuple[Path, dict[str, Any]]:
-    path = _model_file(config_path, model)
-    if not path.exists():
-        raise AssertError(
-            f"Aucun test pour le modèle '{model}'. Lance `mocksql generate {model}.sql`."
-        )
-    doc = read_test_doc(path)
-    if doc is None:
-        raise AssertError(f"Fichier de test illisible : {path}")
-    return path, doc
-
-
-def _save_doc(path: Path, doc: dict[str, Any]) -> None:
-    write_test_doc(path, doc)
-
-
-def _require_test_case(doc: dict[str, Any], test_uid: str) -> dict[str, Any]:
-    tc = find_test_case(doc, test_uid)
-    if tc is None:
-        known = [t.get("test_uid") for t in doc.get("test_cases", [])]
-        raise AssertError(f"test_uid '{test_uid}' introuvable. Connus : {known}")
-    return tc
 
 
 async def _reexec_assertion_status(

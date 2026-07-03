@@ -27,6 +27,37 @@ from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 
 logger = logging.getLogger(__name__)
 
+VALIDATION_EXPLANATION = (
+    "Validé par toi : la description reflète désormais la sortie réelle."
+)
+
+
+def apply_validation_to_case(case: dict, new_description: str, new_name: str) -> dict:
+    """Mutation pure d'un cas validé : réaligne le narratif sur la sortie réelle et
+    flippe le verdict à « Bon ». Les données et les assertions (au niveau ligne) sont
+    conservées telles quelles — seul le narratif mentait. Partagée entre le nœud
+    ``accept_validation`` (bouton « Je valide » de l'UI) et la CLI ``mocksql validate``.
+    """
+    was_input_desync = case.get("reason_type") == "bad_input_description"
+    c = dict(case)
+    c["unit_test_description"] = new_description
+    if new_name:
+        c["test_name"] = new_name
+    c["verdict"] = "Bon"
+    c["reason_type"] = None
+    c["evaluation_explanation"] = VALIDATION_EXPLANATION
+    c.pop("expected_row_count", None)
+    c.pop("corrected_description", None)
+    c.pop("corrected_name", None)
+    # T1↔T2 : valider une desync d'entrée = l'utilisateur accepte les données
+    # réelles, donc sa prémisse d'entrée était fausse → on la retire pour que
+    # le garde bad_data ne protège plus une prémisse abandonnée. (Une validation
+    # de SORTIE — needs_validation / bad_description — ne touche pas la prémisse
+    # d'entrée, qui reste pertinente.)
+    if was_input_desync:
+        c.pop("user_premise", None)
+    return c
+
 
 class _RealignedDescription(BaseModel):
     unit_test_description: str
@@ -115,30 +146,16 @@ async def accept_validation(state: QueryState):
         )
     else:
         realigned = await _realign_description(target, actual_rows)
-    explanation = "Validé par toi : la description reflète désormais la sortie réelle."
+    explanation = VALIDATION_EXPLANATION
 
-    updated_cases = []
-    for c in test.get("test_cases") or []:
-        if str(c.get("test_index")) == str(test_index):
-            was_input_desync = c.get("reason_type") == "bad_input_description"
-            c = dict(c)
-            c["unit_test_description"] = realigned.unit_test_description
-            if realigned.test_name:
-                c["test_name"] = realigned.test_name
-            c["verdict"] = "Bon"
-            c["reason_type"] = None
-            c["evaluation_explanation"] = explanation
-            c.pop("expected_row_count", None)
-            c.pop("corrected_description", None)
-            c.pop("corrected_name", None)
-            # T1↔T2 : valider une desync d'entrée = l'utilisateur accepte les données
-            # réelles, donc sa prémisse d'entrée était fausse → on la retire pour que
-            # le garde bad_data ne protège plus une prémisse abandonnée. (Une validation
-            # de SORTIE — needs_validation / bad_description — ne touche pas la prémisse
-            # d'entrée, qui reste pertinente.)
-            if was_input_desync:
-                c.pop("user_premise", None)
-        updated_cases.append(c)
+    updated_cases = [
+        apply_validation_to_case(
+            c, realigned.unit_test_description, realigned.test_name
+        )
+        if str(c.get("test_index")) == str(test_index)
+        else c
+        for c in test.get("test_cases") or []
+    ]
 
     update_test(state["session"], {"test_cases": updated_cases})
     logger.diag("[accept_validation] test=%s validé → Bon", test_index)

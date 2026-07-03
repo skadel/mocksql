@@ -621,6 +621,165 @@ def assert_remove(
         raise typer.Exit(1)
 
 
+@app.command("remove-test")
+def remove_test(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the test to remove."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Remove a test case from the suite. Deterministic, no LLM.
+
+    Équivalent CLI de la suppression via le chat (delete_test_node) : retire le cas
+    du fichier .mocksql/tests/{model}.json, assertions-specs comprises.
+    """
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_remove_test
+
+    try:
+        _emit(run_remove_test(config.resolve(), model, test_uid))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command()
+def validate(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the test awaiting validation."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Accept the actual output of a test awaiting validation.
+
+    Équivalent du bouton « Je valide l'état actuel » de l'UI (accept_validation) :
+    applique la description réalignée proposée par l'évaluateur (corrected_description,
+    sans LLM) et flippe le verdict à « Bon ». Fallback LLM uniquement pour les tests
+    anciens sans ce champ.
+    """
+    import asyncio
+
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_validate
+
+    try:
+        _emit(asyncio.run(run_validate(config.resolve(), model, test_uid)))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+suggest_app = typer.Typer(
+    name="suggest",
+    help="Manage coverage suggestions — list/regenerate/use/dismiss.",
+    no_args_is_help=True,
+)
+app.add_typer(suggest_app, name="suggest")
+
+
+@suggest_app.command("list")
+def suggest_list(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """List pending coverage suggestions (numbered for `use`/`dismiss`)."""
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_suggest_list
+
+    try:
+        _emit(run_suggest_list(config.resolve(), model))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@suggest_app.command("regenerate")
+def suggest_regenerate(
+    model: str = typer.Argument(...),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Regenerate the suggestion panel via LLM (replace mode).
+
+    Équivalent du bouton « Régénérer » du panneau : tient compte des suggestions déjà
+    acceptées/rejetées pour ne pas les reproposer. Pas de profil en CLI → pas de [PROD].
+    """
+    import asyncio
+
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_suggest_regenerate
+
+    try:
+        result = asyncio.run(run_suggest_regenerate(config.resolve(), model))
+        _emit(result)
+        if not result["suggestions"]:
+            typer.echo("[WARN] Le LLM n'a produit aucune suggestion.", err=True)
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@suggest_app.command("use")
+def suggest_use(
+    model: str = typer.Argument(...),
+    number: int = typer.Option(
+        None, "--number", "-n", help="1-based index from `suggest list`."
+    ),
+    text: str = typer.Option(
+        None, "--text", "-t", help="Exact suggestion text (alternative to --number)."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+    output_dir: Path = typer.Option(Path(".mocksql/tests"), "--output", "-o"),
+) -> None:
+    """Turn a pending suggestion into a test, then consume it.
+
+    Équivalent du clic sur une suggestion dans le panneau : génère le test (mode additif,
+    focus par branche préservé), puis retire la suggestion du panneau (accepted_suggestions).
+    """
+    import asyncio
+
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_suggest_use
+
+    config = config.resolve()
+    if not output_dir.is_absolute():
+        output_dir = (config.parent / output_dir).resolve()
+    try:
+        _emit(asyncio.run(run_suggest_use(config, model, number, text, output_dir)))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@suggest_app.command("dismiss")
+def suggest_dismiss(
+    model: str = typer.Argument(...),
+    number: int = typer.Option(
+        None, "--number", "-n", help="1-based index from `suggest list`."
+    ),
+    text: str = typer.Option(
+        None, "--text", "-t", help="Exact suggestion text (alternative to --number)."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Dismiss a pending suggestion (it will never be re-proposed). No LLM."""
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_suggest_dismiss
+
+    try:
+        _emit(run_suggest_dismiss(config.resolve(), model, number, text))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
 @app.command("refresh-schemas")
 def refresh_schemas(
     config: Path = typer.Option(
