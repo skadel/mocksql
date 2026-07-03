@@ -61,6 +61,11 @@ class QueryState(TypedDict):
     rerun_all_tests: Optional[
         bool
     ]  # True when SQL changed: re-run all existing tests with new SQL
+    user_rerun: Optional[
+        bool
+    ]  # True ONLY on the « Relancer » button (front sends it alongside rerun_all_tests,
+    # which is shared with sql_update): read-only rerun — route_evaluator never enters
+    # the correction loops (bad_data_to_agent / assertion_corrector)
     rerun_only: Optional[
         bool
     ]  # True when user reruns a single test to verify — skips suggestions

@@ -13,7 +13,7 @@ from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_message_type
-from utils.test_utils import find_current_test
+from utils.test_utils import EMPTY_RESULT_SENTINEL_SQL, find_current_test
 
 logger = logging.getLogger(__name__)
 
@@ -447,7 +447,7 @@ async def evaluate_tests(state: QueryState):
                 )
                 empty_assertion = {
                     "description": "La requête doit retourner 0 ligne (table vide intentionnelle)",
-                    "sql": "SELECT * FROM __result__",
+                    "sql": EMPTY_RESULT_SENTINEL_SQL,
                     "passed": True,
                 }
                 updated_test = {

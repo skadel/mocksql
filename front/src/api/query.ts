@@ -131,6 +131,9 @@ export const chatQuery = createAsyncThunk(
             test_uid: testUid ?? null,
             test_index: testIndex ?? null,
             rerun_all_tests: context === 'sql_update' || !!rerunAll,
+            // Bouton « Relancer » uniquement (pas sql_update) : relance en lecture seule —
+            // le backend n'entre jamais dans les boucles de correction sur ce flag.
+            user_rerun: !!rerunAll,
             assertion_only: assertionOnly ?? false,
             suggestion_intent: suggestionIntent ?? false,
             regenerate_suggestions: regenerateSuggestions ?? false,
