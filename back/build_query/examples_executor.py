@@ -29,6 +29,7 @@ from utils.examples import (
 from utils.insert_examples import replace_missing_with_null, insert_examples
 from storage.test_repository import get_test
 from utils.saver import examples_state_retriever
+from utils.test_utils import is_empty_result_sentinel
 
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
@@ -1616,6 +1617,11 @@ async def _run_single_test_case(
     # boucle bad_data la retrouve et n'écrase pas en silence la valeur énoncée.
     if test_case.get("user_premise"):
         base["user_premise"] = test_case["user_premise"]
+    # Memoïsation du verdict d'intention vide (cf. test_evaluator._classify_empty_intent) :
+    # recopiée depuis le test stocké pour que l'évaluateur retrouve l'empreinte dans le
+    # message RESULTS — sinon miss systématique → rappel LLM à chaque relance.
+    if test_case.get("empty_intent_cache"):
+        base["empty_intent_cache"] = test_case["empty_intent_cache"]
 
     try:
         # 1) Préparation et insertion des données de test
@@ -1664,7 +1670,30 @@ async def _run_single_test_case(
         logger.diag("[executor] DuckDB SQL exécuté:\n%s", final_duckdb_sql[:2000])
         logger.diag("[executor] résultat: %s ligne(s)", len(final_res_df))
 
+        existing_assertions = [
+            a for a in (test_case.get("assertion_results") or []) if a.get("sql")
+        ]
+
         if final_res_df.empty:
+            # Relance d'un test à vide INTENTIONNEL : la sentinelle « SELECT * FROM
+            # __result__ » (posée par le PASS d'intention vide de test_evaluator) ancre
+            # l'attente de 0 ligne → rejeu déterministe des assertions, sans repartir dans
+            # le circuit « vide inattendu » (empty_results → juge LLM d'intention) qui
+            # écraserait le verdict acquis. Sans sentinelle on garde ce circuit : rejouer
+            # des assertions failing-rows sur 0 ligne les ferait toutes passer par vacuité.
+            if rerun_all and any(
+                is_empty_result_sentinel(a) for a in existing_assertions
+            ):
+                return await _replay_stored_assertions(
+                    base=base,
+                    existing_assertions=existing_assertions,
+                    test_case=test_case,
+                    suffix=suffix,
+                    con=con,
+                    duckdb_sql=final_duckdb_sql,
+                    test_data=test_data,
+                    final_res_df=final_res_df,
+                )
             ctes = json.loads(state.get("query_decomposed") or "[]")
             cte_trace = await _run_cte_trace(
                 ctes, suffix, state["project"], dialect, con
@@ -1713,42 +1742,18 @@ async def _run_single_test_case(
                 "assertion_results": [],
             }
 
-        existing_assertions = [
-            a for a in (test_case.get("assertion_results") or []) if a.get("sql")
-        ]
-
         if rerun_all and existing_assertions:
             # Re-run existing assertions without LLM (user-triggered rerun or SQL update)
-            view_name = f"__result__{suffix}"
-            con.register(view_name, final_res_df)
-            try:
-                retry_kwargs = dict(
-                    view_name=view_name,
-                    con=con,
-                    duckdb_sql=final_duckdb_sql,
-                    test_data=test_data,
-                    result_df=final_res_df,
-                    test_description=test_case.get("unit_test_description", ""),
-                )
-                assertion_results = await _evaluate_assertions_with_retry(
-                    existing_assertions, **retry_kwargs
-                )
-            finally:
-                con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
-            has_failing = any(not a.get("passed") for a in assertion_results)
-            return {
-                **base,
-                "status": "complete",
-                "results_json": await format_result(final_res_df),
-                "assertion_results": assertion_results,
-                "verdict": "Insuffisant" if has_failing else "Bon",
-                "reason_type": "bad_assertions" if has_failing else None,
-                "evaluation_explanation": (
-                    "Les assertions échouent sur les données re-exécutées."
-                    if has_failing
-                    else "Les assertions passent sur les données re-exécutées."
-                ),
-            }
+            return await _replay_stored_assertions(
+                base=base,
+                existing_assertions=existing_assertions,
+                test_case=test_case,
+                suffix=suffix,
+                con=con,
+                duckdb_sql=final_duckdb_sql,
+                test_data=test_data,
+                final_res_df=final_res_df,
+            )
 
         # Assertions and LLM evaluation are handled by the assertion_generator node
         return {
@@ -1794,6 +1799,49 @@ _DUCKDB_DATA_ERROR_PREFIXES = ("Invalid Input Error", "Conversion Error")
 def _is_duckdb_data_error(exc: Exception) -> bool:
     msg = str(exc)
     return any(msg.startswith(p) for p in _DUCKDB_DATA_ERROR_PREFIXES)
+
+
+async def _replay_stored_assertions(
+    base: Dict[str, Any],
+    existing_assertions: List[Dict[str, Any]],
+    test_case: Dict[str, Any],
+    suffix: str,
+    con,
+    duckdb_sql: str,
+    test_data: Dict[str, Any],
+    final_res_df: DataFrame,
+) -> Dict[str, Any]:
+    """Rejoue les assertions stockées sur le résultat courant (relance / SQL update) et en
+    dérive le verdict déterministe — le LLM n'intervient que si une assertion plante en SQL
+    (cf. _evaluate_assertions_with_retry)."""
+    view_name = f"__result__{suffix}"
+    con.register(view_name, final_res_df)
+    try:
+        assertion_results = await _evaluate_assertions_with_retry(
+            existing_assertions,
+            view_name=view_name,
+            con=con,
+            duckdb_sql=duckdb_sql,
+            test_data=test_data,
+            result_df=final_res_df,
+            test_description=test_case.get("unit_test_description", ""),
+        )
+    finally:
+        con.execute(f'DROP VIEW IF EXISTS "{view_name}"')
+    has_failing = any(not a.get("passed") for a in assertion_results)
+    return {
+        **base,
+        "status": "complete",
+        "results_json": await format_result(final_res_df),
+        "assertion_results": assertion_results,
+        "verdict": "Insuffisant" if has_failing else "Bon",
+        "reason_type": "bad_assertions" if has_failing else None,
+        "evaluation_explanation": (
+            "Les assertions échouent sur les données re-exécutées."
+            if has_failing
+            else "Les assertions passent sur les données re-exécutées."
+        ),
+    }
 
 
 def _prepare_test_data(

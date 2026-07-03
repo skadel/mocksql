@@ -261,6 +261,7 @@ def build_initial_state(
         "profile": None,
         "profile_billing_tb": None,
         "rerun_all_tests": False,
+        "user_rerun": False,
         "optimize": False,
         "save": None,
         "changed_message_id": "",

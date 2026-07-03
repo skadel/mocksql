@@ -6,6 +6,19 @@ from typing import Optional
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
 
+# Assertion sentinelle « le résultat doit être vide », posée par le PASS d'intention
+# vide de test_evaluator : SELECT nu sur __result__, sans WHERE — 0 ligne → passe,
+# ≥1 ligne → échoue. C'est l'ancre qui rend le rejeu déterministe d'un test à vide
+# intentionnel non-vacuux (cf. examples_executor, relance rerun_all).
+EMPTY_RESULT_SENTINEL_SQL = "SELECT * FROM __result__"
+
+
+def is_empty_result_sentinel(assertion: dict) -> bool:
+    """Vrai si l'assertion est la sentinelle « résultat vide attendu » (à la casse,
+    aux espaces et au `;` final près)."""
+    sql = " ".join((assertion.get("sql") or "").replace(";", " ").split())
+    return sql.upper() == EMPTY_RESULT_SENTINEL_SQL.upper()
+
 
 def build_test_detail(current_test: dict) -> dict:
     """Build the test detail dict passed to LLM prompts."""

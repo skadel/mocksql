@@ -441,6 +441,17 @@ def route_evaluator(state: QueryState):
             state.get("rerun_only"),
         )
         return "history_saver"
+    # Relance utilisateur (bouton « Relancer ») : LECTURE SEULE. Les verdicts recalculés
+    # sont ré-émis puis on clôt via final_response (message « réévalué ») — jamais de
+    # boucle de correction (bad_data_to_agent / assertion_corrector) qui réécrirait
+    # données ou assertions sur un simple rejeu. La mise à jour SQL partage
+    # rerun_all_tests et garde, elle, ses boucles de réparation — d'où le flag dédié.
+    if state.get("user_rerun"):
+        logger.diag(
+            "[route_evaluator] → final_response (user_rerun : lecture seule, feedback=%s)",
+            feedback,
+        )
+        return "final_response"
     # SQL structurally requires too many rows — no retry can fix this
     if feedback == "too_many_rows":
         logger.diag("[route_evaluator] → history_saver (too_many_rows)")
