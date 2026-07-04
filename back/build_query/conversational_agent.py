@@ -58,6 +58,132 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
     )
 
 
+# ── Plafonds du contexte agent (incident c6_v3_2 : 400 INVALID_ARGUMENT, ~1,23M tokens).
+# Le message RESULTS + sa copie eval_context rendaient la sortie COMPLÈTE du test
+# (1344 lignes × ~45 colonnes sur c6) + le result_json de CHAQUE CTE
+# (step_by_step_results) + les failing_rows de chaque assertion. L'agent n'a besoin que
+# d'un échantillon : le diagnostic et le profil CTE portent l'analyse. Même principe que
+# _build_result_sample_block côté assertions : lignes ENTIÈRES + marqueurs, jamais de
+# troncature caractère.
+_AGENT_MAX_RESULT_ROWS = 20  # sortie finale (eval_context et message RESULTS)
+_AGENT_MAX_CTE_ROWS = 3  # échantillon par CTE (step_by_step_results)
+_AGENT_MAX_FAILING_ROWS = 3  # contre-exemples par assertion en échec
+_AGENT_MAX_ARRAY_ITEMS = 6  # éléments par colonne ARRAY (ex. *_lags de c6 : 14)
+
+
+def _truncate_long_arrays(value):
+    """Tronque récursivement les listes longues d'une valeur (colonnes ARRAY type
+    ``*_lags``/``preceding_values`` de c6 : 14 éléments × 6 colonnes × N lignes) en
+    gardant un JSON valide : ``[v1..v6, "… (+8)"]``. Dicts parcourus, scalaires intacts."""
+    if isinstance(value, list):
+        items = [_truncate_long_arrays(v) for v in value[:_AGENT_MAX_ARRAY_ITEMS]]
+        hidden = len(value) - _AGENT_MAX_ARRAY_ITEMS
+        if hidden > 0:
+            items.append(f"… (+{hidden})")
+        return items
+    if isinstance(value, dict):
+        return {k: _truncate_long_arrays(v) for k, v in value.items()}
+    return value
+
+
+def _capped_rows(rows: list, cap: int) -> list:
+    """Échantillon par LIGNES ENTIÈRES (arrays tronqués) + marqueur ``… (+N autres
+    lignes)`` en fin de liste — jamais de troncature caractère (JSON coupé mi-objet =
+    hallucinations, cf. leçon assertions)."""
+    shown = [_truncate_long_arrays(r) for r in rows[:cap]]
+    hidden = len(rows) - cap
+    if hidden > 0:
+        shown.append(f"… (+{hidden} autres lignes)")
+    return shown
+
+
+def _compact_assertion_result(a: dict) -> dict:
+    """Assertion réduite aux champs utiles à l'agent. Le ``sql`` est omis (dérivé de
+    ``expected_condition``, que l'agent ne répare pas lui-même) et les ``failing_rows``
+    sont plafonnées : sur un échec en mode ``all`` elles peuvent contenir la
+    quasi-totalité du résultat."""
+    out = {k: v for k, v in a.items() if k not in ("sql", "failing_rows")}
+    rows = a.get("failing_rows") or []
+    if rows:
+        out["failing_rows"] = _capped_rows(rows, _AGENT_MAX_FAILING_ROWS)
+    return out
+
+
+def _compact_results_message(msg: BaseMessage) -> BaseMessage:
+    """Copie COMPACTE d'un message RESULTS pour le prompt agent — le message original
+    reste intact dans le state (le front continue de recevoir le résultat complet).
+
+    Compacte chaque résultat de test : ``results_json`` → ``results_row_count`` +
+    ``results_sample`` plafonné ; ``step_by_step_results`` → nom/row_count/échantillon
+    par CTE (``sql_code`` omis : l'agent a déjà la requête complète dans son prompt) ;
+    ``assertion_results`` → cf. ``_compact_assertion_result``. Les données d'ENTRÉE
+    (``test_data``) restent entières : c'est sur elles que l'agent patche.
+    Best-effort : contenu non parsable ou non-RESULTS → message inchangé."""
+    if get_message_type(msg) != MsgType.RESULTS:
+        return msg
+    try:
+        tests = json.loads(msg.content)
+    except Exception:
+        return msg
+    if not isinstance(tests, list):
+        return msg
+
+    compact = []
+    for tr in tests:
+        if not isinstance(tr, dict):
+            compact.append(tr)
+            continue
+        out = {
+            k: v
+            for k, v in tr.items()
+            if k not in ("results_json", "step_by_step_results", "assertion_results")
+        }
+        raw = tr.get("results_json")
+        try:
+            rows = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            rows = []
+        if isinstance(rows, list):
+            out["results_row_count"] = len(rows)
+            out["results_sample"] = _capped_rows(rows, _AGENT_MAX_RESULT_ROWS)
+        steps = []
+        for s in tr.get("step_by_step_results") or []:
+            if not isinstance(s, dict):
+                continue
+            raw_s = s.get("result_json")
+            try:
+                rows_s = json.loads(raw_s) if isinstance(raw_s, str) else (raw_s or [])
+            except Exception:
+                rows_s = []
+            if not isinstance(rows_s, list):
+                rows_s = []
+            steps.append(
+                {
+                    "cte_name": s.get("cte_name"),
+                    "row_count": s.get("row_count", len(rows_s)),
+                    "sample": _capped_rows(rows_s, _AGENT_MAX_CTE_ROWS),
+                }
+            )
+        if steps:
+            out["step_by_step_results"] = steps
+        assertions = [
+            _compact_assertion_result(a)
+            for a in tr.get("assertion_results") or []
+            if isinstance(a, dict)
+        ]
+        if assertions:
+            out["assertion_results"] = assertions
+        if "cte_trace" in out:
+            out["cte_trace"] = _truncate_long_arrays(out["cte_trace"])
+        compact.append(out)
+
+    return AIMessage(
+        content=json.dumps(compact, ensure_ascii=False, default=str),
+        id=msg.id,
+        additional_kwargs=msg.additional_kwargs,
+    )
+
+
 def _validate_data_patch_calls(calls: list, uid_to_test: dict) -> tuple[list, list]:
     """Valide les opérations de patch contre les données réelles des tests ciblés.
 
@@ -424,20 +550,25 @@ def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
             test_data_block += f"\n\nDonnées d'entrée du test [{failing_uid}] :\n{_format_data_indexed(input_data)}"
 
         if results_json and results_json != "[]":
+            # Échantillon plafonné (cf. _capped_rows) : sur c6 le résultat complet
+            # dépassait à lui seul la limite de contexte modèle. La cardinalité
+            # réelle reste visible dans l'en-tête — c'est elle que l'agent raisonne.
             try:
                 parsed_results = (
                     json.loads(results_json)
                     if isinstance(results_json, str)
                     else results_json
                 )
+                header = f"{len(parsed_results)} ligne(s)"
                 results_summary = json.dumps(
-                    parsed_results, ensure_ascii=False, indent=2
+                    _capped_rows(parsed_results, _AGENT_MAX_RESULT_ROWS),
+                    ensure_ascii=False,
+                    default=str,
                 )
             except Exception:
+                header = "?"
                 results_summary = str(results_json)[:500]
-            test_data_block += (
-                f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
-            )
+            test_data_block += f"\n\nSortie DuckDB obtenue ({header}) :\n```json\n{results_summary}\n```"
         else:
             test_data_block += "\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
 
@@ -448,7 +579,9 @@ def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
             if failing_assertions:
                 try:
                     assertions_summary = json.dumps(
-                        failing_assertions, ensure_ascii=False, indent=2
+                        [_compact_assertion_result(a) for a in failing_assertions],
+                        ensure_ascii=False,
+                        default=str,
                     )
                 except Exception:
                     assertions_summary = str(failing_assertions)[:500]
@@ -1080,7 +1213,11 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             if mtype in (MsgType.RESULTS, MsgType.EXAMPLES):
                 break
 
-    formatted_history = [_format_debug_message(m) for m in history]
+    # RESULTS compactés à la frontière agent (échantillon + arrays tronqués) : le
+    # message complet reste dans le state pour le front — cf. _compact_results_message.
+    formatted_history = [
+        _format_debug_message(_compact_results_message(m)) for m in history
+    ]
     messages_for_llm = [
         SystemMessage(content=system_content + resume_context)
     ] + formatted_history
