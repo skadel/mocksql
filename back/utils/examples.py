@@ -1519,6 +1519,129 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+# Tokens de format Joda-Time (Trino format_datetime) → tokens strftime DuckDB.
+# CASSE-SENSIBLE : en Joda, MM=mois et mm=minute, HH=24h et hh=12h — surtout PAS
+# de IGNORECASE. Alternation longest-first (yyyy avant yy, MMMM avant MM…).
+_TRINO_JODA_TOKENS: list[tuple[str, str]] = [
+    ("yyyy", "%Y"),
+    ("YYYY", "%Y"),
+    ("MMMM", "%B"),
+    ("EEEE", "%A"),
+    ("MMM", "%b"),
+    ("EEE", "%a"),
+    ("yy", "%y"),
+    ("YY", "%y"),
+    ("MM", "%m"),
+    ("dd", "%d"),
+    ("HH", "%H"),
+    ("hh", "%I"),
+    ("mm", "%M"),
+    ("ss", "%S"),
+]
+_TRINO_JODA_RE = re.compile(
+    "|".join(
+        re.escape(k) for k, _ in sorted(_TRINO_JODA_TOKENS, key=lambda kv: -len(kv[0]))
+    )
+)
+_TRINO_JODA_MAP = {k: v for k, v in _TRINO_JODA_TOKENS}
+
+
+def _trino_joda_to_strftime(joda_fmt: str) -> str | None:
+    """Traduit un format Joda-Time (Trino) en format strftime DuckDB.
+
+    Retourne ``None`` si AUCUN token de date n'est reconnu — dans ce cas on laisse
+    l'expression telle quelle plutôt que de fabriquer un format vide.
+    """
+    matched = False
+
+    def _repl(m: re.Match) -> str:
+        nonlocal matched
+        matched = True
+        return _TRINO_JODA_MAP[m.group(0)]
+
+    out = _TRINO_JODA_RE.sub(_repl, joda_fmt)
+    return out if matched else None
+
+
+def _fix_trino_format_datetime(tree: exp.Expression) -> exp.Expression:
+    """Réécrit ``format_datetime(x, '<fmt Joda>')`` en ``strftime(x, '<fmt duckdb>')``.
+
+    sqlglot laisse ``format_datetime`` en Anonymous (DuckDB n'a pas cette fonction →
+    Catalog Error). On réécrit sur l'AST avant le rendu DuckDB en traduisant le
+    format Joda-Time vers strftime.
+    """
+    for node in list(tree.find_all(exp.Anonymous)):
+        if (node.this or "").lower() != "format_datetime":
+            continue
+        args = node.expressions
+        if len(args) != 2 or not (
+            isinstance(args[1], exp.Literal) and args[1].is_string
+        ):
+            continue
+        duck_fmt = _trino_joda_to_strftime(args[1].this)
+        if duck_fmt is None:
+            continue
+        node.replace(
+            exp.Anonymous(
+                this="strftime",
+                expressions=[args[0].copy(), exp.Literal.string(duck_fmt)],
+            )
+        )
+    return tree
+
+
+def _fix_trino_reduce_finish(tree: exp.Expression) -> exp.Expression:
+    """Préserve la lambda de finition de ``reduce(arr, init, merge, finish)``.
+
+    sqlglot transpile Trino ``reduce`` vers DuckDB ``list_reduce`` en **abandonnant
+    silencieusement** la 4ᵉ lambda (finition), avec un simple warning : le résultat
+    devient faux sans erreur dès que la finition n'est pas l'identité (ex.
+    ``s -> s / cardinality(arr)`` pour une moyenne). On inline donc la finition :
+    ``finish(reduce_sans_finish(...))``, ce qui reste correct y compris pour
+    l'identité (``s -> s`` → juste le reduce). Perte silencieuse → résultat exact.
+    """
+    for node in list(tree.find_all(exp.Reduce)):
+        finish = node.args.get("finish")
+        if not isinstance(finish, exp.Lambda) or len(finish.expressions) != 1:
+            continue
+        param_name = finish.expressions[0].name
+        body = finish.this.copy()
+        inner = exp.Reduce(
+            this=node.this.copy(),
+            initial=node.args["initial"].copy(),
+            merge=node.args["merge"].copy(),
+        )
+
+        def _is_param(n: exp.Expression) -> bool:
+            # Dans une lambda, une référence de paramètre est un Identifier nu ;
+            # une vraie colonne est un Column (qui enveloppe son Identifier — exclu).
+            if isinstance(n, exp.Identifier):
+                return n.name == param_name and not isinstance(n.parent, exp.Column)
+            if isinstance(n, exp.Column):
+                return not n.table and n.name == param_name
+            return False
+
+        if _is_param(body):
+            new_expr: exp.Expression = inner
+        else:
+            for n in list(body.find_all(exp.Column, exp.Identifier)):
+                if _is_param(n):
+                    n.replace(inner.copy())
+            new_expr = body
+        node.replace(new_expr)
+    return tree
+
+
+def _fix_trino_idioms(tree: exp.Expression) -> exp.Expression:
+    """Réécritures d'idiomes Trino que sqlglot ne transpile pas correctement.
+
+    Appliquées sur l'AST trino AVANT ``.sql(dialect="duckdb")``.
+    """
+    _fix_trino_format_datetime(tree)
+    _fix_trino_reduce_finish(tree)
+    return tree
+
+
 async def parse_test_query(query, suffix, dialect):
     query_on_test_ds = strip_qualifiers_with_scope(
         sql_query=query, suffix=suffix, dialect=dialect
@@ -1526,10 +1649,16 @@ async def parse_test_query(query, suffix, dialect):
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     _qualify_group_order_by_aliases(tree)
     _fix_group_by_strict_mode(tree)
-    _fix_unnest_with_offset(tree)
+    # _fix_unnest_with_offset traduit la sémantique 0-based de BigQuery WITH OFFSET.
+    # Trino WITH ORDINALITY est déjà 1-based comme DuckDB (et la forme t(x, i) est
+    # native DuckDB) : appliquer le fix décale l'ordinal et perd la colonne valeur.
+    if dialect != "trino":
+        _fix_unnest_with_offset(tree)
     _alias_unnamed_final_projections(tree)
     if dialect == "snowflake":
         _fix_snowflake_idioms(tree)
+    elif dialect == "trino":
+        _fix_trino_idioms(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
