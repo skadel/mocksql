@@ -6,7 +6,6 @@ import json
 import re
 import uuid
 from pathlib import Path
-from typing import Any
 
 import yaml
 
@@ -92,7 +91,15 @@ def resolve_run_sql(
 
 
 def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[dict]:
-    """Build filtered schema list from cache, guided by the saved used_columns."""
+    """Schémas COMPLETS des tables du cache référencées par `used_columns`.
+
+    On identifie les tables via `used_columns` (une entrée par table), mais on renvoie le
+    schéma **complet** (toutes les colonnes réelles), **sans filtrer** par la liste
+    `used_columns` : le réplay crée la table telle qu'en prod, pour que TOUTE colonne
+    référencée par le SQL existe. Filtrer par un `used_columns` incomplet (extraction
+    ratée en amont) droppait une colonne pourtant utilisée par le SQL →
+    "Referenced column ... not found in FROM clause" (cf. bq234, `total_day_supply`).
+    """
     idx: dict[str, dict] = {}
     for s in cache:
         name = s["table_name"].lower()
@@ -104,6 +111,7 @@ def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[
             idx[parts[-1]] = s
 
     result: list[dict] = []
+    seen: set[str] = set()
     for raw in used_columns_raw:
         try:
             u = json.loads(raw)
@@ -112,7 +120,6 @@ def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[
         project = u.get("project", "")
         database = u.get("database", "")
         table = u.get("table", "")
-        used_cols: list[str] = u.get("used_columns", [])
 
         candidates: list[str] = []
         if project and database:
@@ -124,47 +131,12 @@ def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[
         schema = next((idx[c] for c in candidates if c in idx), None)
         if not schema:
             continue
-        if used_cols:
-            used_lower = {c.lower() for c in used_cols}
-            filtered_cols = [
-                col for col in schema["columns"] if col["name"].lower() in used_lower
-            ]
-            result.append({**schema, "columns": filtered_cols})
-        else:
-            result.append(schema)
+        key = schema["table_name"].lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(schema)
     return result
-
-
-_DUCK_TYPE_MAP: list[tuple[type, str]] = [
-    (bool, "BOOLEAN"),
-    (int, "BIGINT"),
-    (float, "DOUBLE"),
-    (str, "TEXT"),
-]
-
-
-def _infer_duck_type(value: Any) -> str:
-    if value is None:
-        return "TEXT"
-    for py_type, duck in _DUCK_TYPE_MAP:
-        if isinstance(value, py_type):
-            return duck
-    return "TEXT"
-
-
-def _infer_schema_from_rows(table_name: str, rows: list[dict]) -> dict:
-    """Derive a DuckDB-typed schema from the data rows themselves."""
-    seen: dict[str, str] = {}
-    for row in rows:
-        for k, v in row.items():
-            if k not in seen:
-                seen[k] = _infer_duck_type(v)
-    return {
-        "table_name": table_name,
-        "columns": [{"name": k, "type": t, "description": ""} for k, t in seen.items()],
-        "description": "",
-        "primary_keys": [],
-    }
 
 
 def _flatten_table_key(name: str) -> str:
@@ -178,44 +150,106 @@ def _flatten_table_key(name: str) -> str:
     return base.lower()
 
 
+def _full_refs_from_used_columns(used_columns_raw: list[str]) -> dict[str, str]:
+    """Mappe la clé de table aplatie → réf BQ complète (`project.dataset.table`),
+    reconstruite depuis les `used_columns` sauvegardés. Sert à afficher une commande
+    `refresh-schemas -t …` actionnable quand un schéma manque.
+    """
+    refs: dict[str, str] = {}
+    for raw in used_columns_raw:
+        try:
+            u = json.loads(raw)
+        except Exception:
+            continue
+        project = u.get("project", "")
+        database = u.get("database", "")
+        table = u.get("table", "")
+        if not table:
+            continue
+        full = ".".join(p for p in (project, database, table) if p)
+        key = _flatten_table_key(f"{database}.{table}" if database else table)
+        refs[key] = full
+    return refs
+
+
+def collect_test_table_refs(tests_root: Path) -> list[str]:
+    """Toutes les réfs `project.dataset.table` référencées par les tests sauvegardés
+    (via leurs `used_columns`), dédupliquées et triées.
+
+    Sert à `mocksql refresh-schemas --from-tests` : importer/rafraîchir d'un coup le
+    schéma de tout ce que les tests utilisent (le réplay `test` exige le vrai schéma).
+    Ignore les fichiers de session nommés en UUID, comme `run_tests`.
+    """
+    if not tests_root.exists():
+        return []
+    refs: set[str] = set()
+    for f in tests_root.rglob("*.json"):
+        if _UUID_RE.match(f.stem):
+            continue
+        doc = _read_json(f)
+        if not doc:
+            continue
+        refs.update(
+            _full_refs_from_used_columns(doc.get("used_columns") or []).values()
+        )
+    return sorted(refs)
+
+
+class SchemaMissingError(Exception):
+    """Une table référencée par un test n'a pas de schéma dans le `schema_cache`.
+
+    `mocksql test` rejoue avec le VRAI schéma de l'entrepôt (fidélité prod) et n'infère
+    jamais depuis les lignes — inférer masquerait un bug de type réel (ex. colonne
+    date-like → VARCHAR → "Cannot compare VARCHAR and DATE"). Le message pointe vers
+    `refresh-schemas -t …` pour importer le schéma manquant.
+    """
+
+    def __init__(self, missing_tables: list[str], full_refs: dict[str, str]) -> None:
+        self.missing_tables = missing_tables
+        refs = [full_refs.get(_flatten_table_key(t), t) for t in missing_tables]
+        cmd = "mocksql refresh-schemas " + " ".join(f"-t {r}" for r in refs)
+        super().__init__(
+            f"Schéma introuvable pour {len(refs)} table(s) référencée(s) par ce test : "
+            f"{', '.join(refs)}. Le replay utilise le vrai schéma de l'entrepôt (aucune "
+            f"inférence). Importe le schéma manquant puis relance :\n  {cmd}"
+        )
+
+
 def _resolve_model_schemas(
     used_columns_raw: list[str],
     schema_cache: list[dict],
     test_cases: list[dict],
 ) -> list[dict]:
-    """Résout un jeu de schémas STABLE pour tous les cas d'un modèle.
+    """Résout les schémas des tables du modèle depuis le `schema_cache` — SOURCE UNIQUE.
 
-    Les cas d'un même modèle partagent le même SQL → le même schéma. On crée donc les
-    tables DuckDB une seule fois par modèle. Avec un schema_cache, le schéma est identique
-    quel que soit le cas. Sans cache (fallback inference), on UNIONNE les lignes de tous les
-    cas par table pour que la table couvre chaque colonne vue dans n'importe quel cas
-    (une colonne NULL dans un cas mais typée dans un autre est ainsi correctement résolue).
+    Les cas d'un même modèle partagent le même SQL → le même schéma : les tables DuckDB
+    sont créées une seule fois par modèle.
+
+    Fidélité prod (pas d'inférence) : le replay utilise le VRAI schéma de l'entrepôt
+    (types compris), jamais un schéma deviné depuis les lignes synthétiques. Inférer
+    masquerait un bug de type réel — une colonne date-like typée VARCHAR passerait le
+    test alors qu'elle casse en prod ("Cannot compare VARCHAR and DATE"). Toute table
+    présente dans les données mais absente du cache lève donc `SchemaMissingError`, qui
+    pointe vers `refresh-schemas` pour importer le schéma manquant.
     """
-    # Lignes fusionnées par table de données — sert au fallback complet ET à
-    # compléter une couverture de cache PARTIELLE (cf. plus bas).
-    merged: dict[str, list] = {}
+    # Tables réellement présentes dans les données d'au moins un cas → elles doivent
+    # toutes avoir un schéma dans le cache.
+    data_tables: set[str] = set()
     for tc in test_cases:
-        data = tc.get("data") or {}
-        for tname, rows in data.items():
+        for tname, rows in (tc.get("data") or {}).items():
             if isinstance(rows, list) and rows:
-                merged.setdefault(tname, []).extend(rows)
+                data_tables.add(tname)
 
-    if used_columns_raw and schema_cache:
-        schemas = _schemas_from_cache(used_columns_raw, schema_cache)
-        if schemas:
-            # La résolution par cache peut être PARTIELLE : une table présente dans les
-            # données (et donc référencée par le SQL) mais absente du schema_cache — par
-            # ex. ajoutée au modèle après le dernier profilage — ne reçoit aucun schéma.
-            # Aucune table DuckDB n'est alors créée pour elle, alors que le SQL réécrit
-            # quand même sa référence avec le suffixe → "Catalog Error: Table ... does not
-            # exist". On complète donc avec un schéma inféré depuis les lignes pour chaque
-            # table de données non couverte par le cache.
-            covered = {_flatten_table_key(s["table_name"]) for s in schemas}
-            for tname, rows in merged.items():
-                if rows and _flatten_table_key(tname) not in covered:
-                    schemas.append(_infer_schema_from_rows(tname, rows))
-            return schemas
-    return [_infer_schema_from_rows(t, r) for t, r in merged.items() if r]
+    schemas = (
+        _schemas_from_cache(used_columns_raw, schema_cache) if used_columns_raw else []
+    )
+    covered = {_flatten_table_key(s["table_name"]) for s in schemas}
+    missing = [t for t in data_tables if _flatten_table_key(t) not in covered]
+    if missing:
+        raise SchemaMissingError(
+            sorted(missing), _full_refs_from_used_columns(used_columns_raw)
+        )
+    return schemas
 
 
 # ── Assertion SQL remapping ───────────────────────────────────────────────────
@@ -250,6 +284,7 @@ async def _run_one_case(
     suffix: str,
     con,
     precompiled_sql: str,
+    setup_error: str | None = None,
 ) -> dict:
     """Rejoue UN cas dans les tables déjà créées par modèle (cf. `_setup_model`).
 
@@ -257,6 +292,11 @@ async def _run_one_case(
     contente de vider les tables, d'insérer les données du cas, d'exécuter le SQL
     pré-transpilé, puis d'évaluer les assertions. `suffix` est le suffixe STABLE du modèle
     (pas de `test_index` concaténé) — il est commun à toutes les tables et au SQL.
+
+    `setup_error` : si le setup modèle a échoué (schéma manquant, DDL/transpile), le cas
+    ne peut pas s'exécuter. On classe quand même les cas sans données/assertions en `skip`
+    (rien à exécuter), et on remonte l'erreur sur les cas exécutables SANS toucher DuckDB
+    (éviter d'exécuter à vide, qui logue des erreurs `Failed to run query` trompeuses).
     """
     from build_query.assertion_eval import _evaluate_assertions
     from utils.examples import execute_queries, run_query_on_test_dataset
@@ -288,6 +328,14 @@ async def _run_one_case(
             **meta,
             "status": "skip",
             "reason": "no assertions",
+            "assertions": [],
+        }
+    if setup_error is not None:
+        return {
+            "index": test_index,
+            **meta,
+            "status": "error",
+            "error": setup_error,
             "assertions": [],
         }
 
@@ -447,11 +495,15 @@ async def run_tests(
             )
 
             # Setup partagé : tables + SQL transpilé une seule fois pour tout le modèle.
-            schemas = _resolve_model_schemas(used_columns_raw, schema_cache, test_cases)
+            # `_resolve_model_schemas` peut lever `SchemaMissingError` (cache incomplet) :
+            # on la capture ici pour la remonter en erreur par cas plutôt que planter le run.
             duckdb_schemas: list[dict] = []
             precompiled_sql = ""
             setup_error: str | None = None
             try:
+                schemas = _resolve_model_schemas(
+                    used_columns_raw, schema_cache, test_cases
+                )
                 duckdb_schemas, precompiled_sql = await _setup_model(
                     schemas=schemas,
                     sql=sql,
@@ -463,32 +515,19 @@ async def run_tests(
                 setup_error = str(exc)
 
             for tc in test_cases:
-                if setup_error is not None:
-                    # Le setup modèle a échoué (DDL/transpile) : tous les cas exécutables
-                    # remontent l'erreur, les cas vides restent des skips.
-                    result = await _run_one_case(
-                        test_case=tc,
-                        sql=sql,
-                        duckdb_schemas=[],
-                        used_columns_parsed=used_columns_parsed,
-                        dialect=dialect,
-                        suffix=model_suffix,
-                        con=con,
-                        precompiled_sql=precompiled_sql,
-                    )
-                    if result["status"] not in ("skip",):
-                        result = {**result, "status": "error", "error": setup_error}
-                else:
-                    result = await _run_one_case(
-                        test_case=tc,
-                        sql=sql,
-                        duckdb_schemas=duckdb_schemas,
-                        used_columns_parsed=used_columns_parsed,
-                        dialect=dialect,
-                        suffix=model_suffix,
-                        con=con,
-                        precompiled_sql=precompiled_sql,
-                    )
+                # Si le setup modèle a échoué, `_run_one_case` classe les cas vides en
+                # skip et remonte `setup_error` sur les cas exécutables sans toucher DuckDB.
+                result = await _run_one_case(
+                    test_case=tc,
+                    sql=sql,
+                    duckdb_schemas=duckdb_schemas,
+                    used_columns_parsed=used_columns_parsed,
+                    dialect=dialect,
+                    suffix=model_suffix,
+                    con=con,
+                    precompiled_sql=precompiled_sql,
+                    setup_error=setup_error,
+                )
                 case_results.append(result)
 
                 if result["status"] in ("fail", "error"):

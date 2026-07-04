@@ -261,6 +261,7 @@ def build_initial_state(
         "profile": None,
         "profile_billing_tb": None,
         "rerun_all_tests": False,
+        "user_rerun": False,
         "optimize": False,
         "save": None,
         "changed_message_id": "",
@@ -560,6 +561,7 @@ async def run_generate(
     overwrite: bool = False,
     instruction: str | None = None,
     update_uid: str | None = None,
+    target_path: str | None = None,
 ) -> None:
     import typer
 
@@ -789,6 +791,12 @@ async def run_generate(
             f"ajout d'un cas{' ciblé' if instruction else ''} "
             f"(--overwrite pour reconstruire à la place)."
         )
+
+    if target_path:
+        # Focus par branche issu d'une suggestion (suggestion_paths, cf. `mocksql suggest
+        # use`) : posé comme focus autoritaire — l'agent le valide contre path_plans et
+        # appelle set_target_path sans deviner de nom (cf. conversational_agent).
+        state["target_path"] = target_path
 
     _inject_schemas_into_cache(project_id, schemas)
 
