@@ -88,6 +88,61 @@ def _cast_nontext_string_slicing(
     return tree.sql(dialect=dialect) if changed else sql
 
 
+_RESERVED_KEYWORDS: frozenset[str] | None = None
+
+
+def _duckdb_reserved_keywords() -> frozenset[str]:
+    """Mots réservés DuckDB (catégorie ``reserved``), lus depuis le moteur lui-même
+    (``duckdb_keywords()``) — la liste embarquée de sqlglot est incomplète (elle quote
+    ``offset`` mais pas ``end``). Cache module ; best-effort : échec → noyau connu.
+    """
+    global _RESERVED_KEYWORDS
+    if _RESERVED_KEYWORDS is None:
+        try:
+            import duckdb
+
+            rows = duckdb.execute(
+                "SELECT keyword_name FROM duckdb_keywords() "
+                "WHERE keyword_category = 'reserved'"
+            ).fetchall()
+            _RESERVED_KEYWORDS = frozenset(r[0].lower() for r in rows)
+        except Exception:
+            _RESERVED_KEYWORDS = frozenset({"offset", "end", "order", "group", "all"})
+    return _RESERVED_KEYWORDS
+
+
+def _quote_reserved_identifiers(sql: str, dialect: str = "duckdb") -> str:
+    """Quote les identifiants mots réservés (``offset``, ``end``, …) — et eux seuls,
+    sans sur-quoting — via l'AST sqlglot re-rendu.
+
+    Un LLM les écrit nus (il ignore la liste des mots réservés DuckDB) → ``Parser
+    Error`` sur TOUTE la suite d'assertions dès que le résultat expose une telle
+    colonne (incident c6 : ``UNNEST(...) WITH OFFSET AS offset``), et les boucles de
+    régénération/correction thrashent sans converger — aucun modèle ne peut réparer
+    une erreur dont il ignore la cause. Accepte un fragment (condition, scope) comme
+    une requête complète. Best-effort : parsing en échec → SQL inchangé, jamais
+    bloquant (même posture que ``_cast_nontext_string_slicing``).
+    """
+    if not sql:
+        return sql
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+        if tree is None:
+            return sql
+        reserved = _duckdb_reserved_keywords()
+        changed = False
+        for ident in tree.find_all(exp.Identifier):
+            if not ident.args.get("quoted") and ident.name.lower() in reserved:
+                ident.set("quoted", True)
+                changed = True
+        # Re-rendu seulement si un identifiant a été quoté : le SQL d'origine reste
+        # byte-identique dans le cas courant (pas de reformatage cosmétique, ex.
+        # `(c) IS NOT TRUE` → `NOT (c) IS TRUE`) — même posture que la garde sœur.
+        return tree.sql(dialect=dialect) if changed else sql
+    except Exception:
+        return sql
+
+
 def _evaluate_assertions(
     assertions: List[Dict[str, Any]], view_name: str, con
 ) -> List[Dict[str, Any]]:
@@ -127,9 +182,11 @@ def _evaluate_assertions(
                 }
             )
             continue
+        raw_sql = _quote_reserved_identifiers(raw_sql)
         raw_sql = _cast_nontext_string_slicing(raw_sql, non_text_cols)
         sql = raw_sql.replace("__result__", view_name)
         scope = (a.get("scope") or "").strip().rstrip(";").strip()
+        scope = _quote_reserved_identifiers(scope)
         scope = _cast_nontext_string_slicing(scope, non_text_cols)
         quantifier = (a.get("quantifier") or "all").strip() or "all"
         try:
