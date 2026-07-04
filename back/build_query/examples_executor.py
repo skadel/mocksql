@@ -2323,6 +2323,14 @@ def _assertion_references_source_tables(sql: str) -> bool:
     return bool(_SUFFIXED_TABLE_RE.search(sql))
 
 
+def _error_signature(error: str) -> str:
+    """Signature stable d'une erreur DuckDB : première ligne seule, sans le contexte
+    ``LINE 1: …`` (qui varie avec le texte du SQL régénéré). Deux erreurs de même cause
+    (mot réservé, colonne inconnue) gardent ainsi la même signature d'un round à l'autre.
+    """
+    return (error or "").splitlines()[0].strip()
+
+
 async def _evaluate_assertions_with_retry(
     assertions: List[Dict[str, Any]],
     view_name: str,
@@ -2335,6 +2343,7 @@ async def _evaluate_assertions_with_retry(
     """
     Évalue les assertions et retente la régénération (jusqu'à REGEN_ASSERTION_LIMIT fois)
     de celles qui produisent une erreur d'exécution (pas juste un échec métier).
+    S'arrête dès qu'un round complet ne fait plus évoluer les erreurs (cf. disjoncteur).
     """
     logger.diag("[assertion_retry] évaluation de %s assertion(s)", len(assertions))
     results = _evaluate_assertions(assertions, view_name, con)
@@ -2343,10 +2352,25 @@ async def _evaluate_assertions_with_retry(
         [{"passed": r.get("passed"), "error": bool(r.get("error"))} for r in results],
     )
 
+    prev_error_map: Dict[int, str] = {}
     for attempt in range(REGEN_ASSERTION_LIMIT):
         errored_indices = [i for i, r in enumerate(results) if r.get("error")]
         if not errored_indices:
             break
+        # Disjoncteur anti-thrash : un round complet de régénération n'a fait bouger
+        # AUCUNE signature d'erreur (mêmes indices, mêmes messages) → la cause est
+        # STRUCTURELLE (schéma, environnement — cf. incident c6 : colonne mot réservé
+        # `offset`), pas une erreur de formulation que le LLM peut corriger. Re-boucler
+        # ne ferait que brûler REGEN_ASSERTION_LIMIT × N appels pour le même résultat.
+        error_map = {i: _error_signature(results[i]["error"]) for i in errored_indices}
+        if error_map == prev_error_map:
+            logger.diag(
+                "[assertion_retry] disjoncteur : erreurs inchangées après un round de "
+                "régénération — arrêt (%s)",
+                sorted(set(error_map.values())),
+            )
+            break
+        prev_error_map = error_map
         logger.diag(
             "[assertion_retry] tentative %s/%s — %s assertion(s) en erreur",
             attempt + 1,
