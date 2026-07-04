@@ -310,6 +310,57 @@ def _autoscope_conjunction(
     return None
 
 
+def _closest_partial_match(
+    expected_condition: str, view_name: str, con, scope: str = "", limit: int = 5
+) -> Optional[tuple[list, str]]:
+    """Éclaire le conjoint fautif d'une assertion qui ne remonte AUCUNE ligne (``exists`` sans
+    match, ou ``all`` scopée sur un périmètre vide → « Lignes remontées : [] », signal inutile
+    pour le fixer). Trouve le PLUS GRAND sous-ensemble de conjoints satisfiable (on retire le
+    moins de conjoints possible) et renvoie ``(lignes_les_plus_proches, conjoints_retirés_sql)``.
+
+    Ex. ``indicateur = 'nb_cartes' AND valeur = 999`` sans match → retire ``valeur = 999`` →
+    renvoie les lignes ``nb_cartes`` réelles : le conjoint ``valeur`` saute aux yeux. ``None``
+    si condition non conjonctive ou si aucun sous-ensemble non trivial ne matche.
+
+    Best-effort (mêmes garde-fous que ``_autoscope_conjunction``) : parsing/exécution en échec
+    → ``None``.
+    """
+    from itertools import combinations
+
+    try:
+        parsed = sqlglot.parse_one(expected_condition, dialect="duckdb")
+    except Exception:
+        return None
+    if parsed is None or isinstance(parsed, exp.Select):
+        return None
+    conjuncts = _flatten_top_level_and(parsed)
+    n = len(conjuncts)
+    if n < 2 or n > _MAX_AUTOSCOPE_CONJUNCTS:
+        return None
+    parts = [c.sql(dialect="duckdb") for c in conjuncts]
+    sc = (scope or "").strip().rstrip(";").strip()
+    scope_prefix = f"({sc.replace('__result__', view_name)}) AND " if sc else ""
+
+    # drop_size croissant → on retire le MINIMUM de conjoints (sous-ensemble maximal d'abord).
+    for drop_size in range(1, n):
+        for drop_idx in combinations(range(n), drop_size):
+            dropped_set = set(drop_idx)
+            keep_sql = " AND ".join(
+                f"({parts[i]})" for i in range(n) if i not in dropped_set
+            )
+            try:
+                rows = con.execute(
+                    f"SELECT * FROM {view_name} "
+                    f"WHERE {scope_prefix}({keep_sql}) LIMIT {limit}"
+                ).fetchdf()
+            except Exception:
+                continue
+            if len(rows) > 0:
+                dropped = " AND ".join(parts[i] for i in drop_idx)
+                return rows.to_dict(orient="records"), dropped
+    return None
+
+
 def _autoscope_failing_assertions(
     assertion_results: List[Dict[str, Any]], view_name: str, con
 ) -> List[Dict[str, Any]]:
@@ -392,6 +443,10 @@ class _Assertion(BaseModel):
             "destiné à 'vérifier ce qui ne doit PAS être là' — exprime la vérité "
             "positive à la place (au lieu de `date != '2016-01-02'`, écris "
             "`date = '2016-01-02'`). "
+            "⚠️ NULL ATTENDU — pour affirmer qu'une colonne DOIT être NULL (fait métier "
+            "légitime), n'écris JAMAIS `col IS NULL` (négation) : utilise l'idiome POSITIF "
+            "`COALESCE(col, <sentinelle hors-domaine>) = <sentinelle>` (ex. "
+            "`COALESCE(montant, -999999) = -999999`, `COALESCE(libelle, '__NULL__') = '__NULL__'`). "
             "Utilise UNIQUEMENT les colonnes du schéma de `__result__` (casse exacte) "
             "et, si besoin d'une valeur relative, une sous-requête sur `__result__` "
             "uniquement. N'inclus pas `SELECT`/`WHERE` — seulement l'expression booléenne."
@@ -534,19 +589,39 @@ def _build_assertion_eval_output_type(native_thinking: bool):
     )
 
 
+# Sentinelle : SQL d'une assertion dont la condition n'est PAS positive (négation/vacuité).
+# Retourne toujours 1 ligne (= échec) sans erreur d'exécution → l'assertion est routée vers le
+# fixer LOGIQUE (_fix_logically_failing_assertions), pas la voie erreur-SQL. Ne référence pas
+# __result__ (rien à substituer par la vue).
+_INVALID_POSITIVE_SENTINEL_SQL = (
+    "SELECT 'condition non positive (négation/vacuité) — à régénérer' AS _rejected"
+)
+
+
 def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
     """Convertit une assertion générée (condition positive) en dict exécutable aval.
 
     Conserve `description` et `expected_condition` (forme positive, pour l'UI/transparence)
     et dérive `sql` — l'artefact dbt-style réellement exécuté par `_evaluate_assertions`.
+
+    Garde structurelle à la génération (cf. audit c6.sql P1-2) : si `expected_condition` n'est
+    PAS une condition positive valide (négation détournée `IS NULL`/`!=`/`NOT IN`, ou vacuité),
+    on ne la wrappe PAS en `IS NOT TRUE` (où elle pourrait « passer » à vide), mais on émet une
+    sentinelle d'échec — l'assertion entre alors dans la boucle du fixer, qui la régénère en
+    forme positive. Même garde que les voies fixer et relevage (`_is_valid_positive_condition`).
     """
     scope = getattr(a, "scope", None)
     quantifier = getattr(a, "quantifier", "all") or "all"
-    return {
+    base = {
         "description": a.description,
         "expected_condition": a.expected_condition,
         **({"scope": scope} if scope and scope.strip() else {}),
         **({"quantifier": quantifier} if quantifier != "all" else {}),
+    }
+    if not _is_valid_positive_condition(a.expected_condition):
+        return {**base, "sql": _INVALID_POSITIVE_SENTINEL_SQL}
+    return {
+        **base,
         "sql": _assertion_sql_from_condition(a.expected_condition, scope, quantifier),
     }
 
@@ -1863,6 +1938,135 @@ async def _handle_test_result(
 
 REGEN_ASSERTION_LIMIT = 3
 
+# Plafond de l'échantillon <result_sample> (en LIGNES entières). Au-delà, on tronque et on
+# résume les colonnes discriminantes. Cf. audit c6.sql (P0-1) : un CUBE×UNION ALL×UNNEST peut
+# produire >1000 lignes → ~963K tokens/appel → 429 Vertex.
+RESULT_SAMPLE_MAX_ROWS = 60
+# Une colonne est « discriminante » (catégorielle) si elle a peu de valeurs distinctes ; on en
+# liste alors la totalité dans l'échantillon tronqué pour que le juge sache ce qui existe hors
+# des lignes montrées.
+_DISCRIMINANT_MAX_CARD = 30
+
+
+def _describe_duckdb_types(con, view_name: str) -> Dict[str, str]:
+    """Types DuckDB RÉELS de la vue registrée — ceux que les assertions affronteront vraiment.
+
+    Le round-trip JSON (``format_result`` → ``pd.read_json``) fait mentir les dtypes pandas :
+    une date ISO redevient ``object`` (VARCHAR dans DuckDB), une mesure FLOAT64 à valeurs
+    entières redevient ``int64``. ``DESCRIBE`` lit les types tels que DuckDB voit ``__result__``
+    après ``con.register`` — la source de vérité pour écrire des assertions valides.
+    """
+    try:
+        rows = con.execute(f'DESCRIBE "{view_name}"').fetchall()
+        return {str(r[0]): str(r[1]) for r in rows}
+    except Exception:
+        return {}
+
+
+def _first_example_value(series) -> Optional[str]:
+    """Première valeur non-nulle d'une colonne, sérialisée pour le prompt. Désambiguïse le
+    format réel (``'2024-03-01T00:00:00'`` vs ``'2024-03-01'``). None si la colonne est vide."""
+    non_null = series.dropna()
+    if non_null.empty:
+        return None
+    return json.dumps(non_null.iloc[0], ensure_ascii=False, default=str)
+
+
+def _build_result_schema_block(result_df, con=None, view_name: str = "") -> str:
+    """Bloc ``<result_schema>`` véridique : type DuckDB réel (via DESCRIBE de la vue registrée
+    si ``con`` fourni, sinon repli sur le dtype pandas) + une valeur d'exemple par colonne.
+
+    Ex. ``  - `partition_date`: VARCHAR (ex. '2024-03-01T00:00:00')``. Cf. audit c6.sql (P0-2) :
+    afficher ``object`` sans exemple faisait écrire au juge ``partition_date = '2024-03-01'``,
+    toujours faux sur une chaîne ISO horodatée.
+    """
+    duck_types = (
+        _describe_duckdb_types(con, view_name) if con is not None and view_name else {}
+    )
+    lines = []
+    for col in result_df.columns:
+        dtype = duck_types.get(str(col)) or str(result_df[col].dtype)
+        example = _first_example_value(result_df[col])
+        suffix = f" (ex. {example})" if example is not None else ""
+        lines.append(f"  - `{col}`: {dtype}{suffix}")
+    return "\n".join(lines) if lines else "  (aucune colonne)"
+
+
+def _subject_tokens(text: str) -> set:
+    """Tokens significatifs (>3 caractères, minuscules) d'une description, pour prioriser les
+    lignes de l'échantillon qui parlent du sujet du test."""
+    return {t for t in re.findall(r"[\wÀ-ÿ]+", (text or "").lower()) if len(t) > 3}
+
+
+def _build_result_sample_block(
+    result_df,
+    test_description: str = "",
+    max_rows: int = RESULT_SAMPLE_MAX_ROWS,
+) -> str:
+    """Bloc ``<result_sample>`` plafonné par LIGNES ENTIÈRES (jamais de troncature caractère).
+
+    - ``row_count <= max_rows`` → le résultat complet (comportement historique préservé sur les
+      petits mocks, 0 régression sur le cas courant).
+    - sinon → ``max_rows`` lignes priorisées sur le sujet du test (celles dont une valeur est un
+      token de la description passent devant), un compteur ``(+N autres)``, puis les valeurs
+      distinctes des colonnes discriminantes pour que le juge sache ce qui existe hors
+      échantillon. Cf. audit c6.sql (P0-1).
+    """
+    records = result_df.to_dict(orient="records")
+    row_count = len(records)
+    if row_count <= max_rows:
+        return f"{row_count} ligne(s) :\n{json.dumps(records, ensure_ascii=False, default=str)}"
+
+    tokens = _subject_tokens(test_description)
+    if tokens:
+        prioritized = [
+            r for r in records if any(str(v).lower() in tokens for v in r.values())
+        ]
+        rest = [
+            r for r in records if not any(str(v).lower() in tokens for v in r.values())
+        ]
+        ordered = prioritized + rest
+    else:
+        ordered = records
+    shown = ordered[:max_rows]
+    hidden = row_count - len(shown)
+
+    distinct_lines = []
+    for col in result_df.columns:
+        try:
+            values = result_df[col].dropna().unique().tolist()
+        except TypeError:
+            # Colonnes non-hashables (ARRAY/STRUCT, ex. les *_lags / preceding_values
+            # de c6) : jamais discriminantes → on les ignore plutôt que de casser le run.
+            continue
+        if 0 < len(values) <= _DISCRIMINANT_MAX_CARD and len(values) < row_count:
+            rendered = ", ".join(
+                json.dumps(v, ensure_ascii=False, default=str) for v in values
+            )
+            distinct_lines.append(f"  - `{col}` ({len(values)}) : {rendered}")
+    distinct_block = (
+        "\nValeurs distinctes des colonnes discriminantes :\n"
+        + "\n".join(distinct_lines)
+        if distinct_lines
+        else ""
+    )
+
+    return (
+        f"{row_count} ligne(s) — échantillon de {len(shown)} (les autres non affichées) :\n"
+        f"{json.dumps(shown, ensure_ascii=False, default=str)}\n"
+        f"(+{hidden} autres){distinct_block}"
+    )
+
+
+def _format_input_data(test_data) -> str:
+    """Rend ``<input_data>`` en JSON (cohérent avec ``<result_sample>`` et le reste des prompts)
+    plutôt qu'en repr Python (guillemets simples, `None`/`True` non-JSON). Best-effort : non
+    sérialisable → repr en dernier recours."""
+    try:
+        return json.dumps(test_data, ensure_ascii=False, default=str)
+    except Exception:
+        return str(test_data)
+
 
 async def _generate_assertions_and_evaluate(
     duckdb_sql: str,
@@ -1870,19 +2074,18 @@ async def _generate_assertions_and_evaluate(
     result_df,
     test_description: str,
     focus_path: str = "",
+    con=None,
+    view_name: str = "",
 ) -> _AssertionsAndEvaluation:
     """
     Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
     Returns an _AssertionsAndEvaluation with assertions, verdict, explanation, and optional fix.
     Falls back to an empty assertions + Bon verdict on failure.
     """
-    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
-    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
-    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
-    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
-    # petits résultats — aucun risque de budget de prompt.
-    sample = result_df.to_dict(orient="records")
-    row_count = len(result_df)
+    # Schéma véridique (types DuckDB réels + valeur d'exemple) et échantillon plafonné :
+    # cf. helpers + audit c6.sql (P0-1/P0-2). `con`/`view_name` permettent le DESCRIBE réel.
+    schema_str = _build_result_schema_block(result_df, con=con, view_name=view_name)
+    sample_block = _build_result_sample_block(result_df, test_description)
 
     # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
     system_content = """Tu es un expert en tests SQL dbt-style avec DuckDB. À partir d'un \
@@ -1920,10 +2123,25 @@ assertion fige la valeur exacte que CE scénario doit produire, lue dans `<resul
 
 **Floats — JAMAIS d'égalité stricte :** pour une colonne flottante (z-score, moyenne, STDDEV,
 ratio, pourcentage), `col = 1.234` est non-déterministe (ordre d'agrégation, précision) → assertion
-fragile. Pince via `ROUND(col, 2) = 1.23` ou `ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre
-que pour les entiers, dates et chaînes. **Temporel (DATE/TIMESTAMP) :** compare directement à un jour
-(`date = '2026-01-01'`) ou caste (`CAST(date AS DATE) = '2026-01-01'`) ; n'applique JAMAIS LEFT/SUBSTR à
-une colonne temporelle (invalide en DuckDB) — si tu dois slicer, caste d'abord : `LEFT(CAST(date AS STRING), 10)`.
+fragile. Pince via `ROUND(col, 2) = 1.23` (borne la précision à **2 décimales, JAMAIS plus de 3** :
+un pin à 9 décimales `= 8.232225317` est ingérable et casse au moindre recalcul) ou
+`ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre que pour les entiers, dates et chaînes.
+
+**Alignement description ↔ condition, et anti-redondance :**
+- La condition doit tester ce que la description AFFIRME. Si la description dit « dépasse 1.2 »,
+  écris `col > 1.2` — pas `ROUND(col, 9) = 8.23`. Pour figer EN PLUS la valeur exacte, ajoute une
+  assertion SÉPARÉE (`ROUND(col, 2) = 8.23`) ; ne fais jamais dire à une condition autre chose que
+  sa description.
+- Ne pince pas la MÊME valeur sur plusieurs colonnes dérivées l'une de l'autre (ex. `zscore_max =
+  GREATEST(...)` d'une colonne déjà épinglée) : une assertion sur la colonne source suffit.
+
+**Temporel — VÉRIFIE LE TYPE dans `<result_schema>` (et la valeur d'exemple) avant de comparer :**
+- Colonne DATE/TIMESTAMP réelle → compare à un jour (`date = '2026-01-01'`) ou caste
+  (`CAST(date AS DATE) = '2026-01-01'`) ; n'applique JAMAIS LEFT/SUBSTR nu à une colonne temporelle
+  (invalide en DuckDB) — pour slicer, caste d'abord : `LEFT(CAST(date AS STRING), 10)`.
+- Colonne **VARCHAR** contenant une date ISO (valeur d'exemple `'2024-03-01T00:00:00'`) → la valeur
+  PORTE la partie heure : `col = '2024-03-01'` est TOUJOURS FAUX. Compare avec `CAST(col AS DATE) =
+  '2024-03-01'` ou `LEFT(col, 10) = '2024-03-01'` (LEFT est valide sur VARCHAR).
 
 **Cible les bonnes colonnes :** concentre tes assertions sur les colonnes NOMMÉES ou impliquées par
 `<test_context>` (la cible du scénario) ; n'épingle pas les colonnes intermédiaires ou techniques.
@@ -1931,7 +2149,9 @@ une colonne temporelle (invalide en DuckDB) — si tu dois slicer, caste d'abord
 **Forme des assertions :** le détail des contraintes est porté par les descriptions des champs
 `description`, `expected_condition` et `scope` du schéma de sortie — respecte-les strictement :
 condition POSITIVE (jamais de négation `!=`/`<>`/`NOT IN`/`IS NULL` pour « vérifier ce qui ne doit
-PAS être là » → reformule en l'affirmation attendue) ; UNE propriété observable par assertion (émets-
+PAS être là » → reformule en l'affirmation attendue ; pour affirmer qu'une colonne DOIT être NULL,
+idiome positif `COALESCE(col, <sentinelle hors-domaine>) = <sentinelle>`, jamais `col IS NULL`) ;
+UNE propriété observable par assertion (émets-
 en plusieurs au besoin ; jamais d'`OR`/`AND` entre colonnes d'intentions distinctes) ; `scope` pour
 affirmer un fait sur UNE ligne précise d'un résultat MULTI-lignes ; sous-requête sur `__result__`
 UNIQUEMENT (aucune autre table) ; anti-trivialité (`1=1`, `col=col`, `IS NOT NULL` d'une colonne déjà
@@ -2042,12 +2262,11 @@ Les données d'entrée de ce test ont été GÉNÉRÉES en focus sur la branche 
 </query>
 
 <input_data>
-{test_data}
+{_format_input_data(test_data)}
 </input_data>
 
 <result_sample>
-{row_count} ligne(s) :
-{json.dumps(sample, ensure_ascii=False, default=str)}
+{sample_block}
 </result_sample>{focus_block}
 
 <task>
@@ -2104,26 +2323,23 @@ async def _generate_diagnostic(
 ) -> Optional[DiagnosticBlock]:
     """Second focused LLM call to produce a surgical DiagnosticBlock when bad_data is detected.
     Uses DiagnosticBlock directly as structured output schema — all fields required, no Optional."""
-    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
-    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
-    # petits résultats — aucun risque de budget de prompt.
-    sample = result_df.to_dict(orient="records")
-    row_count = len(result_df)
+    # Échantillon plafonné par lignes entières (cf. _build_result_sample_block, audit c6.sql P0-1).
+    sample_block = _build_result_sample_block(result_df, test_description)
 
     prompt = f"""Tu es un expert en tests SQL. Le test suivant a été jugé "bad_data" : les données d'entrée ne permettent pas de valider le scénario.
 
 Description du test : {test_description}
 
 Données d'entrée injectées dans DuckDB :
-{test_data}
+{_format_input_data(test_data)}
 
 Requête SQL testée :
 ```sql
 {duckdb_sql}
 ```
 
-Résultat DuckDB — {row_count} ligne(s) :
-{sample}
+Résultat DuckDB :
+{sample_block}
 
 Raisonnement de l'évaluateur :
 {eval_reasoning}
@@ -2170,13 +2386,15 @@ async def _regenerate_assertion(
     test_data: list,
     result_df,
     test_description: str,
+    con=None,
+    view_name: str = "",
 ) -> Optional[Dict[str, Any]]:
     """
     Demande au LLM de corriger une assertion dont l'exécution a produit une erreur.
     Retourne un nouveau dict {"description": ..., "sql": ...} ou None en cas d'échec.
     """
-    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
-    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
+    schema_str = _build_result_schema_block(result_df, con=con, view_name=view_name)
+    sample_block = _build_result_sample_block(result_df, test_description)
 
     # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
     system_content = """Tu es un expert en tests SQL DuckDB dbt-style. Une assertion a \
@@ -2187,6 +2405,7 @@ Le message suivant contient ces sections, délimitées par des balises :
 - `<result_schema>` : le schéma exact de la table `__result__` (colonnes + types).
 - `<query>` : la requête SQL testée.
 - `<input_data>` : les données d'entrée injectées dans DuckDB.
+- `<result_sample>` : le résultat réel après exécution (pour ancrer les valeurs attendues).
 - `<broken_assertion>` : l'assertion fautive et l'erreur qu'elle a produite.
 - `<task>` : ce que tu dois produire.
 
@@ -2221,8 +2440,12 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour) :
 </query>
 
 <input_data>
-{test_data}
+{_format_input_data(test_data)}
 </input_data>
+
+<result_sample>
+{sample_block}
+</result_sample>
 
 <broken_assertion>
 Description : {original.get("description", "")}
@@ -2337,6 +2560,8 @@ async def _evaluate_assertions_with_retry(
                 test_data=test_data,
                 result_df=result_df,
                 test_description=test_description,
+                con=con,
+                view_name=view_name,
             )
             if new_assertion and not _assertion_references_source_tables(
                 new_assertion.get("sql", "")
@@ -2366,12 +2591,8 @@ async def _fix_logically_failing_assertions(
     demande au LLM si l'assertion elle-même est incorrecte. Si oui, la régénère
     et la réévalue une fois. Appelée uniquement lors de la génération initiale.
     """
-    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
-    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
-    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
-    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
-    # petits résultats — aucun risque de budget de prompt.
-    sample = result_df.to_dict(orient="records")
+    schema_str = _build_result_schema_block(result_df, con=con, view_name=view_name)
+    sample_block = _build_result_sample_block(result_df, test_description)
     results = list(assertion_results)
 
     failing_indices = [
@@ -2401,7 +2622,8 @@ Le message suivant contient ces sections, délimitées par des balises :
 - `<input_data>` : les données d'entrée injectées dans DuckDB.
 - `<result_sample>` : des exemples du résultat réel.
 - `<failing_assertions>` : les assertions qui échouent, chacune identifiée par un `id` (#0, #1, …),
-  avec son SQL et les lignes qu'elle remonte.
+  avec sa condition attendue, son SQL et soit les lignes violantes, soit — si aucune ligne ne
+  satisfait la condition — les lignes les plus proches et le conjoint probablement fautif.
 - `<task>` : ce que tu dois produire.
 
 **Décision attendue pour chaque assertion :** est-elle logiquement correcte par rapport au
@@ -2421,6 +2643,8 @@ colonne, condition inversée, etc.) ?
   lui-même pour produire la requête de validation.
 - INTERDIT : tout `!=`, `<>`, `NOT IN`, `NOT (...)`, `IS NULL`, ou une clause `SELECT`/`WHERE`
   de tête — écris seulement l'expression booléenne (ex. `montant > 0`, `date = '2026-01-02'`).
+  Pour affirmer qu'une colonne DOIT être NULL : idiome POSITIF `COALESCE(col, <sentinelle
+  hors-domaine>) = <sentinelle>` (ex. `COALESCE(montant, -999999) = -999999`), jamais `col IS NULL`.
 - INTERDIT : toute clause qui se neutralise elle-même (ex. `x = 2 AND (SELECT COUNT(*) … x = 2) = 0`) :
   c'est une assertion creuse qui ne teste rien.
 - Utilise UNIQUEMENT les colonnes de `<result_schema>` (casse exacte). Pour une valeur relative,
@@ -2452,18 +2676,43 @@ Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par a
     for local_id, i in enumerate(failing_indices):
         a = results[i]
         failing_rows = a.get("failing_rows", [])
+        cond = a.get("expected_condition", "")
+        scope = a.get("scope", "")
         logger.diag(
             "[assertion_fixer] #%s (idx %s): %r", local_id, i, a.get("description", "")
         )
+        if failing_rows:
+            evidence = (
+                "Lignes remontées (violations détectées) :\n"
+                f"{json.dumps(failing_rows[:10], ensure_ascii=False, default=str)}"
+            )
+        else:
+            # Aucune violation à montrer (exists sans match, ou scope vacant) : au lieu d'un
+            # `[]` muet, on éclaire le conjoint fautif via le plus grand sous-ensemble
+            # satisfiable (cf. audit c6.sql P1-3).
+            partial = _closest_partial_match(cond, view_name, con, scope)
+            if partial:
+                near, dropped = partial
+                evidence = (
+                    "Aucune ligne ne satisfait la condition COMPLÈTE. Lignes les plus proches "
+                    f"(elles satisfont tout SAUF `{dropped}` → conjoint probablement fautif) :\n"
+                    f"{json.dumps(near, ensure_ascii=False, default=str)}"
+                )
+            else:
+                evidence = (
+                    "Aucune ligne ne satisfait la condition (et aucun sous-ensemble ne "
+                    "matche) — vérifie que les colonnes/valeurs existent bien dans le résultat."
+                )
+        scope_line = f"Scope : {scope}\n" if scope else ""
         blocks.append(
             f"""#{local_id}
 Description : {a.get("description", "")}
-SQL :
+Condition attendue : {cond}
+{scope_line}SQL :
 ```sql
 {a.get("sql", "")}
 ```
-Lignes remontées (violations détectées) :
-{json.dumps(failing_rows[:10], ensure_ascii=False, default=str)}"""
+{evidence}"""
         )
     failing_block = "\n\n".join(blocks)
 
@@ -2482,11 +2731,11 @@ Lignes remontées (violations détectées) :
 </query>
 
 <input_data>
-{test_data}
+{_format_input_data(test_data)}
 </input_data>
 
 <result_sample>
-{json.dumps(sample, ensure_ascii=False, default=str)}
+{sample_block}
 </result_sample>
 
 <failing_assertions>

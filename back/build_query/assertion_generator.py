@@ -100,6 +100,8 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 result_df=result_df,
                 test_description=test_description,
                 focus_path=focus_path,
+                con=con,
+                view_name=view_name,
             )
 
             async with atimed("assertion_gen:eval+fix"):

@@ -168,6 +168,22 @@ def get_llm_thinking_budget() -> int | None:
         return None
 
 
+def get_llm_max_retries() -> int:
+    """Nombre de tentatives (avec backoff exponentiel géré par le client Vertex) sur erreur
+    transitoire — notamment un 429 (quota TPM dépassé). Défaut 6 (défaut LangChain), rendu
+    explicite et surchargeable via `mocksql.yml` (`llm.max_retries`) ou `LLM_MAX_RETRIES`."""
+    cfg = load_config()
+    val = cfg.get("llm", {}).get("max_retries")
+    if val is None:
+        val = os.getenv("LLM_MAX_RETRIES")
+    if val is None:
+        return 6
+    try:
+        return max(0, int(val))
+    except (ValueError, TypeError):
+        return 6
+
+
 def is_native_thinking_active() -> bool:
     """Indique si le modèle raisonne nativement (canal thinking séparé).
 
