@@ -1073,7 +1073,11 @@ async def generate_examples_(
             c_copy = dict(c)
             hints = col_hints.get((uc_key, col_name))
             if hints:
-                hint_str = " | ATTENTION contrainte SQL : " + " ; ".join(hints)
+                hint_str = (
+                    " | ⚠️ indice extrait du SQL (peut être partiel ou conditionnel à "
+                    "UNE branche d'un OR/UNION — la requête fait foi) : "
+                    + " ; ".join(hints)
+                )
                 existing_desc = c_copy.get("description")
                 if existing_desc:
                     c_copy["description"] = str(existing_desc) + hint_str
