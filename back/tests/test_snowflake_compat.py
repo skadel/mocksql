@@ -159,3 +159,95 @@ def test_snowflake_debug_sql_parses():
     sql = f"WITH {name} AS (SELECT 1 AS x)\nSELECT * FROM {name}"
     # ne doit pas lever de ParseError
     sqlglot.parse_one(sql, read="snowflake")
+
+
+# ---------------------------------------------------------------------------
+# Hex string → DOUBLE : CAST('0x' || h AS FLOAT) → hexstr_to_double(h)
+# (sf_bq083 : Snowflake parse l'hexa depuis une chaîne runtime, DuckDB non)
+# ---------------------------------------------------------------------------
+
+
+def _fresh_con(monkeypatch):
+    """Connexion DuckDB préparée comme en prod (extensions + macros), sans réseau."""
+    from storage import config
+
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: [])
+    con = duckdb.connect(":memory:")
+    config.apply_duckdb_extensions(con)
+    return con
+
+
+def test_hexstr_macro_values(monkeypatch):
+    """Valeurs de référence : uint256 sans overflow, vide=0, invalide/NULL → NULL."""
+    con = _fresh_con(monkeypatch)
+    cases = [
+        ("f4240", 1_000_000.0),
+        ("de0b6b3a7640000", 1e18),
+        ("ff", 255.0),
+        ("F4240", 1_000_000.0),  # casse indifférente
+        ("", 0.0),  # valeur 0 encodée : LTRIM a tout mangé
+        ("zz", None),  # non-hexa → NULL (pas de 0 silencieux)
+        (None, None),
+    ]
+    for h, expected in cases:
+        got = con.execute("SELECT hexstr_to_double(?)", [h]).fetchone()[0]
+        assert got == expected, f"hexstr_to_double({h!r}) = {got}, attendu {expected}"
+
+
+def test_hex_cast_rewritten_to_macro():
+    out = _ptq(
+        "SELECT CAST('0x' || LTRIM(SUBSTRING(\"input\", 75), '0') AS FLOAT) AS v"
+        " FROM mydb.s.t"
+    )
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "'0x'" not in out.lower()
+
+
+def test_hex_cast_chained_concat():
+    """'0x' || a || b : DPipe imbriqué à gauche — le préfixe doit être trouvé en feuille."""
+    out = _ptq("SELECT CAST('0x' || a || b AS FLOAT) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "'0x'" not in out.lower()
+
+
+def test_hex_cast_uppercase_prefix_and_try_cast():
+    out = _ptq("SELECT TRY_CAST('0X' || h AS DOUBLE) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+
+
+def test_hex_cast_concat_function_form():
+    out = _ptq("SELECT CAST(CONCAT('0x', h) AS FLOAT) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+
+
+def test_normal_float_casts_untouched():
+    """Un CAST float ordinaire (littéral ou colonne) ne doit PAS déclencher le fixer."""
+    for sql in [
+        "SELECT CAST('3.14' AS FLOAT) AS v",
+        "SELECT CAST(col AS FLOAT) AS v FROM mydb.s.t",
+        "SELECT CAST(a || b AS FLOAT) AS v FROM mydb.s.t",  # concat sans préfixe 0x
+    ]:
+        assert "HEXSTR_TO_DOUBLE" not in _ptq(sql).upper()
+
+
+def test_hex_cast_to_varchar_untouched():
+    out = _ptq("SELECT CAST('0x' || h AS VARCHAR) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE" not in out.upper()
+
+
+def test_hex_cast_executes_end_to_end(monkeypatch):
+    """Chaîne complète : transpilation + exécution DuckDB sur l'idiome sf_bq083."""
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT CAST('0x' || LTRIM('000f4240', '0') AS FLOAT) AS v")
+    assert con.execute(out).fetchone()[0] == 1_000_000.0
+
+
+def test_validator_helper_has_macro(monkeypatch):
+    """Le dry-run PREPARE du validateur passe par DuckDBTestHelper : macro requis."""
+    from storage import config
+
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: [])
+    from utils.duckdb_test_helper import DuckDBTestHelper
+
+    helper = DuckDBTestHelper(":memory:")
+    assert helper.conn.execute("SELECT hexstr_to_double('ff')").fetchone()[0] == 255.0

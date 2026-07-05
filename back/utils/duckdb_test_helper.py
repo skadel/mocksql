@@ -57,10 +57,16 @@ class DuckDBTestHelper:
     """
 
     def __init__(self, db_path: str = ":memory:"):
+        from storage.config import apply_duckdb_extensions
+
         self.db_path = db_path
         # Connexion persistante: garantit l'état partagé en ':memory:' et évite
         # la recréation/fermeture coûteuse des connexions
         self.conn = duckdb.connect(self.db_path)
+        # Même préparation que les connexions d'exécution (extensions + macros
+        # type hexstr_to_double) : le dry-run PREPARE doit résoudre les mêmes
+        # fonctions que l'exécution réelle, sinon il rejette du SQL valide.
+        apply_duckdb_extensions(self.conn)
         # Lock pour sérialiser l'accès concurrent à la connexion
         self._lock = asyncio.Lock()
 

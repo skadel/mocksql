@@ -1557,6 +1557,66 @@ def _fix_snowflake_to_timestamp(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _strip_hex_prefix(concat: exp.Expression) -> exp.Expression | None:
+    """Retire le littéral ``'0x'`` en tête d'une chaîne de concaténations.
+
+    Retourne le reste de la concaténation (copie), ou ``None`` si l'expression
+    n'est pas une concaténation préfixée par ``'0x'``. Les ``||`` chaînés sont
+    imbriqués à gauche par sqlglot (``('0x' || a) || b``) : on descend donc
+    récursivement jusqu'à la feuille la plus à gauche.
+    """
+
+    def _is_0x(n: exp.Expression) -> bool:
+        return isinstance(n, exp.Literal) and n.is_string and n.this.lower() == "0x"
+
+    if isinstance(concat, exp.DPipe):
+        if _is_0x(concat.this):
+            return concat.expression.copy()
+        stripped = _strip_hex_prefix(concat.this)
+        if stripped is not None:
+            return exp.DPipe(this=stripped, expression=concat.expression.copy())
+        return None
+    if isinstance(concat, exp.Concat):
+        exprs = concat.expressions
+        if len(exprs) >= 2 and _is_0x(exprs[0]):
+            rest = [e.copy() for e in exprs[1:]]
+            if len(rest) == 1:
+                return rest[0]
+            return exp.Concat(
+                expressions=rest,
+                safe=concat.args.get("safe"),
+                coalesce=concat.args.get("coalesce"),
+            )
+    return None
+
+
+def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
+    """Réécrit ``CAST('0x' || h AS FLOAT)`` en ``hexstr_to_double(h)``.
+
+    Snowflake interprète une chaîne ``'0x…'`` castée en FLOAT comme de
+    l'hexadécimal ; DuckDB refuse (il ne parse l'hexa que comme littéral).
+    Le macro ``hexstr_to_double`` est enregistré sur chaque connexion par
+    ``storage.config:apply_duckdb_extensions``. Couvre CAST et TRY_CAST
+    (sous-classe), cibles FLOAT/DOUBLE uniquement — un cast texte ou décimal
+    n'est pas touché.
+    """
+    for node in list(tree.find_all(exp.Cast)):
+        target = node.to
+        if not isinstance(target, exp.DataType) or target.this not in (
+            exp.DataType.Type.FLOAT,
+            exp.DataType.Type.DOUBLE,
+        ):
+            continue
+        inner = node.this
+        while isinstance(inner, exp.Paren):
+            inner = inner.this
+        stripped = _strip_hex_prefix(inner)
+        if stripped is None:
+            continue
+        node.replace(exp.Anonymous(this="hexstr_to_double", expressions=[stripped]))
+    return tree
+
+
 def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
 
@@ -1564,6 +1624,7 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """
     _fix_snowflake_to_char(tree)
     _fix_snowflake_to_timestamp(tree)
+    _fix_snowflake_hex_cast(tree)
     return tree
 
 

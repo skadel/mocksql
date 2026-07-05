@@ -261,13 +261,38 @@ def get_duckdb_extensions() -> list[str]:
     return [str(e).strip() for e in exts if str(e).strip()]
 
 
-def apply_duckdb_extensions(con) -> None:
-    """Installe et charge les extensions configurées sur une connexion DuckDB.
+# Snowflake parse une chaîne '0x…' castée en FLOAT comme de l'hexadécimal ;
+# DuckDB ne parse l'hexa que comme littéral, jamais depuis une chaîne runtime.
+# Accumulateur en DOUBLE : un uint256 (jusqu'à 64 chiffres hexa, Ethereum
+# calldata) déborde tout type entier, HUGEINT compris (127 bits).
+# Chaîne vide → 0.0 (valeur 0 dont LTRIM a mangé tous les chiffres) ;
+# caractère non-hexa → NULL (comme TRY_CAST, pas de 0 silencieux).
+_HEXSTR_TO_DOUBLE_MACRO = """
+CREATE OR REPLACE MACRO hexstr_to_double(h) AS (
+  CASE
+    WHEN h IS NULL THEN NULL
+    WHEN length(h) = 0 THEN 0.0
+    ELSE list_reduce(
+      [CASE
+         WHEN c BETWEEN '0' AND '9' THEN (ord(c) - 48)::DOUBLE
+         WHEN c BETWEEN 'a' AND 'f' THEN (ord(c) - 87)::DOUBLE
+         ELSE NULL
+       END
+       FOR c IN string_split(lower(h), '')],
+      (acc, d) -> acc * 16 + d
+    )
+  END
+)
+"""
 
-    Idempotent (INSTALL/LOAD sont sûrs à rejouer). Une extension qui échoue
-    (réseau absent au premier INSTALL, nom inconnu) est journalisée en warning
-    et n'interrompt pas l'ouverture de la connexion — l'erreur de requête en
-    aval restera explicite.
+
+def apply_duckdb_extensions(con) -> None:
+    """Prépare une connexion DuckDB : extensions configurées + macros MockSQL.
+
+    Idempotent (INSTALL/LOAD et CREATE OR REPLACE sont sûrs à rejouer). Une
+    extension qui échoue (réseau absent au premier INSTALL, nom inconnu) est
+    journalisée en warning et n'interrompt pas l'ouverture de la connexion —
+    l'erreur de requête en aval restera explicite.
     """
     import logging
 
@@ -283,6 +308,7 @@ def apply_duckdb_extensions(con) -> None:
                 ext,
                 e,
             )
+    con.execute(_HEXSTR_TO_DOUBLE_MACRO)
 
 
 def load_preprocessor_fn(fn_ref: str, config_dir: Path):
