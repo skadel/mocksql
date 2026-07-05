@@ -1912,25 +1912,56 @@ async def _handle_test_result(
 REGEN_ASSERTION_LIMIT = 3
 
 
+def _result_schema_and_sample(result_df, con=None, view_name: str = ""):
+    """Schéma (`<result_schema>`) + échantillon (`<result_sample>`) du résultat pour le juge.
+
+    Priorité au MOTEUR quand la vue est disponible (`con` + `view_name`) : types DuckDB
+    RÉELS via `DESCRIBE` et valeurs via `SELECT *` (NULL natifs → `null`). Le round-trip
+    pandas, lui, mute les types que le juge lit (`VARCHAR '001'` → `int64 1`, `NULL` →
+    `NaN`) → il épingle des artefacts de sérialisation. Repli sur les dtypes/`to_dict`
+    pandas si la vue n'est pas fournie (ou DESCRIBE en échec) — best-effort, jamais
+    bloquant. Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
+    pincer les valeurs et juger la cardinalité (les mocks sont petits). Cf. incident c2 / P1-1.
+    """
+    if con is not None and view_name:
+        try:
+            desc = con.execute(f'DESCRIBE "{view_name}"').fetchall()
+            schema_lines = [f"  - `{r[0]}`: {r[1]}" for r in desc]
+            cur = con.execute(f'SELECT * FROM "{view_name}"')
+            cols = [c[0] for c in cur.description]
+            sample = [dict(zip(cols, rec)) for rec in cur.fetchall()]
+            schema_str = (
+                "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
+            )
+            return schema_str, sample, len(sample)
+        except Exception as exc:
+            logger.debug(
+                "[assertions_eval] DESCRIBE/SELECT %s échoué: %s", view_name, exc
+            )
+    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
+    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
+    return schema_str, result_df.to_dict(orient="records"), len(result_df)
+
+
 async def _generate_assertions_and_evaluate(
     duckdb_sql: str,
     test_data: list,
     result_df,
     test_description: str,
     focus_path: str = "",
+    con=None,
+    view_name: str = "",
 ) -> _AssertionsAndEvaluation:
     """
     Single LLM call that generates 1-N dbt-style assertions AND evaluates test quality.
     Returns an _AssertionsAndEvaluation with assertions, verdict, explanation, and optional fix.
     Falls back to an empty assertions + Bon verdict on failure.
+
+    ``con`` + ``view_name`` (vue résultat déjà enregistrée) : schéma et échantillon montrés
+    au juge construits depuis le MOTEUR (types réels, NULL natifs) plutôt que via les dtypes
+    pandas mutés. Cf. ``_result_schema_and_sample``.
     """
-    schema_lines = [f"  - `{col}`: {dtype}" for col, dtype in result_df.dtypes.items()]
-    schema_str = "\n".join(schema_lines) if schema_lines else "  (aucune colonne)"
-    # Output complet, jamais tronqué : le juge a besoin de TOUTES les lignes pour
-    # pincer les valeurs de sortie et juger la cardinalité. Les mocks produisent de
-    # petits résultats — aucun risque de budget de prompt.
-    sample = result_df.to_dict(orient="records")
-    row_count = len(result_df)
+    schema_str, sample, row_count = _result_schema_and_sample(result_df, con, view_name)
 
     # ── System : rôle + index des sections + règles (préfixe stable → cacheable) ──
     system_content = """Tu es un expert en tests SQL dbt-style avec DuckDB. À partir d'un \
