@@ -309,7 +309,13 @@ def insert_examples(
 
     # Transformer la liste used_columns en dict pour accès rapide
     if used_columns is not None:
-        used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
+        # Clés en minuscules (cf. filter_schemas_by_used_columns / create_test_tables) :
+        # used_columns peut être en minuscules (qualification Trino) alors que le nom de
+        # table du schéma garde la casse d'origine → sans normalisation le filtrage
+        # retombe silencieusement sur « toutes les colonnes ».
+        used_columns_dict = {
+            _uc_key(uc).lower(): uc["used_columns"] for uc in used_columns
+        }
         logger.debug("used_columns_dict keys: %s", list(used_columns_dict.keys()))
     else:
         used_columns_dict = {}
@@ -371,7 +377,9 @@ def insert_examples(
                 )
 
             table_name_with_suffix = f"{duckdb_base}_{suffix_key}"
-            qualified_key = duckdb_base  # même format que used_columns_dict
+            qualified_key = (
+                duckdb_base.lower()
+            )  # même format que used_columns_dict (minuscule)
 
             logger.debug(
                 "Traitement table=%s  qualified_key=%s", table_name, qualified_key
