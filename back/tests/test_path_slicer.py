@@ -12,6 +12,7 @@ import json
 
 from build_query.path_slicer import (
     build_path_plans,
+    list_all_union_branches,
     list_union_paths,
     prune_dead_projections,
     resolve_active_sql,
@@ -181,6 +182,44 @@ def test_list_union_paths_union_distinct_bails():
 
 def test_list_union_paths_multiple_unions_bails():
     assert list_union_paths(_decompose(TWO_UNIONS)) == []
+
+
+# --- Inventaire de branches (P1-2 : repli quand le slicer bail) -----------------------
+
+
+def test_inventory_names_branches_when_slicer_bails():
+    """TWO_UNIONS : deux UNION internes, aucune union finale → `list_union_paths` bail ([]),
+    mais l'inventaire nomme quand même les branches de CHAQUE hôte (c2 : MEG/FERMETURE)."""
+    decomposed = _decompose(TWO_UNIONS)
+    assert list_union_paths(decomposed) == []  # rappel : le slicer ne peut pas cibler
+    inv = list_all_union_branches(decomposed)
+    assert {h for h, _ in inv} == {"u1", "u2"}
+    assert all(names == ["a", "b"] for _, names in inv)
+
+
+def test_inventory_names_branches_by_discriminant_tag():
+    inv = list_all_union_branches(_decompose(TRANSPOSE_UNION, "bigquery"), "bigquery")
+    assert len(inv) == 1
+    host, names = inv[0]
+    assert host == "res"
+    assert names == [
+        "nb_ope",
+        "ouvertures",
+        "fermetures",
+        "parc",
+        "parc_actifs",
+        "mt_ope",
+    ]
+
+
+def test_inventory_empty_without_union():
+    assert list_all_union_branches(_decompose(NO_UNION)) == []
+
+
+def test_inventory_ignores_union_distinct_and_buried_subquery():
+    # Cohérent avec le scope du slicer : ni UNION DISTINCT, ni union enterrée en sous-requête.
+    assert list_all_union_branches(_decompose(UNION_DISTINCT)) == []
+    assert list_all_union_branches(_decompose(NESTED_UNION)) == []
 
 
 # --- SPEC 2 : nommage de branche par tag constant discriminant -----------------------
