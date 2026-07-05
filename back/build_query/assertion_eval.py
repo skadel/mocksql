@@ -88,6 +88,17 @@ def _cast_nontext_string_slicing(
     return tree.sql(dialect=dialect) if changed else sql
 
 
+def _is_empty_intent_sentinel(raw_sql: str) -> bool:
+    """Vrai si l'assertion est la sentinelle « résultat vide intentionnel » : un
+    ``SELECT * FROM __result__`` NU (sans ``WHERE``). Émise par ``test_evaluator`` quand
+    le scénario attend explicitement 0 ligne (plage vide, anti-jointure ciblée…). Sa
+    présence dans la suite signale que le vide est VOULU → la garde anti-vacuité sur
+    résultat vide (ci-dessous) ne doit pas s'appliquer.
+    """
+    norm = " ".join((raw_sql or "").strip().rstrip(";").split()).lower()
+    return norm == "select * from __result__"
+
+
 _RESERVED_KEYWORDS: frozenset[str] | None = None
 
 
@@ -165,6 +176,24 @@ def _evaluate_assertions(
     # TEXT avant exécution — calcul des types de la vue une seule fois (cf. incident c3).
     non_text_cols = _nontext_columns(view_name, con)
 
+    # Garde anti-vacuité sur RÉSULTAT VIDE (P0-1, incident c2) : une assertion `all` non
+    # scopée (`SELECT * FROM __result__ WHERE (cond) IS NOT TRUE`) retourne 0 ligne
+    # violante sur une vue VIDE → « passe » à tort. Une régression SQL qui vide la sortie
+    # (la plus courante) shipperait alors au vert. On échoue ces assertions — SAUF si le
+    # scénario attend explicitement un vide (sentinelle `SELECT * FROM __result__`), auquel
+    # cas toute la suite est exemptée. Les assertions SCOPÉES sont déjà couvertes par la
+    # garde de scope (périmètre vide → échec) ; les `exists` échouent déjà (aucun match).
+    result_empty = False
+    if assertions and not any(
+        _is_empty_intent_sentinel(a.get("sql") or "") for a in assertions
+    ):
+        try:
+            result_empty = (
+                con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 0
+            )
+        except Exception:
+            result_empty = False
+
     results = []
     for a in assertions:
         raw_sql = (a.get("sql") or "").strip()
@@ -189,6 +218,20 @@ def _evaluate_assertions(
         scope = _quote_reserved_identifiers(scope)
         scope = _cast_nontext_string_slicing(scope, non_text_cols)
         quantifier = (a.get("quantifier") or "all").strip() or "all"
+        if result_empty and not scope and quantifier != "exists":
+            results.append(
+                {
+                    "description": a.get("description", ""),
+                    "expected_condition": a.get("expected_condition", ""),
+                    "sql": raw_sql,
+                    "passed": False,
+                    "error": (
+                        "résultat vide — l'assertion ne teste rien (vacante) : sur une "
+                        "sortie vide, la condition n'a aucune ligne à contredire"
+                    ),
+                }
+            )
+            continue
         try:
             # Garde anti-vacuité du scope : une assertion scopée dont le périmètre ne
             # sélectionne AUCUNE ligne du résultat ne teste rien (0 ligne violante →

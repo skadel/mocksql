@@ -1966,6 +1966,13 @@ assertion fige la valeur exacte que CE scénario doit produire, lue dans `<resul
 - Exception : un invariant non-trivial EST l'objet même du test (« le solde ne peut être négatif
   après remboursement ») → `solde >= 0` est alors valide. Par défaut, préfère la valeur exacte.
 
+**Ancre d'existence OBLIGATOIRE :** si `<test_context>` attend AU MOINS une ligne (tout scénario sauf
+« plage vide » / « aucune ligne »), émets EXACTEMENT une assertion `quantifier: "exists"` qui identifie
+la ligne attendue par ses valeurs discriminantes (ex. `typ_client = 'OUVERTURE' AND nb_increase = 1`).
+Raison : les assertions `all` retournent 0 ligne violante sur un résultat VIDE → elles « passeraient »
+toutes à tort si une régression SQL vidait la sortie. L'ancre `exists`, elle, ÉCHOUE sur un vide — c'est
+le seul garde-fou contre une suite entièrement vacante.
+
 **Floats — JAMAIS d'égalité stricte :** pour une colonne flottante (z-score, moyenne, STDDEV,
 ratio, pourcentage), `col = 1.234` est non-déterministe (ordre d'agrégation, précision) → assertion
 fragile. Pince via `ROUND(col, 2) = 1.23` ou `ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre
