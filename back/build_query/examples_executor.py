@@ -1956,8 +1956,16 @@ En bref :
 
 ═══════════════════ PARTIE 2 — ÉVALUER LA QUALITÉ ═══════════════════
 
-- `verdict` : "Excellent", "Bon", ou "Insuffisant".
-- `explanation` : une phrase ≤20 mots, en français, lisible par un responsable métier — sans noms
+- `verdict` : "Excellent", "Bon", ou "Insuffisant" — applique STRICTEMENT cette rubrique :
+  · "Excellent" SEULEMENT si les TROIS conditions tiennent : (1) les données exercent la clause
+    DISCRIMINANTE du scénario/de la branche visé(e) — pas un passage trivial par un NULL/vide de
+    complaisance ; (2) au moins une assertion fige une valeur CALCULÉE par la requête (agrégat,
+    classification, dérivation), pas un simple recopiage d'une valeur d'entrée ; (3) aucune assertion
+    n'épingle l'artefact d'une valeur d'ENTRÉE inventée (placeholder hors référentiel, ex. `'XX'`).
+  · "Bon" : test valide mais une des trois conditions manque — dis LAQUELLE dans `explanation`.
+  · "Insuffisant" : cf. `reason_type` ci-dessous.
+- `explanation` : une phrase ≤20 mots, FACTUELLE (jamais de superlatif « parfaitement », « idéal »,
+  « parfait »), en français, lisible par un responsable métier — sans noms
   de colonnes, de CTEs ni de mots-clés SQL.
   ✓ « Les données couvrent correctement le scénario nominal. »
   ✓ « Les valeurs d'entrée ne produisent pas le résultat attendu pour ce cas limite. »
