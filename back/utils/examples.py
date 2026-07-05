@@ -9,7 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from sqlglot import expressions as exp
 from sqlglot.optimizer import traverse_scope, find_all_in_scope
 
-from common_vars import type_mapping
+import datetime
+
+from common_vars import FlexibleDatetime, type_mapping
 from models.env_variables import BQ_TEST_PROJECT
 
 logger = logging.getLogger(__name__)
@@ -291,6 +293,24 @@ def _safe_field_name(name: str, used: set[str]) -> str:
     return candidate
 
 
+def _iso_format_hint(col_type) -> str:
+    """Rappel de format ISO pour un champ TYPÉ date/timestamp, à coller à sa description.
+
+    Un champ `date`/`timestamp` du schéma de sortie s'écrit TOUJOURS en ISO, quel que soit
+    le format des littéraux du SQL (un `PARSE_DATE('%d-%m-%Y', col)` ne concerne QUE les
+    colonnes TEXTE). Sans ce rappel, le LLM recopie le format du SQL (ex. `01-01-2026`) →
+    `OutputParserException` Pydantic → retry coûteux (incident c2). Porté par la DESCRIPTION
+    du champ pour survivre au retry sans contexte (schéma + erreur seuls). Cf. consigne 5.
+    Chaîne vide pour tout autre type (identité stricte : `datetime.datetime` sous-classe
+    `datetime.date`, mais `type_mapping` mappe TIMESTAMP → FlexibleDatetime, jamais date).
+    """
+    if col_type is datetime.date:
+        return " (⚠️ champ typé date : littéral ISO obligatoire, format YYYY-MM-DD)"
+    if col_type is FlexibleDatetime:
+        return " (⚠️ champ typé timestamp : littéral ISO obligatoire, format YYYY-MM-DDTHH:MM:SS)"
+    return ""
+
+
 def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]:
     models = {}
     for table in filtered_tables_and_columns:
@@ -315,6 +335,16 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
                 col_type = _bq_ddl_to_pydantic(f"{table_name}_{col_name}", bq_ddl)
             else:
                 col_type = parse_field_type(column["type"])
+
+            # Champ typé date/timestamp → rappel ISO dans la description (survit au retry
+            # Pydantic sans contexte). No-op pour tout autre type. Cf. _iso_format_hint.
+            iso_hint = _iso_format_hint(col_type)
+            if iso_hint:
+                col_description = (
+                    (str(col_description) + iso_hint)
+                    if col_description
+                    else iso_hint.strip()
+                )
 
             # Underscore initial → clé assainie + alias sur le nom réel.
             if col_name.startswith("_"):
