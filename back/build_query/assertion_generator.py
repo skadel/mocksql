@@ -50,7 +50,13 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
 
     results_json = current_test.get("results_json", "[]")
     try:
-        result_df = pd.read_json(io.StringIO(results_json), orient="records")
+        # dtype=False : NE PAS ré-inférer les types depuis le JSON. Sans lui, une colonne
+        # VARCHAR de chiffres (`'001'`) est coercée en int64 (`1`) et une colonne NULL en
+        # float64/NaN → le juge, qui lit le schéma et l'échantillon, épingle des artefacts
+        # de sérialisation (`CD = 1` au lieu de `'001'`). Cf. incident c2 / P1-1.
+        result_df = pd.read_json(
+            io.StringIO(results_json), orient="records", dtype=False
+        )
     except Exception:
         result_df = pd.DataFrame()
 
@@ -100,6 +106,8 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 result_df=result_df,
                 test_description=test_description,
                 focus_path=focus_path,
+                con=con,
+                view_name=view_name,
             )
 
             async with atimed("assertion_gen:eval+fix"):
