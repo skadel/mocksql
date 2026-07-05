@@ -9,6 +9,11 @@ DDL.csv, et on émet une entrée de cache au format MockSQL :
     {table_name: "DB.SCHEMA.TABLE", description, columns: [{name, type, mode}]}
 où `type` est le DATA_TYPE Snowflake canonique (TEXT/NUMBER/FLOAT/VARIANT/...),
 sans `bq_ddl_type` — exactement ce que fetch_tables_schema_snowflake stocke.
+
+Usage :
+    python build_schema_cache.py                 # tous les modeles de models/
+    python build_schema_cache.py sf_bq028        # un seul modele (plus rapide)
+    python build_schema_cache.py sf002 sf_bq091  # un sous-ensemble
 """
 
 import csv
@@ -89,7 +94,12 @@ def build_ddl_index() -> dict[tuple[str, str, str], str]:
         db, sch = parts[-3], parts[-2]
         with open(ddl_csv, encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                key = (db.upper(), sch.upper(), row["table_name"].upper())
+                # Selon la base, la colonne table_name stocke soit le nom nu
+                # (TABLE), soit le nom pleinement qualifie (DB.SCHEMA.TABLE).
+                # On indexe toujours sur le dernier segment pour matcher la
+                # cle 3-parties derivee du modele.
+                bare = row["table_name"].split(".")[-1]
+                key = (db.upper(), sch.upper(), bare.upper())
                 idx[key] = row["DDL"]
     return idx
 
@@ -110,12 +120,15 @@ def columns_from_ddl(ddl: str) -> list[dict]:
 
 
 def main() -> None:
+    only = {a.lower().removesuffix(".sql") for a in sys.argv[1:]}
     ddl_idx = build_ddl_index()
     print(f"DDL index: {len(ddl_idx)} tables")
 
     wanted: dict[tuple[str, str, str], tuple[str, str, str]] = {}  # upper -> orig
     for sql_path in sorted(glob.glob(os.path.join(MODELS_DIR, "*.sql"))):
         name = os.path.basename(sql_path)
+        if only and name.lower().removesuffix(".sql") not in only:
+            continue
         sql = open(sql_path, encoding="utf-8").read()
         try:
             tabs = model_tables(sql)
@@ -147,10 +160,13 @@ def main() -> None:
 
     print(f"\n-> {len(cache)} tables ecrites dans {OUT}")
     if missing:
-        print(f"[MISSING DDL] {len(missing)}: {missing}")
+        shown = missing[:20]
+        print(f"[MISSING DDL] {len(missing)}: {shown}{' ...' if len(missing) > 20 else ''}")
     if unmapped:
         print(f"[UNMAPPED TYPES] {sorted(unmapped)}")
-    if missing:
+    # Sur un build complet, un DDL manquant est bloquant (CI). Sur un sous-ensemble
+    # explicite (arguments), on tolere — l'utilisateur cible sciemment quelques modeles.
+    if missing and not only:
         sys.exit(1)
 
 
