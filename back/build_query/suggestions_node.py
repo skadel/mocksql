@@ -12,7 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
-from build_query.path_slicer import ALL_PATH
+from build_query.path_slicer import ALL_PATH, list_all_union_branches
 from build_query.prompt_tools import (
     _format_profile_block,
     build_sql_digest,
@@ -326,6 +326,35 @@ def _branch_catalog_block(state: QueryState, covered: set, dialect: str) -> str:
         f"renseignant son `target_path` avec le nom machine exact (ex. `{example}`). Sinon "
         "laisse `target_path` vide. Ne propose JAMAIS un focus par branche « pour la forme ».\n"
         "Branches :\n" + "\n".join(lines) + "\n</branches_union_all>"
+    )
+
+
+def _branch_inventory_block(state: QueryState, dialect: str) -> str:
+    """Repli du catalogue de branches quand aucun path plan n'est disponible : les UNION ALL
+    sont INTERNES aux CTE (plusieurs, sans union finale) → non sliçables en focus, donc absents
+    de ``_branch_catalog_block``. On liste quand même les branches détectées pour que le
+    suggesteur les NOMME (cf. c2 : sans ce bloc, MEG/FERMETURE n'avaient aucun chemin
+    actionnable). ``""`` si aucun UNION ALL de 1er niveau détecté.
+    """
+    try:
+        query_decomposed = json.loads(state.get("query_decomposed") or "[]")
+    except Exception:
+        return ""
+    inventory = list_all_union_branches(query_decomposed, dialect)
+    if not inventory:
+        return ""
+    lines = [
+        f"- CTE `{host}` : " + ", ".join(f"`{n}`" for n in names)
+        for host, names in inventory
+    ]
+    return (
+        "<branches_union_all>\n"
+        "Ce SQL contient des UNION ALL INTERNES (une CTE assemble plusieurs présentations des "
+        "mêmes sources). Ces branches ne sont PAS sliçables en focus autonome — laisse "
+        "`target_path` vide. Mais chacune est un CHEMIN LOGIQUE distinct à couvrir : en lisant "
+        "les tests existants, repère les branches NON couvertes et propose AU MOINS une "
+        "suggestion par branche manquante, en la NOMMANT explicitement dans le texte.\n"
+        "Branches détectées :\n" + "\n".join(lines) + "\n</branches_union_all>"
     )
 
 
@@ -756,7 +785,12 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
     # (via le champ `target_path`). Plus de track déterministe « une suggestion par
     # branche » : le focus est devenu une suggestion contextuelle parmi les autres.
     covered_paths = _covered_paths(state, test_cases)
-    branch_catalog_block = _branch_catalog_block(state, covered_paths, dialect)
+    # Catalogue sliçable si un UNION ALL de 1er niveau porte des paths ; sinon repli sur un
+    # inventaire NOMMÉ des branches (UNION internes non sliçables, cf. c2) pour que le
+    # suggesteur couvre quand même les branches manquantes.
+    branch_catalog_block = _branch_catalog_block(
+        state, covered_paths, dialect
+    ) or _branch_inventory_block(state, dialect)
 
     # Échec LLM → panneau vide (pas de repli déterministe, cf. décision produit).
     suggestions: list[str] = []

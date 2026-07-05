@@ -226,6 +226,54 @@ def list_union_paths(
     return specs
 
 
+def list_all_union_branches(
+    query_decomposed: list[dict], dialect: str = "bigquery"
+) -> list[tuple[str, list[str]]]:
+    """Inventaire best-effort de TOUTES les branches d'UNION ALL de 1er niveau, nœud par nœud.
+
+    Complément de ``list_union_paths`` : là où celle-ci exige un hôte unique/final pour
+    *slicer* (et rend ``[]`` sur plusieurs UNION internes sans union finale), cet inventaire
+    NE slice pas — il se contente de **nommer** les branches de chaque CTE hôte, pour que le
+    suggesteur puisse citer les branches non couvertes même quand le slicing n'est pas
+    applicable (cf. c2 : deux UNION internes, aucune union finale → aucun ``target_path``
+    actionnable, mais MEG/FERMETURE restent des chemins logiques à couvrir).
+
+    Retourne ``[(host_cte, [noms de branches])]`` avec les MÊMES règles de nommage que
+    ``list_union_paths`` (tag discriminant, sinon source du FROM, sinon ``branch_N``). ``[]``
+    si aucun UNION ALL de 1er niveau (branches elles-mêmes des UNION imbriqués → ignorées).
+    """
+    out: list[tuple[str, list[str]]] = []
+    for node in query_decomposed:
+        parsed = _parse(node.get("code", ""), dialect)
+        if parsed is None:
+            continue
+        union = _top_union(parsed)
+        if union is None:
+            continue
+        branches = _flatten_union(union)
+        if any(_top_union(b) is not None for b in branches):  # imbriqué → hors scope
+            continue
+        per_branch = [_branch_const_aliases(b) for b in branches]
+        disc = _discriminant_alias(per_branch)
+        names: list[str] = []
+        used: set[str] = set()
+        for i, branch in enumerate(branches):
+            name = (
+                _slug(per_branch[i][disc])
+                if disc is not None and disc in per_branch[i]
+                else ""
+            )
+            if not name:
+                name = _branch_name(branch, i)
+            if name in used:
+                name = f"branch_{i + 1}"
+            used.add(name)
+            names.append(name)
+        if names:
+            out.append((node["name"], names))
+    return out
+
+
 def _prune_orphans(
     order: list[str],
     code_by_name: dict[str, str],
