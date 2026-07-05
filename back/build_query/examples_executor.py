@@ -707,11 +707,18 @@ def filter_schemas_by_used_columns(
       ...
     ]
     """
-    # 1. Construire un dictionnaire { "NomTable" -> [colonne1, colonne2, ...] }
+    # 1. Construire un dictionnaire { "nomtable" -> [colonne1, colonne2, ...] }
+    #    Clés en MINUSCULES : la qualification sqlglot de certains dialectes (Trino…)
+    #    met les identifiants de used_columns en minuscules, alors que le schema_cache
+    #    conserve la casse d'origine de l'entrepôt (BigQuery). Sans normalisation, le
+    #    match échoue → 0 table conservée → aucune table créée dans DuckDB → « Table
+    #    ... does not exist » à l'exécution.
     used_cols_dict = {
-        f"{item['database']}.{item['table']}"
-        if item.get("database")
-        else item["table"]: [col.lower() for col in item["used_columns"]]
+        (
+            f"{item['database']}.{item['table']}"
+            if item.get("database")
+            else item["table"]
+        ).lower(): [col.lower() for col in item["used_columns"]]
         for item in used_columns_info
     }
 
@@ -725,8 +732,8 @@ def filter_schemas_by_used_columns(
         parts = table_schema["table_name"].split(".")
         qualified = ".".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
 
-        if qualified in used_cols_dict:
-            wanted_cols = used_cols_dict[qualified]
+        if qualified.lower() in used_cols_dict:
+            wanted_cols = used_cols_dict[qualified.lower()]
             logger.debug(
                 f"\n[DEBUG] >>> Filtrage de la table {qualified}. wanted_cols: {wanted_cols}"
             )

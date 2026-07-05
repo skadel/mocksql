@@ -44,7 +44,7 @@ def _build_profile_index(profile: dict | None) -> dict[str, dict[str, dict]]:
     index: dict[str, dict[str, dict]] = {}
     for tbl_key, tbl_data in profile["tables"].items():
         parts = tbl_key.split(".")
-        uc_key = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
+        uc_key = ("_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]).lower()
         cols = tbl_data.get("columns", {})
         index[uc_key] = {col_name.lower(): stats for col_name, stats in cols.items()}
     return index
@@ -118,11 +118,17 @@ def generate_faker_rows(
     Returns:
         Mapping from uc_key to list of row dicts containing only the filled columns.
     """
-    # Build a column-type index keyed by uc_key
+    # Build a column-type index keyed by uc_key — en MINUSCULES. La qualification
+    # sqlglot de certains dialectes (Trino…) met les clés de faker_cols en minuscules
+    # alors que _table_uc_key conserve la casse d'origine du schéma. Sans normalisation,
+    # aucune table ne matche → type_index vide → toutes les colonnes retombent sur
+    # STRING → un mot Faker ("help") atterrit dans une colonne numérique → échec du
+    # CAST DuckDB ("could not convert string to float").
+    faker_keys_lower = {k.lower() for k in faker_cols_by_uc_key}
     type_index: dict[str, dict[str, str]] = {}
     for table_entry in schema:
-        key = _table_uc_key(table_entry["table_name"])
-        if key not in faker_cols_by_uc_key:
+        key = _table_uc_key(table_entry["table_name"]).lower()
+        if key not in faker_keys_lower:
             continue
         type_index[key] = {
             col["name"].lower(): col.get("bq_ddl_type") or col.get("type", "STRING")
@@ -141,8 +147,8 @@ def generate_faker_rows(
 
     result: dict[str, list[dict]] = {}
     for uc_key, col_names in faker_cols_by_uc_key.items():
-        col_types = type_index.get(uc_key, {})
-        col_profile = profile_index.get(uc_key, {})
+        col_types = type_index.get(uc_key.lower(), {})
+        col_profile = profile_index.get(uc_key.lower(), {})
         llm_rows = filled_data.get(uc_key) or []
         n_rows = len(llm_rows) if llm_rows else default_n
         rows = []

@@ -40,23 +40,33 @@ def filter_columns(schemas, used_columns):
         db_name_from_schema = parts[-2]
         table_name_from_schema = parts[-1]
 
-        # Construire le nom de table qualifié pour le résultat final (ex: MARKETING_Referentiels_correspondance_cartes)
-        # On prend les deux dernières parties pour formater le 'table_name' final
-        qualified_under_parts = parts[-2:]
-        qualified_under_name = "_".join(qualified_under_parts)
-
-        # Rechercher dans used_columns en comparant à la fois la base de données et le nom de la table
+        # Rechercher dans used_columns en comparant base de données + table.
+        # Comparaison INSENSIBLE À LA CASSE : la qualification sqlglot de certains
+        # dialectes (Trino…) met les identifiants de used_columns en minuscules,
+        # alors que le schema_cache conserve la casse d'origine de l'entrepôt
+        # (BigQuery). Sans .lower() des deux côtés, aucune table ne matche → le
+        # schéma de génération se vide, le LLM ne produit aucune donnée, et seul
+        # Faker survit (tables de fait manquantes → Catalog Error à l'exécution).
         used_table_entry = next(
             (
                 item
                 for item in used_columns
-                if item.get("database") == db_name_from_schema
-                and item.get("table") == table_name_from_schema
+                if (item.get("database") or "").lower() == db_name_from_schema.lower()
+                and (item.get("table") or "").lower() == table_name_from_schema.lower()
             ),
             None,
         )
 
         if used_table_entry:
+            # Nom de table final aligné sur la casse de used_columns (source de
+            # vérité du pipeline : faker_cols et l'executor construisent tous la
+            # clé f"{db}_{table}" à partir de used_columns). En BigQuery la casse
+            # coïncide avec le schéma → sortie inchangée ; en Trino elle suit
+            # used_columns (minuscules) → cohérence des clés en aval.
+            db_key = used_table_entry.get("database") or db_name_from_schema
+            tbl_key = used_table_entry.get("table") or table_name_from_schema
+            qualified_under_name = f"{db_key}_{tbl_key}"
+
             used_cols = {uc.lower() for uc in used_table_entry["used_columns"]}
             used_ids = {
                 ui.lower() for ui in used_table_entry.get("used_identifiers", [])
@@ -476,8 +486,14 @@ def create_test_tables(
     errors = []
 
     # Si used_columns est None, on crée un dictionnaire vide afin de ne pas filtrer les colonnes.
+    # Clés en minuscules (cf. filter_schemas_by_used_columns) : used_columns peut être
+    # en minuscules (qualification Trino) alors que le nom de table du schéma garde la
+    # casse d'origine → sans normalisation le filtrage retombe silencieusement sur
+    # « toutes les colonnes ».
     if used_columns is not None:
-        used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
+        used_columns_dict = {
+            _uc_key(uc).lower(): uc["used_columns"] for uc in used_columns
+        }
     else:
         used_columns_dict = {}
 
@@ -486,7 +502,9 @@ def create_test_tables(
         try:
             parts = table["table_name"].split(".")
             duckdb_base = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-            qualified_key = duckdb_base  # même format que used_columns_dict
+            qualified_key = (
+                duckdb_base.lower()
+            )  # même format que used_columns_dict (minuscule)
             table_name = f"{duckdb_base}_{suffix.replace('-', '_')}"
 
             # Filtrage avec sous-champs inclus pour pouvoir reconstruire les types STRUCT

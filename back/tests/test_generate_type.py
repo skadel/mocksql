@@ -303,6 +303,44 @@ class TestFunctions(unittest.TestCase):
         actual_filtered_tables = filter_columns(tables_and_columns, used_columns)
         self.assertEqual(actual_filtered_tables, expected_filtered_tables)
 
+    def test_filter_columns_case_insensitive_dialect_qualification(self):
+        """Régression Trino : la qualification sqlglot met les identifiants de
+        used_columns en minuscules, alors que le schema_cache garde la casse
+        d'origine de l'entrepôt. Le match database/table doit être insensible à
+        la casse — sinon filtered_schema se vide, le modèle de génération n'a
+        aucune table, et le LLM ne produit aucune donnée (seul Faker survit)."""
+        schema = [
+            {
+                "table_name": "pipetalk-493612.MONETIQUE_Dataset_Porteur.DS_RCOMP_DASHBOARD_RESEAU",
+                "columns": [
+                    {"name": "NO_SIRET", "type": "STRING", "description": ""},
+                    {"name": "MT_BRUT_TRANSACTION", "type": "FLOAT", "description": ""},
+                ],
+            }
+        ]
+        # used_columns tel que produit par la qualification Trino (tout en minuscules,
+        # projet vide).
+        used = [
+            {
+                "project": "",
+                "database": "monetique_dataset_porteur",
+                "table": "ds_rcomp_dashboard_reseau",
+                "used_columns": ["no_siret", "mt_brut_transaction"],
+            }
+        ]
+
+        filtered = filter_columns(schema, used)
+
+        # La table doit être retrouvée malgré la différence de casse…
+        self.assertEqual(len(filtered), 1)
+        # …et la clé émise doit suivre la casse de used_columns (source de vérité du
+        # pipeline : faker_cols + executor utilisent f"{db}_{table}" issu de used_columns).
+        self.assertEqual(
+            filtered[0]["table_name"],
+            "monetique_dataset_porteur_ds_rcomp_dashboard_reseau",
+        )
+        self.assertEqual(len(filtered[0]["columns"]), 2)
+
     def test_combined_model_fields(self):
         filtered_tables = [
             {
