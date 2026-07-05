@@ -296,6 +296,13 @@ async def compile_query(sql_code, project, dialect):
             await asyncio.to_thread(run_sf_query, sql_code, True)
         return 0
 
+    elif dialect == "trino":
+        from utils.trino_connector import run_trino_query
+
+        async with atimed("validate: dry-run Trino"):
+            await asyncio.to_thread(run_trino_query, sql_code, True)
+        return 0
+
     else:
         raise ValueError(f"Unsupported dialect: {dialect}")
 

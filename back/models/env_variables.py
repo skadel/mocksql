@@ -81,3 +81,16 @@ SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", "")
 SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "")
 SNOWFLAKE_SCHEMA_NAME = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
 SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE", "")
+
+# ---------------------------------------------------------------------------
+# Trino (source optionnelle)
+#   L'exécution reste DuckDB : Trino ne sert qu'à l'import de schéma, la
+#   validation dry-run (EXPLAIN TYPE VALIDATE) et le profiling.
+# ---------------------------------------------------------------------------
+TRINO_HOST = os.getenv("TRINO_HOST", "localhost")
+TRINO_PORT = int(os.getenv("TRINO_PORT", "8080"))
+TRINO_USER = os.getenv("TRINO_USER", "mocksql")
+TRINO_CATALOG = os.getenv("TRINO_CATALOG", "")
+TRINO_SCHEMA = os.getenv("TRINO_SCHEMA", "")
+TRINO_PASSWORD = os.getenv("TRINO_PASSWORD", "")
+TRINO_HTTP_SCHEME = os.getenv("TRINO_HTTP_SCHEME", "http")

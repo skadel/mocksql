@@ -474,6 +474,98 @@ async def fetch_tables_schema_snowflake(
     return schema_rows, failed
 
 
+async def fetch_tables_schema_trino(
+    refs: list[str],
+) -> tuple[list[dict], list[dict]]:
+    """Fetch Trino schema for a list of table refs (schema.table or catalog.schema.table).
+
+    Returns (schema_rows, failed) in the same INFORMATION_SCHEMA-style format as
+    fetch_tables_schema(), so generate_tables_and_columns_from_project_schema() can
+    consume it unchanged. Chaque catalog Trino a son propre information_schema, donc
+    on le qualifie par le catalog de la ref (ou TRINO_CATALOG par défaut).
+    """
+    from models.env_variables import TRINO_CATALOG, TRINO_SCHEMA
+    from utils.trino_connector import run_trino_query
+
+    schema_rows: list[dict] = []
+    failed: list[dict] = []
+
+    for ref in refs:
+        parts = ref.split(".")
+        if len(parts) >= 3:
+            catalog, schema_name, table_name = parts[0], parts[1], parts[2]
+        elif len(parts) == 2:
+            catalog, schema_name, table_name = TRINO_CATALOG, parts[0], parts[1]
+        elif len(parts) == 1:
+            catalog, schema_name, table_name = TRINO_CATALOG, TRINO_SCHEMA, parts[0]
+        else:
+            failed.append({"table": ref, "error": "Invalid ref"})
+            continue
+
+        if not catalog:
+            failed.append(
+                {
+                    "table": ref,
+                    "error": "Catalog Trino inconnu : préfixez catalog.schema.table "
+                    "ou définissez TRINO_CATALOG.",
+                }
+            )
+            continue
+
+        schema_filter = f"AND table_schema = '{schema_name}'" if schema_name else ""
+        info_schema = f"{_trino_quote(catalog)}.information_schema.columns"
+        sql = f"""
+            SELECT
+                table_catalog,
+                table_schema,
+                table_name,
+                column_name,
+                data_type,
+                is_nullable
+            FROM {info_schema}
+            WHERE table_name = '{table_name}'
+            {schema_filter}
+            ORDER BY ordinal_position
+        """
+        try:
+            rows = await asyncio.to_thread(run_trino_query, sql)
+            if not rows:
+                failed.append(
+                    {
+                        "table": ref,
+                        "error": "Table not found in Trino information_schema",
+                    }
+                )
+                continue
+            for row in rows:
+                is_nullable = row.get("is_nullable")
+                nullable = is_nullable in (True, "YES", "true", "TRUE", 1)
+                schema_rows.append(
+                    {
+                        # Catalog volontairement vide : côté MockSQL l'identité de table
+                        # est schema.table (comme dataset.table en BigQuery). Le catalog
+                        # Trino est un concept de connexion (TRINO_CATALOG), pas d'identité
+                        # — l'inclure produit des refs 3-part qui cassent la qualification.
+                        "table_catalog": "",
+                        "table_schema": row.get("table_schema") or schema_name,
+                        "table_name": row.get("table_name") or table_name,
+                        "field_path": row.get("column_name"),
+                        "data_type": row.get("data_type"),
+                        "mode": "NULLABLE" if nullable else "REQUIRED",
+                        "description": "",
+                    }
+                )
+        except Exception as exc:
+            failed.append({"table": ref, "error": str(exc)})
+
+    return schema_rows, failed
+
+
+def _trino_quote(identifier: str) -> str:
+    """Quote a Trino identifier for safe interpolation in FROM clauses."""
+    return '"' + identifier.replace('"', '""') + '"'
+
+
 def _sf_quote(identifier: str) -> str:
     """Quote a Snowflake identifier for safe interpolation in FROM clauses."""
     return '"' + identifier.replace('"', '""') + '"'

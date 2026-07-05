@@ -817,57 +817,91 @@ def refresh_schemas(
         validate_required_env()
 
         cfg = load_config(config)
+        dialect = cfg.get("dialect", "bigquery")
         cache_path = str(
             config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
         )
-        billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
-        if not billing_project:
-            typer.echo(
-                "[ERROR] BQ_TEST_PROJECT not set. Define it in your .env or shell environment.",
-                err=True,
-            )
-            raise typer.Exit(1)
-
         cached = load_schema_cache(cache_path)
 
-        if tables:
-            refs = [t for t in tables if validate_bq_ref(t)]
-            invalid = [t for t in tables if not validate_bq_ref(t)]
-            if invalid:
-                typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
-        elif from_tests:
-            from cli.test_runner import collect_test_table_refs
+        if dialect == "trino":
+            from build_query.schema_fetcher import fetch_tables_schema_trino
 
-            tests_root = config.parent / ".mocksql" / "tests"
-            all_refs = collect_test_table_refs(tests_root)
-            refs = [t for t in all_refs if validate_bq_ref(t)]
-            invalid = [t for t in all_refs if not validate_bq_ref(t)]
-            if invalid:
-                typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+            if tables:
+                refs = list(tables)
+            elif from_tests:
+                from cli.test_runner import collect_test_table_refs
+
+                tests_root = config.parent / ".mocksql" / "tests"
+                refs = collect_test_table_refs(tests_root)
+                if not refs:
+                    typer.echo(
+                        "No tables referenced by saved tests in .mocksql/tests/."
+                    )
+                    raise typer.Exit()
+            else:
+                refs = [
+                    t["table_name"]
+                    for t in cached
+                    if isinstance(t, dict) and t.get("table_name")
+                ]
             if not refs:
                 typer.echo(
-                    "No BigQuery tables referenced by saved tests in .mocksql/tests/."
+                    "No tables to import. Pass --table catalog.schema.table (or "
+                    "schema.table with TRINO_CATALOG set), or run `mocksql generate` first."
                 )
                 raise typer.Exit()
+            typer.echo(f"Re-importing {len(refs)} table(s) from Trino...")
+            schema_rows, failed = await fetch_tables_schema_trino(refs)
+            partitions = {}
         else:
-            refs = [
-                t["table_name"]
-                for t in cached
-                if isinstance(t, dict)
-                and validate_bq_ref(t.get("table_name", ""))
-                and len(t["table_name"].split(".")) == 3
-            ]
-
-        if not refs:
-            typer.echo(
-                "No BigQuery tables found in cache. Run `mocksql generate` first."
+            billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv(
+                "VERTEX_PROJECT"
             )
-            raise typer.Exit()
+            if not billing_project:
+                typer.echo(
+                    "[ERROR] BQ_TEST_PROJECT not set. Define it in your .env or shell environment.",
+                    err=True,
+                )
+                raise typer.Exit(1)
 
-        typer.echo(f"Re-importing {len(refs)} table(s) from BigQuery...")
-        schema_rows, failed, partitions = await fetch_tables_schema(
-            refs, billing_project
-        )
+            if tables:
+                refs = [t for t in tables if validate_bq_ref(t)]
+                invalid = [t for t in tables if not validate_bq_ref(t)]
+                if invalid:
+                    typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+            elif from_tests:
+                from cli.test_runner import collect_test_table_refs
+
+                tests_root = config.parent / ".mocksql" / "tests"
+                all_refs = collect_test_table_refs(tests_root)
+                refs = [t for t in all_refs if validate_bq_ref(t)]
+                invalid = [t for t in all_refs if not validate_bq_ref(t)]
+                if invalid:
+                    typer.echo(f"[WARN] Ignored (not a valid BQ ref): {invalid}")
+                if not refs:
+                    typer.echo(
+                        "No BigQuery tables referenced by saved tests in .mocksql/tests/."
+                    )
+                    raise typer.Exit()
+            else:
+                refs = [
+                    t["table_name"]
+                    for t in cached
+                    if isinstance(t, dict)
+                    and validate_bq_ref(t.get("table_name", ""))
+                    and len(t["table_name"].split(".")) == 3
+                ]
+
+            if not refs:
+                typer.echo(
+                    "No BigQuery tables found in cache. Run `mocksql generate` first."
+                )
+                raise typer.Exit()
+
+            typer.echo(f"Re-importing {len(refs)} table(s) from BigQuery...")
+            schema_rows, failed, partitions = await fetch_tables_schema(
+                refs, billing_project
+            )
 
         if failed:
             typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
