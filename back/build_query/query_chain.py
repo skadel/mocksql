@@ -36,7 +36,7 @@ from storage.config import get_llm_model
 from storage.context_loader import load_model_context
 from storage.test_repository import get_test, update_test
 from utils.msg_types import MsgType
-from utils.saver import history_saver, get_history_from_state
+from utils.saver import history_saver, get_history_from_state, get_message_type
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +129,29 @@ async def _bad_data_to_agent(state: QueryState):
         )
 
         failing_cte, trace = _get_failing_cte_from_results(state.get("messages", []))
-        digest = (
-            f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
-            if failing_cte
-            else "verdict toujours Insuffisant (bad_data)"
+        # Désync prémisse↔entrée : pas de CTE en échec (le résultat n'est pas vide, ce
+        # sont les valeurs injectées qui ≠ prémisse) → digest dédié plutôt que le fallback
+        # générique qui laisserait croire à un blocage structurel inexistant.
+        latest_eval = next(
+            (
+                m
+                for m in reversed(state.get("messages", []))
+                if get_message_type(m) == MsgType.EVALUATION
+            ),
+            None,
         )
+        is_premise_desync = (
+            (latest_eval.additional_kwargs.get("diagnostic") or {}).get("kind")
+            == "premise_desync"
+            if latest_eval
+            else False
+        )
+        if failing_cte:
+            digest = f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
+        elif is_premise_desync:
+            digest = "données d'entrée toujours ≠ prémisse utilisateur"
+        else:
+            digest = "verdict toujours Insuffisant (bad_data)"
         outcome: dict = {"blocking_cte": failing_cte, "digest": digest}
         # Trace structuré complet (profil row_count de TOUTES les CTE + valeurs des
         # pivots + mismatch jointure) : conservé par tentative pour que l'agent lise

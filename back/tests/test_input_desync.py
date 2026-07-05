@@ -103,8 +103,10 @@ async def test_evaluator_does_not_loop_on_bad_input_description():
 
 @pytest.mark.asyncio
 async def test_evaluator_question_points_to_premise_when_user_authored():
-    """Si le test porte une prémisse utilisateur (TICKET-1), la question de validation
-    pointe l'attente énoncée plutôt qu'un simple réalignement cosmétique."""
+    """Si le test porte une prémisse utilisateur (TICKET-1) et que les retries sont
+    épuisés (gen_retries == 0), la question de validation pointe l'attente énoncée
+    plutôt qu'un simple réalignement cosmétique. (Avec des retries restants, la boucle
+    de correction auto prend la main — cf. test_premise_desync_loop.py.)"""
     test = {
         "test_index": 5,
         "status": "complete",
@@ -117,7 +119,7 @@ async def test_evaluator_question_points_to_premise_when_user_authored():
         "user_premise": "on injecte 10 et 20 TiB",
     }
     update = await evaluate_tests(
-        {"messages": [_results_msg(test)], "test_index": 5, "gen_retries": 3}
+        {"messages": [_results_msg(test)], "test_index": 5, "gen_retries": 0}
     )
     prompt = next(
         m

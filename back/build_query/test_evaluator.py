@@ -595,11 +595,56 @@ async def evaluate_tests(state: QueryState):
 
     eval_test_index = current_test.get("test_index")
 
+    # Désync description↔données d'ENTRÉE AVEC prémisse utilisateur explicite : la cible de
+    # correction est CONNUE (la prémisse), donc on tente d'abord une correction automatique —
+    # aligner les données injectées SUR la prémisse — via la boucle bad_data → conversational_agent
+    # (dont le premise_guard protège déjà la prémisse d'un écrasement muet). On ne réécrit JAMAIS
+    # la prémisse : la boucle ramène les DONNÉES vers elle. On ne décrémente PAS gen_retries ici —
+    # c'est bad_data_to_agent/l'agent qui le fait (cf. query_chain._bad_data_to_agent). Le
+    # diagnostic synthétique (kind="premise_desync") porte les 6 clés lues par
+    # _build_agent_eval_context et déclenche le trigger dédié côté agent. À retries épuisés (ou
+    # sans prémisse) on retombe sur le VALIDATION_PROMPT ci-dessous — jamais pire qu'avant.
+    _gen_retries_lookahead = (
+        state.get("gen_retries") if state.get("gen_retries") is not None else 1
+    )
+    if (
+        reason_type == "bad_input_description"
+        and current_test.get("user_premise")
+        and _gen_retries_lookahead > 0
+    ):
+        premise = current_test["user_premise"]
+        current_test["diagnostic"] = {
+            "root_cause": (
+                "Les données d'entrée injectées ne respectent pas la prémisse "
+                "explicitement énoncée par l'utilisateur pour ce test."
+            ),
+            "sql_pattern": "premise_desync",
+            "data_issue": f"{explanation} Prémisse à respecter : « {premise} ».",
+            "fix_recipe": (
+                f"Aligner les données d'entrée injectées sur la prémisse « {premise} » "
+                f"— corriger les VALEURS des lignes, ni la prémisse ni la description."
+            ),
+            "affected_tables": list((current_test.get("data") or {}).keys()),
+            "affected_ctes": [],
+            "kind": "premise_desync",
+        }
+        # Bascule vers la queue générique bad_data (plus bas) : reason_type local devient
+        # "bad_data" → l'if VALIDATION_PROMPT ci-dessous est court-circuité, et evaluation_feedback
+        # sera calculé à "bad_data" (verdict reste "Insuffisant"). Le diagnostic posé ci-dessus
+        # sera attaché à l'EVALUATION + émis en BAD_DATA_DIAGNOSTIC.
+        logger.diag(
+            "[evaluator] bad_input_description + user_premise (retries=%s) → boucle bad_data (premise_desync) test=%s",
+            _gen_retries_lookahead,
+            eval_test_index,
+        )
+        reason_type = "bad_data"
+
     # Désync description↔réel (données valides) : on NE boucle PAS. On sauve l'état, on émet
-    # le verdict puis un VALIDATION_PROMPT actionnable (Valider / Corriger côté UI). Deux causes :
+    # le verdict puis un VALIDATION_PROMPT actionnable (Valider / Corriger côté UI). Trois causes :
     #   needs_validation → écart de CARDINALITÉ (nb de lignes annoncé ≠ réel)
     #   bad_description  → écart de VALEUR concrète (la description ment sur une valeur de sortie)
-    # Dans les deux cas, l'évaluateur a proposé une `corrected_description` qu'accept_validation
+    #   bad_input_description (sans prémisse, ou retries épuisés) → écart description↔entrées
+    # Dans les trois cas, l'évaluateur a proposé une `corrected_description` qu'accept_validation
     # appliquera au clic. Cf. assertion_generator (détection) et accept_validation (application).
     if reason_type in ("needs_validation", "bad_description", "bad_input_description"):
         actual_rows = 0

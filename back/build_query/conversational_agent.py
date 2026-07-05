@@ -1263,7 +1263,36 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             if user_premise
             else ""
         )
-        if any(get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history):
+        # Désync prémisse↔données d'ENTRÉE (kind="premise_desync", posé par l'évaluateur) :
+        # cas où la DIRECTION de correction est connue — ramener les données injectées vers
+        # la prémisse. Le premise_guard générique (ci-dessus) pousse vers la délégation
+        # (request_reevaluation) car il couvre le cas ambigu « prémisse OU SQL faux » ; ici
+        # l'ambiguïté est levée (le juge a vu des données valides ≠ prémisse), donc on émet
+        # un trigger dédié qui ordonne d'aligner les données SUR la prémisse, sans déléguer.
+        _latest_eval = next(
+            (
+                m
+                for m in reversed(state.get("messages", []))
+                if get_message_type(m) == MsgType.EVALUATION
+            ),
+            None,
+        )
+        _diag_kind = (
+            (_latest_eval.additional_kwargs.get("diagnostic") or {}).get("kind")
+            if _latest_eval
+            else None
+        )
+        if _diag_kind == "premise_desync" and user_premise:
+            trigger = (
+                f"Le test [{failing_uid_trigger}] a des données d'entrée qui ne "
+                f"respectent PAS la prémisse explicitement énoncée par l'utilisateur "
+                f"— « {user_premise} ». Corrige les DONNÉES D'ENTRÉE "
+                f"(`patch_test_field` / `add_test_row` / `remove_test_row`) pour "
+                f"qu'elles respectent cette prémisse. Aligner les données SUR la "
+                f"prémisse est exactement la correction attendue ici — ne réécris ni "
+                f"la prémisse ni la description du test."
+            ) + branch_plan_hint
+        elif any(get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history):
             trigger = (
                 (
                     f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
