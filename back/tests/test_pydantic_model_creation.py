@@ -4,6 +4,14 @@ from typing import get_args
 from utils.examples import create_pydantic_models
 
 
+def _field_description(model, table, col):
+    """Descend Optional[list[RowModel]] → RowModel et rend la description d'un champ."""
+    row_model = model.model_fields[table].annotation
+    inner = get_args(row_model)[0]  # list[RowModel]
+    row_cls = get_args(inner)[0]  # RowModel
+    return row_cls.model_fields[col].description
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -243,3 +251,39 @@ def test_description_attached_to_field():
     inner = get_args(row_model)[0]  # list[RowModel]
     row_cls = get_args(inner)[0]  # RowModel
     assert row_cls.model_fields["id"].description == "Primary key"
+
+
+# ---------------------------------------------------------------------------
+# Rappel ISO sur les champs typés date/timestamp (P1-3, retry Pydantic c2)
+# ---------------------------------------------------------------------------
+
+
+def test_date_field_carries_iso_hint():
+    """Un champ typé DATE porte un rappel ISO dans sa description — il survit au retry
+    Pydantic (schéma + erreur seuls, sans system prompt)."""
+    model = create_pydantic_models([_table("T", _col("partition_date", "DATE"))])
+    desc = _field_description(model, "T", "partition_date")
+    assert desc and "ISO" in desc and "YYYY-MM-DD" in desc
+
+
+def test_timestamp_field_carries_iso_hint():
+    model = create_pydantic_models([_table("T", _col("event_ts", "TIMESTAMP"))])
+    desc = _field_description(model, "T", "event_ts")
+    assert desc and "ISO" in desc
+
+
+def test_string_field_has_no_iso_hint():
+    """Une colonne TEXTE (que le SQL peut parser via PARSE_DATE) ne reçoit PAS le rappel
+    ISO : sa valeur doit respecter le format attendu par le SQL, pas ISO."""
+    model = create_pydantic_models([_table("T", _col("date_str", "STRING"))])
+    desc = _field_description(model, "T", "date_str")
+    assert not desc or "ISO" not in desc
+
+
+def test_date_hint_appended_to_existing_description():
+    model = create_pydantic_models(
+        [_table("T", _col("d", "DATE", description="Date d'ouverture"))]
+    )
+    desc = _field_description(model, "T", "d")
+    assert desc.startswith("Date d'ouverture")
+    assert "YYYY-MM-DD" in desc
