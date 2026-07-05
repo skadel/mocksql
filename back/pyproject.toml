@@ -54,14 +54,16 @@ pyyaml = ">=6.0.3"
 
 # Connecteurs sources optionnels (dépendances lourdes : pyarrow, grpc…).
 # Installés via les extras pour garder l'install de base légère.
-# pip install mocksql[bigquery] / [snowflake] / [all]
+# pip install mocksql[bigquery] / [snowflake] / [trino] / [all]
 google-cloud-bigquery = {version = "^3.42.0", optional = true}
 snowflake-connector-python = {version = "^4.6.0", optional = true}
+trino = {version = "^0.330", optional = true}
 
 [tool.poetry.extras]
 bigquery = ["google-cloud-bigquery"]
 snowflake = ["snowflake-connector-python"]
-all = ["google-cloud-bigquery", "snowflake-connector-python"]
+trino = ["trino"]
+all = ["google-cloud-bigquery", "snowflake-connector-python", "trino"]
 
 
 [tool.poetry.group.dev.dependencies]
