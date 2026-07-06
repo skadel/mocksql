@@ -163,35 +163,6 @@ def _discriminant_alias(per_branch: list[dict[str, str]]) -> str | None:
     return None
 
 
-def _has_aggregating_consumer(
-    host_name: str, query_decomposed: list[dict], dialect: str
-) -> bool:
-    """Un consommateur (transitif) de ``host_name`` agrège-t-il ses lignes ?
-
-    ``True`` si un nœud qui LIT (directement ou transitivement) la CTE hôte porte un
-    ``GROUP BY`` ou une fonction d'agrégat : les lignes des différentes branches y sont
-    **fusionnées**, donc slicer une seule branche fausserait la sortie du script complet
-    (sf_bq012 : ``all_flows`` → ``net_balances`` ``SUM … GROUP BY addr`` → ``AVG``). On
-    retombe alors sur le path ``all`` (correctness-first : moins de focus, jamais faux).
-
-    Conservateur par choix : tout agrégat en aval (y compris fenêtré) disqualifie le
-    slicing — un ``… OVER ()`` recalculé sur une branche seule change aussi la sortie.
-    """
-    graph = build_cte_dependency_graph(query_decomposed, dialect)
-    consumers = {
-        n for n in graph if n != host_name and host_name in transitive_deps(graph, n)
-    }
-    for node in query_decomposed:
-        if node["name"] not in consumers:
-            continue
-        parsed = _parse(node.get("code", ""), dialect)
-        if parsed is None:
-            continue
-        if parsed.find(exp.Group) is not None or parsed.find(exp.AggFunc) is not None:
-            return True
-    return False
-
-
 def _find_host(query_decomposed: list[dict], dialect: str):
     """Le couple ``(host_name, union_node, branches)`` de l'UNION ALL de 1er niveau à
     focaliser, ou ``None``.
@@ -217,11 +188,6 @@ def _find_host(query_decomposed: list[dict], dialect: str):
         host_name, union = final
     elif len(hosts) == 1:
         host_name, union = hosts[0]
-        # Union INTERNE (pas final_query) : sliçable seulement si ses branches atteignent
-        # la sortie SANS agrégation cross-branches. Un GROUP BY / agrégat en aval collapse
-        # les branches → slicer une seule fausserait le script complet (sf_bq012).
-        if _has_aggregating_consumer(host_name, query_decomposed, dialect):
-            return None
     else:
         return None
     branches = _flatten_union(union)
