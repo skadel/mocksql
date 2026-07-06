@@ -308,3 +308,84 @@ def test_hex_idiom_all_literal_executes_end_to_end(monkeypatch):
     )
     out = _ptq(folded.sql(dialect="snowflake"))
     assert con.execute(out).fetchone()[0] == 1_000_000.0
+
+
+# ---------------------------------------------------------------------------
+# Durcissement du fixer hexa : formes fonction, parenthèses, CONCAT imbriqué,
+# CAST imbriqué, cibles entières/décimales (revue #3/#5/#6)
+# ---------------------------------------------------------------------------
+
+
+def _rewrites(sql: str) -> bool:
+    out = _ptq(sql).upper()
+    return "HEXSTR_TO_DOUBLE(" in out and "'0X'" not in out
+
+
+def test_hex_function_form_to_double():
+    """TO_DOUBLE('0x' || h) — forme fonction idiomatique Snowflake (exp.ToDouble)."""
+    assert _rewrites("SELECT TO_DOUBLE('0x' || h) AS v FROM mydb.s.t")
+
+
+def test_hex_function_form_try_to_double():
+    assert _rewrites("SELECT TRY_TO_DOUBLE('0x' || h) AS v FROM mydb.s.t")
+
+
+def test_hex_paren_in_concat_chain():
+    """('0x' || a) || b — parenthèses explicites dans la chaîne."""
+    assert _rewrites("SELECT CAST(('0x' || a) || b AS FLOAT) AS v FROM mydb.s.t")
+
+
+def test_hex_nested_concat_function():
+    """CONCAT(CONCAT('0x', a), b) — CONCAT imbriqué, préfixe non en tête directe."""
+    assert _rewrites(
+        "SELECT CAST(CONCAT(CONCAT('0x', a), b) AS FLOAT) AS v FROM mydb.s.t"
+    )
+
+
+def test_hex_nested_cast_fully_rewritten():
+    """CAST imbriqué : aucun '0x' résiduel ne doit subsister (pas de faux succès)."""
+    out = _ptq(
+        "SELECT CAST('0x' || CAST('0x' || h AS FLOAT) AS DOUBLE) AS v FROM mydb.s.t"
+    )
+    assert "'0x'" not in out.lower(), f"'0x' résiduel : {out}"
+
+
+def test_hex_cast_to_number_target():
+    """CAST('0x' || h AS NUMBER) : cible décimale → CAST(hexstr_to_double(h) AS ...)."""
+    out = _ptq("SELECT CAST('0x' || h AS NUMBER) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "'0x'" not in out.lower()
+
+
+def test_hex_cast_to_int_target():
+    out = _ptq("SELECT CAST('0x' || h AS INT) AS v FROM mydb.s.t")
+    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "'0x'" not in out.lower()
+
+
+def test_hex_to_number_function_form():
+    assert _rewrites("SELECT TO_NUMBER('0x' || h) AS v FROM mydb.s.t")
+
+
+def test_hex_int_target_executes_end_to_end(monkeypatch):
+    """Cible entière : la valeur revient bien en entier, pas en double brut."""
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT CAST('0x' || LTRIM('000f4240', '0') AS INT) AS v")
+    assert con.execute(out).fetchone()[0] == 1_000_000
+
+
+def test_hex_function_form_executes_end_to_end(monkeypatch):
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT TO_DOUBLE('0x' || LTRIM('000f4240', '0')) AS v")
+    assert con.execute(out).fetchone()[0] == 1_000_000.0
+
+
+def test_normal_numeric_casts_still_untouched():
+    """Régression : un CAST numérique ordinaire ne déclenche jamais le fixer."""
+    for sql in [
+        "SELECT CAST('3.14' AS FLOAT) AS v",
+        "SELECT CAST(col AS INT) AS v FROM mydb.s.t",
+        "SELECT TO_NUMBER(col) AS v FROM mydb.s.t",
+        "SELECT CAST(a || b AS FLOAT) AS v FROM mydb.s.t",
+    ]:
+        assert "HEXSTR_TO_DOUBLE" not in _ptq(sql).upper()

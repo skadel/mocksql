@@ -1636,12 +1636,17 @@ def _strip_hex_prefix(concat: exp.Expression) -> exp.Expression | None:
 
     Retourne le reste de la concaténation (copie), ou ``None`` si l'expression
     n'est pas une concaténation préfixée par ``'0x'``. Les ``||`` chaînés sont
-    imbriqués à gauche par sqlglot (``('0x' || a) || b``) : on descend donc
-    récursivement jusqu'à la feuille la plus à gauche.
+    imbriqués à gauche par sqlglot (``('0x' || a) || b``) et peuvent porter des
+    parenthèses explicites : on déballe les ``Paren`` et on descend récursivement
+    jusqu'à la feuille la plus à gauche, y compris à travers un ``CONCAT`` imbriqué
+    (``CONCAT(CONCAT('0x', a), b)``).
     """
 
     def _is_0x(n: exp.Expression) -> bool:
         return isinstance(n, exp.Literal) and n.is_string and n.this.lower() == "0x"
+
+    while isinstance(concat, exp.Paren):
+        concat = concat.this
 
     if isinstance(concat, exp.DPipe):
         if _is_0x(concat.this):
@@ -1652,42 +1657,110 @@ def _strip_hex_prefix(concat: exp.Expression) -> exp.Expression | None:
         return None
     if isinstance(concat, exp.Concat):
         exprs = concat.expressions
-        if len(exprs) >= 2 and _is_0x(exprs[0]):
+        if not exprs:
+            return None
+        if _is_0x(exprs[0]):
             rest = [e.copy() for e in exprs[1:]]
-            if len(rest) == 1:
-                return rest[0]
-            return exp.Concat(
-                expressions=rest,
-                safe=concat.args.get("safe"),
-                coalesce=concat.args.get("coalesce"),
-            )
+        else:
+            # Le préfixe peut être enfoui dans le 1ᵉʳ opérande (CONCAT imbriqué).
+            head = _strip_hex_prefix(exprs[0])
+            if head is None:
+                return None
+            rest = [head] + [e.copy() for e in exprs[1:]]
+        if not rest:
+            return None  # '0x' seul, rien après → dégénéré, on ne réécrit pas
+        if len(rest) == 1:
+            return rest[0]
+        return exp.Concat(
+            expressions=rest,
+            safe=concat.args.get("safe"),
+            coalesce=concat.args.get("coalesce"),
+        )
     return None
 
 
-def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
-    """Réécrit ``CAST('0x' || h AS FLOAT)`` en ``hexstr_to_double(h)``.
+# Cibles de cast où la chaîne hexa Snowflake est valide. FLOAT/DOUBLE → le macro
+# rend directement un DOUBLE ; les cibles entières/décimales sont enveloppées dans
+# un CAST vers le type d'origine (hexstr_to_double rend un DOUBLE).
+_HEX_DOUBLE_TARGETS = frozenset({exp.DataType.Type.FLOAT, exp.DataType.Type.DOUBLE})
+_HEX_INT_DEC_TARGETS = frozenset(
+    {
+        exp.DataType.Type.INT,
+        exp.DataType.Type.BIGINT,
+        exp.DataType.Type.SMALLINT,
+        exp.DataType.Type.TINYINT,
+        exp.DataType.Type.INT128,  # DuckDB HUGEINT ≡ sqlglot INT128
+        exp.DataType.Type.DECIMAL,
+        exp.DataType.Type.BIGDECIMAL,
+    }
+)
 
-    Snowflake interprète une chaîne ``'0x…'`` castée en FLOAT comme de
-    l'hexadécimal ; DuckDB refuse (il ne parse l'hexa que comme littéral).
-    Le macro ``hexstr_to_double`` est enregistré sur chaque connexion par
-    ``storage.config:apply_duckdb_extensions``. Couvre CAST et TRY_CAST
-    (sous-classe), cibles FLOAT/DOUBLE uniquement — un cast texte ou décimal
-    n'est pas touché.
+
+def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
+    """Réécrit l'idiome hexa Snowflake ``'0x' || h`` casté en numérique.
+
+    Snowflake interprète une chaîne ``'0x…'`` castée en nombre comme de
+    l'hexadécimal ; DuckDB refuse (il ne parse l'hexa que comme littéral). On
+    réécrit vers le macro ``hexstr_to_double`` (enregistré par
+    ``storage.config:apply_duckdb_extensions``). Couvre :
+
+    - ``CAST``/``TRY_CAST`` (sous-classe) vers FLOAT/DOUBLE → ``hexstr_to_double(h)`` ;
+    - ``CAST`` vers entier/décimal (INT, NUMBER…) → ``CAST(hexstr_to_double(h) AS <cible>)`` ;
+    - les formes fonction ``TO_DOUBLE``/``TRY_TO_DOUBLE`` (``exp.ToDouble``) et
+      ``TO_NUMBER``/``TO_DECIMAL`` (``exp.ToNumber``).
+
+    Un cast vers texte, ou un cast numérique sans préfixe ``'0x'``, n'est pas touché.
+    La boucle tourne jusqu'au point fixe : un idiome hexa imbriqué dans l'opérande
+    d'un autre (cas pathologique) est ainsi entièrement réécrit, sans faux succès.
     """
-    for node in list(tree.find_all(exp.Cast)):
-        target = node.to
-        if not isinstance(target, exp.DataType) or target.this not in (
-            exp.DataType.Type.FLOAT,
-            exp.DataType.Type.DOUBLE,
-        ):
-            continue
-        inner = node.this
-        while isinstance(inner, exp.Paren):
-            inner = inner.this
-        stripped = _strip_hex_prefix(inner)
-        if stripped is None:
-            continue
-        node.replace(exp.Anonymous(this="hexstr_to_double", expressions=[stripped]))
+
+    def _operand_and_target(
+        node: exp.Expression,
+    ) -> tuple[exp.Expression, exp.DataType | None] | None:
+        """(opérande, type-cible-à-réappliquer) ou None si le nœud n'est pas un
+        cast numérique éligible. type-cible None ⇒ résultat DOUBLE direct."""
+        if isinstance(node, exp.Cast):  # inclut TryCast
+            target = node.to
+            if not isinstance(target, exp.DataType):
+                return None
+            if target.this in _HEX_DOUBLE_TARGETS:
+                return node.this, None
+            if target.this in _HEX_INT_DEC_TARGETS:
+                return node.this, target.copy()
+            return None
+        if isinstance(node, exp.ToDouble):
+            return node.this, None
+        if isinstance(node, exp.ToNumber):
+            prec = node.args.get("precision")
+            scale = node.args.get("scale")
+            if prec is not None and scale is not None:
+                tgt = exp.DataType.build(f"DECIMAL({prec.name}, {scale.name})")
+            else:
+                # Défaut Snowflake TO_NUMBER = NUMBER(38, 0).
+                tgt = exp.DataType.build("DECIMAL(38, 0)")
+            return node.this, tgt
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for node in list(tree.find_all(exp.Cast, exp.ToDouble, exp.ToNumber)):
+            found = _operand_and_target(node)
+            if found is None:
+                continue
+            operand, wrap_target = found
+            inner = operand
+            while isinstance(inner, exp.Paren):
+                inner = inner.this
+            stripped = _strip_hex_prefix(inner)
+            if stripped is None:
+                continue
+            macro = exp.Anonymous(this="hexstr_to_double", expressions=[stripped])
+            replacement: exp.Expression = (
+                macro if wrap_target is None else exp.Cast(this=macro, to=wrap_target)
+            )
+            node.replace(replacement)
+            changed = True
     return tree
 
 
