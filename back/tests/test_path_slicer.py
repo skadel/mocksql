@@ -151,6 +151,37 @@ UNION ALL
 SELECT id, 'X' AS kind FROM b
 """
 
+# Union interne UNIQUE dont le résultat est agrégé cross-branches en aval (sf_bq012 :
+# all_flows → net_balances `SUM … GROUP BY addr` → sortie). Slicer une branche fausserait
+# l'agrégat du script complet (les branches partagent la clé `addr` et se compensent) →
+# NON sliçable : le système doit retomber sur le path `all` (toutes les tables peuplées).
+AGG_CONSUMER_UNION = """
+WITH a AS (SELECT 1 AS addr, 10 AS amt),
+     b AS (SELECT 1 AS addr, -4 AS amt),
+     flows AS (
+         SELECT addr, amt FROM a
+         UNION ALL
+         SELECT addr, amt FROM b
+     ),
+     net AS (
+         SELECT addr, SUM(amt) AS bal FROM flows GROUP BY addr
+     )
+SELECT AVG(bal) AS avg_bal FROM net
+"""
+
+# Union interne UNIQUE consommée par un simple passthrough (aucune agrégation) → RESTE
+# sliçable : les lignes de chaque branche traversent jusqu'à la sortie sans fusion.
+PASSTHROUGH_CONSUMER_UNION = """
+WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS id),
+     u AS (
+         SELECT id FROM a
+         UNION ALL
+         SELECT id FROM b
+     ),
+     renamed AS (SELECT id FROM u)
+SELECT id FROM renamed
+"""
+
 
 # --- list_union_paths -----------------------------------------------------------------
 
@@ -182,6 +213,26 @@ def test_list_union_paths_union_distinct_bails():
 
 def test_list_union_paths_multiple_unions_bails():
     assert list_union_paths(_decompose(TWO_UNIONS)) == []
+
+
+def test_list_union_paths_bails_on_aggregating_consumer():
+    """Union interne agrégée cross-branches en aval (sf_bq012) → bail : slicer une
+    branche fausserait l'agrégat du script complet."""
+    assert list_union_paths(_decompose(AGG_CONSUMER_UNION)) == []
+
+
+def test_build_path_plans_none_on_aggregating_consumer():
+    plans = build_path_plans(
+        AGG_CONSUMER_UNION, _decompose(AGG_CONSUMER_UNION), [], "duckdb"
+    )
+    assert plans is None
+
+
+def test_list_union_paths_sliceable_through_passthrough():
+    """Union interne consommée par un passthrough non-agrégeant → reste sliçable."""
+    paths = list_union_paths(_decompose(PASSTHROUGH_CONSUMER_UNION))
+    assert [p.name for p in paths] == ["a", "b"]
+    assert {p.host_cte for p in paths} == {"u"}
 
 
 # --- Inventaire de branches (P1-2 : repli quand le slicer bail) -----------------------
