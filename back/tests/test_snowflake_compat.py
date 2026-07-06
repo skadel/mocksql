@@ -251,3 +251,60 @@ def test_validator_helper_has_macro(monkeypatch):
 
     helper = DuckDBTestHelper(":memory:")
     assert helper.conn.execute("SELECT hexstr_to_double('ff')").fetchone()[0] == 255.0
+
+
+def test_macro_is_connection_local_no_catalog_conflict(monkeypatch, tmp_path):
+    """Le macro doit être TEMP : sinon deux connexions concurrentes sur la même
+    base fichier écrivent le catalogue en transactions chevauchantes → DuckDB
+    lève « Catalog write-write conflict », cassant l'ouverture de connexion
+    (executor, validator, pool) pour TOUS les dialectes. En prod DUCKDB_PATH est
+    un fichier partagé, pas ':memory:'."""
+    from storage import config
+
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: [])
+    db_file = str(tmp_path / "shared.duckdb")
+    con_a = duckdb.connect(db_file)
+    con_b = duckdb.connect(db_file)
+    try:
+        # Transactions chevauchantes : reproduit le scénario multi-session.
+        con_a.execute("BEGIN")
+        con_b.execute("BEGIN")
+        config.apply_duckdb_extensions(con_a)
+        config.apply_duckdb_extensions(con_b)  # ne doit PAS lever
+        con_a.execute("COMMIT")
+        con_b.execute("COMMIT")
+        assert con_b.execute("SELECT hexstr_to_double('ff')").fetchone()[0] == 255.0
+    finally:
+        con_a.close()
+        con_b.close()
+
+
+def test_hex_idiom_not_folded_to_null_by_scalar_folder():
+    """Le constant-folder (validator) tourne AVANT le fixer hexa. Un idiome hexa
+    tout-littéral sous TRY_CAST ne doit pas être replié en NULL, sinon le fixer
+    ne voit plus jamais le CAST et le résultat est silencieusement faux."""
+    import sqlglot
+
+    from build_query.scalar_folder import fold_scalar_expressions
+
+    sql = "SELECT TRY_CAST('0x' || 'f4240' AS DOUBLE) AS v FROM db.s.t"
+    tree = sqlglot.parse_one(sql, dialect="snowflake")
+    folded = fold_scalar_expressions(tree, "snowflake").sql(dialect="snowflake")
+    # L'idiome '0x' || ... doit survivre au fold pour que le fixer le réécrive.
+    assert "'0x'" in folded.lower(), f"idiome hexa replié/perdu : {folded}"
+    assert " NULL " not in f" {folded} ".upper()
+
+
+def test_hex_idiom_all_literal_executes_end_to_end(monkeypatch):
+    """Chaîne complète fold → fixer → exécution sur un idiome hexa tout-littéral."""
+    con = _fresh_con(monkeypatch)
+    import sqlglot
+
+    from build_query.scalar_folder import fold_scalar_expressions
+
+    sql = "SELECT TRY_CAST('0x' || 'f4240' AS DOUBLE) AS v"
+    folded = fold_scalar_expressions(
+        sqlglot.parse_one(sql, dialect="snowflake"), "snowflake"
+    )
+    out = _ptq(folded.sql(dialect="snowflake"))
+    assert con.execute(out).fetchone()[0] == 1_000_000.0

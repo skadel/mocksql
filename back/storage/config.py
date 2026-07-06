@@ -267,8 +267,16 @@ def get_duckdb_extensions() -> list[str]:
 # calldata) déborde tout type entier, HUGEINT compris (127 bits).
 # Chaîne vide → 0.0 (valeur 0 dont LTRIM a mangé tous les chiffres) ;
 # caractère non-hexa → NULL (comme TRY_CAST, pas de 0 silencieux).
+#
+# TEMP (connection-local) OBLIGATOIRE : un CREATE OR REPLACE MACRO non-temp écrit
+# le catalogue de la base. Comme on l'exécute à CHAQUE ouverture de connexion et
+# que DUCKDB_PATH est un fichier PARTAGÉ, deux connexions concurrentes (executor,
+# validator, pool) le posent en transactions chevauchantes → « Catalog
+# write-write conflict », cassant l'ouverture pour tous les dialectes. TEMP =
+# zéro écriture catalogue, exactement l'intention d'un enregistrement par
+# connexion.
 _HEXSTR_TO_DOUBLE_MACRO = """
-CREATE OR REPLACE MACRO hexstr_to_double(h) AS (
+CREATE OR REPLACE TEMP MACRO hexstr_to_double(h) AS (
   CASE
     WHEN h IS NULL THEN NULL
     WHEN length(h) = 0 THEN 0.0
@@ -308,7 +316,14 @@ def apply_duckdb_extensions(con) -> None:
                 ext,
                 e,
             )
-    con.execute(_HEXSTR_TO_DOUBLE_MACRO)
+    try:
+        con.execute(_HEXSTR_TO_DOUBLE_MACRO)
+    except Exception as e:  # pragma: no cover - défensif, comme les extensions
+        logger.warning(
+            "Macro DuckDB 'hexstr_to_double' non enregistré: %r "
+            "(les requêtes hexa→double échoueront)",
+            e,
+        )
 
 
 def load_preprocessor_fn(fn_ref: str, config_dir: Path):
