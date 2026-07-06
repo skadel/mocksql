@@ -321,6 +321,68 @@ def _iso_format_hint(col_type) -> str:
     return ""
 
 
+# Tokens de nom signalant qu'une colonne porte un horodatage.
+_TEMPORAL_NAME_TOKENS = {"at", "time", "timestamp", "date", "datetime", "epoch", "ts"}
+# Familles de types numériques (base, précision retirée). NUMBER/NUMERIC/DECIMAL ne
+# sont PAS dans `type_mapping` → champ Pydantic `str` : un littéral date les traverse
+# sans validation. Les types int/float y sont aussi pour la robustesse (le rappel
+# reste vrai), même si Pydantic les rejetterait déjà.
+_NUMERIC_BASE_TYPES = {
+    "NUMBER",
+    "NUMERIC",
+    "DECIMAL",
+    "BIGDECIMAL",
+    "BIGNUMERIC",
+    "INT",
+    "INTEGER",
+    "INT64",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "FLOAT",
+    "FLOAT64",
+    "DOUBLE",
+    "REAL",
+}
+
+
+def _tokenize_col_name(name: str) -> set[str]:
+    """Découpe un nom de colonne en tokens minuscules (snake_case ET camelCase).
+
+    `SnapshotAt`→{snapshot, at}, `created_at`→{created, at}, `block_timestamp`→
+    {block, timestamp}. Le découpage camelCase évite les faux positifs de sous-chaîne
+    (`update` ne contient pas le token `date`, `format` ne contient pas `at`).
+    """
+    tokens: set[str] = set()
+    for part in re.split(r"[_\s]+", name):
+        for tok in re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part):
+            tokens.add(tok.lower())
+    return tokens
+
+
+def _numeric_epoch_hint(col_type_str: str | None, col_name: str) -> str:
+    """Rappel « epoch → entier » pour une colonne NUMÉRIQUE au nom horodaté.
+
+    Un `NUMBER` Snowflake au nom temporel (`SnapshotAt`, `UpstreamPublishedAt`) stocke
+    un epoch, pas une date. Comme `NUMBER` retombe sur `str` (cf. `parse_field_type`),
+    le LLM y colle volontiers un littéral ISO — que DuckDB refuse d'insérer dans la
+    colonne DECIMAL (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
+    survit au retry sans contexte. Gaté sur le TYPE numérique (pas seulement le nom) :
+    une colonne TYPÉE date/timestamp nommée `...At` garde son rappel ISO.
+    """
+    if not col_type_str:
+        return ""
+    base = col_type_str.split("(")[0].strip().upper()
+    if base not in _NUMERIC_BASE_TYPES:
+        return ""
+    if _tokenize_col_name(col_name) & _TEMPORAL_NAME_TOKENS:
+        return (
+            " (⚠️ colonne numérique au nom horodaté : valeur stockée en epoch → "
+            "émettre un ENTIER (ex. 1704067200000000), jamais un littéral date ISO)"
+        )
+    return ""
+
+
 def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]:
     models = {}
     for table in filtered_tables_and_columns:
@@ -354,6 +416,18 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
                     (str(col_description) + iso_hint)
                     if col_description
                     else iso_hint.strip()
+                )
+
+            # Colonne NUMÉRIQUE au nom horodaté (NUMBER Snowflake = str en Pydantic) →
+            # rappel « epoch → entier », sinon le LLM y met un littéral date que DuckDB
+            # refuse d'insérer en DECIMAL (incident sf_bq028). Exclusif du rappel ISO
+            # (gaté sur le type numérique). Cf. _numeric_epoch_hint.
+            epoch_hint = _numeric_epoch_hint(column.get("type"), column["name"])
+            if epoch_hint:
+                col_description = (
+                    (str(col_description) + epoch_hint)
+                    if col_description
+                    else epoch_hint.strip()
                 )
 
             # Underscore initial → clé assainie + alias sur le nom réel.
