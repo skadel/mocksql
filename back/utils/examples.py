@@ -1709,27 +1709,32 @@ def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
     - les formes fonction ``TO_DOUBLE``/``TRY_TO_DOUBLE`` (``exp.ToDouble``) et
       ``TO_NUMBER``/``TO_DECIMAL`` (``exp.ToNumber``).
 
-    Un cast vers texte, ou un cast numérique sans préfixe ``'0x'``, n'est pas touché.
-    La boucle tourne jusqu'au point fixe : un idiome hexa imbriqué dans l'opérande
-    d'un autre (cas pathologique) est ainsi entièrement réécrit, sans faux succès.
+    Sémantique d'erreur fidèle à Snowflake : un cast STRICT (``CAST``,
+    ``TO_DOUBLE``, ``TO_NUMBER``) vise ``hexstr_to_double_strict`` qui lève sur
+    hexa invalide ; une forme ``TRY_*`` vise ``hexstr_to_double`` (NULL sur
+    invalide). Un cast vers texte, ou un cast numérique sans préfixe ``'0x'``,
+    n'est pas touché. La boucle tourne jusqu'au point fixe : un idiome hexa
+    imbriqué dans l'opérande d'un autre est entièrement réécrit, sans faux succès.
     """
 
-    def _operand_and_target(
+    def _operand_target_strict(
         node: exp.Expression,
-    ) -> tuple[exp.Expression, exp.DataType | None] | None:
-        """(opérande, type-cible-à-réappliquer) ou None si le nœud n'est pas un
-        cast numérique éligible. type-cible None ⇒ résultat DOUBLE direct."""
-        if isinstance(node, exp.Cast):  # inclut TryCast
+    ) -> tuple[exp.Expression, exp.DataType | None, bool] | None:
+        """(opérande, type-cible-à-réappliquer, strict) ou None si non éligible.
+        type-cible None => résultat DOUBLE direct ; strict=True => lève sur hexa
+        invalide, False => NULL (variante TRY_*)."""
+        if isinstance(node, exp.Cast):  # inclut TryCast (sous-classe)
             target = node.to
             if not isinstance(target, exp.DataType):
                 return None
+            strict = not isinstance(node, exp.TryCast)
             if target.this in _HEX_DOUBLE_TARGETS:
-                return node.this, None
+                return node.this, None, strict
             if target.this in _HEX_INT_DEC_TARGETS:
-                return node.this, target.copy()
+                return node.this, target.copy(), strict
             return None
         if isinstance(node, exp.ToDouble):
-            return node.this, None
+            return node.this, None, not node.args.get("safe")
         if isinstance(node, exp.ToNumber):
             prec = node.args.get("precision")
             scale = node.args.get("scale")
@@ -1738,24 +1743,25 @@ def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
             else:
                 # Défaut Snowflake TO_NUMBER = NUMBER(38, 0).
                 tgt = exp.DataType.build("DECIMAL(38, 0)")
-            return node.this, tgt
+            return node.this, tgt, not node.args.get("safe")
         return None
 
     changed = True
     while changed:
         changed = False
         for node in list(tree.find_all(exp.Cast, exp.ToDouble, exp.ToNumber)):
-            found = _operand_and_target(node)
+            found = _operand_target_strict(node)
             if found is None:
                 continue
-            operand, wrap_target = found
+            operand, wrap_target, strict = found
             inner = operand
             while isinstance(inner, exp.Paren):
                 inner = inner.this
             stripped = _strip_hex_prefix(inner)
             if stripped is None:
                 continue
-            macro = exp.Anonymous(this="hexstr_to_double", expressions=[stripped])
+            macro_name = "hexstr_to_double_strict" if strict else "hexstr_to_double"
+            macro = exp.Anonymous(this=macro_name, expressions=[stripped])
             replacement: exp.Expression = (
                 macro if wrap_target is None else exp.Cast(this=macro, to=wrap_target)
             )

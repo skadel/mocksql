@@ -266,7 +266,9 @@ def get_duckdb_extensions() -> list[str]:
 # Accumulateur en DOUBLE : un uint256 (jusqu'à 64 chiffres hexa, Ethereum
 # calldata) déborde tout type entier, HUGEINT compris (127 bits).
 # Chaîne vide → 0.0 (valeur 0 dont LTRIM a mangé tous les chiffres) ;
-# caractère non-hexa → NULL (comme TRY_CAST, pas de 0 silencieux).
+# caractère non-hexa → NULL : c'est la sémantique de TRY_CAST/TRY_TO_DOUBLE.
+# La variante STRICTE (hexstr_to_double_strict, ci-dessous) LÈVE sur invalide,
+# fidèle à un CAST/TO_DOUBLE strict Snowflake ; le fixer choisit selon le nœud.
 #
 # TEMP (connection-local) OBLIGATOIRE : un CREATE OR REPLACE MACRO non-temp écrit
 # le catalogue de la base. Comme on l'exécute à CHAQUE ouverture de connexion et
@@ -288,6 +290,23 @@ CREATE OR REPLACE TEMP MACRO hexstr_to_double(h) AS (
        END
        FOR c IN string_split(lower(h), '')],
       (acc, d) -> acc * 16 + d
+    )
+  END
+)
+"""
+
+# Variante stricte : NULL/vide traités comme la version lenient (un CAST Snowflake
+# sur NULL ne lève pas), mais un caractère non-hexa LÈVE au lieu de rendre NULL —
+# fidèle à un CAST/TO_DOUBLE strict Snowflake. coalesce court-circuite : error()
+# n'est évalué que si hexstr_to_double a rendu NULL sur une entrée non-nulle.
+_HEXSTR_TO_DOUBLE_STRICT_MACRO = """
+CREATE OR REPLACE TEMP MACRO hexstr_to_double_strict(h) AS (
+  CASE
+    WHEN h IS NULL THEN NULL
+    WHEN length(h) = 0 THEN 0.0
+    ELSE coalesce(
+      hexstr_to_double(h),
+      error('hexstr_to_double: chaîne hexadécimale invalide: ' || h)
     )
   END
 )
@@ -318,6 +337,7 @@ def apply_duckdb_extensions(con) -> None:
             )
     try:
         con.execute(_HEXSTR_TO_DOUBLE_MACRO)
+        con.execute(_HEXSTR_TO_DOUBLE_STRICT_MACRO)  # dépend du précédent
     except Exception as e:  # pragma: no cover - défensif, comme les extensions
         logger.warning(
             "Macro DuckDB 'hexstr_to_double' non enregistré: %r "

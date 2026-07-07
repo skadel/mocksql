@@ -14,6 +14,7 @@ sortie s'exécute (ou échoue exactement là où c'est attendu).
 import asyncio
 
 import duckdb
+import pytest
 import sqlglot
 
 from build_query.debug_executor import _quote_ident
@@ -199,25 +200,25 @@ def test_hex_cast_rewritten_to_macro():
         "SELECT CAST('0x' || LTRIM(SUBSTRING(\"input\", 75), '0') AS FLOAT) AS v"
         " FROM mydb.s.t"
     )
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
     assert "'0x'" not in out.lower()
 
 
 def test_hex_cast_chained_concat():
     """'0x' || a || b : DPipe imbriqué à gauche — le préfixe doit être trouvé en feuille."""
     out = _ptq("SELECT CAST('0x' || a || b AS FLOAT) AS v FROM mydb.s.t")
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
     assert "'0x'" not in out.lower()
 
 
 def test_hex_cast_uppercase_prefix_and_try_cast():
     out = _ptq("SELECT TRY_CAST('0X' || h AS DOUBLE) AS v FROM mydb.s.t")
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
 
 
 def test_hex_cast_concat_function_form():
     out = _ptq("SELECT CAST(CONCAT('0x', h) AS FLOAT) AS v FROM mydb.s.t")
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
 
 
 def test_normal_float_casts_untouched():
@@ -318,7 +319,7 @@ def test_hex_idiom_all_literal_executes_end_to_end(monkeypatch):
 
 def _rewrites(sql: str) -> bool:
     out = _ptq(sql).upper()
-    return "HEXSTR_TO_DOUBLE(" in out and "'0X'" not in out
+    return "HEXSTR_TO_DOUBLE" in out and "'0X'" not in out
 
 
 def test_hex_function_form_to_double():
@@ -353,13 +354,13 @@ def test_hex_nested_cast_fully_rewritten():
 def test_hex_cast_to_number_target():
     """CAST('0x' || h AS NUMBER) : cible décimale → CAST(hexstr_to_double(h) AS ...)."""
     out = _ptq("SELECT CAST('0x' || h AS NUMBER) AS v FROM mydb.s.t")
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
     assert "'0x'" not in out.lower()
 
 
 def test_hex_cast_to_int_target():
     out = _ptq("SELECT CAST('0x' || h AS INT) AS v FROM mydb.s.t")
-    assert "HEXSTR_TO_DOUBLE(" in out.upper()
+    assert "HEXSTR_TO_DOUBLE" in out.upper()
     assert "'0x'" not in out.lower()
 
 
@@ -389,3 +390,66 @@ def test_normal_numeric_casts_still_untouched():
         "SELECT CAST(a || b AS FLOAT) AS v FROM mydb.s.t",
     ]:
         assert "HEXSTR_TO_DOUBLE" not in _ptq(sql).upper()
+
+
+# ---------------------------------------------------------------------------
+# Sémantique d'erreur : CAST strict lève sur hexa invalide, TRY_* rend NULL
+# (revue #4 — fidélité Snowflake : CAST strict échoue, TRY_CAST → NULL)
+# ---------------------------------------------------------------------------
+
+
+def test_strict_cast_uses_strict_macro():
+    """CAST (non-TRY) → hexstr_to_double_strict (lève sur invalide)."""
+    out = _ptq("SELECT CAST('0x' || h AS FLOAT) AS v FROM mydb.s.t").upper()
+    assert "HEXSTR_TO_DOUBLE_STRICT(" in out
+
+
+def test_try_cast_uses_lenient_macro():
+    """TRY_CAST → hexstr_to_double (NULL sur invalide), PAS la variante stricte."""
+    out = _ptq("SELECT TRY_CAST('0x' || h AS FLOAT) AS v FROM mydb.s.t").upper()
+    assert "HEXSTR_TO_DOUBLE(" in out
+    assert "STRICT" not in out
+
+
+def test_try_to_double_uses_lenient_macro():
+    out = _ptq("SELECT TRY_TO_DOUBLE('0x' || h) AS v FROM mydb.s.t").upper()
+    assert "HEXSTR_TO_DOUBLE(" in out
+    assert "STRICT" not in out
+
+
+def test_to_double_function_uses_strict_macro():
+    """TO_DOUBLE (non-TRY) est strict."""
+    out = _ptq("SELECT TO_DOUBLE('0x' || h) AS v FROM mydb.s.t").upper()
+    assert "HEXSTR_TO_DOUBLE_STRICT(" in out
+
+
+def test_strict_cast_raises_on_invalid_hex(monkeypatch):
+    """Un CAST strict sur une donnée non-hexa LÈVE (fidèle à Snowflake), au lieu
+    de rendre NULL silencieusement."""
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT CAST('0x' || 'zz' AS FLOAT) AS v")
+    with pytest.raises(Exception) as exc:
+        con.execute(out).fetchone()
+    assert "invalide" in str(exc.value).lower() or "invalid" in str(exc.value).lower()
+
+
+def test_try_cast_returns_null_on_invalid_hex(monkeypatch):
+    """TRY_CAST sur une donnée non-hexa rend NULL (fidèle à Snowflake TRY_CAST)."""
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT TRY_CAST('0x' || 'zz' AS FLOAT) AS v")
+    assert con.execute(out).fetchone()[0] is None
+
+
+def test_strict_cast_null_input_stays_null(monkeypatch):
+    """NULL en entrée reste NULL même en strict (Snowflake CAST(NULL) ne lève pas)."""
+    con = _fresh_con(monkeypatch)
+    # '0x' || NULL → NULL en amont ; le macro strict ne doit pas lever sur NULL.
+    out = _ptq("SELECT CAST('0x' || CAST(NULL AS VARCHAR) AS FLOAT) AS v")
+    assert con.execute(out).fetchone()[0] is None
+
+
+def test_strict_cast_valid_hex_executes(monkeypatch):
+    """Le strict n'entrave pas le cas nominal : hexa valide → valeur."""
+    con = _fresh_con(monkeypatch)
+    out = _ptq("SELECT CAST('0x' || LTRIM('000f4240', '0') AS FLOAT) AS v")
+    assert con.execute(out).fetchone()[0] == 1_000_000.0
