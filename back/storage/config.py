@@ -326,6 +326,22 @@ def apply_duckdb_extensions(con) -> None:
         )
 
 
+def open_duckdb_connection(path: str, *, read_only: bool = False):
+    """Ouvre une connexion DuckDB PRÊTE : extensions + macros MockSQL appliqués.
+
+    Point d'entrée UNIQUE pour toute connexion qui exécute du SQL MockSQL — le
+    dry-run du validateur, l'executor, le pool, le réplay CLI. Passer par ici
+    garantit que le macro ``hexstr_to_double`` (et les extensions configurées)
+    sont présents : un ``duckdb.connect`` nu manquerait le macro et la requête
+    échouerait à l'exécution seulement, sur les seuls modèles concernés.
+    """
+    import duckdb
+
+    con = duckdb.connect(path, read_only=read_only)
+    apply_duckdb_extensions(con)
+    return con
+
+
 def load_preprocessor_fn(fn_ref: str, config_dir: Path):
     import importlib
     import sys

@@ -66,3 +66,44 @@ def test_missing_extension_hint_actionable():
 
 def test_missing_extension_hint_none_for_unrelated_error():
     assert _missing_extension_hint("Binder Error: column foo not found") is None
+
+
+# ---------------------------------------------------------------------------
+# Factory de connexion : point d'entrée unique connect + apply_duckdb_extensions
+# ---------------------------------------------------------------------------
+
+
+def test_open_duckdb_connection_prepared(monkeypatch):
+    """La factory rend une connexion prête : macros MockSQL enregistrés."""
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: [])
+    con = config.open_duckdb_connection(":memory:")
+    try:
+        assert con.execute("SELECT hexstr_to_double('ff')").fetchone()[0] == 255.0
+    finally:
+        con.close()
+
+
+def test_open_duckdb_connection_applies_extensions(monkeypatch):
+    """La factory charge aussi les extensions configurées."""
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: ["spatial"])
+    con = config.open_duckdb_connection(":memory:")
+    try:
+        assert (
+            con.execute("SELECT ST_AsText(st_point(1, 2))").fetchone()[0]
+            == "POINT (1 2)"
+        )
+    finally:
+        con.close()
+
+
+def test_open_duckdb_connection_read_only(monkeypatch, tmp_path):
+    """Le flag read_only est transmis à DuckDB."""
+    monkeypatch.setattr(config, "get_duckdb_extensions", lambda: [])
+    db = str(tmp_path / "ro.duckdb")
+    config.open_duckdb_connection(db).close()  # crée le fichier
+    con = config.open_duckdb_connection(db, read_only=True)
+    try:
+        with pytest.raises(Exception):
+            con.execute("CREATE TABLE t (x INT)")
+    finally:
+        con.close()

@@ -36,7 +36,6 @@ def run_query_duckdb(
     sql: str, db_path: str, *, limit: int = 30, offset: int = 0
 ) -> Tuple[List[Dict[str, Any]], int]:
     # import paresseux pour éviter l’exigence si DuckDB n’est pas utilisé
-    import duckdb
 
     base_sql = sql.strip().rstrip(";")
     _validate_sql(base_sql, dialect="duckdb")
@@ -55,10 +54,9 @@ def run_query_duckdb(
         """
         params = [limit, offset]
 
-    from storage.config import apply_duckdb_extensions
+    from storage.config import open_duckdb_connection
 
-    with duckdb.connect(db_path, read_only=False) as con:
-        apply_duckdb_extensions(con)
+    with open_duckdb_connection(db_path) as con:
         q = con.execute(paginated_sql, params) if params else con.execute(paginated_sql)
         rows = q.fetchall()
         cols = [d[0] for d in q.description]

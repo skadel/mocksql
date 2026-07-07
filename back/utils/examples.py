@@ -2140,8 +2140,6 @@ def transform_timestamp(sql_query):
 
 
 def initialize_duckdb(db_path: str):
-    from storage.config import apply_duckdb_extensions
+    from storage.config import open_duckdb_connection
 
-    con = duckdb.connect(db_path)
-    apply_duckdb_extensions(con)
-    return con
+    return open_duckdb_connection(db_path)

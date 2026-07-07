@@ -126,13 +126,9 @@ class DBPool:
             logger.debug("Erreur fermeture connexion ignorée: %r", e)
 
     async def _create_new_connection(self) -> Any:
-        import duckdb
+        from storage.config import open_duckdb_connection
 
-        from storage.config import apply_duckdb_extensions
-
-        conn = duckdb.connect(DUCKDB_PATH)
-        apply_duckdb_extensions(conn)
-        return conn
+        return open_duckdb_connection(DUCKDB_PATH)
 
     @staticmethod
     def _duckdb_sanity_check_or_fail(path: str) -> None:
