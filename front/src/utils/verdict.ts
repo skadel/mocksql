@@ -50,6 +50,20 @@ export function verdictText(status: string | undefined, test?: any): string {
   return "En cours d'exécution…";
 }
 
+/** Vrai quand l'exécution du test est terminée mais que le verdict LLM n'est pas encore
+ *  rendu (run en cours) : le verdict dérivé du seul statut d'exécution serait optimiste
+ *  (complete → « Bon » avant que le juge ne parle) — l'UI doit montrer « Évaluation… »
+ *  au lieu du badge. Hors run (isLoading false), le verdict basé sur le statut reste
+ *  affiché tel quel (modèles rechargés sans champ evaluation). */
+export function isAwaitingEvaluation(test: any, isLoading: boolean | undefined): boolean {
+  if (!isLoading || !test) return false;
+  if (!test.status || test.status === 'pending') return false;
+  if (test.evaluation) return false;
+  // reason_type de validation = l'évaluateur a déjà tranché (état « À valider »).
+  if (test.reason_type && VALIDATION_REASON_TYPES.has(test.reason_type)) return false;
+  return true;
+}
+
 export function testExecStatus(test: any): ExecStatus {
   if (test.status === 'complete') return 'pass';
   if (test.status === 'empty_results') {

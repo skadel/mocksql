@@ -3,6 +3,7 @@ import {
   verdictText,
   testExecStatus,
   getVerdictInfo,
+  isAwaitingEvaluation,
   VERDICT_META,
 } from './verdict';
 
@@ -212,6 +213,40 @@ describe('getVerdictInfo', () => {
     expect(info.verdict).toBe('pending');
     expect(info.execStatus).toBe('pending');
     expect(info.fg).toBe(VERDICT_META.pending.fg);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isAwaitingEvaluation
+// ---------------------------------------------------------------------------
+
+// Régression : pendant un run, un test exécuté (complete) sans verdict LLM affichait
+// le badge « Bon » optimiste dérivé du statut, à côté du spinner « Évaluation… ».
+describe('isAwaitingEvaluation', () => {
+  it('returns true when execution finished but no LLM verdict yet during a run', () => {
+    expect(isAwaitingEvaluation({ status: 'complete' }, true)).toBe(true);
+  });
+
+  it('applies to error and empty_results too (verdict exec tout aussi provisoire)', () => {
+    expect(isAwaitingEvaluation({ status: 'error' }, true)).toBe(true);
+    expect(isAwaitingEvaluation({ status: 'empty_results' }, true)).toBe(true);
+  });
+
+  it('returns false once the LLM verdict arrived', () => {
+    expect(isAwaitingEvaluation({ status: 'complete', evaluation: '**Bon** — ok.' }, true)).toBe(false);
+  });
+
+  it('returns false outside a run (modèle rechargé sans champ evaluation)', () => {
+    expect(isAwaitingEvaluation({ status: 'complete' }, false)).toBe(false);
+  });
+
+  it('returns false while still pending or without status (autre spinner déjà affiché)', () => {
+    expect(isAwaitingEvaluation({ status: 'pending' }, true)).toBe(false);
+    expect(isAwaitingEvaluation({}, true)).toBe(false);
+  });
+
+  it('returns false for validation reason_type (l\'évaluateur a déjà tranché)', () => {
+    expect(isAwaitingEvaluation({ status: 'complete', reason_type: 'needs_validation' }, true)).toBe(false);
   });
 });
 

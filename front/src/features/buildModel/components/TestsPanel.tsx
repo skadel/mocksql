@@ -55,6 +55,8 @@ import {
   statusToVerdict,
   testExecStatus,
   getVerdictInfo,
+  isAwaitingEvaluation,
+  VERDICT_META,
 } from '../../../utils/verdict';
 import { TEAL, TEAL_ALT, INK, BODY, MUTED, PLACEHOLDER, BORDER, SURFACE, TEAL_SUBTLE, AMBER, AMBER_BG, GREEN, GREEN_BG } from '../../../theme/tokens';
 
@@ -294,11 +296,13 @@ function StatusDot({ status, test }: { status: string | undefined; test?: any })
 }
 
 /* ─── CompactRow ──────────────────────────────────────────────────── */
-function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
-  test: any; idx: number; commentCount: number;
+function CompactRow({ test, idx, commentCount, isLoading, onExpand, onAsk, onDelete }: {
+  test: any; idx: number; commentCount: number; isLoading: boolean;
   onExpand: () => void; onAsk: () => void; onDelete: () => void;
 }) {
   const { verdict, label, fg, bg, border } = getVerdictInfo(test);
+  // Verdict LLM pas encore rendu : ne pas afficher le badge optimiste basé sur l'exécution.
+  const awaitingEval = isAwaitingEvaluation(test, isLoading);
   const tags: string[] = test.tags ?? [];
   return (
     <Box
@@ -306,21 +310,29 @@ function CompactRow({ test, idx, commentCount, onExpand, onAsk, onDelete }: {
       data-testid={`test-card-${idx + 1}`}
       onClick={onExpand}
       sx={{
-        bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderLeft: `3px solid ${border}`,
+        bgcolor: SURFACE, border: `1px solid ${BORDER}`, borderLeft: `3px solid ${awaitingEval ? VERDICT_META.pending.border : border}`,
         borderRadius: '10px', display: 'grid',
         gridTemplateColumns: '22px 108px 1fr auto',
         alignItems: 'center', gap: 1, p: '9px 12px', cursor: 'pointer',
         '&:hover': { bgcolor: '#fafcfc' },
       }}
     >
-      <StatusDot status={test.status} test={test} />
-      <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700, justifySelf: 'start' }}>
-        {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 11 }} />}
-        {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 11 }} />}
-        {verdict === 'bad'        && <CancelIcon sx={{ fontSize: 11 }} />}
-        {verdict === 'validation' && <HelpOutlineIcon sx={{ fontSize: 11 }} />}
-        {label}
-      </Box>
+      {awaitingEval
+        ? <CircularProgress size={14} thickness={5} sx={{ color: TEAL, flexShrink: 0 }} />
+        : <StatusDot status={test.status} test={test} />}
+      {awaitingEval ? (
+        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11, justifySelf: 'start' }}>
+          Évaluation…
+        </Box>
+      ) : (
+        <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700, justifySelf: 'start' }}>
+          {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 11 }} />}
+          {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 11 }} />}
+          {verdict === 'bad'        && <CancelIcon sx={{ fontSize: 11 }} />}
+          {verdict === 'validation' && <HelpOutlineIcon sx={{ fontSize: 11 }} />}
+          {label}
+        </Box>
+      )}
       <Box sx={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 1 }}>
         <Typography sx={{ fontSize: 11, color: MUTED, fontVariantNumeric: 'tabular-nums' }}>#{idx + 1}</Typography>
         <Typography sx={{ fontSize: 12.5, color: INK, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 500 }}>
@@ -1257,6 +1269,8 @@ function TestCard({
   onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onUpload,
 }: TestCardProps) {
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
+  // Verdict LLM pas encore rendu : ne pas afficher le badge optimiste basé sur l'exécution.
+  const awaitingEval = isAwaitingEvaluation(test, isLoading);
   const tags: string[] = test.tags ?? [];
   const description = editedDescription ?? test.unit_test_description ?? '';
   const testKey = `${idx}`;
@@ -1284,7 +1298,7 @@ function TestCard({
       sx={{
         bgcolor: selectedTestIndex === idx ? '#f0fafa' : SURFACE,
         border: `1px solid ${BORDER}`,
-        borderLeft: `3px solid ${border}`,
+        borderLeft: `3px solid ${awaitingEval ? VERDICT_META.pending.border : border}`,
         borderRadius: '12px',
         overflow: 'hidden',
       }}
@@ -1293,7 +1307,7 @@ function TestCard({
       <Box sx={{ p: '14px 16px 10px' }}>
         {/* Verdict badge + tags */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.75 }}>
-          {test.status !== 'pending' && (
+          {test.status !== 'pending' && !awaitingEval && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '3px', borderRadius: 999, fontSize: 11.5, fontWeight: 700 }}>
               {verdict === 'good'       && <CheckCircleIcon sx={{ fontSize: 11 }} />}
               {verdict === 'warn'       && <WarningAmberIcon sx={{ fontSize: 11 }} />}
@@ -1308,7 +1322,7 @@ function TestCard({
               {Object.keys(inputData).length > 0 ? 'Exécution DuckDB…' : 'Génération…'}
             </Box>
           )}
-          {test.status !== 'pending' && isLoading && !test.evaluation && (
+          {awaitingEval && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11.5 }}>
               <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} /> Évaluation…
             </Box>
@@ -1356,13 +1370,13 @@ function TestCard({
         {test.decision && <DecisionBlock test={test} />}
 
         {/* Verdict text — masqué pour 'validation' : l'explication figure dans le bloc de validation ci-dessous */}
-        {test.status && test.status !== 'pending' && verdict !== 'validation' && isLoading && !test.evaluation && (
+        {test.status && test.status !== 'pending' && verdict !== 'validation' && awaitingEval && (
           <Box sx={{ mt: 1, p: '9px 12px', bgcolor: '#f5f7f8', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <CircularProgress size={10} thickness={5} sx={{ color: TEAL }} />
             <Typography sx={{ fontSize: 12, color: MUTED }}>Évaluation en cours…</Typography>
           </Box>
         )}
-        {test.status && test.status !== 'pending' && verdict !== 'validation' && (!isLoading || test.evaluation) && (
+        {test.status && test.status !== 'pending' && verdict !== 'validation' && !awaitingEval && (
           <Box sx={{
             mt: 1, p: '9px 12px', bgcolor: bg, borderRadius: '8px',
             borderLeft: `2px solid ${fg}`, fontSize: 12.5, color: BODY, lineHeight: 1.55,
@@ -2218,6 +2232,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                     test={test}
                     idx={idx}
                     commentCount={testComments.length}
+                    isLoading={isLoading && (loadingTestIndex === undefined || test.test_index === loadingTestIndex)}
                     onExpand={() => setExpanded(prev => { const next = new Set(prev); next.add(idx); return next; })}
                     onAsk={() => onSelectForModification(idx)}
                     onDelete={() => handleDelete(idx)}
