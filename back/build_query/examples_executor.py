@@ -43,7 +43,7 @@ def _assertion_sql_from_condition(
     quantifier: str = "all",
 ) -> str:
     """Wrappe une condition positive en requête dbt-style retournant les lignes/faits
-    VIOLANTS (0 ligne = OK). Deux quantificateurs :
+    VIOLANTS (0 ligne = OK). Trois quantificateurs :
 
     - ``quantifier="all"`` (défaut) : la condition doit tenir sur CHAQUE ligne (de
       ``scope`` si fourni). C'est le mode « invariant universel ».
@@ -51,6 +51,10 @@ def _assertion_sql_from_condition(
       Mode « il existe une ligne telle que … » — idéal pour affirmer la présence d'une
       ligne précise dans un résultat MULTI-lignes (ex. « il existe une ligne où
       ``indicateur = 'nb_cartes' AND valeur = 2974`` ») sans piéger les autres lignes.
+    - ``quantifier="aggregate"`` : la condition porte sur des AGRÉGATS de ``__result__``
+      (``SUM(revenue) = 40``, ``COUNT(*) = 3``) — une propriété GLOBALE du résultat,
+      pas un invariant ligne à ligne. C'est la forme qui attrape les régressions de
+      cardinalité (lignes fuyantes/manquantes), invisibles pour une assertion scopée.
 
     Le LLM exprime l'affirmation attendue (ex. ``date = '2016-01-02'``) ; la négation
     est gérée ici, mécaniquement — le LLM n'écrit donc jamais d'assertion inversée
@@ -68,6 +72,12 @@ def _assertion_sql_from_condition(
     Mode ``exists`` — requête ``... WHERE NOT EXISTS (SELECT 1 FROM __result__ WHERE
     (cond))`` : renvoie une ligne (= échec) ssi AUCUNE ligne ne satisfait la condition.
     Un ``scope`` éventuel est fondu dans le filtre EXISTS (``WHERE (scope) AND (cond)``).
+
+    Mode ``aggregate`` — sous-requête SCALAIRE ``(SELECT (cond) FROM __result__) IS NOT
+    TRUE`` : un agrégat sans GROUP BY produit toujours exactement une ligne, donc
+    l'assertion est naturellement NON-vacuité sur un résultat vide (``SUM`` → NULL →
+    ``IS NOT TRUE`` → violation ; ``COUNT(*) = 0`` → pass). Un ``scope`` éventuel
+    restreint le périmètre de l'agrégat (``FROM __result__ WHERE (scope)``).
     """
     cond = expected_condition.strip().rstrip(";").strip()
     sc = (scope or "").strip().rstrip(";").strip()
@@ -76,6 +86,11 @@ def _assertion_sql_from_condition(
         return (
             "SELECT 1 AS _no_match WHERE NOT EXISTS "
             f"(SELECT 1 FROM __result__ WHERE {inner})"
+        )
+    if quantifier == "aggregate":
+        src = f"__result__ WHERE ({sc})" if sc else "__result__"
+        return (
+            f"SELECT 1 AS _agg_violation WHERE (SELECT ({cond}) FROM {src}) IS NOT TRUE"
         )
     if sc:
         return f"SELECT * FROM __result__ WHERE ({sc}) AND (({cond}) IS NOT TRUE)"
@@ -147,11 +162,48 @@ def _is_always_true(expr: exp.Expression) -> bool:
         pass
     if isinstance(node, _ALWAYS_TRUE_SAME_OPERAND) and node.this == node.expression:
         return True
+    if _is_count_tautology(node):
+        return True
     if isinstance(node, exp.And):
         return _is_always_true(node.this) and _is_always_true(node.expression)
     if isinstance(node, exp.Or):
         return _is_always_true(node.this) or _is_always_true(node.expression)
     return False
+
+
+def _is_count_tautology(node: exp.Expression) -> bool:
+    """Vrai si ``node`` compare un ``COUNT(...)`` à un littéral entier d'une façon VRAIE
+    PAR DÉFINITION (un COUNT est toujours ≥ 0) : ``COUNT(*) >= 0``, ``COUNT(*) > -1`` et
+    leurs formes miroir (``0 <= COUNT(*)``). La tautologie d'agrégat du mode ``aggregate``
+    — `simplify` ne fold pas ces formes (il ne connaît pas la borne du COUNT).
+
+    ``COUNT(*) >= 1`` (non-vacuité légitime, faible mais pas vide de sens) et
+    ``COUNT(*) = N`` (pin de cardinalité) ne sont PAS couverts.
+    """
+
+    def _as_int(e: exp.Expression) -> Optional[int]:
+        if isinstance(e, exp.Neg) and isinstance(e.this, exp.Literal) and e.this.is_int:
+            return -int(e.this.this)
+        if isinstance(e, exp.Literal) and e.is_int:
+            return int(e.this)
+        return None
+
+    if not isinstance(node, (exp.GTE, exp.GT, exp.LTE, exp.LT)):
+        return False
+    if isinstance(node, (exp.GTE, exp.GT)):
+        count_side, lit_side = node.this, node.expression
+        strict = isinstance(node, exp.GT)
+    else:
+        # `n <= COUNT(...)` ≡ `COUNT(...) >= n` (resp. `<` ≡ `>`) : on normalise
+        # count-à-gauche pour partager le même critère de borne.
+        count_side, lit_side = node.expression, node.this
+        strict = isinstance(node, exp.LT)
+    if not isinstance(count_side.unnest(), exp.Count):
+        return False
+    n = _as_int(lit_side.unnest())
+    if n is None:
+        return False
+    return n < 0 if strict else n <= 0
 
 
 def _is_trivial_tautology(expr: exp.Expression) -> bool:
@@ -161,6 +213,8 @@ def _is_trivial_tautology(expr: exp.Expression) -> bool:
     - constante booléenne après ``simplify`` (``1 = 1``, ``TRUE``, ``1 < 2``…) ;
     - comparaison de tête à opérandes structurellement identiques (``x = x``, ``x >= x``,
       ``lower(c) = lower(c)``) ;
+    - borne d'agrégat vraie par définition (``COUNT(*) >= 0``, ``COUNT(*) > -1`` et
+      formes miroir) — cf. ``_is_count_tautology`` ;
     - composé ``AND`` / ``OR`` toujours-vrai par propagation (``x = x AND y = y``,
       ``x = x OR y > 5``) — délégué à ``_is_always_true``.
 
@@ -176,6 +230,8 @@ def _is_trivial_tautology(expr: exp.Expression) -> bool:
         pass
     node = expr.unnest()
     if isinstance(node, _SAME_OPERAND_COMPARISONS) and node.this == node.expression:
+        return True
+    if _is_count_tautology(node):
         return True
     if isinstance(node, (exp.And, exp.Or)):
         return _is_always_true(node)
@@ -319,12 +375,18 @@ def _autoscope_failing_assertions(
     le fixer LLM (``_fix_logically_failing_assertions``) pour rattraper mécaniquement le cas
     le plus fréquent (le fixer garde alors les cas qui exigent du contexte métier).
 
-    N'agit que sur les assertions ``passed=False`` sans erreur SQL et sans ``scope`` déjà
-    posé. Conservateur : si aucune partition valide n'existe, l'assertion reste intacte
-    (en échec). Idempotent."""
+    N'agit que sur les assertions ``passed=False`` sans erreur SQL, sans ``scope`` déjà
+    posé et en mode ``all`` uniquement (le rebuild hard-wire le mode ``all`` : relever un
+    ``exists``/``aggregate`` perdrait le quantifier). Conservateur : si aucune partition
+    valide n'existe, l'assertion reste intacte (en échec). Idempotent."""
     out = list(assertion_results)
     for i, a in enumerate(out):
-        if a.get("passed") or a.get("error") or (a.get("scope") or "").strip():
+        if (
+            a.get("passed")
+            or a.get("error")
+            or (a.get("scope") or "").strip()
+            or (a.get("quantifier") or "all") != "all"
+        ):
             continue
         cond = (a.get("expected_condition") or "").strip()
         if not cond:
@@ -419,10 +481,13 @@ class _Assertion(BaseModel):
             "Laisse `null` si la condition vaut pour TOUTES les lignes. "
             "Un `scope` qui ne sélectionne aucune ligne fait ÉCHOUER l'assertion "
             "(elle ne testerait rien) — choisis un sélecteur qui matche au moins une ligne. "
+            'Avec `quantifier: "aggregate"`, l\'agrégat est calculé sur les seules lignes '
+            "du scope (ex. `scope: \"pays = 'FR'\"` + `expected_condition: "
+            '"SUM(ca) = 120"`). '
             "Mêmes colonnes que `__result__` ; pas de `SELECT`/`WHERE`/`FROM` de tête."
         ),
     )
-    quantifier: Literal["all", "exists"] = Field(
+    quantifier: Literal["all", "exists", "aggregate"] = Field(
         default="all",
         description=(
             "Quantificateur de l'assertion sur les lignes de `__result__` :\n"
@@ -438,7 +503,17 @@ class _Assertion(BaseModel):
             "valeur, et n'est exigée que sur une ligne. "
             "⚠️ `exists` est plus FAIBLE que `all` (il ne vérifie pas les autres lignes) : "
             "ne l'utilise que pour une affirmation de présence, pas pour un invariant qui "
-            "doit tenir partout."
+            "doit tenir partout.\n"
+            '- `"aggregate"` : `expected_condition` porte sur des AGRÉGATS de '
+            "l'ENSEMBLE de `__result__` (ex. `SUM(revenue) = 40`, "
+            "`ROUND(AVG(score), 2) = 1.35`, `COUNT(*) = 2` avec un `scope`) — une "
+            "propriété GLOBALE du résultat, pas un invariant ligne à ligne. À utiliser "
+            "pour figer un total, une moyenne, ou le nombre de lignes d'un SOUS-ensemble "
+            "(via `scope`). La règle des FLOATS s'applique aussi aux agrégats flottants "
+            "(`ROUND`/`ABS`, jamais `=` strict). Toujours POSITIF ; jamais de borne "
+            "vraie par définition (`COUNT(*) >= 0`). N'émets PAS de simple "
+            "`COUNT(*) = N` sur tout le résultat : ce pin de cardinalité est ajouté "
+            "automatiquement par MockSQL."
         ),
     )
 
@@ -550,6 +625,53 @@ def _assertion_to_executable(a: _Assertion) -> Dict[str, Any]:
         **({"quantifier": quantifier} if quantifier != "all" else {}),
         "sql": _assertion_sql_from_condition(a.expected_condition, scope, quantifier),
     }
+
+
+def _cardinality_pin(row_count: int) -> Dict[str, Any]:
+    """Pin de cardinalité DÉTERMINISTE (hors LLM) : assertion aggregate `COUNT(*) = N`,
+    N = row_count exact du résultat. Passe par construction à la génération ; sa valeur
+    est au replay CI, où toute dérive de cardinalité (ligne fuyante ou manquante) la fait
+    échouer — les assertions scopées/`exists`, elles, ignorent mécaniquement les lignes
+    en trop (faux positif de la critique démo « NULL qui fuit »)."""
+    cond = f"COUNT(*) = {row_count}"
+    return {
+        "description": f"Le résultat contient exactement {row_count} ligne(s).",
+        "expected_condition": cond,
+        "quantifier": "aggregate",
+        "sql": _assertion_sql_from_condition(cond, None, "aggregate"),
+    }
+
+
+def _is_bare_rowcount_pin(executable: Dict[str, Any]) -> bool:
+    """Vrai si l'assertion exécutable est un pin de row-count PUR sur tout le résultat
+    (`COUNT(*) = <entier>`, sans scope) — doublon du pin mécanique, à dropper. Le prompt
+    interdit au LLM d'en émettre ; ce filtre rattrape les récidives. Le mode `all` compte
+    aussi : `COUNT(*)` en WHERE est une erreur DuckDB → assertion morte de toute façon.
+    Les `COUNT(*)` scopés, non-star (`COUNT(DISTINCT …)`) ou combinés à d'autres agrégats
+    sont conservés (ils portent plus que la cardinalité globale)."""
+    if (executable.get("scope") or "").strip():
+        return False
+    if (executable.get("quantifier") or "all") not in ("aggregate", "all"):
+        return False
+    cond = (executable.get("expected_condition") or "").strip()
+    if not cond:
+        return False
+    try:
+        parsed = sqlglot.parse_one(cond, dialect="duckdb").unnest()
+    except Exception:
+        return re.fullmatch(r"(?i)count\s*\(\s*\*\s*\)\s*=\s*\d+", cond) is not None
+    if not isinstance(parsed, exp.EQ):
+        return False
+    left, right = parsed.this.unnest(), parsed.expression.unnest()
+    if isinstance(right, exp.Count):
+        left, right = right, left
+    return (
+        isinstance(left, exp.Count)
+        and isinstance(left.this, exp.Star)
+        and not left.args.get("distinct")
+        and isinstance(right, exp.Literal)
+        and right.is_int
+    )
 
 
 def _load_existing_tests(session_id: str) -> List[Dict[str, Any]]:
@@ -2011,6 +2133,20 @@ Raison : les assertions `all` retournent 0 ligne violante sur un résultat VIDE 
 toutes à tort si une régression SQL vidait la sortie. L'ancre `exists`, elle, ÉCHOUE sur un vide — c'est
 le seul garde-fou contre une suite entièrement vacante.
 
+**Assertion de CLÔTURE pour les scénarios d'EXCLUSION/FILTRAGE :** si `<test_context>` vérifie qu'une
+catégorie de lignes est EXCLUE du résultat (« exclut les NULL », « ne retient que… », « filtre… »,
+« n'apparaît pas »), émets une assertion qui ÉCHOUERAIT si une ligne exclue FUYAIT dans le résultat :
+- soit le domaine positif NON scopé en `all` : `payment_type IN ('Credit Card', 'Cash')` — une ligne
+  fuyante (y compris NULL, grâce à la négation `IS NOT TRUE`) la fait échouer ;
+- soit un agrégat sensible à la fuite (`quantifier: "aggregate"`) : `SUM`/`COUNT(*)` scopé sur les
+  seuls labels légitimes.
+Sans clôture, des assertions toutes scopées ou `exists` ignorent MÉCANIQUEMENT les lignes en trop —
+le test resterait vert sur la régression qu'il prétend couvrir (faux positif).
+
+**Pin de cardinalité automatique :** MockSQL ajoute lui-même une assertion `COUNT(*) = N` sur tout le
+résultat. N'émets JAMAIS d'assertion réduite à ce seul `COUNT(*) = N` global (doublon inutile) ; les
+`COUNT(*)` scopés ou combinés à d'autres agrégats restent permis.
+
 **Floats — JAMAIS d'égalité stricte :** pour une colonne flottante (z-score, moyenne, STDDEV,
 ratio, pourcentage), `col = 1.234` est non-déterministe (ordre d'agrégation, précision) → assertion
 fragile. Pince via `ROUND(col, 2) = 1.23` ou `ABS(col - 1.23) < 0.01`. L'égalité exacte n'est sûre
@@ -2034,7 +2170,9 @@ En bref :
 - `expected_condition` : booléen POSITIF ; uniquement les colonnes de `<result_schema>` (casse
   exacte) ; pas de `SELECT`/`WHERE`/`FROM` de tête.
 - `quantifier` : `"all"` (défaut) = vrai pour CHAQUE ligne ; `"exists"` = vrai pour AU MOINS UNE
-  ligne. ⚠️ FORMAT LONG (une ligne par métrique : colonne label + colonne valeur) : pour figer la
+  ligne ; `"aggregate"` = condition sur les AGRÉGATS de l'ensemble du résultat
+  (`SUM(revenue) = 40`, `ROUND(AVG(score), 2) = 1.35`, `COUNT(*)` d'un sous-ensemble via `scope`).
+  ⚠️ FORMAT LONG (une ligne par métrique : colonne label + colonne valeur) : pour figer la
   valeur d'UNE métrique, utilise SOIT `quantifier: "exists"` avec
   `expected_condition: "indicateur = 'nb_cartes' AND valeur = 2974"`, SOIT `scope:
   "indicateur = 'nb_cartes'"` + `expected_condition: "valeur = 2974"` (plus fort). N'écris JAMAIS
@@ -2541,11 +2679,18 @@ au choix :
   Plus FORT que `exists` (vérifie TOUTES les lignes nb_cartes). Un `scope` qui ne sélectionne
   aucune ligne fait ÉCHOUER l'assertion — choisis un sélecteur qui matche au moins une ligne.
 
+**Réparer une propriété GLOBALE du résultat :** si l'assertion visait un agrégat de l'ensemble
+(somme totale, moyenne, nombre de lignes d'un sous-ensemble) → `"quantifier": "aggregate"` : la
+condition porte sur des AGRÉGATS de `__result__` (ex. `SUM(montant) = 40`,
+`{"scope": "pays = 'FR'", "expected_condition": "COUNT(*) = 2"}`), toujours POSITIVE. Jamais de
+borne vraie par définition (`COUNT(*) >= 0`) — c'est une assertion creuse, rejetée.
+
 **Règle de la `description` (si tu régénères une assertion) :** phrase EN FRANÇAIS, courte
 (max 12 mots), en langage métier — jamais en anglais, sans noms de colonnes/CTEs ni mots-clés SQL.
 
 Réponds UNIQUEMENT avec un objet JSON (aucun texte autour), une décision par assertion
-(`scope` et `quantifier` optionnels — omets-les si l'affirmation vaut pour toutes les lignes) :
+(`scope` et `quantifier` ∈ {`all`, `exists`, `aggregate`} optionnels — omets-les si
+l'affirmation vaut pour toutes les lignes) :
 {"decisions": [{"id": 0, "correct": true}, {"id": 1, "correct": false, "description": "...", "expected_condition": "...", "quantifier": "exists"}]}"""
 
     # ── Bloc <failing_assertions> : une entrée par assertion échouée, indexée par `id` local. ──
@@ -2646,7 +2791,7 @@ et réponds selon le format du message système (un objet `decisions` listant un
             new_quantifier = (
                 dec.get("quantifier") or results[target].get("quantifier") or "all"
             ).strip() or "all"
-            if new_quantifier not in ("all", "exists"):
+            if new_quantifier not in ("all", "exists", "aggregate"):
                 new_quantifier = "all"
             new_assertion = {
                 "description": dec.get("description", results[target]["description"]),

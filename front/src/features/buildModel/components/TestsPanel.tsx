@@ -372,11 +372,15 @@ interface AssertionItem {
   error?: string;
 }
 
-/* Sélecteur de quantificateur : « chaque ligne » (all) vs « au moins une ligne » (exists). */
-function QuantifierToggle({ value, onChange }: { value: 'all' | 'exists'; onChange: (v: 'all' | 'exists') => void }) {
-  const opts: { key: 'all' | 'exists'; label: string }[] = [
+type Quantifier = 'all' | 'exists' | 'aggregate';
+
+/* Sélecteur de quantificateur : « chaque ligne » (all), « au moins une ligne » (exists),
+   « ensemble du résultat » (aggregate : condition sur les agrégats, ex. SUM/COUNT). */
+function QuantifierToggle({ value, onChange }: { value: Quantifier; onChange: (v: Quantifier) => void }) {
+  const opts: { key: Quantifier; label: string }[] = [
     { key: 'all', label: 'Chaque ligne' },
     { key: 'exists', label: 'Au moins une ligne' },
+    { key: 'aggregate', label: 'Ensemble du résultat' },
   ];
   return (
     <Box sx={{ display: 'flex', gap: 0.5, mb: 1 }} onClick={(e) => e.stopPropagation()}>
@@ -420,17 +424,19 @@ function AssertionRow({ a, expanded, onToggle, onDelete, onEdit, editable, disab
   const [editing, setEditing] = useState(false);
   const [draftDesc, setDraftDesc] = useState(a.description ?? '');
   const [draftCond, setDraftCond] = useState(a.expected_condition ?? '');
-  // Le scope (mode "all" scopé) n'est pas éditable inline ; on bascule entre "all" et
-  // "exists". Une assertion scopée éditée reste "all" et conserve son scope via le merge.
-  const [draftQuantifier, setDraftQuantifier] = useState<'all' | 'exists'>(
-    a.quantifier === 'exists' ? 'exists' : 'all'
+  // Le scope (mode "all" scopé) n'est pas éditable inline ; on bascule entre "all",
+  // "exists" et "aggregate". Une assertion scopée éditée conserve son scope via le merge.
+  const normalizeQuantifier = (q?: string): Quantifier =>
+    q === 'exists' || q === 'aggregate' ? q : 'all';
+  const [draftQuantifier, setDraftQuantifier] = useState<Quantifier>(
+    normalizeQuantifier(a.quantifier)
   );
 
   function startEdit(e: React.MouseEvent) {
     e.stopPropagation();
     setDraftDesc(a.description ?? '');
     setDraftCond(a.expected_condition ?? '');
-    setDraftQuantifier(a.quantifier === 'exists' ? 'exists' : 'all');
+    setDraftQuantifier(normalizeQuantifier(a.quantifier));
     setEditing(true);
   }
   function saveEdit() {
@@ -480,14 +486,22 @@ function AssertionRow({ a, expanded, onToggle, onDelete, onEdit, editable, disab
                 sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 12.5 } }}
               />
               <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
-                {draftQuantifier === 'exists' ? 'Condition attendue (vraie pour au moins une ligne)' : 'Condition attendue (vraie pour chaque ligne)'}
+                {draftQuantifier === 'exists'
+                  ? 'Condition attendue (vraie pour au moins une ligne)'
+                  : draftQuantifier === 'aggregate'
+                    ? "Condition attendue (sur l'ensemble du résultat)"
+                    : 'Condition attendue (vraie pour chaque ligne)'}
               </Typography>
               <TextField
                 value={draftCond}
                 onChange={(e) => setDraftCond(e.target.value)}
                 onClick={(e) => e.stopPropagation()}
                 onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); saveEdit(); } }}
-                placeholder={draftQuantifier === 'exists' ? "ex : indicateur = 'nb_cartes' AND valeur = 2974" : 'ex : amount > 0'}
+                placeholder={draftQuantifier === 'exists'
+                  ? "ex : indicateur = 'nb_cartes' AND valeur = 2974"
+                  : draftQuantifier === 'aggregate'
+                    ? 'ex : SUM(revenue) = 40'
+                    : 'ex : amount > 0'}
                 fullWidth size="small" multiline minRows={1}
                 sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace" } }}
               />
@@ -508,9 +522,13 @@ function AssertionRow({ a, expanded, onToggle, onDelete, onEdit, editable, disab
               <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
                 {a.quantifier === 'exists'
                   ? 'Condition attendue (vraie pour au moins une ligne)'
-                  : a.scope
-                    ? 'Condition attendue (vraie sur les lignes ciblées)'
-                    : 'Condition attendue (vraie pour chaque ligne)'}
+                  : a.quantifier === 'aggregate'
+                    ? a.scope
+                      ? "Condition attendue (agrégat des lignes ciblées)"
+                      : "Condition attendue (sur l'ensemble du résultat)"
+                    : a.scope
+                      ? 'Condition attendue (vraie sur les lignes ciblées)'
+                      : 'Condition attendue (vraie pour chaque ligne)'}
               </Typography>
               {a.scope && (
                 <Box sx={{ mb: 0.6 }}>
@@ -580,7 +598,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
   const [adding, setAdding] = useState(false);
   const [newDesc, setNewDesc] = useState('');
   const [newCond, setNewCond] = useState('');
-  const [newQuantifier, setNewQuantifier] = useState<'all' | 'exists'>('all');
+  const [newQuantifier, setNewQuantifier] = useState<Quantifier>('all');
 
   useEffect(() => {
     setLocalAssertions(assertionResults);
@@ -635,7 +653,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
       {
         description: newDesc.trim(),
         expected_condition: cond,
-        ...(newQuantifier === 'exists' ? { quantifier: 'exists' } : {}),
+        ...(newQuantifier !== 'all' ? { quantifier: newQuantifier } : {}),
         passed: true,
       },
     ]);
@@ -757,12 +775,20 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
                   sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 12.5 } }}
                 />
                 <Typography sx={{ fontSize: 10.5, fontWeight: 600, color: MUTED, textTransform: 'uppercase', letterSpacing: '0.04em', mb: 0.4 }}>
-                  {newQuantifier === 'exists' ? 'Condition attendue (vraie pour au moins une ligne)' : 'Condition attendue (vraie pour chaque ligne)'}
+                  {newQuantifier === 'exists'
+                    ? 'Condition attendue (vraie pour au moins une ligne)'
+                    : newQuantifier === 'aggregate'
+                      ? "Condition attendue (sur l'ensemble du résultat)"
+                      : 'Condition attendue (vraie pour chaque ligne)'}
                 </Typography>
                 <TextField
                   value={newCond} onChange={(e) => setNewCond(e.target.value)}
                   onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); addAssertion(); } }}
-                  placeholder={newQuantifier === 'exists' ? "ex : indicateur = 'nb_cartes' AND valeur = 2974" : 'ex : amount > 0'}
+                  placeholder={newQuantifier === 'exists'
+                    ? "ex : indicateur = 'nb_cartes' AND valeur = 2974"
+                    : newQuantifier === 'aggregate'
+                      ? 'ex : SUM(revenue) = 40'
+                      : 'ex : amount > 0'}
                   fullWidth size="small" multiline minRows={1}
                   sx={{ mb: 1, '& .MuiInputBase-input': { fontSize: 11.5, fontFamily: "'JetBrains Mono', monospace" } }}
                 />

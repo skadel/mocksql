@@ -179,6 +179,10 @@ async def apply_assertions(body: ApplyAssertionsRequest):
             cond = a.get("expected_condition", "")
             scope = (a.get("scope") or "").strip()
             quantifier = (a.get("quantifier") or "all").strip() or "all"
+            # Normalisation : une valeur inconnue serait stockée telle quelle mais
+            # bâtirait silencieusement la forme `all` → incohérence dict/sql.
+            if quantifier not in ("all", "exists", "aggregate"):
+                quantifier = "all"
             execs.append(
                 {
                     "description": a.get("description", ""),

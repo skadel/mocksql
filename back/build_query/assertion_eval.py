@@ -182,7 +182,10 @@ def _evaluate_assertions(
     # (la plus courante) shipperait alors au vert. On échoue ces assertions — SAUF si le
     # scénario attend explicitement un vide (sentinelle `SELECT * FROM __result__`), auquel
     # cas toute la suite est exemptée. Les assertions SCOPÉES sont déjà couvertes par la
-    # garde de scope (périmètre vide → échec) ; les `exists` échouent déjà (aucun match).
+    # garde de scope (périmètre vide → échec) ; les `exists` échouent déjà (aucun match) ;
+    # les `aggregate` sont naturellement NON-vacuées sur vide (sous-requête scalaire :
+    # SUM → NULL → IS NOT TRUE → violation, COUNT(*) = 0 → pass légitime) — on les laisse
+    # s'exécuter pour un signal honnête plutôt qu'un force-fail.
     result_empty = False
     if assertions and not any(
         _is_empty_intent_sentinel(a.get("sql") or "") for a in assertions
@@ -218,7 +221,7 @@ def _evaluate_assertions(
         scope = _quote_reserved_identifiers(scope)
         scope = _cast_nontext_string_slicing(scope, non_text_cols)
         quantifier = (a.get("quantifier") or "all").strip() or "all"
-        if result_empty and not scope and quantifier != "exists":
+        if result_empty and not scope and quantifier not in ("exists", "aggregate"):
             results.append(
                 {
                     "description": a.get("description", ""),
@@ -238,6 +241,9 @@ def _evaluate_assertions(
             # « passe » à tort). On l'échoue explicitement plutôt que de la laisser verte.
             # Inapplicable au mode `exists` : un scope (fondu dans l'EXISTS) qui ne couvre
             # aucune ligne fait DÉJÀ échouer l'assertion (rien à matcher) — pas de vacuité.
+            # Applicable au mode `aggregate` : un agrégat sur un scope à 0 ligne est une
+            # assertion d'absence déguisée (`COUNT(*) = 0` sur un label inexistant) —
+            # interdite par la philosophie positive-only, comme en mode `all`.
             if scope and quantifier != "exists":
                 scope_sql = scope.replace("__result__", view_name)
                 covered = con.execute(
@@ -260,12 +266,12 @@ def _evaluate_assertions(
                     continue
             fail_df = con.execute(sql).fetchdf()
             passed = len(fail_df) == 0
-            # Mode `exists` : l'échec = « aucune ligne ne satisfait la condition ». La
-            # requête renvoie une ligne sentinelle (`_no_match`) sans valeur métier — on
-            # n'expose pas de contre-exemple (l'absence n'est pas une ligne du résultat).
+            # Modes `exists` / `aggregate` : l'échec renvoie une ligne sentinelle
+            # (`_no_match` / `_agg_violation`) sans valeur métier — on n'expose pas de
+            # contre-exemple (l'absence ou un agrégat faux n'est pas une ligne du résultat).
             failing_rows = (
                 []
-                if (passed or quantifier == "exists")
+                if (passed or quantifier in ("exists", "aggregate"))
                 else fail_df.to_dict(orient="records")
             )
             results.append(
