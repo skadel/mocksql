@@ -669,7 +669,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
       {hasInput && (
         <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
           <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
-            {hasAssertions ? '1 · ' : ''}Données d'entrée
+            Données d'entrée
           </Typography>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
             {Object.entries(inputData).map(([key, val]) => (
@@ -691,7 +691,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
         <Box sx={{ px: 2, pb: 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              {hasAssertions ? '2 · ' : ''}Résultat de la requête
+              Résultat de la requête
             </Typography>
             <Typography sx={{ fontSize: 11, color: MUTED, ml: 'auto' }}>
               {outputData.length} ligne{outputData.length > 1 ? 's' : ''}
@@ -715,7 +715,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
         <Box sx={{ px: 2, pb: 1.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              3 · Assertions sur ce résultat
+              Assertions sur ce résultat
             </Typography>
             {applying && <CircularProgress size={12} thickness={5} sx={{ color: TEAL, ml: 0.25 }} />}
             {onEditAssertions && (
