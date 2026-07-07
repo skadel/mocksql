@@ -903,10 +903,15 @@ def _resolve_user_premise(
     """
     if existing_tc is not None:
         return existing_tc.get("user_premise")
+    # Suggestion machine (boucle batch ou clic sur le panneau, suggestion_intent) :
+    # le texte est écrit par MockSQL, pas AFFIRMÉ par l'utilisateur → pas de prémisse.
+    # Sans ce garde, le premise_guard de la boucle bad_data refuse de patcher les
+    # données « énoncées » et délègue via ask_clarification — sans destinataire en batch.
     if (
         existing_tests
         and state.get("input", "").strip()
         and state.get("evaluation_feedback") != "bad_data"
+        and not state.get("suggestion_intent")
     ):
         return state["input"].strip()
     return None

@@ -464,6 +464,15 @@ def route_agent_output(state: QueryState):
     if tool_call == "request_reevaluation":
         return "test_evaluator"
     if tool_call == "ask_clarification":
+        # Boucle multi-tests (suggestion machine, cf. generate_single_suggestion) : la
+        # question n'a pas de destinataire — la laisser passer tuerait le lot (N-1 tests
+        # + question orpheline). Backstop de l'interception côté agent : on retombe sur
+        # le generator, l'input porte déjà le texte de la suggestion.
+        if state.get("suggestion_intent") and state.get("auto_tests_built"):
+            logger.diag(
+                "[route_agent_output] ask_clarification en boucle batch → generator (backstop)"
+            )
+            return "generator"
         logger.diag("[route_agent_output] → history_saver (ask_clarification)")
         return "history_saver"
     # Auto-correction loop (bad_data) : si l'agent n'a émis aucun outil actionnable,
@@ -568,8 +577,8 @@ def route_evaluator(state: QueryState):
     # 1ʳᵉ génération : boucle multi-tests puis suggestions de couverture.
     # L'utilisateur a demandé N tests au total (tests_target) ; le nominal compte pour 1,
     # on auto-construit N-1 tests supplémentaires depuis des suggestions uniques. Tant qu'il
-    # reste des tests à construire → generate_single_suggestion (qui enchaîne sur le
-    # conversational_agent). Sinon, dernière étape : suggestions_generator (panneau, pas de
+    # reste des tests à construire → generate_single_suggestion (qui enchaîne directement
+    # sur le generator). Sinon, dernière étape : suggestions_generator (panneau, pas de
     # boucle). Ce point n'est atteint qu'une fois le test courant RÉGLÉ (les branches
     # bad_data / needs_validation / etc. ci-dessus sont prioritaires).
     # Boucle active à la 1ʳᵉ génération (pas de tests préexistants) OU lors de la reprise d'un
@@ -753,10 +762,14 @@ def build_query_graph():
     builder.add_edge("focus_fallback", "generator")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_conditional_edges("suggestions_generator", route_after_suggestions)
-    # Boucle multi-tests : la suggestion unique enchaîne sur le conversational_agent, qui
-    # construit le test (generate_test_data → generator → executor → test_evaluator), puis
-    # route_evaluator décide de reboucler ou de clore via suggestions_generator.
-    builder.add_edge("generate_single_suggestion", "conversational_agent")
+    # Boucle multi-tests : la suggestion unique enchaîne DIRECTEMENT sur le generator
+    # (executor → test_evaluator ensuite), puis route_evaluator décide de reboucler ou de
+    # clore via suggestions_generator. Historique : passait par le conversational_agent
+    # (chemin clic-suggestion) — retiré car la suggestion est machine : rien à clarifier
+    # (incident ask_clarification terminal → lot inachevé), dédup déjà faite dans le
+    # prompt du suggesteur, focus déjà posé dans le state (target_path). L'agent reste
+    # dans la boucle de CORRECTION bad_data d'un test du lot (bad_data_to_agent).
+    builder.add_edge("generate_single_suggestion", "generator")
     builder.add_edge("final_response", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

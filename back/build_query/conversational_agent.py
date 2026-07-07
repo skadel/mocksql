@@ -778,22 +778,46 @@ async def conversational_agent(state: QueryState):
     # Clic sur une suggestion de couverture : l'utilisateur veut un test concret, pas une
     # réponse conversationnelle. On laisse à l'agent la latitude de dédupliquer (étendre un test
     # proche au lieu d'en créer un quasi-identique), mais on lui interdit la non-action.
+    # Boucle multi-tests (batch) : la « suggestion » est générée par MockSQL lui-même
+    # (generate_single_suggestion) — il n'y a PAS d'utilisateur derrière. Depuis le
+    # rebranch (generate_single_suggestion → generator direct), l'agent ne voit cet état
+    # que dans la boucle de CORRECTION bad_data d'un test du lot. Discriminant fiable :
+    # auto_tests_built n'est posé que par le backend, jamais par un clic front.
     suggestion_note = ""
+    is_batch_auto = bool(state.get("suggestion_intent")) and bool(
+        state.get("auto_tests_built")
+    )
     if state.get("suggestion_intent"):
-        suggestion_note = (
-            "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
-            "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
-            "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
-            "- S'il recoupe largement un test existant → DIS-LE à l'utilisateur (quel test "
-            "ressemble) et étends/ajuste ce test (`add_test_row` ou `update_test_data`) plutôt "
-            "que de créer un doublon. Si seule la DESCRIPTION du test existant gagnerait à être "
-            "ajustée, n'écris JAMAIS la nouvelle description toi-même : appelle "
-            "`update_test_description` qui ne fait que la PROPOSER à l'utilisateur (il valide).\n"
-            "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
-            "`ask_clarification`.\n"
-            "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
-            "renforce le test existant via `add_test_row`."
-        )
+        if is_batch_auto:
+            suggestion_note = (
+                "\n\n⚠️ SUGGESTION AUTOMATIQUE (boucle multi-tests) : cette consigne a été "
+                "générée par MockSQL lui-même pour construire le prochain test du lot — il "
+                "n'y a PAS d'utilisateur derrière ce message, donc n'appelle JAMAIS "
+                "`ask_clarification` (personne ne répondra, le lot resterait inachevé). "
+                "Tu DOIS produire une action de test :\n"
+                "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
+                "- S'il recoupe largement un test existant → étends ce test "
+                "(`add_test_row` ou `update_test_data`) plutôt que de créer un doublon.\n"
+                "- Si la suggestion décrit un comportement que le SQL EXCLUT (ex. une ligne "
+                "filtrée qui n'apparaît pas dans le résultat), c'est PRÉCISÉMENT le cas à "
+                "tester : crée le test qui AFFIRME ce comportement observable "
+                "(ex. résultat vide, ligne absente de la sortie)."
+            )
+        else:
+            suggestion_note = (
+                "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
+                "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
+                "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
+                "- S'il recoupe largement un test existant → DIS-LE à l'utilisateur (quel test "
+                "ressemble) et étends/ajuste ce test (`add_test_row` ou `update_test_data`) plutôt "
+                "que de créer un doublon. Si seule la DESCRIPTION du test existant gagnerait à être "
+                "ajustée, n'écris JAMAIS la nouvelle description toi-même : appelle "
+                "`update_test_description` qui ne fait que la PROPOSER à l'utilisateur (il valide).\n"
+                "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
+                "`ask_clarification`.\n"
+                "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
+                "renforce le test existant via `add_test_row`."
+            )
         # Focus déterministe : si la suggestion cliquée a été marquée par le suggesteur comme
         # focalisée sur une branche (suggestion_paths persisté), on impose le nom machine exact
         # à l'agent → set_target_path sans deviner. Évite tout remap fuzzy texte → branche.
@@ -1365,6 +1389,8 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     noop_retries = 0
     _MALFORMED_RETRY_MAX = 2
     malformed_retries = 0
+    _CLARIF_RETRY_MAX = 2
+    clarif_retries = 0
 
     logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
     if eval_context:
@@ -1428,6 +1454,41 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         clarif_tc = next(
             (tc for tc in tool_calls if tc["name"] == "ask_clarification"), None
         )
+        # Boucle multi-tests : la « suggestion » vient de MockSQL, pas d'un utilisateur —
+        # une question resterait sans réponse et tuerait le lot (incident : N-1 tests +
+        # question orpheline dans le chat). On ignore la clarification : l'action co-émise
+        # dans la même réponse est conservée s'il y en a une, sinon on renvoie l'agent
+        # agir (retry capé) ; à l'épuisement, break sans outil → route_agent_output
+        # retombe sur le generator (l'input porte le texte de la suggestion).
+        if clarif_tc and is_batch_auto:
+            other_calls = [tc for tc in tool_calls if tc["name"] != "ask_clarification"]
+            logger.diag(
+                "[conv_agent] ask_clarification ignoré (boucle batch) — %s",
+                f"{len(other_calls)} outil(s) co-émis conservé(s)"
+                if other_calls
+                else f"retry {clarif_retries + 1}/{_CLARIF_RETRY_MAX}",
+            )
+            if other_calls:
+                tool_calls = other_calls
+                clarif_tc = None
+            elif clarif_retries < _CLARIF_RETRY_MAX:
+                clarif_retries += 1
+                messages_for_llm = messages_for_llm + [
+                    result,
+                    HumanMessage(
+                        content=(
+                            "Il n'y a pas d'utilisateur à qui poser cette question : cette "
+                            "suggestion a été générée automatiquement par MockSQL (boucle "
+                            "multi-tests). Si le SQL exclut le cas décrit, c'est le "
+                            "comportement à tester : appelle `generate_test_data` avec un "
+                            "scénario qui AFFIRME ce comportement observable (ex. la ligne "
+                            "est absente du résultat)."
+                        )
+                    ),
+                ]
+                continue
+            else:
+                break
         if clarif_tc:
             agent_tool_call = "ask_clarification"
             agent_tool_args = dict(clarif_tc["args"])

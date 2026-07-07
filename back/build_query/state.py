@@ -116,7 +116,8 @@ class QueryState(TypedDict):
     agent_tool_args: Optional[Dict]  # args of the tool call
     agent_message_id: Optional[
         str
-    ]  # ID of the GENERATE_TEST_SCENARIO msg emitted by conversational_agent
+    ]  # ID of the GENERATE_TEST_SCENARIO msg (conversational_agent, or
+    # generate_single_suggestion in the batch loop); generator chains under it
     model_context: Optional[
         str
     ]  # concatenated mocksql.md files (global → file-specific)

@@ -175,6 +175,20 @@ def test_no_premise_during_bad_data_retry():
     assert _resolve_user_premise(state, existing, existing_tc=None) is None
 
 
+def test_no_premise_on_machine_suggestion():
+    """Suggestion machine (boucle batch ou clic sur le panneau, `suggestion_intent`) :
+    le texte est écrit par MockSQL, pas affirmé par l'utilisateur → jamais de prémisse.
+    Sans ce garde, le premise_guard de la boucle bad_data refuse de patcher les données
+    et pousse vers ask_clarification — sans destinataire en batch."""
+    state = {
+        "input": "Un client PRO→PART n'apparaît pas dans le résultat final.",
+        "evaluation_feedback": None,
+        "suggestion_intent": True,
+    }
+    existing = [{"test_index": "1", "test_uid": "a3f9"}]
+    assert _resolve_user_premise(state, existing, existing_tc=None) is None
+
+
 def test_premise_preserved_on_regeneration():
     """Régénération/retry d'un test existant : l'authorship déjà tracée est reportée,
     jamais perdue."""
