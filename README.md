@@ -1,3 +1,5 @@
+
+
 # MockSQL
 
 [![Backend CI](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml)
@@ -7,8 +9,7 @@
 
 **A native unit-testing layer for data engineers.** MockSQL takes a `.sql` file, automatically generates test data via LLM, runs it locally on DuckDB (zero cost on BigQuery), assigns an argued verdict to each test, and suggests the edge cases you haven't covered.
 
-<!-- DEMO VIDEO: éditer ce README sur github.com et glisser-déposer docs/assets/demo.mp4
-     juste sous ce commentaire — GitHub héberge la vidéo et affiche un player inline. -->
+https://github.com/user-attachments/assets/ce95cacb-c245-432a-8e4b-6ffc76507980
 
 <p align="center"><em>Full flow: pick a <code>.sql</code> model → MockSQL generates the input data, runs the query locally on DuckDB, and returns an argued verdict per test — plus suggestions for the edge cases you haven't covered.</em></p>
 
