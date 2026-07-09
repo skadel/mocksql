@@ -61,12 +61,18 @@ import {
 import { TEAL, TEAL_ALT, INK, BODY, MUTED, PLACEHOLDER, BORDER, SURFACE, TEAL_SUBTLE, AMBER, AMBER_BG, GREEN, GREEN_BG } from '../../../theme/tokens';
 
 /* ─── tag colours ─────────────────────────────────────────────────── */
+// Les tags sont des DONNÉES portées par les tests, générés dans la langue de
+// sortie configurée (fr ou en) — on couvre les deux vocabulaires.
 const TAG_COLORS: Record<string, { bg: string; fg: string }> = {
   'Logique métier':     { bg: '#e6f7f6', fg: TEAL },
+  'Business logic':     { bg: '#e6f7f6', fg: TEAL },
   'Null checks':        { bg: '#fdecea', fg: '#d32f2f' },
   'Cas limites':        { bg: '#fff3e0', fg: '#e65100' },
+  'Edge cases':         { bg: '#fff3e0', fg: '#e65100' },
   'Intégration':        { bg: '#eef1f7', fg: '#50609d' },
+  'Integration':        { bg: '#eef1f7', fg: '#50609d' },
   'Valeurs dupliquées': { bg: '#f3e8e6', fg: '#6d4c41' },
+  'Duplicate values':   { bg: '#f3e8e6', fg: '#6d4c41' },
   'Performance':        { bg: '#e0f2f1', fg: '#00695c' },
 };
 function tagStyle(tag: string) {
@@ -300,6 +306,7 @@ function CompactRow({ test, idx, commentCount, isLoading, onExpand, onAsk, onDel
   test: any; idx: number; commentCount: number; isLoading: boolean;
   onExpand: () => void; onAsk: () => void; onDelete: () => void;
 }) {
+  const { t } = useTranslation();
   const { verdict, label, fg, bg, border } = getVerdictInfo(test);
   // Verdict LLM pas encore rendu : ne pas afficher le badge optimiste basé sur l'exécution.
   const awaitingEval = isAwaitingEvaluation(test, isLoading);
@@ -322,7 +329,7 @@ function CompactRow({ test, idx, commentCount, isLoading, onExpand, onAsk, onDel
         : <StatusDot status={test.status} test={test} />}
       {awaitingEval ? (
         <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11, justifySelf: 'start' }}>
-          Évaluation…
+          {t('panel.evaluating')}
         </Box>
       ) : (
         <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: bg, color: fg, px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700, justifySelf: 'start' }}>
@@ -588,6 +595,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
   onEditAssertions?: () => void;
   onApplyAssertions?: (assertions: { description: string; expected_condition: string; scope?: string; quantifier?: string }[]) => Promise<void> | void;
 }) {
+  const { t } = useTranslation();
   const [expandedSet, setExpandedSet] = useState<Set<number>>(() => {
     const s = new Set<number>();
     assertionResults.forEach((a, i) => { if (!a.passed) s.add(i); });
@@ -674,11 +682,11 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
       {hasAssertions && (
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.25, px: 2, py: '8px', bgcolor: '#f0f3f4', borderBottom: '1px solid #eff3f4' }}>
           <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, letterSpacing: 0.6, textTransform: 'uppercase' }}>
-            Scénario du test
+            {t('panel.scenario')}
           </Typography>
           <Typography sx={{ fontSize: 11.5, color: failCount > 0 ? '#d0503f' : '#23a26d', fontWeight: 600 }}>
-            {passCount}/{localAssertions.length} assertion{localAssertions.length > 1 ? 's' : ''} passe{passCount !== 1 ? 'nt' : ''}
-            {failCount > 0 && <Box component="span" sx={{ ml: 1 }}>· {failCount} échoue{failCount > 1 ? 'nt' : ''}</Box>}
+            {t('panel.assertions_passing', { passed: passCount, count: localAssertions.length })}
+            {failCount > 0 && <Box component="span" sx={{ ml: 1 }}>· {failCount} ✗</Box>}
           </Typography>
         </Box>
       )}
@@ -687,7 +695,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
       {hasInput && (
         <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
           <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
-            Données d'entrée
+            {t('panel.input_data')}
           </Typography>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
             {Object.entries(inputData).map(([key, val]) => (
@@ -709,14 +717,14 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
         <Box sx={{ px: 2, pb: 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 0.75 }}>
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              Résultat de la requête
+              {t('panel.query_result')}
             </Typography>
             <Typography sx={{ fontSize: 11, color: MUTED, ml: 'auto' }}>
-              {outputData.length} ligne{outputData.length > 1 ? 's' : ''}
+              {t('panel.rows', { count: outputData.length })}
             </Typography>
           </Box>
           <Box sx={{ overflowX: 'auto' }}>
-            <DisplayTable jsonData={outputData} tableName="Résultat" />
+            <DisplayTable jsonData={outputData} tableName={t('panel.result')} />
           </Box>
         </Box>
       )}
@@ -733,7 +741,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
         <Box sx={{ px: 2, pb: 1.5 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, mb: 0.75 }}>
             <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              Assertions sur ce résultat
+              {t('panel.assertions_on_result')}
             </Typography>
             {applying && <CircularProgress size={12} thickness={5} sx={{ color: TEAL, ml: 0.25 }} />}
             {onEditAssertions && (
@@ -796,18 +804,18 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
                 <Box sx={{ display: 'flex', gap: 1 }}>
                   <Box component="button" onClick={addAssertion} disabled={applying || !newCond.trim()}
                     sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', px: '10px', py: '4px', fontSize: 11, fontWeight: 600, border: 'none', borderRadius: '7px', bgcolor: newCond.trim() ? '#2BB0A8' : '#c8d2d4', color: '#fff', cursor: newCond.trim() ? 'pointer' : 'not-allowed', fontFamily: 'inherit' }}>
-                    Ajouter
+                    {t('panel.add')}
                   </Box>
                   <Box component="button" onClick={() => { setAdding(false); setNewDesc(''); setNewCond(''); }}
                     sx={{ px: '10px', py: '4px', fontSize: 11, fontWeight: 500, border: `1px solid ${BORDER}`, borderRadius: '7px', bgcolor: '#fff', color: BODY, cursor: 'pointer', fontFamily: 'inherit' }}>
-                    Annuler
+                    {t('cancel')}
                   </Box>
                 </Box>
               </Box>
             ) : (
               <Box component="button" onClick={() => setAdding(true)} disabled={applying}
                 sx={{ mt: 1, display: 'inline-flex', alignItems: 'center', gap: '5px', px: '10px', py: '5px', fontSize: 11.5, fontWeight: 600, border: `1px dashed ${BORDER}`, borderRadius: '8px', bgcolor: '#fff', color: TEAL, cursor: 'pointer', fontFamily: 'inherit', '&:hover': { borderColor: TEAL, bgcolor: '#f0fafa' } }}>
-                <AddIcon sx={{ fontSize: 13 }} /> Ajouter une assertion
+                <AddIcon sx={{ fontSize: 13 }} /> {t('panel.add_assertion')}
               </Box>
             )
           )}
@@ -819,6 +827,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
 
 /* ─── SuggestionRow ──────────────────────────────────────────────── */
 function SuggestionRow({ text, tag, rationale, onAdd, onFill, onDismiss }: { text: string; tag?: string; rationale?: string; onAdd?: () => void; onFill?: () => void; onDismiss?: () => void }) {
+  const { t } = useTranslation();
   const tc = tag ? tagStyle(tag) : { bg: SURFACE, fg: MUTED };
   const isProd = /^\[PROD\]\s*/i.test(text);
   const displayText = isProd ? text.replace(/^\[PROD\]\s*/i, '') : text;
@@ -869,7 +878,7 @@ function SuggestionRow({ text, tag, rationale, onAdd, onFill, onDismiss }: { tex
           '&:hover': { bgcolor: '#1f948d' },
         }}
       >
-        <AddIcon sx={{ fontSize: 12 }} /> Ajouter
+        <AddIcon sx={{ fontSize: 12 }} /> {t('panel.add')}
       </Box>
       {onDismiss && (
         <Tooltip title="Non pertinent — ne plus suggérer">
@@ -905,6 +914,7 @@ function SuggestionsSection({ suggestions, rationales, onAdd, onDismiss, onRegen
   highlighted?: boolean;
   boxRef?: React.RefObject<HTMLDivElement>;
 }) {
+  const { t } = useTranslation();
   const isEmpty = suggestions.length === 0;
   return (
     <Box
@@ -922,7 +932,7 @@ function SuggestionsSection({ suggestions, rationales, onAdd, onDismiss, onRegen
       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1 }}>
         <AutoAwesomeIcon sx={{ fontSize: 15, color: TEAL }} />
         <Typography sx={{ fontSize: 12.5, fontWeight: 600, color: INK }}>
-          Cas suggérés
+          {t('panel.suggested_cases')}
         </Typography>
         <Box sx={{ ml: 'auto' }}>
           <Tooltip title="Régénérer des suggestions">
@@ -944,7 +954,7 @@ function SuggestionsSection({ suggestions, rationales, onAdd, onDismiss, onRegen
                 {regenerating
                   ? <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} />
                   : <ReplayIcon sx={{ fontSize: 13 }} />}
-                Régénérer
+                {t('panel.regenerate')}
               </Box>
             </span>
           </Tooltip>
@@ -953,10 +963,10 @@ function SuggestionsSection({ suggestions, rationales, onAdd, onDismiss, onRegen
       {isEmpty ? (
         <Box sx={{ textAlign: 'center', py: '14px', px: '8px' }}>
           <Typography sx={{ fontSize: 12, color: BODY, lineHeight: 1.5 }}>
-            Plus aucune suggestion valide pour l'instant.
+            {t('panel.no_more_suggestions')}
           </Typography>
           <Typography sx={{ fontSize: 11.5, color: PLACEHOLDER, mt: 0.5 }}>
-            Voulez-vous régénérer d'autres suggestions ?
+            {t('panel.regenerate_prompt')}
           </Typography>
         </Box>
       ) : (
@@ -1010,6 +1020,7 @@ export interface SqlStripProps {
 }
 
 function SqlStrip({ sql, disabled, hasError, optimizedSql, sqlHistory, onHistorySelect, historyRestoreTrigger, collapseSignal, sqlFileName, hasTests }: SqlStripProps) {
+  const { t } = useTranslation();
   // Démarre fermé dès qu'il y a des tests : on ne déroule le SQL que sur action explicite.
   const [open, setOpen] = useState(() => !hasTests);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
@@ -1091,7 +1102,7 @@ function SqlStrip({ sql, disabled, hasError, optimizedSql, sqlHistory, onHistory
           )}
           {open && <Box sx={{ flex: 1 }} />}
           {hasHistory && (
-            <Tooltip title={`Historique (${sqlHistory!.length})`}>
+            <Tooltip title={t('panel.history', { count: sqlHistory!.length })}>
               <TealIconButton
                 size="small"
                 onClick={(e) => { e.stopPropagation(); setHistoryAnchor(e.currentTarget); }}
@@ -1136,7 +1147,7 @@ function SqlStrip({ sql, disabled, hasError, optimizedSql, sqlHistory, onHistory
                     '&:hover': { backgroundColor: isOptimizedView ? '#159e9a' : '#e8f7f6' },
                   }}
                 >
-                  Optimisé
+                  {t('panel.optimized')}
                 </Button>
               </Box>
             )}
@@ -1294,6 +1305,7 @@ function TestCard({
   onAddComment, onDeleteComment,
   onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onUpload,
 }: TestCardProps) {
+  const { t } = useTranslation();
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   // Verdict LLM pas encore rendu : ne pas afficher le badge optimiste basé sur l'exécution.
   const awaitingEval = isAwaitingEvaluation(test, isLoading);
@@ -1345,12 +1357,12 @@ function TestCard({
           {test.status === 'pending' && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11.5 }}>
               <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} />
-              {Object.keys(inputData).length > 0 ? 'Exécution DuckDB…' : 'Génération…'}
+              {Object.keys(inputData).length > 0 ? t('panel.exec_running') : t('panel.generating')}
             </Box>
           )}
           {awaitingEval && (
             <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '5px', color: MUTED, fontSize: 11.5 }}>
-              <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} /> Évaluation…
+              <CircularProgress size={11} thickness={5} sx={{ color: TEAL }} /> {t('panel.evaluating')}
             </Box>
           )}
           {tags.map((tg) => {
@@ -1399,7 +1411,7 @@ function TestCard({
         {test.status && test.status !== 'pending' && verdict !== 'validation' && awaitingEval && (
           <Box sx={{ mt: 1, p: '9px 12px', bgcolor: '#f5f7f8', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '6px' }}>
             <CircularProgress size={10} thickness={5} sx={{ color: TEAL }} />
-            <Typography sx={{ fontSize: 12, color: MUTED }}>Évaluation en cours…</Typography>
+            <Typography sx={{ fontSize: 12, color: MUTED }}>{t('panel.evaluation_running')}</Typography>
           </Box>
         )}
         {test.status && test.status !== 'pending' && verdict !== 'validation' && !awaitingEval && (
@@ -1594,7 +1606,7 @@ function TestCard({
             }}
           >
             <CommentIcon sx={{ fontSize: 12 }} />
-            Commentaires
+            {t('panel.comments')}
             {comments.length > 0 && (
               <Box sx={{ bgcolor: INK, color: '#fff', fontSize: 10, fontWeight: 700, px: '5px', borderRadius: 999, ml: 0.25 }}>
                 {comments.length}
@@ -1628,7 +1640,7 @@ function TestCard({
               <>
                 <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
                   <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
-                    Données d'entrée
+                    {t('panel.input_data')}
                   </Typography>
                   <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1, overflowX: 'auto' }}>
                     {Object.entries(inputData).map(([key, val]) => (
@@ -1737,8 +1749,8 @@ function StaleBanner({ info, tests, sqlFileName }: { info: StaleInfo; tests: any
   const [fetching, setFetching] = useState(false);
 
   const changesLabel = info.commitsSince > 0
-    ? `${info.commitsSince} changement${info.commitsSince > 1 ? 's' : ''} depuis le dernier test`
-    : 'le fichier source a été modifié';
+    ? t('panel.changes_since', { count: info.commitsSince })
+    : t('panel.source_file_changed');
 
   async function handleOpenDiff() {
     setModalOpen(true);
@@ -1855,11 +1867,11 @@ function StaleBanner({ info, tests, sqlFileName }: { info: StaleInfo; tests: any
             {fetching && (
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 1.5, p: 3, color: MUTED }}>
                 <CircularProgress size={16} thickness={4} sx={{ color: TEAL }} />
-                <Typography sx={{ fontSize: 13 }}>Chargement du fichier…</Typography>
+                <Typography sx={{ fontSize: 13 }}>{t('panel.loading_file')}</Typography>
               </Box>
             )}
             {!fetching && newSql === null && !info.onFetchNewSql && (
-              <Typography sx={{ p: 3, fontSize: 13, color: MUTED }}>Aperçu de la diff non disponible.</Typography>
+              <Typography sx={{ p: 3, fontSize: 13, color: MUTED }}>{t('panel.diff_unavailable')}</Typography>
             )}
             {!fetching && chunks.length > 0 && (
               <Box component="table" sx={{ width: '100%', borderCollapse: 'collapse', fontFamily: "'JetBrains Mono', 'Fira Code', monospace", fontSize: 12 }}>
@@ -1992,6 +2004,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
   retryBadDataTestIndex,
   sqlProps, staleInfo,
 }) => {
+  const { t } = useTranslation();
   const dispatch = useAppDispatch();
   const currentModelId = useAppSelector((state) => state.appBarModel.currentModelId);
   const testResults: any[] = useAppSelector((state) => state.buildModel.testResults ?? []);
@@ -2166,18 +2179,18 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
         <Box sx={{ flexShrink: 0, px: 2, py: 1.25, borderBottom: '1px solid #eee', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 1 }}>
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
             <Typography variant="body2" sx={{ fontWeight: 700, color: TEAL }}>
-              🧪 {testResults.length} test{testResults.length > 1 ? 's' : ''}
+              🧪 {t('model.tests_count', { count: testResults.length })}
             </Typography>
             {execSummary.fail > 0 && (
               <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: '#fbeceb', color: '#d0503f', px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700 }}>
                 <CancelIcon sx={{ fontSize: 11 }} />
-                {execSummary.fail} en échec
+                {t('panel.failing', { count: execSummary.fail })}
               </Box>
             )}
             {execSummary.fail === 0 && execSummary.pending === 0 && (
               <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: '4px', bgcolor: '#e9f7f0', color: '#23a26d', px: '8px', py: '2px', borderRadius: 999, fontSize: 11, fontWeight: 700 }}>
                 <CheckCircleIcon sx={{ fontSize: 11 }} />
-                Tous passent
+                {t('panel.all_pass')}
               </Box>
             )}
           </Box>
@@ -2196,7 +2209,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                 }}
               >
                 <AutoAwesomeIcon sx={{ fontSize: 13 }} />
-                Demander à MockSQL
+                {t('panel.ask')}
               </Box>
             )}
           </Box>
@@ -2228,7 +2241,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
       {testResults.length === 0 && !isLoading && !sqlProps?.loading && (
         <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 2, p: 2 }}>
           <Typography variant="body2" sx={{ color: '#999', textAlign: 'center' }}>
-            Aucun test généré pour l'instant.
+            {t('panel.no_tests')}
           </Typography>
         </Box>
       )}
@@ -2239,10 +2252,10 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
           {/* Filter chips */}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, mb: 1.25, flexWrap: 'wrap' }}>
             <FilterListIcon sx={{ fontSize: 14, color: PLACEHOLDER }} />
-            <FilterChip label="Tous"        count={counts.all}  active={filter === 'all'}  color={MUTED}      onClick={() => setFilter('all')} />
-            <FilterChip label="Bon"         count={counts.good} active={filter === 'good'} color="#23a26d"    onClick={() => setFilter('good')} />
-            <FilterChip label="Insuffisant" count={counts.warn} active={filter === 'warn'} color="#d89323"    onClick={() => setFilter('warn')} />
-            <FilterChip label="Incorrect"   count={counts.bad}  active={filter === 'bad'}  color="#d0503f"    onClick={() => setFilter('bad')} />
+            <FilterChip label={t('panel.filter_all')} count={counts.all}  active={filter === 'all'}  color={MUTED}   onClick={() => setFilter('all')} />
+            <FilterChip label={t('verdict.good')}     count={counts.good} active={filter === 'good'} color="#23a26d" onClick={() => setFilter('good')} />
+            <FilterChip label={t('verdict.warn')}     count={counts.warn} active={filter === 'warn'} color="#d89323" onClick={() => setFilter('warn')} />
+            <FilterChip label={t('verdict.bad')}      count={counts.bad}  active={filter === 'bad'}  color="#d0503f" onClick={() => setFilter('bad')} />
           </Box>
 
           {/* Test list */}

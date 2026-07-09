@@ -8,8 +8,10 @@ import ScienceIcon from '@mui/icons-material/Science';
 import CloseIcon from '@mui/icons-material/Close';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import RefreshIcon from '@mui/icons-material/Refresh';
+import { useTranslation } from 'react-i18next';
 import { WarningContainedButton } from '../../../style/AppButtons';
 import { updateProjectAutoImport } from '../../../api/preferences';
+import { dialectDisplayName } from '../../../utils/dialect';
 
 interface MissingTablesAlertProps {
   missingTables: string[];
@@ -30,7 +32,8 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
   importError,
   onDismiss,
 }) => {
-  const dialectLabel = dialect.charAt(0).toUpperCase() + dialect.slice(1);
+  const { t } = useTranslation();
+  const dialectLabel = dialectDisplayName(dialect);
   const failed = !!importError && !importing;
   const projectKey = `autoImport_project_${projectId}`;
 
@@ -70,14 +73,14 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
           </Box>
           <Box sx={{ flex: 1 }}>
             <Typography sx={{ fontSize: 15, fontWeight: 700, color: failed ? '#b91c1c' : '#8a5a00' }}>
-              {failed ? 'Échec de l\'import' : 'Tables introuvables dans l\'index local'}
+              {failed ? t('import.failed_title') : t('import.missing_title')}
             </Typography>
             <Typography sx={{ fontSize: 12.5, color: failed ? '#c53030' : '#8a6914', mt: 0.5, lineHeight: 1.55 }}>
               {failed ? importError : (
                 <>
-                  MockSQL transpile ta requête {dialectLabel} et l'exécute en local via{' '}
+                  {t('import.intro_before', { dialect: dialectLabel })}{' '}
                   <Box component="strong" sx={{ color: '#8a5a00' }}>DuckDB</Box>{' '}
-                  — aucune requête facturée sur {dialectLabel}. C'est uniquement le schéma qui est importé.
+                  {t('import.intro_after', { dialect: dialectLabel })}
                 </>
               )}
             </Typography>
@@ -142,7 +145,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                 fontSize: 11, fontWeight: 600, flexShrink: 0, minWidth: 60, textAlign: 'right',
                 color: importing ? '#8a5a00' : failed ? '#b91c1c' : '#b89a4a',
               }}>
-                {importing ? 'Import…' : failed ? 'Erreur' : 'En attente'}
+                {importing ? t('import.status_importing') : failed ? t('import.status_error') : t('import.status_pending')}
               </Typography>
             </Box>
           ))}
@@ -160,7 +163,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                   sx={{ py: 0.25, color: '#b89a4a', '&.Mui-checked': { color: '#1ca8a4' } }}
                 />
               }
-              label={<Typography sx={{ fontSize: 12.5, color: '#8a5a00' }}>Toujours importer pour ce projet</Typography>}
+              label={<Typography sx={{ fontSize: 12.5, color: '#8a5a00' }}>{t('import.always_import')}</Typography>}
               sx={{ m: 0 }}
             />
           </Box>
@@ -177,7 +180,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                   '&:hover': { bgcolor: '#f7e3a0' },
                 }}
               >
-                Annuler
+                {t('cancel')}
               </Box>
             )}
             {onImport && (
@@ -199,10 +202,10 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
                 } : {}}
               >
                 {importing
-                  ? `Import en cours… (${missingTables.length} table${missingTables.length > 1 ? 's' : ''})`
+                  ? t('import.importing', { count: missingTables.length })
                   : failed
-                    ? 'Réessayer'
-                    : `Importer les tables (${missingTables.length})`
+                    ? t('import.retry')
+                    : t('import.import_button', { count: missingTables.length })
                 }
               </WarningContainedButton>
             )}
@@ -211,7 +214,7 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
 
         {importing && !failed && (
           <Typography sx={{ mt: 1, fontSize: 11.5, color: '#8a6914' }}>
-            Import en cours — les tests se lanceront automatiquement à la fin.
+            {t('import.importing_note')}
           </Typography>
         )}
       </Box>
@@ -219,9 +222,9 @@ const MissingTablesAlert: React.FC<MissingTablesAlertProps> = ({
       {/* Info cards row */}
       <Box sx={{ mt: 1.5, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 1.25 }}>
         {[
-          { icon: <StorageIcon sx={{ fontSize: 16 }} />, title: 'Exécution locale', desc: 'DuckDB exécute la requête sur ton poste. Aucune donnée réelle ne quitte ton infra.' },
-          { icon: <SecurityIcon sx={{ fontSize: 16 }} />, title: '0 € facturé', desc: `Aucune requête n'atteint ${dialectLabel} — itère librement sans coup de facture.` },
-          { icon: <ScienceIcon sx={{ fontSize: 16 }} />, title: 'Données synthétiques', desc: 'Seul le schéma est importé. Les valeurs utilisées pour les tests sont générées — zéro fuite de données prod.' },
+          { icon: <StorageIcon sx={{ fontSize: 16 }} />, title: t('import.card_local_title'), desc: t('import.card_local_desc') },
+          { icon: <SecurityIcon sx={{ fontSize: 16 }} />, title: t('import.card_zero_title'), desc: t('import.card_zero_desc', { dialect: dialectLabel }) },
+          { icon: <ScienceIcon sx={{ fontSize: 16 }} />, title: t('import.card_synth_title'), desc: t('import.card_synth_desc') },
         ].map(({ icon, title, desc }) => (
           <Box key={title} sx={{ bgcolor: '#f4f7f7', border: '1px solid #e4eaec', borderRadius: '12px', p: '12px 14px' }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, color: '#1ca8a4', mb: 0.75 }}>

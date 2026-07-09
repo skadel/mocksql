@@ -106,30 +106,31 @@ describe('verdictText', () => {
     expect(verdictText('error', { evaluation })).toBe(evaluation);
   });
 
+  // Textes de repli localisés — langue par défaut du produit : anglais.
   it('returns complete message for complete status', () => {
     const text = verdictText('complete');
-    expect(text).toContain('résultats');
-    expect(text).toContain('valide');
+    expect(text).toContain('results');
+    expect(text).toContain('valid');
   });
 
   it('returns error message for error status', () => {
     const text = verdictText('error');
-    expect(text).toContain('échoué');
+    expect(text).toContain('failed');
   });
 
   it('returns "expected empty" message when test expects empty', () => {
     const text = verdictText('empty_results', { unit_test_description: '0 ligne attendue' });
-    expect(text).toContain('aucune ligne');
-    expect(text).toContain('valide');
+    expect(text).toContain('no rows');
+    expect(text).toContain('valid');
   });
 
   it('returns warning message for unexpected empty_results', () => {
     const text = verdictText('empty_results', { unit_test_description: 'cas nominal' });
-    expect(text).toContain("Vérifiez");
+    expect(text).toContain('Check');
   });
 
   it('returns pending message for undefined status', () => {
-    expect(verdictText(undefined)).toContain("cours");
+    expect(verdictText(undefined)).toContain('Running');
   });
 });
 

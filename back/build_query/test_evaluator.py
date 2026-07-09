@@ -11,11 +11,40 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
+from storage.config import get_language, output_language_directive
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE
 from utils.saver import get_message_type
 from utils.test_utils import EMPTY_RESULT_SENTINEL_SQL, find_current_test
 
 logger = logging.getLogger(__name__)
+
+
+def _empty_intent_assertion_description() -> str:
+    """Libellé de l'assertion sentinelle « résultat vide intentionnel », localisé."""
+    return (
+        "La requête doit retourner 0 ligne (table vide intentionnelle)"
+        if get_language() == "fr"
+        else "The query must return 0 rows (intentional empty table)"
+    )
+
+
+def _structural_empty_reason(failing_cte: str) -> str:
+    """Message *utilisateur* expliquant un résultat vide inattendu, localisé.
+
+    ``failing_cte`` est un identifiant SQL interne, jamais traduit.
+    """
+    fr = get_language() == "fr"
+    if failing_cte:
+        return (
+            f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
+            if fr
+            else f"CTE `{failing_cte}` is empty — the data does not satisfy its constraints."
+        )
+    return (
+        "Les données d'entrée ne produisent aucun résultat."
+        if fr
+        else "The input data does not produce any result."
+    )
 
 
 def _format_input_for_judge(input_data) -> str:
@@ -158,7 +187,9 @@ Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
         result = await llm.ainvoke(
             [
                 SystemMessage(
-                    content=MOCKSQL_PRODUCT_PREAMBLE
+                    content=output_language_directive()
+                    + "\n\n"
+                    + MOCKSQL_PRODUCT_PREAMBLE
                     + "\n\nTu réévalues ici la qualité d'un test (verdict argumenté) pour l'utilisateur."
                 ),
                 HumanMessage(content=prompt),
@@ -169,7 +200,11 @@ Justification de l'agent de diagnostic (pourquoi 0 lignes serait correct) :
     except Exception as exc:
         logger.warning("[evaluator] _reevaluate_empty_result failed: %s", exc)
         verdict = "Insuffisant"
-        explanation = "Réévaluation impossible — erreur LLM."
+        explanation = (
+            "Réévaluation impossible — erreur LLM."
+            if get_language() == "fr"
+            else "Re-evaluation failed — LLM error."
+        )
 
     logger.diag(
         "[evaluator] réévaluation après request_reevaluation : verdict=%s — %s",
@@ -265,7 +300,9 @@ que le scénario produise des lignes."""
         result = await llm.ainvoke(
             [
                 SystemMessage(
-                    content=MOCKSQL_PRODUCT_PREAMBLE
+                    content=output_language_directive()
+                    + "\n\n"
+                    + MOCKSQL_PRODUCT_PREAMBLE
                     + "\n\nTu évalues ici si l'absence de résultat est le comportement voulu du test."
                 ),
                 HumanMessage(content=prompt),
@@ -418,17 +455,13 @@ async def evaluate_tests(state: QueryState):
             from build_query.examples_generator import _format_cte_trace_hint
 
             diag = _format_cte_trace_hint(failing_cte, cte_trace)
-            structural_reason = (
-                f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
-                if failing_cte
-                else "Les données d'entrée ne produisent aucun résultat."
-            )
+            structural_reason = _structural_empty_reason(failing_cte)
         elif failing_cte:
             diag = f"La requête retourne 0 ligne — la CTE `{failing_cte}` est vide. Les données d'entrée ne satisfont pas les contraintes de jointure ou de filtre."
-            structural_reason = f"La CTE `{failing_cte}` est vide — les données ne satisfont pas ses contraintes."
+            structural_reason = _structural_empty_reason(failing_cte)
         else:
             diag = "La requête retourne 0 ligne. Les données d'entrée ne produisent aucun résultat."
-            structural_reason = "Les données d'entrée ne produisent aucun résultat."
+            structural_reason = _structural_empty_reason("")
 
         # Garde d'intention LLM — une seule fois, à la 1ʳᵉ occurrence du vide
         # (`empty_results_regen` falsy). Sur les retries de régénération on reste sur
@@ -446,7 +479,7 @@ async def evaluate_tests(state: QueryState):
                     verdict,
                 )
                 empty_assertion = {
-                    "description": "La requête doit retourner 0 ligne (table vide intentionnelle)",
+                    "description": _empty_intent_assertion_description(),
                     "sql": EMPTY_RESULT_SENTINEL_SQL,
                     "passed": True,
                 }

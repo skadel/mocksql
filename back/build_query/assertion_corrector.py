@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
+from storage.config import get_language, output_language_directive, output_language_name
 from utils.examples import DB_PATH, initialize_duckdb
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -22,9 +23,15 @@ logger = logging.getLogger(__name__)
 class _Assertion(BaseModel):
     description: str = Field(
         description=(
-            "Phrase EN FRANÇAIS, courte (max 12 mots), en langage métier lisible par un "
-            "responsable non-développeur. Jamais en anglais. Sans noms de colonnes/CTEs ni "
-            "mots-clés SQL. ✓ 'Le montant total reste positif.' ✗ 'amount > 0 sur __result__'."
+            f"Phrase en {output_language_name()}, courte (max 12 mots), en langage métier lisible par un "
+            "responsable non-développeur. Sans noms de colonnes/CTEs ni "
+            "mots-clés SQL. "
+            + (
+                "✓ 'Le montant total reste positif.' "
+                if get_language() == "fr"
+                else "✓ 'The total amount stays positive.' "
+            )
+            + "✗ 'amount > 0 sur __result__'."
         )
     )
     expected_condition: str
@@ -127,7 +134,10 @@ async def _generate_improved_assertions(
 
     history_block = _format_correction_history(correction_attempts or [])
 
-    prompt = f"""Tu es un expert en tests SQL dbt-style avec DuckDB.
+    prompt = (
+        output_language_directive()
+        + "\n\n"
+        + f"""Tu es un expert en tests SQL dbt-style avec DuckDB.
 
 Le test suivant a été évalué "Insuffisant" car les assertions générées ne vérifient pas réellement la logique métier.
 Problème identifié : {evaluation_explanation}
@@ -197,7 +207,8 @@ Règles strictes :
 Puis évalue la qualité de ces nouvelles assertions :
 - `verdict` : "Excellent", "Bon", ou "Insuffisant"
 - `reason_type` : uniquement si Insuffisant → "bad_data" ou "bad_assertions"
-- `explanation` : une phrase ultra-concise (max 20 mots) en français"""
+- `explanation` : une phrase ultra-concise (max 20 mots) dans la langue de sortie indiquée en tête de prompt"""
+    )
 
     llm = make_llm()
     structured_llm = llm.with_structured_output(_ImprovedAssertions)

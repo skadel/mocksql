@@ -14,6 +14,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.state import QueryState
+from storage.config import get_language, output_language_directive
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
 from utils.saver import get_message_type
@@ -30,6 +31,25 @@ def _coerce_text(content) -> str:
             if isinstance(part, dict) and part.get("type") == "text"
         )
     return content if isinstance(content, str) else ""
+
+
+# Les mots d'action des « facts » et des fallbacks, par langue de sortie.
+# L'anglais place l'action APRÈS le nom sans accord (« 2 tests generated ») :
+# le suffixe pluriel ne s'applique qu'au français.
+_ACTION_WORDS = {
+    "fr": {
+        "update": "modifié",
+        "add": "ajouté",
+        "rerun": "réévalué",
+        "generate": "généré",
+    },
+    "en": {
+        "update": "updated",
+        "add": "added",
+        "rerun": "re-evaluated",
+        "generate": "generated",
+    },
+}
 
 
 def _collect_run_context(state: QueryState) -> dict:
@@ -53,17 +73,20 @@ def _collect_run_context(state: QueryState) -> dict:
         elif mtype == MsgType.EXAMPLES:
             n_tests += 1
 
+    # Mot d'action localisé : il part dans les « facts » donnés au LLM, qui recopie
+    # leur langue — un fact français ferait basculer toute la réponse en français.
+    words = _ACTION_WORDS[get_language()]
     agent_call = state.get("agent_tool_call")
     if agent_call == "update_test_data":
-        action = "modifié"
+        action = words["update"]
     elif agent_call == "generate_test_data":
-        action = "ajouté"
+        action = words["add"]
     elif state.get("rerun_all_tests"):
         # SQL mis à jour ou réévaluation déclenchée depuis la bannière « fichier modifié » :
         # les tests existaient déjà, on les re-exécute / réévalue — surtout pas « généré ».
-        action = "réévalué"
+        action = words["rerun"]
     else:
-        action = "généré"
+        action = words["generate"]
 
     status = state.get("status")
     feedback = state.get("evaluation_feedback")
@@ -84,6 +107,19 @@ def _fallback_message(ctx: dict) -> str:
     action = ctx["action"]
     n = ctx["n_tests"] or 1
     plural = "s" if n > 1 else ""
+    if get_language() == "en":
+        if action == "generated":
+            head = f"I generated {n} test{plural} for your query."
+        elif action == "re-evaluated":
+            head = f"I re-evaluated your test{plural}."
+        else:
+            head = f"I {action} your test."
+        tail = (
+            " Everything runs correctly."
+            if ctx["exec_ok"]
+            else " Take a look at the step details below."
+        )
+        return head + tail
     if action == "généré":
         head = f"J'ai généré {n} test{plural} pour ta requête."
     elif action == "réévalué":
@@ -129,9 +165,10 @@ async def final_response(state: QueryState):
     gap_analysis = (state.get("coverage_gap_analysis") or "").strip()
 
     system_lines = [
+        output_language_directive() + " ",
         "Tu es l'assistant MockSQL qui aide à tester des requêtes SQL. "
         "Tu viens de terminer une opération sur les tests d'un utilisateur. "
-        "Réponds-lui directement, en français, sur un ton sobre et factuel. "
+        "Réponds-lui directement, sur un ton sobre et factuel. "
         "Reprends EXACTEMENT l'action indiquée dans les faits ci-dessous "
         "(généré / ajouté / modifié / réévalué) — n'en invente pas une autre, "
         "et ne dis pas « généré » si l'action est une réévaluation. Annonce "
@@ -152,26 +189,48 @@ async def final_response(state: QueryState):
         system_lines.append(
             "Réponds en 1 à 2 phrases courtes. Ne liste pas de suggestions."
         )
+    # Bookend de langue : le corps de ce prompt est rédigé en français, avec des
+    # ancres d'action FR — « (généré / ajouté / modifié / réévalué) » — qui faisaient
+    # parfois dériver la clôture vers le français MÊME en config anglaise (la directive
+    # de tête perdait face aux ancres + aux faits). On répète la directive en DERNIER
+    # (recency) pour que l'ultime signal avant génération soit la langue de sortie.
+    system_lines.append(output_language_directive())
     system = SystemMessage(content=" ".join(system_lines))
     n_tests = ctx["n_tests"] or 1
     plural = "s" if n_tests > 1 else ""
-    facts = [
-        f"Action réalisée : {n_tests} test{plural} {ctx['action']}{plural}.",
-        f"Exécution DuckDB : {'OK' if ctx['exec_ok'] else 'à vérifier'}.",
-    ]
-    if ctx["scenario"]:
-        facts.append(f"Scénario visé : {ctx['scenario']}")
-    if ctx["verdict_line"]:
-        facts.append(f"Verdict d'évaluation : {ctx['verdict_line']}")
-    if gap_analysis:
-        facts.append(f"Analyse de couverture (manques identifiés) : {gap_analysis}")
+    # Facts localisés : le LLM recopie la langue des facts plus sûrement que celle
+    # de la directive — des facts français font basculer la réponse en français.
+    en = get_language() == "en"
+    if en:
+        facts = [
+            f"Action performed: {n_tests} test{plural} {ctx['action']}.",
+            f"DuckDB execution: {'OK' if ctx['exec_ok'] else 'needs review'}.",
+        ]
+        if ctx["scenario"]:
+            facts.append(f"Target scenario: {ctx['scenario']}")
+        if ctx["verdict_line"]:
+            facts.append(f"Evaluation verdict: {ctx['verdict_line']}")
+        if gap_analysis:
+            facts.append(f"Coverage analysis (identified gaps): {gap_analysis}")
+    else:
+        facts = [
+            f"Action réalisée : {n_tests} test{plural} {ctx['action']}{plural}.",
+            f"Exécution DuckDB : {'OK' if ctx['exec_ok'] else 'à vérifier'}.",
+        ]
+        if ctx["scenario"]:
+            facts.append(f"Scénario visé : {ctx['scenario']}")
+        if ctx["verdict_line"]:
+            facts.append(f"Verdict d'évaluation : {ctx['verdict_line']}")
+        if gap_analysis:
+            facts.append(f"Analyse de couverture (manques identifiés) : {gap_analysis}")
     human = HumanMessage(content="\n".join(facts))
 
-    panel_pointer = (
-        " J'ai aussi déposé des suggestions pour renforcer la couverture dans le panneau Suggestions."
-        if gap_analysis
-        else ""
-    )
+    if not gap_analysis:
+        panel_pointer = ""
+    elif en:
+        panel_pointer = " I also dropped test suggestions in the Suggestions panel to strengthen coverage."
+    else:
+        panel_pointer = " J'ai aussi déposé des suggestions pour renforcer la couverture dans le panneau Suggestions."
     try:
         llm = make_llm()
         result = await llm.ainvoke([system, human])

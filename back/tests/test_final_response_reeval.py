@@ -2,6 +2,10 @@
 l'opération est une **réévaluation** : SQL mis à jour ou bannière « fichier modifié »
 qui re-exécute les tests existants (``rerun_all_tests``). Les tests existaient déjà —
 dire « j'ai généré le test » est faux et trompeur.
+
+Les mots d'action sont localisés (défaut produit : anglais ; ``language: fr`` /
+env ``MOCKSQL_LANGUAGE`` pour le français) — les assertions portent sur le défaut
+anglais, plus un test dédié au chemin français.
 """
 
 import pytest
@@ -27,8 +31,15 @@ def _base_state(**extra):
     return state
 
 
-def test_rerun_all_action_is_reevalue_not_genere():
-    """rerun_all_tests sans agent_tool_call → action « réévalué », jamais « généré »."""
+def test_rerun_all_action_is_reevaluate_not_generate():
+    """rerun_all_tests sans agent_tool_call → action « re-evaluated », jamais « generated »."""
+    ctx = _collect_run_context(_base_state(rerun_all_tests=True))
+    assert ctx["action"] == "re-evaluated"
+
+
+def test_rerun_all_action_localized_french(monkeypatch):
+    """Avec la langue fr, le même chemin produit « réévalué »."""
+    monkeypatch.setenv("MOCKSQL_LANGUAGE", "fr")
     ctx = _collect_run_context(_base_state(rerun_all_tests=True))
     assert ctx["action"] == "réévalué"
 
@@ -38,18 +49,18 @@ def test_agent_call_still_wins_over_rerun():
     ctx = _collect_run_context(
         _base_state(rerun_all_tests=True, agent_tool_call="update_test_data")
     )
-    assert ctx["action"] == "modifié"
+    assert ctx["action"] == "updated"
 
 
-def test_fresh_generation_still_genere():
-    """Sans rerun_all_tests ni agent_tool_call → 1ʳᵉ génération → « généré »."""
+def test_fresh_generation_still_generate():
+    """Sans rerun_all_tests ni agent_tool_call → 1ʳᵉ génération → « generated »."""
     ctx = _collect_run_context(_base_state())
-    assert ctx["action"] == "généré"
+    assert ctx["action"] == "generated"
 
 
 @pytest.mark.asyncio
-async def test_facts_say_reevalue_to_llm(monkeypatch):
-    """Les faits transmis au LLM annoncent « réévalué », pas « généré »."""
+async def test_facts_say_reevaluate_to_llm(monkeypatch):
+    """Les faits transmis au LLM annoncent « re-evaluated », pas « generated »."""
     captured = {}
 
     class _CapturingLLM:
@@ -57,23 +68,23 @@ async def test_facts_say_reevalue_to_llm(monkeypatch):
             captured["human"] = messages[-1].content
 
             class _R:
-                content = "J'ai réévalué ton test, tout passe."
+                content = "I re-evaluated your test, everything passes."
 
             return _R()
 
     monkeypatch.setattr(final_response_node, "make_llm", lambda: _CapturingLLM())
     await final_response(_base_state(rerun_all_tests=True))
 
-    assert "réévalué" in captured["human"]
-    assert "généré" not in captured["human"]
+    assert "re-evaluated" in captured["human"]
+    assert "generated" not in captured["human"]
 
 
 @pytest.mark.asyncio
-async def test_fallback_message_uses_reevalue(monkeypatch):
-    """LLM indisponible → le fallback templaté dit « réévalué », pas « généré »."""
+async def test_fallback_message_uses_reevaluate(monkeypatch):
+    """LLM indisponible → le fallback templaté dit « re-evaluated », pas « generated »."""
     monkeypatch.setattr(final_response_node, "make_llm", lambda: _BoomLLM())
     out = await final_response(_base_state(rerun_all_tests=True))
 
     text = out["messages"][0].content
-    assert "réévalué" in text
-    assert "généré" not in text
+    assert "re-evaluated" in text
+    assert "generated" not in text

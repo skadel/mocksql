@@ -67,7 +67,7 @@ def _install(monkeypatch, *, suggestions, capture, persisted):
             def _run(prompt_value):
                 capture["messages"] = prompt_value.to_messages()
                 return SuggestionsOutput(
-                    analyse_des_manques="ok", suggestions=suggestions
+                    coverage_gap_analysis="ok", suggestions=suggestions
                 )
 
             return RunnableLambda(_run)

@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage
 
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.state import QueryState
+from storage.config import tag_labels
 from utils.llm_errors import is_vertex_permission_error, normalize_llm_content
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -153,10 +154,10 @@ Réponds avec un objet JSON strict contenant exactement ces champs :
   "test_name": "Nom court du scénario (3–6 mots)",
   "unit_test_description": "Vérifie que … (assertion courte et actionnable)",
   "unit_test_build_reasoning": "Explication de la modification appliquée",
-  "tags": ["Logique métier"],
+  "tags": ["{tag_labels()[0]}"],
   "suggestions": ["Vérifie que ...", "S'assure que ..."]
 }}
 ```
 
-Tags disponibles : Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance.
+Tags disponibles : {", ".join(tag_labels())}.
 JSON uniquement, sans texte ni explication autour."""

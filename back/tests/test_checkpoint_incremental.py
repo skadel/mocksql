@@ -96,7 +96,7 @@ async def test_loop_checkpoints_previous_test_before_next(model_on_disk, monkeyp
     monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _no_tests)
     fake = RunnableLambda(
         lambda _pv: suggestions_node.TestSuggestionsOutput(
-            analyse_des_manques="x",
+            coverage_gap_analysis="x",
             suggestions=[suggestions_node.TestSuggestion(text="Vérifie le cas NULL")],
         )
     )

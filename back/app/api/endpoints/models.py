@@ -26,6 +26,24 @@ router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
+# Config projet (mocksql.yml) exposée au front
+# ---------------------------------------------------------------------------
+
+
+@router.get("/config")
+async def get_config():
+    """Réglages projet nécessaires au front au démarrage.
+
+    `language` provient de `mocksql.yml` (défaut anglais) et sert de langue par
+    défaut de l'UI : le front l'applique tant que l'utilisateur n'a pas choisi
+    explicitement une autre langue via le sélecteur (persisté en localStorage).
+    """
+    from storage.config import get_language
+
+    return {"language": get_language()}
+
+
+# ---------------------------------------------------------------------------
 # SQL Models (fichiers physiques dans models_path)
 # ---------------------------------------------------------------------------
 

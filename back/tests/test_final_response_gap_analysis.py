@@ -102,6 +102,19 @@ async def test_fallback_appends_panel_pointer_on_llm_error(monkeypatch):
     out = await final_response(state)
 
     text = out["messages"][0].content
+    assert "Suggestions panel" in text
+
+
+@pytest.mark.asyncio
+async def test_fallback_appends_panel_pointer_on_llm_error_fr(monkeypatch):
+    """Même chose en langue de sortie française : pointeur localisé."""
+    monkeypatch.setenv("MOCKSQL_LANGUAGE", "fr")
+    monkeypatch.setattr(final_response_node, "make_llm", lambda: _BoomLLM())
+
+    state = _base_state(coverage_gap_analysis="Les valeurs NULL ne sont pas testées.")
+    out = await final_response(state)
+
+    text = out["messages"][0].content
     assert "panneau Suggestions" in text
 
 
@@ -114,4 +127,5 @@ async def test_fallback_no_pointer_without_gap_analysis(monkeypatch):
     out = await final_response(state)
 
     text = out["messages"][0].content
+    assert "Suggestions panel" not in text
     assert "panneau Suggestions" not in text

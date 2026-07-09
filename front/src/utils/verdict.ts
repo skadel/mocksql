@@ -1,3 +1,5 @@
+import i18n from '../i18n';
+
 export type Verdict = 'good' | 'warn' | 'bad' | 'pending' | 'validation';
 export type ExecStatus = 'pass' | 'fail' | 'pending';
 
@@ -8,27 +10,39 @@ export interface VerdictMeta {
   border: string;
 }
 
+// Couleurs par verdict ; le label affiché est localisé au moment du rendu
+// (getVerdictInfo) — `label` ici n'est qu'un repli si la clé i18n manque.
 export const VERDICT_META: Record<Verdict, VerdictMeta> = {
-  good:       { label: 'Bon',         fg: '#23a26d', bg: '#e9f7f0', border: '#23a26d' },
-  warn:       { label: 'Insuffisant', fg: '#d89323', bg: '#fcf3e1', border: '#d89323' },
-  bad:        { label: 'Incorrect',   fg: '#d0503f', bg: '#fbeceb', border: '#d0503f' },
-  pending:    { label: 'En attente',  fg: '#888',    bg: '#f4f7f7', border: '#ccc'    },
-  validation: { label: 'À valider',   fg: '#1565c0', bg: '#e8f0fd', border: '#1976d2' },
+  good:       { label: 'Good',         fg: '#23a26d', bg: '#e9f7f0', border: '#23a26d' },
+  warn:       { label: 'Insufficient', fg: '#d89323', bg: '#fcf3e1', border: '#d89323' },
+  bad:        { label: 'Incorrect',    fg: '#d0503f', bg: '#fbeceb', border: '#d0503f' },
+  pending:    { label: 'Pending',      fg: '#888',    bg: '#f4f7f7', border: '#ccc'    },
+  validation: { label: 'To review',    fg: '#1565c0', bg: '#e8f0fd', border: '#1976d2' },
 };
 
 const VALIDATION_REASON_TYPES = new Set(['needs_validation', 'bad_description', 'bad_input_description']);
 
 function testExpectsEmpty(test: any): boolean {
   const desc = (test.unit_test_description ?? '').toLowerCase();
-  return /retourne\s+.{0,40}vide|résultat[s]?\s+(?:est\s+)?vide[s]?|0\s+ligne|aucune\s+ligne/.test(desc);
+  // Descriptions générées en FR ou EN selon la langue de sortie configurée.
+  return (
+    /retourne\s+.{0,40}vide|résultat[s]?\s+(?:est\s+)?vide[s]?|0\s+ligne|aucune\s+ligne/.test(desc) ||
+    /returns?\s+.{0,40}empty|empty\s+result|no\s+rows?|zero\s+rows?|0\s+rows?/.test(desc)
+  );
 }
+
+// Les tokens de verdict du juge sont un enum structuré historique (« Excellent » /
+// « Bon » / « Insuffisant ») mais le texte libre autour est localisé — on tolère
+// les deux langues pour ne pas dépendre de la discipline du LLM sur l'enum.
+const GOOD_RE = /Excellent|Bon|Good/;
+const WARN_RE = /Insuffisant|Insufficient/;
 
 export function statusToVerdict(status: string | undefined, test?: any): Verdict {
   // Description désync → état neutre « À valider », ni Insuffisant ni Bon.
   if (test?.reason_type && VALIDATION_REASON_TYPES.has(test.reason_type)) return 'validation';
   if (test?.evaluation) {
-    if (/Excellent|Bon/.test(test.evaluation))  return 'good';
-    if (/Insuffisant/.test(test.evaluation))    return 'warn';
+    if (GOOD_RE.test(test.evaluation)) return 'good';
+    if (WARN_RE.test(test.evaluation)) return 'warn';
   }
   if (status === 'complete')      return 'good';
   if (status === 'empty_results') return (test && testExpectsEmpty(test)) ? 'good' : 'warn';
@@ -38,16 +52,13 @@ export function statusToVerdict(status: string | undefined, test?: any): Verdict
 
 export function verdictText(status: string | undefined, test?: any): string {
   if (test?.evaluation) return test.evaluation;
-  if (status === 'complete')
-    return "La requête a produit des résultats sur ces données d'entrée. Le test est valide.";
+  if (status === 'complete') return i18n.t('verdict.text_complete');
   if (status === 'empty_results') {
-    if (test && testExpectsEmpty(test))
-      return "La requête n'a retourné aucune ligne, conformément au comportement attendu. Le test est valide.";
-    return "La requête n'a retourné aucune ligne. Vérifiez que les données d'entrée déclenchent bien le chemin de calcul attendu.";
+    if (test && testExpectsEmpty(test)) return i18n.t('verdict.text_empty_expected');
+    return i18n.t('verdict.text_empty_unexpected');
   }
-  if (status === 'error')
-    return "La requête a échoué sur ces données. Inspectez les données d'entrée ou la requête SQL.";
-  return "En cours d'exécution…";
+  if (status === 'error') return i18n.t('verdict.text_error');
+  return i18n.t('verdict.text_running');
 }
 
 /** Vrai quand l'exécution du test est terminée mais que le verdict LLM n'est pas encore
@@ -70,7 +81,7 @@ export function testExecStatus(test: any): ExecStatus {
     // Le juge prime : s'il a validé le test (« Bon »/« Excellent »), le résultat
     // vide est attendu → pass. Aligne l'exec sur statusToVerdict pour éviter un
     // header « en échec » sur une carte verte. Sinon, heuristique sur la description.
-    if (/Excellent|Bon/.test(test.evaluation ?? '')) return 'pass';
+    if (GOOD_RE.test(test.evaluation ?? '')) return 'pass';
     return testExpectsEmpty(test) ? 'pass' : 'fail';
   }
   if (test.status === 'error') return 'fail';
@@ -83,6 +94,12 @@ export interface VerdictInfo extends VerdictMeta {
   execStatus: ExecStatus;
 }
 
+// Le texte du juge commence par son grade interne (« Excellent — … ») alors que le badge
+// affiche déjà le label localisé → on retire ce préfixe à l'affichage pour ne pas montrer
+// deux échelles (« Good — Excellent — … »). La classification (statusToVerdict) garde le
+// texte brut.
+const GRADE_PREFIX_RE = /^\s*(?:Excellent|Bon|Insuffisant|Good|Insufficient)\s*[—–-]\s*/;
+
 /** Consolidates all verdict computations for a single test object. */
 export function getVerdictInfo(test: any): VerdictInfo {
   const verdict = statusToVerdict(test.status, test);
@@ -90,7 +107,9 @@ export function getVerdictInfo(test: any): VerdictInfo {
   return {
     verdict,
     ...meta,
-    text: verdictText(test.status, test),
+    label: i18n.t(`verdict.${verdict}`, meta.label),
+    // Les ** du markdown du juge ne sont pas rendus par l'UI — on les retire à l'affichage.
+    text: verdictText(test.status, test).replace(/\*\*/g, '').replace(GRADE_PREFIX_RE, ''),
     execStatus: testExecStatus(test),
   };
 }

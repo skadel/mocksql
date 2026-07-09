@@ -19,7 +19,11 @@ from build_query.prompt_tools import (
     compact_passthrough_sql,
 )
 from build_query.state import QueryState
-from storage.config import is_native_thinking_active
+from storage.config import (
+    get_language,
+    is_native_thinking_active,
+    output_language_directive,
+)
 from storage.test_repository import get_test, update_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -146,8 +150,14 @@ class TestSuggestion(BaseModel):
     text: str = Field(
         description=(
             "La suggestion, formulée comme une affirmation directe du symptôme métier observable "
-            '(ex : "Un client présent dans deux régions est compté deux fois dans le total '
-            'national."). Pas de préfixe interrogatif ou injonctif — jamais "Tester si", '
+            + (
+                '(ex : "Un client présent dans deux régions est compté deux fois dans le total '
+                'national."). '
+                if get_language() == "fr"
+                else '(e.g. "A customer present in two regions is counted twice in the national '
+                'total."). '
+            )
+            + 'Pas de préfixe interrogatif ou injonctif — jamais "Tester si", '
             '"S\'assurer que", "Vérifier que". Une phrase courte, au présent, qui décrit '
             "ce qui se passe dans les données quand le cas se produit. Évite le jargon "
             "d'implémentation — noms de fonctions SQL, d'opérateurs, de colonnes ou de CTE "
@@ -164,8 +174,14 @@ class TestSuggestion(BaseModel):
             "OBLIGATOIRE et NON VIDE pour les suggestions [PROD], vide sinon. "
             "Une phrase en langage métier qui cite la preuve chiffrée tirée du profil et qui "
             "explique pourquoi ce cas mérite un test — ex : "
-            "\"Le profil indique que le champ 'code banque' est vide 3% du temps : ce cas n'est "
-            'couvert par aucun test existant." Doit citer une valeur concrète du profil '
+            + (
+                "\"Le profil indique que le champ 'code banque' est vide 3% du temps : ce cas n'est "
+                'couvert par aucun test existant." '
+                if get_language() == "fr"
+                else "\"The profile shows the 'bank code' field is empty 3% of the time: no existing "
+                'test covers this case." '
+            )
+            + "Doit citer une valeur concrète du profil "
             "(taux de NULL, min/max, cardinalité, valeur observée), jamais une fonction SQL."
         ),
     )
@@ -181,7 +197,11 @@ class TestSuggestion(BaseModel):
 
 
 class TestSuggestionsOutput(BaseModel):
-    analyse_des_manques: str = Field(
+    # Nom de champ EN neutre : un nom de champ français faisait basculer CE champ en
+    # français alors même que `suggestions[].text` (nom neutre) respectait la directive
+    # de langue de sortie — le nom de champ est un signal de langue plus fort que la
+    # directive. Rédigé dans la langue de sortie configurée.
+    coverage_gap_analysis: str = Field(
         description=(
             "Justification brève : 3 ou 4 phrases maximum, jamais plus. "
             "Le raisonnement détaillé se fait dans le canal de réflexion (thinking natif), "
@@ -519,7 +539,10 @@ async def generate_single_suggestion(state: QueryState):
 
     prompt_template = ChatPromptTemplate.from_messages(
         [
-            ("system", _SINGLE_SUGGESTION_SYSTEM),
+            (
+                "system",
+                output_language_directive() + "\n\n" + _SINGLE_SUGGESTION_SYSTEM,
+            ),
             (
                 "user",
                 """Requête SQL à analyser :
@@ -542,7 +565,7 @@ Pièges classiques pertinents pour ce SQL :
 Génère exactement 1 suggestion de cas de test non couvert, formulée comme une affirmation
 directe décrivant le symptôme métier (jamais "Tester si", "S'assurer que", "Vérifier que" —
 une phrase courte au présent, sans jargon SQL ni détail d'implémentation).
-Renseigne aussi `analyse_des_manques` en une phrase.""",
+Renseigne aussi `coverage_gap_analysis` en une phrase.""",
             ),
         ]
     )
@@ -702,7 +725,7 @@ async def generate_suggestions(state: QueryState):
 
     # --- 2. Construction du Prompt ---
     # Quand le thinking natif est actif (flash/pro), le raisonnement se fait dans le
-    # canal de réflexion → `analyse_des_manques` ne porte qu'une conclusion brève (cf.
+    # canal de réflexion → `coverage_gap_analysis` ne porte qu'une conclusion brève (cf.
     # schéma TestSuggestionsOutput). Demander un chain-of-thought *dans le JSON* le
     # contredirait. Sinon (flash-lite / thinking coupé), le CoT in-schema est le seul
     # raisonnement disponible : on le réclame explicitement.
@@ -710,14 +733,16 @@ async def generate_suggestions(state: QueryState):
     reasoning_directive = (
         "Mène ton analyse dans ton canal de réflexion : comprends d'abord ce que fait le "
         "SQL (quel algorithme, quel pattern métier), puis identifie les hypothèses implicites "
-        "sur les données. Dans `analyse_des_manques`, ne reporte que la conclusion (3-4 phrases)."
+        "sur les données. Dans `coverage_gap_analysis`, ne reporte que la conclusion (3-4 phrases)."
         if native_thinking
-        else "Raisonne en mode chain-of-thought directement dans `analyse_des_manques` (3-4 phrases "
+        else "Raisonne en mode chain-of-thought directement dans `coverage_gap_analysis` (3-4 phrases "
         "max) : pars de ce que fait le SQL (quel algorithme, quel pattern métier), puis des "
         "hypothèses implicites sur les données, avant de justifier le choix des suggestions."
     )
     system_prompt = (
-        MOCKSQL_PRODUCT_PREAMBLE
+        output_language_directive()
+        + "\n\n"
+        + MOCKSQL_PRODUCT_PREAMBLE
         + """
 
 Ici, tu agis comme l'expert en assurance qualité et en tests unitaires SQL de MockSQL (dialecte: {dialect}). Tu proposes à l'utilisateur les cas de tests les plus utiles **non encore couverts**.
@@ -765,7 +790,9 @@ Formule chaque suggestion comme une **affirmation directe** décrivant le sympt�
 
 Pour ces patterns, formule la suggestion en décrivant le **symptôme métier observable** : qu'est-ce que l'utilisateur métier constaterait comme anomalie dans le rapport ou le résultat ? Évite le jargon **d'implémentation** — noms de fonctions SQL, d'opérateurs, de colonnes ou de CTE. En revanche, un terme **d'analyse indispensable** au sens (référence/baseline de calcul, écart-type, seuil, percentile, moyenne glissante) reste acceptable s'il est nécessaire pour décrire le symptôme : la prohibition vise le *comment technique*, pas le vocabulaire métier de l'analyse. L'ingénieur a besoin de comprendre *ce qui ne va pas dans les données*, pas *par quelle fonction SQL*.
 
-Mauvais exemple (cite une fonction SQL, décrit la mécanique au lieu du symptôme métier) :
+"""
+                + (
+                    """Mauvais exemple (cite une fonction SQL, décrit la mécanique au lieu du symptôme métier) :
 "Les incidents de 2024 sont exclus silencieusement par l'EXTRACT lorsque la date est NULL."
 Bon exemple (affirmation directe, symptôme métier observable, sans jargon) :
 "Des incidents sans mois sont invisibles dans le rapport annuel et gonflent le total sans apparaître dans les totaux mensuels."
@@ -777,7 +804,23 @@ Autre bon exemple (cas limite où le résultat surprend l'ingénieur) :
 
 Autre bon exemple (cas analytique — **une anomalie en masque une autre**, terme technique indispensable toléré) :
 "Une hausse brutale un mois fait gonfler la référence (moyenne et écart-type), rendant la hausse suivante invisible dans le rapport d'anomalies."
+"""
+                    if get_language() == "fr"
+                    else """Bad example (names a SQL function, describes the mechanics instead of the business symptom):
+"Incidents from 2024 are silently excluded by the EXTRACT when the date is NULL."
+Good example (direct statement, observable business symptom, no jargon):
+"Incidents with no month are invisible in the annual report and inflate the total without appearing in the monthly totals."
 
+Another bad example (trivial, true by construction, teaches nothing):
+"The query returns rows when there is input data."
+Another good example (edge case where the result surprises the engineer):
+"A customer present in two regions is counted twice in the national total, which then exceeds the sum of the real headcounts."
+
+Another good example (analytical case — **one anomaly masks another**, essential technical term tolerated):
+"A sharp spike one month inflates the baseline (mean and standard deviation), making the next spike invisible in the anomaly report."
+"""
+                )
+                + """
 {prod_instruction_block}""",
             ),
         ]
@@ -892,9 +935,9 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
                 "results_grounding": results_grounding,
             }
         )
-        gap_analysis = (result.analyse_des_manques or "").strip()
+        gap_analysis = (result.coverage_gap_analysis or "").strip()
         logger.diag(
-            "[suggestions] analyse_des_manques:\n%s",
+            "[suggestions] coverage_gap_analysis:\n%s",
             gap_analysis[:1500],
         )
         items = result.suggestions[:3]

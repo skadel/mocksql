@@ -313,6 +313,7 @@ interface NodeProps {
 }
 
 const TreeNodeComponent: React.FC<NodeProps> = ({ node, depth, q, currentModelId }) => {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(true);
 
   if (node.type === 'file') {
@@ -377,7 +378,7 @@ const TreeNodeComponent: React.FC<NodeProps> = ({ node, depth, q, currentModelId
 
         {/* Stale count badge */}
         {!q && nStale > 0 && (
-          <Tooltip title={`${nStale} fichier${nStale > 1 ? 's' : ''} modifié${nStale > 1 ? 's' : ''}`}>
+          <Tooltip title={t('drawer.stale_files', { count: nStale })}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: '2px', mr: '4px' }}>
               <WarningAmberIcon sx={{ fontSize: 11, color: '#c78f00' }} />
               <Typography sx={{ fontSize: 10, fontWeight: 700, color: '#c78f00' }}>{nStale}</Typography>
@@ -479,10 +480,10 @@ const SqlFileList: React.FC<Props> = ({ search }) => {
         }}>
           <UpdateIcon sx={{ fontSize: 13, color: '#c78f00', flexShrink: 0 }} />
           <Typography sx={{ fontSize: 11.5, fontWeight: 600, color: '#7a5500', flex: 1 }}>
-            {totalStale} fichier{totalStale > 1 ? 's' : ''} modifié{totalStale > 1 ? 's' : ''}
+            {t('drawer.stale_files', { count: totalStale })}
           </Typography>
           <Typography sx={{ fontSize: 10.5, color: '#a07820' }}>
-            tests à relancer
+            {t('drawer.rerun_tests')}
           </Typography>
         </Box>
       )}

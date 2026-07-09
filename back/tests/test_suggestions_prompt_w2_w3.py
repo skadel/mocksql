@@ -79,7 +79,7 @@ def _install_capture(monkeypatch, captured: dict):
         captured["system"] = prompt_value.to_messages()[0].content
         captured["user"] = prompt_value.to_messages()[1].content
         return SuggestionsOutput(
-            analyse_des_manques="ok",
+            coverage_gap_analysis="ok",
             suggestions=[Suggestion(text="Vérifie un cas", rationale="")],
         )
 
@@ -152,7 +152,17 @@ async def test_suggestions_prompt_injects_compacted_sql(monkeypatch):
 @pytest.mark.asyncio
 async def test_suggestions_prompt_has_analytical_masking_example(monkeypatch):
     """W3 — le prompt fournit un exemple analytique (anomalie qui en masque une autre via la
-    contamination de la référence de calcul)."""
+    contamination de la référence de calcul). Langue par défaut = anglais → exemple localisé."""
+    captured = await _run_suggestions(
+        monkeypatch, sql="SELECT region, SUM(x) AS s FROM t GROUP BY region"
+    )
+    assert "one anomaly masks another" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_suggestions_prompt_has_analytical_masking_example_fr(monkeypatch):
+    """W3 — même exemple analytique, en français quand la langue de sortie est fr."""
+    monkeypatch.setenv("MOCKSQL_LANGUAGE", "fr")
     captured = await _run_suggestions(
         monkeypatch, sql="SELECT region, SUM(x) AS s FROM t GROUP BY region"
     )

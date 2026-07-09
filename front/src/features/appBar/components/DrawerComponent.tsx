@@ -12,6 +12,7 @@ import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { resetContext } from '../../buildModel/buildModelSlice';
 import { setCurrentId, toggleDrawer } from '../appBarSlice';
 import { fetchModels } from '../../../api/models';
+import { LANGUAGE_STORAGE_KEY } from '../../../i18n';
 import SqlFileList from './SqlFileList';
 import ModelExplorer from './ModelExplorer';
 
@@ -37,7 +38,7 @@ function DbIcon() {
 
 const DrawerComponent: React.FC = () => {
   const dispatch    = useAppDispatch();
-  const { i18n }   = useTranslation();
+  const { t, i18n } = useTranslation();
   const [language, setLanguage] = useState(i18n.language);
   const [search, setSearch]     = useState('');
   const [activeTab, setActiveTab] = useState<'models' | 'priority'>('models');
@@ -57,10 +58,20 @@ const DrawerComponent: React.FC = () => {
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [dispatch]);
 
+  // Garde le sélecteur aligné sur i18n, y compris quand la langue par défaut
+  // arrive du backend (mocksql.yml via /api/config) APRÈS le montage.
+  useEffect(() => {
+    const onLanguageChanged = (lng: string) => setLanguage(lng);
+    i18n.on('languageChanged', onLanguageChanged);
+    return () => i18n.off('languageChanged', onLanguageChanged);
+  }, [i18n]);
+
   const handleChangeLanguage = (e: SelectChangeEvent<string>) => {
     const lang = e.target.value;
     setLanguage(lang);
     i18n.changeLanguage(lang);
+    // Choix explicite de l'utilisateur : persiste et prime sur le défaut mocksql.yml.
+    localStorage.setItem(LANGUAGE_STORAGE_KEY, lang);
   };
 
   return (
@@ -226,7 +237,7 @@ const DrawerComponent: React.FC = () => {
                 textTransform: 'uppercase',
                 letterSpacing: '0.5px',
               }}>
-                {tab === 'models' ? `Modèles${testedCount > 0 ? ` · ${testedCount}` : ''}` : 'Priorité'}
+                {tab === 'models' ? `${t('drawer.models')}${testedCount > 0 ? ` · ${testedCount}` : ''}` : t('drawer.priority')}
               </Typography>
             </Box>
           ))}
@@ -249,10 +260,10 @@ const DrawerComponent: React.FC = () => {
         >
           <SearchIcon sx={{ fontSize: 14, color: '#a0adb0', flexShrink: 0 }} />
           <InputBase
-            placeholder="Rechercher…"
+            placeholder={t('drawer.search')}
             value={search}
             onChange={e => setSearch(e.target.value)}
-            inputProps={{ 'aria-label': 'Rechercher' }}
+            inputProps={{ 'aria-label': t('drawer.search') }}
             sx={{
               fontSize: 12.5,
               color: INK,
@@ -283,17 +294,17 @@ const DrawerComponent: React.FC = () => {
           {import.meta.env.VITE_DEMO_MODE !== 'true' && (
             <Box sx={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
               <Box sx={{ width: 6, height: 6, borderRadius: '50%', bgcolor: '#23a26d', flexShrink: 0 }} />
-              <Typography sx={{ fontSize: 11.5, color: MUTED }}>Connecté · :8080</Typography>
+              <Typography sx={{ fontSize: 11.5, color: MUTED }}>{t('drawer.connected')} · :8080</Typography>
             </Box>
           )}
 
           <FormControl fullWidth variant="outlined" size="small">
-            <InputLabel id="lang-label" sx={{ fontSize: 12 }}>Langue</InputLabel>
+            <InputLabel id="lang-label" sx={{ fontSize: 12 }}>{t('drawer.language')}</InputLabel>
             <Select
               labelId="lang-label"
               value={language}
               onChange={handleChangeLanguage}
-              label="Langue"
+              label={t('drawer.language')}
               sx={{ fontSize: 12, borderRadius: '8px', color: INK, bgcolor: '#fff' }}
             >
               <MenuItem value="en" sx={{ fontSize: 12 }}>English</MenuItem>
