@@ -342,7 +342,12 @@ function CompactRow({ test, idx, commentCount, isLoading, onExpand, onAsk, onDel
       )}
       <Box sx={{ minWidth: 0, display: 'flex', alignItems: 'center', gap: 1 }}>
         <Typography sx={{ fontSize: 11, color: MUTED, fontVariantNumeric: 'tabular-nums' }}>#{idx + 1}</Typography>
-        <Typography sx={{ fontSize: 12.5, color: INK, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', fontWeight: 500 }}>
+        <Typography sx={{
+          fontSize: 12.5, color: INK, fontWeight: 500,
+          // Titre sur 2 lignes max : l'ellipse mono-ligne tronquait tous les titres
+          // dans la vue liste (aucun titre complet lisible).
+          overflow: 'hidden', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical',
+        }}>
           {test.unit_test_description ?? '—'}
         </Typography>
         {tags.slice(0, 1).map((tg) => {
@@ -693,7 +698,7 @@ function ResultWithAssertions({ inputData, outputData, assertionResults, onEditA
 
       {/* 1. Input data */}
       {hasInput && (
-        <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
+        <Box data-testid="demo-zoom-data" sx={{ px: 2, pt: 1.5, pb: 1 }}>
           <Typography sx={{ fontSize: 10.5, fontWeight: 700, color: MUTED, textTransform: 'uppercase', letterSpacing: 0.6, mb: 0.75 }}>
             {t('panel.input_data')}
           </Typography>
@@ -1342,7 +1347,7 @@ function TestCard({
       }}
     >
       {/* Card header */}
-      <Box sx={{ p: '14px 16px 10px' }}>
+      <Box data-testid="demo-zoom-verdict" sx={{ p: '14px 16px 10px' }}>
         {/* Verdict badge + tags */}
         <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75, flexWrap: 'wrap', mb: 0.75 }}>
           {test.status !== 'pending' && !awaitingEval && (

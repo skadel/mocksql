@@ -676,7 +676,22 @@ async def stream_events_route(body: StreamEventsRequest):
             return _make_serializable(obj.dict())
         return str(obj)
 
-    _CAPTURED_STEPS = {"parser", "generator", "executor"}
+    # Nœuds dont on forwarde les on_chain_start/end pour piloter le libellé du loader
+    # front. DOIT rester aligné sur `capturedSteps`/`loadingMap` de front/src/api/query.ts :
+    # sans les nœuds post-exécution ici, le front ne reçoit jamais leur start et le loader
+    # reste figé sur « Executing query » (dernier reçu) jusqu'à la fin du graph.
+    _CAPTURED_STEPS = {
+        "parser",
+        "generator",
+        "executor",
+        "assertion_generator",
+        "assertion_corrector",
+        "assertion_modifier",
+        "test_evaluator",
+        "conversational_agent",
+        "data_patcher",
+        "suggestions_generator",
+    }
     _EXCLUDED_EVENT_TYPES = {
         "on_llm_start",
         "on_llm_end",
