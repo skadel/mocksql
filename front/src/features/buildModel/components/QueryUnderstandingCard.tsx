@@ -69,7 +69,7 @@ const QueryUnderstandingCard: React.FC<{ understanding: QueryUnderstanding }> = 
           {t('understanding.title')}
         </Typography>
         <Typography variant="caption" sx={{ color: '#6b8287' }}>
-          {t('understanding.summary', { tables: tables.length, columns: totalColumns })}
+          {t('understanding.summary_tables', { count: tables.length })} · {t('understanding.summary_columns', { count: totalColumns })}
         </Typography>
         <ExpandMoreIcon
           sx={{ fontSize: 20, color: '#6b8287', transform: open ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }}

@@ -153,6 +153,9 @@ def init(
     config: dict = {
         "version": "2",
         "dialect": dialect,
+        # Langue de sortie (UI + textes générés : verdicts, descriptions, chat,
+        # suggestions). "en" par défaut ; passer à "fr" pour un projet francophone.
+        "language": "en",
         "models_path": models_path,
         "llm": {
             "provider": llm_provider,

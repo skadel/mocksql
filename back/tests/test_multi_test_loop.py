@@ -69,7 +69,7 @@ def test_bad_data_priority_over_loop():
 def _patch_llm(monkeypatch, text="Vérifie le cas NULL"):
     fake = RunnableLambda(
         lambda _pv: suggestions_node.TestSuggestionsOutput(
-            analyse_des_manques="x",
+            coverage_gap_analysis="x",
             suggestions=[suggestions_node.TestSuggestion(text=text)],
         )
     )

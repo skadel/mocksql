@@ -225,7 +225,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
               lineHeight: 1.2,
             }}
           >
-            Fichier testé
+            {t('chatcol.file_tested')}
           </Typography>
           <Tooltip
             title={filePath && filePath !== fileName ? filePath : ''}
@@ -266,7 +266,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
             '&:hover': { bgcolor: '#ecf7f6', borderColor: '#2BB0A8', color: '#1ca8a4' },
           }}
         >
-          Changer
+          {t('chatcol.change')}
         </Box>
         {sqlHistory.length > 0 && (
           <Box
@@ -491,7 +491,7 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.75 }}>
                     <CheckCircleOutlineIcon sx={{ fontSize: 16, color: '#2BB0A8' }} />
                     <Typography variant="caption" sx={{ color: '#37474f', fontWeight: 600 }}>
-                      {understandingDraft.length} {t('loading.step_tables')} · {totalColumns} {t('loading.step_columns')}
+                      {t('loading.step_tables', { count: understandingDraft.length })} · {t('loading.step_columns', { count: totalColumns })}
                     </Typography>
                     <Stack direction="row" flexWrap="wrap" gap={0.5} sx={{ ml: 0.5 }}>
                       {understandingDraft.map((tb) => (
@@ -545,8 +545,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
                   <path d="M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .962 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.962 0z"/>
                 </svg>
               </Box>
-              <Typography component="span" sx={{ fontSize: 12, fontWeight: 600, color: 'inherit' }}>Réflexion</Typography>
-              <Typography component="span" sx={{ fontSize: 11.5, color: '#9aabb0' }}>· terminée</Typography>
+              <Typography component="span" sx={{ fontSize: 12, fontWeight: 600, color: 'inherit' }}>{t('chatcol.reflection')}</Typography>
+              <Typography component="span" sx={{ fontSize: 11.5, color: '#9aabb0' }}>· {t('chatcol.reflection_done')}</Typography>
               <Box component="span" sx={{ ml: 'auto', display: 'inline-flex', color: '#9aabb0', transition: 'transform .2s', transform: reasoningOpen ? 'rotate(180deg)' : 'none' }}>
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round"><path d="m6 9 6 6 6-6"/></svg>
               </Box>
@@ -651,8 +651,8 @@ const ChatColumn: React.FC<ChatColumnProps> = ({
           sx={{ color: '#9aabb0', mt: 0.75, display: 'block', textAlign: 'center', fontSize: 10.5 }}
         >
           {isLoading
-            ? 'Une instruction infléchit la génération ; une question y répond sans la toucher'
-            : 'Entrée pour envoyer · Maj+Entrée pour saut de ligne'}
+            ? t('chatcol.hint_instruction')
+            : t('chatcol.hint_send')}
         </Typography>
       </Box>
     </Box>

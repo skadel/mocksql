@@ -9,6 +9,7 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
 from build_query.path_slicer import ALL_PATH
 from build_query.state import QueryState
+from storage.config import get_language, output_language_directive
 from storage.test_repository import get_test
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
@@ -635,9 +636,14 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
     narration + le panneau porte les boutons Valider/Refuser) ; `delete_test` a déjà sa
     confirmation → retourne None (comme pour tout outil de debug/réévaluation/clarification).
     """
+    en = get_language() == "en"
     if agent_tool_call == "generate_test_data":
+        if en:
+            return "Got it — I'm preparing a new test for this scenario."
         return "C'est noté — je te prépare un nouveau test pour ce scénario."
     if agent_tool_call == "update_test_data":
+        if en:
+            return "Got it — I'm fixing this test's data, then re-running it."
         return "C'est noté — je corrige les données de ce test, puis je le relance."
     if agent_tool_call == "data_batch":
         adds = patches = removes = 0
@@ -651,17 +657,40 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
                 removes += 1
         parts = []
         if adds:
-            parts.append(f"j'ajoute {adds} ligne{'s' if adds > 1 else ''}")
+            parts.append(
+                f"adding {adds} row{'s' if adds > 1 else ''}"
+                if en
+                else f"j'ajoute {adds} ligne{'s' if adds > 1 else ''}"
+            )
         if patches:
-            parts.append(f"j'ajuste {patches} valeur{'s' if patches > 1 else ''}")
+            parts.append(
+                f"adjusting {patches} value{'s' if patches > 1 else ''}"
+                if en
+                else f"j'ajuste {patches} valeur{'s' if patches > 1 else ''}"
+            )
         if removes:
-            parts.append(f"je retire {removes} ligne{'s' if removes > 1 else ''}")
+            parts.append(
+                f"removing {removes} row{'s' if removes > 1 else ''}"
+                if en
+                else f"je retire {removes} ligne{'s' if removes > 1 else ''}"
+            )
+        if en:
+            detail = ", ".join(parts) if parts else "adjusting the data"
+            return (
+                f"I'm updating the test data to reflect your request "
+                f"({detail}), then re-running the execution."
+            )
         detail = ", ".join(parts) if parts else "j'ajuste les données"
         return (
             f"Je modifie les données de test pour prendre en compte ta demande "
             f"({detail}), puis je relance l'exécution."
         )
     if agent_tool_call == "generate_suggestions":
+        if en:
+            return (
+                "I'm preparing new suggestions of cases to test — "
+                "they will appear in the tests panel."
+            )
         return (
             "Je te prépare de nouvelles suggestions de cas à tester — "
             "elles apparaîtront dans le panneau des tests."
@@ -669,7 +698,14 @@ def _build_tool_ack(agent_tool_call: str | None, agent_tool_args: dict) -> str |
     if agent_tool_call == "set_target_path":
         path = agent_tool_args.get("path")
         if path in (ALL_PATH, "all"):
+            if en:
+                return "I'm regenerating this test without focus: data and execution on the full script."
             return "Je régénère ce test sans focus : données et exécution sur le script complet."
+        if en:
+            return (
+                f"I'm focusing this test's data on the \"{path}\" branch and regenerating it "
+                "(execution still runs on the full script)."
+            )
         return (
             f"Je cible les données de ce test sur la branche « {path} » et je le régénère "
             "(l'exécution reste sur le script complet)."
@@ -953,7 +989,7 @@ Si l'utilisateur fait référence à une suggestion (« la suggestion 2 », « l
 Tu peux répondre aux questions sur la couverture, analyser les redondances,
 et utiliser les outils disponibles pour générer ou supprimer des tests.
 Pour toute suppression, demande toujours confirmation dans ta réponse AVANT d'appeler delete_test.
-Réponds en français, de manière concise et naturelle.
+{output_language_directive()} Réponds de manière concise et naturelle.
 
 ⚠️ Pour mentionner un test dans ta réponse, écris-le TOUJOURS sous la forme `[[test:RÉF]]`
 (ex. `[[test:88eb]]`, en reprenant la « réf. outil » du bloc « Tests existants »).
@@ -1157,7 +1193,7 @@ des deux tu dois faire AVANT de choisir entre `generate_test_data` (nouveau test
         entre l'intention exprimée et le comportement réel de la requête SQL.
         Exemple : l'utilisateur demande de tester "le domaine le plus pertinent" mais la requête
         utilise MAX() alphabétique — signale-le et demande si c'est intentionnel.
-        question : la question à poser à l'utilisateur (claire, concise, en français)."""
+        question : la question à poser à l'utilisateur (claire, concise, dans la langue de sortie configurée)."""
         return question
 
     # Outils indépendants de l'existence d'un test : démarrer, clarifier, ou mémoriser

@@ -13,7 +13,11 @@ from pydantic import BaseModel, Field, create_model
 
 
 from build_query.path_slicer import ALL_PATH, resolve_active_sql
-from build_query.prompt_tools import generate_data_prompt, update_data_prompt
+from build_query.prompt_tools import (
+    description_format,
+    generate_data_prompt,
+    update_data_prompt,
+)
 from build_query.state import QueryState
 from utils.examples import (
     create_pydantic_models,
@@ -21,7 +25,12 @@ from utils.examples import (
 )
 from utils.faker_fill import generate_faker_rows
 from utils.llm_factory import make_llm
-from storage.config import get_llm_model, is_native_thinking_active
+from storage.config import (
+    get_language,
+    get_llm_model,
+    is_native_thinking_active,
+    tag_labels,
+)
 from utils.msg_types import MsgType
 from utils.prompt_utils import create_output_fixing_parser
 from utils.saver import get_message_type, get_history_from_state
@@ -1392,8 +1401,12 @@ def get_generation_output_type(
             Field(
                 description=(
                     "Nom court du scénario (3-6 mots) destiné à un lecteur métier, sans jargon SQL ni noms techniques. "
-                    "✓ Bons exemples : 'Commandes actives France', 'Client sans historique', 'Ventes nulles juillet'. "
-                    "✗ À proscrire : 'CTE orders_filtered vide', 'JOIN sur user_id NULL', 'WHERE status active'."
+                    + (
+                        "✓ Bons exemples : 'Commandes actives France', 'Client sans historique', 'Ventes nulles juillet'. "
+                        if get_language() == "fr"
+                        else "✓ Good examples: 'Active orders France', 'Customer without history', 'Zero sales July'. "
+                    )
+                    + "✗ À proscrire : 'CTE orders_filtered vide', 'JOIN sur user_id NULL', 'WHERE status active'."
                 )
             ),
         ),
@@ -1402,13 +1415,18 @@ def get_generation_output_type(
             Field(
                 description=(
                     "Description métier contextualisée au format "
-                    '"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] '
-                    '[condition] → [résultat attendu]". Destinée à un responsable métier non-développeur. '
+                    f'"{description_format()["skeleton"]}". Destinée à un responsable métier non-développeur. '
                     "Nommer la branche choisie quand le SQL a des alternatives (OR, CASE, UNION). "
-                    "✓ Bons exemples : "
-                    "'Pour un client sans commande sur janvier → son chiffre d'affaires est nul.' "
-                    "'Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse.' "
-                    "✗ À proscrire absolument — noms de colonnes SQL, noms de CTEs, syntaxe SQL, "
+                    + (
+                        "✓ Bons exemples : "
+                        "'Pour un client sans commande sur janvier → son chiffre d'affaires est nul.' "
+                        "'Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse.' "
+                        if get_language() == "fr"
+                        else "✓ Good examples: "
+                        "'For a customer with no orders in January → their revenue is zero.' "
+                        f"'{description_format()['example']}.' "
+                    )
+                    + "✗ À proscrire absolument — noms de colonnes SQL, noms de CTEs, syntaxe SQL, "
                     "formulation générique type 'Vérifie que le calcul est correct' : "
                     "'Vérifie que price > 0 dans la CTE orders_filtered.' "
                     "'S'assure que le LEFT JOIN sur user_id retourne NULL.'"
@@ -1420,7 +1438,7 @@ def get_generation_output_type(
             Field(
                 description=(
                     "Labels décrivant les types de cas couverts. "
-                    "Choisir parmi : 'Logique métier', 'Null checks', 'Cas limites', 'Intégration', 'Valeurs dupliquées', 'Performance'. "
+                    f"Choisir parmi : {', '.join(repr(t) for t in tag_labels())}. "
                     "Inclure tous les labels pertinents."
                 )
             ),

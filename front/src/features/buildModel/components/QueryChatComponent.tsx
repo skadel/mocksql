@@ -36,6 +36,7 @@ import { getMessages, patchModelSql, clearHistoryApi, dismissSuggestionApi } fro
 import { getRenderMessages } from '../../../selectors/getRenderMessages';
 import { ChatQueryParams, ProfileRequest, SqlHistoryEntry } from '../../../utils/types';
 import { relativeDate } from '../../../utils/dates';
+import { dialectDisplayName } from '../../../utils/dialect';
 
 // Dialect is read from the current project — fallback to bigquery for backward compat.
 
@@ -244,6 +245,7 @@ const ChatComponent: React.FC = () => {
   const currentProjectId = useAppSelector((state) => state.appBarModel.currentProjectId);
   const currentProject = useAppSelector((state) => state.appBarModel.currentProject);
   const DIALECT = currentProject?.dialect ?? 'bigquery';
+  const DIALECT_LABEL = dialectDisplayName(DIALECT);
 
   const isRetryableError = (msg: string) =>
     msg.includes('Connexion perdue') || msg.includes('connexion réseau');
@@ -1664,7 +1666,7 @@ const ChatComponent: React.FC = () => {
                       const count = fileSearch
                         ? sqlFiles.filter(f => (f.name + ' ' + (f.path ?? '')).toLowerCase().includes(fileSearch.toLowerCase())).length
                         : sqlFiles.length;
-                      return `${count} fichier${count !== 1 ? 's' : ''}`;
+                      return t('generate.files', { count });
                     })()}
                   </Typography>
                 </Box>
@@ -1715,7 +1717,7 @@ const ChatComponent: React.FC = () => {
                           </Box>
                           {/* Last modified */}
                           <Typography sx={{ fontSize: 11, color: '#6b8287', textAlign: 'right', minWidth: 90, flexShrink: 0 }}>
-                            {f.updated_at ? `modifié ${relativeDate(f.updated_at, t)}` : ''}
+                            {f.updated_at ? t('generate.modified', { date: relativeDate(f.updated_at, t) }) : ''}
                           </Typography>
                         </Box>
                       );
@@ -1734,12 +1736,12 @@ const ChatComponent: React.FC = () => {
               <Box sx={{ mb: '24px' }}>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: '10px', mb: '10px' }}>
                   <Box sx={{ width: 22, height: 22, borderRadius: '50%', bgcolor: '#2BB0A8', color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11, fontWeight: 700, flexShrink: 0 }}>2</Box>
-                  <Typography sx={{ fontSize: 14.5, fontWeight: 600, color: '#0f272a' }}>Aperçu du SQL</Typography>
+                  <Typography sx={{ fontSize: 14.5, fontWeight: 600, color: '#0f272a' }}>{t('generate.sql_preview')}</Typography>
                   <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>
                     · <Box component="code" sx={{ fontSize: 11.5, color: '#3b5357', fontFamily: 'monospace' }}>{selectedModelName}</Box>
                   </Typography>
                   <Box sx={{ ml: 'auto', fontSize: 10.5, px: '8px', py: '2px', borderRadius: 999, bgcolor: '#dde3e6', border: '1px solid #c9d3d6', color: '#6b8287', fontWeight: 500 }}>
-                    Lecture seule
+                    {t('generate.read_only')}
                   </Box>
                 </Box>
                 <Box sx={{ border: '1px solid #c9d3d6', borderRadius: '12px', overflow: 'hidden', bgcolor: '#f3f6f7' }}>
@@ -1753,7 +1755,7 @@ const ChatComponent: React.FC = () => {
                     </Box>
                     <Typography sx={{ fontSize: 11.5, fontWeight: 700, color: '#16746e', letterSpacing: 0.6, fontFamily: 'monospace' }}>SQL</Typography>
                     <Typography sx={{ ml: 'auto', fontSize: 11.5, color: '#6b8287' }}>
-                      {DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)} · {previewSql ? `${previewSql.split('\n').length} lignes` : '…'}
+                      {DIALECT_LABEL} · {previewSql ? `${previewSql.split('\n').length} lignes` : '…'}
                     </Typography>
                   </Box>
                   <Box sx={{ opacity: previewLoading ? 0.5 : 1, transition: 'opacity .15s' }}>
@@ -1773,7 +1775,7 @@ const ChatComponent: React.FC = () => {
             <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '12px', mt: selectedModelName ? 0 : '18px' }}>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: '5px', fontSize: 11.5, color: '#6b8287' }}>
                 <Box component="span" sx={{ width: 8, height: 8, borderRadius: '50%', bgcolor: '#f7c948', display: 'inline-block', mr: '2px' }} />
-                <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>Exécuté sur DuckDB en local — zéro coût {DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}</Typography>
+                <Typography sx={{ fontSize: 11.5, color: '#6b8287' }}>{t('footer.generate_footer', { dialect: DIALECT_LABEL })}</Typography>
               </Box>
               <Button
                 variant="contained"
@@ -2041,7 +2043,7 @@ const ChatComponent: React.FC = () => {
                 onOpenChat={() => { setSelectedTestIndex(null); }}
               />
             </Box>
-            <DuckDBFooter />
+            <DuckDBFooter dialectLabel={DIALECT_LABEL} />
           </Box>
         </Box>
       )}
@@ -2075,8 +2077,7 @@ const ChatComponent: React.FC = () => {
             {pendingAutoProfile.step === 'count' && (
               <Box sx={{ mb: 1 }}>
                 <Typography variant="body2" sx={{ color: '#555', mb: 1.5 }}>
-                  Combien de tests veux-tu générer d'emblée ? MockSQL construit le test du chemin
-                  nominal, puis enchaîne les suivants à partir de cas non encore couverts.
+                  {t('genpopup.how_many')}
                 </Typography>
                 <ToggleButtonGroup
                   exclusive
@@ -2098,7 +2099,7 @@ const ChatComponent: React.FC = () => {
                         '&.Mui-selected': { bgcolor: '#1ca8a4', color: 'white', '&:hover': { bgcolor: '#159e9a' } },
                       }}
                     >
-                      {n} test{n > 1 ? 's' : ''}
+                      {t('genpopup.n_tests', { count: n })}
                     </ToggleButton>
                   ))}
                 </ToggleButtonGroup>
@@ -2115,7 +2116,7 @@ const ChatComponent: React.FC = () => {
                 {pendingAutoProfile.needsProfiling && DIALECT === 'bigquery' && (
                   pendingAutoProfile.configBudget != null ? (
                     <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 2 }}>
-                      <Typography variant="caption" sx={{ color: '#888' }}>Budget de scan :</Typography>
+                      <Typography variant="caption" sx={{ color: '#888' }}>{t('genpopup.budget_label')}</Typography>
                       <Chip
                         size="small"
                         label={`${pendingAutoProfile.configBudget} To · auto`}
@@ -2125,7 +2126,7 @@ const ChatComponent: React.FC = () => {
                   ) : (
                     <Box sx={{ mt: 2 }}>
                       <Typography variant="body2" sx={{ color: '#555', fontWeight: 600, mb: 0.5 }}>
-                        Budget de scan BigQuery
+                        {t('genpopup.budget_title')}
                       </Typography>
                       <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                         <TextField
@@ -2216,7 +2217,7 @@ const ChatComponent: React.FC = () => {
                     <Chip
                       label={`~${pendingAutoProfile.profileRequest.billing_tb < 0.001
                         ? '< 0,001'
-                        : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT.charAt(0).toUpperCase() + DIALECT.slice(1)}`}
+                        : pendingAutoProfile.profileRequest.billing_tb.toFixed(3)} To · ${DIALECT_LABEL}`}
                       size="small"
                       sx={{ bgcolor: '#f5f5f5', color: '#888', border: '1px solid #e0e0e0', fontWeight: 600, fontSize: 11 }}
                     />
@@ -2274,7 +2275,7 @@ const ChatComponent: React.FC = () => {
               disabled={isAutoProfileRunning}
               sx={{ textTransform: 'none', color: '#999', mr: 'auto', '&:hover': { bgcolor: 'transparent', color: '#666' } }}
             >
-              Annuler
+              {t('cancel')}
             </Button>
             {pendingAutoProfile.step === 'profiling' && (
               <Button
@@ -2299,7 +2300,7 @@ const ChatComponent: React.FC = () => {
               >
                 {isAutoProfileRunning
                   ? t('loading.profiling_short')
-                  : `Générer ${testsTarget} test${testsTarget > 1 ? 's' : ''}`}
+                  : t('genpopup.generate_n', { count: testsTarget })}
               </Button>
             ) : (
               <Button
@@ -2325,7 +2326,7 @@ const ChatComponent: React.FC = () => {
                 {isAutoProfileRunning
                   ? t('loading.profiling_short')
                   : pendingAutoProfile.profileRequest === null
-                    ? 'Estimation…'
+                    ? t('genpopup.estimating')
                     : t('action.run_profiling')}
               </Button>
             )}
@@ -2340,7 +2341,9 @@ const ChatComponent: React.FC = () => {
 // réellement la génération (→ promesse « tu peux passer à autre chose ») de l'écran
 // intermédiaire encore en attente d'une confirmation (→ on ne promet rien, sinon
 // l'utilisateur s'absente alors qu'une étape requiert toujours son attention).
-const EtaNotice: React.FC<{ eta: number; launchesNow: boolean }> = ({ eta, launchesNow }) => (
+const EtaNotice: React.FC<{ eta: number; launchesNow: boolean }> = ({ eta, launchesNow }) => {
+  const { t } = useTranslation();
+  return (
   <Box
     sx={{
       display: 'flex',
@@ -2356,21 +2359,13 @@ const EtaNotice: React.FC<{ eta: number; launchesNow: boolean }> = ({ eta, launc
   >
     <AccessTimeIcon sx={{ color: '#1ca8a4', fontSize: 18, mt: '1px', flexShrink: 0 }} />
     <Typography variant="body2" sx={{ color: '#3a6b69', fontSize: 13 }}>
-      {launchesNow ? (
-        <>
-          Le travail peut prendre ~{eta} minute{eta > 1 ? 's' : ''} — garde cet onglet
-          ouvert (tu peux passer à autre chose), je te préviens par notification dès que
-          c'est terminé.
-        </>
-      ) : (
-        <>
-          Le travail prendra ~{eta} minute{eta > 1 ? 's' : ''}. Une dernière étape de
-          confirmation reste avant le lancement.
-        </>
-      )}
+      {launchesNow
+        ? t('genpopup.eta_launches', { count: eta })
+        : t('genpopup.eta_pending', { count: eta })}
     </Typography>
   </Box>
-);
+  );
+};
 
 const AutoProfileWarningBanner: React.FC<{
   status: 'partial' | 'failed';

@@ -4,9 +4,14 @@ import { Provider } from 'react-redux';
 import { store } from './app/store';
 import { I18nextProvider } from 'react-i18next';
 import App from './App';
-import i18n from './i18n';
+import i18n, { applyBackendLanguage } from './i18n';
+import { fetchConfig } from './api/models';
 import './style/tokens.css';
 import 'prismjs/themes/prism.css';
+
+// Langue par défaut de l'UI = celle de mocksql.yml (défaut anglais), sauf choix
+// explicite de l'utilisateur déjà persisté en localStorage (cf. applyBackendLanguage).
+fetchConfig().then((config) => applyBackendLanguage(config?.language));
 
 // Get the root container
 const container = document.getElementById('root');

@@ -3,6 +3,8 @@ import { Box, Button, Chip, CircularProgress, Tooltip, Typography } from '@mui/m
 import PlayArrowIcon from '@mui/icons-material/PlayArrow';
 import RefreshIcon from '@mui/icons-material/Refresh';
 import ScienceIcon from '@mui/icons-material/Science';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 
 interface ArtefactHeaderProps {
   testCount: number;
@@ -15,21 +17,22 @@ interface ArtefactHeaderProps {
 }
 
 // Fraîcheur du profil en langage naturel : « à l'instant », « il y a 3 h », « il y a 5 j ».
-const formatProfiledAt = (iso?: string | null): string | null => {
+const formatProfiledAt = (t: TFunction, iso?: string | null): string | null => {
   if (!iso) return null;
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return null;
   const diffMin = Math.floor((Date.now() - then) / 60000);
-  if (diffMin < 1) return "profilé à l'instant";
-  if (diffMin < 60) return `profilé il y a ${diffMin} min`;
+  if (diffMin < 1) return t('panel.profiled_now');
+  if (diffMin < 60) return t('panel.profiled_min', { count: diffMin });
   const diffH = Math.floor(diffMin / 60);
-  if (diffH < 24) return `profilé il y a ${diffH} h`;
+  if (diffH < 24) return t('panel.profiled_h', { count: diffH });
   const diffD = Math.floor(diffH / 24);
-  return `profilé il y a ${diffD} j`;
+  return t('panel.profiled_d', { count: diffD });
 };
 
 const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rerunning, sqlDirty, onRefreshProfile, refreshing, profiledAt }) => {
-  const freshness = formatProfiledAt(profiledAt);
+  const { t } = useTranslation();
+  const freshness = formatProfiledAt(t, profiledAt);
   return (
     <Box
       sx={{
@@ -45,15 +48,15 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
     >
       <ScienceIcon sx={{ fontSize: 15, color: '#2BB0A8' }} />
       <Typography sx={{ fontWeight: 600, fontSize: 13.5, color: '#0f272a' }}>
-        Suite de tests
+        {t('panel.suite_title')}
       </Typography>
       <Typography sx={{ fontSize: 12, color: '#6b8287' }}>
-        · {testCount} test{testCount !== 1 ? 's' : ''}
+        · {t('model.tests_count', { count: testCount })}
       </Typography>
 
       {sqlDirty && (
         <Chip
-          label="SQL modifié"
+          label={t('panel.sql_modified')}
           size="small"
           variant="outlined"
           sx={{
@@ -69,11 +72,11 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
       <Box sx={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
         {onRefreshProfile && !refreshing && (
           <Typography sx={{ fontSize: 11, color: freshness ? '#9aacb0' : '#a86a00' }}>
-            {freshness ?? 'jamais profilé'}
+            {freshness ?? t('panel.never_profiled')}
           </Typography>
         )}
         {onRefreshProfile && (
-          <Tooltip title="Re-scanne le schéma et le profil des tables sources (pas un rechargement de page ni une relance des tests)" arrow placement="top">
+          <Tooltip title={t('panel.refresh_tooltip')} arrow placement="top">
             <Button
               size="small"
               variant="text"
@@ -96,7 +99,7 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
                 '&:hover': { color: '#1ca8a4', bgcolor: '#ecf7f6' },
               }}
             >
-              {refreshing ? 'Rafraîchissement…' : 'Rafraîchir le schéma'}
+              {refreshing ? t('panel.refreshing') : t('panel.refresh_schema')}
             </Button>
           </Tooltip>
         )}
@@ -121,7 +124,7 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
             '&:hover': { borderColor: '#2BB0A8', color: '#1ca8a4', bgcolor: '#ecf7f6' },
           }}
         >
-          Relancer
+          {t('panel.rerun')}
         </Button>
       </Box>
     </Box>

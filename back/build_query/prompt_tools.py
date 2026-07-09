@@ -10,6 +10,12 @@ from langchain_core.prompts.chat import MessageLike
 
 from build_query.converstion_history import format_history
 from build_query.lessons import format_lessons_block
+from storage.config import (
+    get_language,
+    output_language_directive,
+    output_language_name,
+    tag_labels,
+)
 from utils.msg_types import MsgType
 from utils.prompt_utils import MOCKSQL_PRODUCT_PREAMBLE, escape_unescaped_placeholders
 from utils.saver import get_message_type
@@ -28,7 +34,9 @@ def build_other_prompt(
             MOCKSQL_PRODUCT_PREAMBLE
             + """
 
-Ici, l'utilisateur **pose une question ou réfléchit à voix haute** — il n'a PAS demandé de générer ou modifier un test. Réponds en français, de façon concise et naturelle, en gardant à l'esprit le contexte de test ci-dessus (la requête testée, ses tests et leurs verdicts). Aide-le à comprendre un résultat, une couverture, une redondance, ou à décider quoi tester ensuite. N'inclus pas de code dans la réponse et ne génère pas de données de test.
+Ici, l'utilisateur **pose une question ou réfléchit à voix haute** — il n'a PAS demandé de générer ou modifier un test. """
+            + output_language_directive()
+            + """ Réponds de façon concise et naturelle, en gardant à l'esprit le contexte de test ci-dessus (la requête testée, ses tests et leurs verdicts). Aide-le à comprendre un résultat, une couverture, une redondance, ou à décider quoi tester ensuite. N'inclus pas de code dans la réponse et ne génère pas de données de test.
 
 **Description de la base de données**:
 {descriptions}""",
@@ -743,25 +751,53 @@ FEW_SHOT_EXAMPLE_DATA = {
     "ref_produits": [{"code": "BPGOLD", "libelle": "Carte Gold BP"}],
 }
 
-_FEW_SHOT_EXAMPLE_ANSWER = json.dumps(
-    {
-        "unit_test_build_reasoning": (
+# Champs en langage naturel de la réponse few-shot, par langue de sortie.
+# Le LLM recopie la langue de la réponse AI d'exemple plus sûrement que la
+# directive de langue — ces champs DOIVENT donc être dans la langue de sortie.
+_FEW_SHOT_ANSWER_TEXTS = {
+    "fr": {
+        "reasoning": (
             "La clé de jointure est dérivée (CASE → CONCAT('BP', type_carte)) : "
             "type_carte='GOLD' produit 'BPGOLD' = produits.code, et C001 n'a "
             "aucune ligne au 2024-02-29 pour rester une ouverture."
         ),
         "test_name": "Ouverture carte Gold réseau BP",
-        "unit_test_description": (
+        "description": (
             "Pour la carte C001 (réseau BP, type GOLD) présente sur la photo du "
             "2024-03-31 et absente de celle du 2024-02-29 → elle ressort comme "
             "ouverture avec le libellé Carte Gold BP."
         ),
-        "tags": ["Logique métier"],
-        "data": FEW_SHOT_EXAMPLE_DATA,
     },
-    ensure_ascii=False,
-    indent=2,
-)
+    "en": {
+        "reasoning": (
+            "The join key is derived (CASE → CONCAT('BP', type_carte)): "
+            "type_carte='GOLD' produces 'BPGOLD' = produits.code, and C001 has "
+            "no row on 2024-02-29 so it qualifies as an opening."
+        ),
+        "test_name": "Gold card opening on BP network",
+        "description": (
+            "For card C001 (network BP, type GOLD) present in the 2024-03-31 "
+            "snapshot and absent from the 2024-02-29 one → it comes out as an "
+            "opening with the label Carte Gold BP."
+        ),
+    },
+}
+
+
+def _few_shot_example_answer() -> str:
+    texts = _FEW_SHOT_ANSWER_TEXTS.get(get_language(), _FEW_SHOT_ANSWER_TEXTS["en"])
+    return json.dumps(
+        {
+            "unit_test_build_reasoning": texts["reasoning"],
+            "test_name": texts["test_name"],
+            "unit_test_description": texts["description"],
+            "tags": [tag_labels()[0]],
+            "data": FEW_SHOT_EXAMPLE_DATA,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
 
 _FEW_SHOT_EXAMPLE_HUMAN = f"""<example>
 Exemple travaillé — tables et requête FICTIVES : n'en réutilisez ni les noms ni les valeurs. Seuls <schema> et <query> font autorité pour votre réponse.
@@ -777,10 +813,37 @@ Cette requête concentre les deux pièges classiques :
 ✗ **Photos M / M-1** — ajouter « par complétude » une ligne C001 datée du 2024-02-29 : la carte existe alors en M-1 et le `WHERE m1.num_carte IS NULL` l'élimine → résultat vide. L'ABSENCE en M-1 fait partie du scénario d'ouverture.
 </example>"""
 
-_FEW_SHOT_MESSAGES: list[tuple[str, str]] = [
-    ("human", _FEW_SHOT_EXAMPLE_HUMAN),
-    ("ai", _FEW_SHOT_EXAMPLE_ANSWER),
-]
+
+def _few_shot_messages() -> list[tuple[str, str]]:
+    """Paire few-shot (human, ai) — construite à l'appel pour suivre la langue de sortie."""
+    return [
+        ("human", _FEW_SHOT_EXAMPLE_HUMAN),
+        ("ai", _few_shot_example_answer()),
+    ]
+
+
+# Squelette du format de description + exemples travaillés, par langue de sortie.
+# Ce sont les ancres que le LLM recopie dans sa sortie : elles doivent être dans
+# la langue de sortie même si le reste des instructions reste en français.
+_DESC_FORMAT = {
+    "fr": {
+        "skeleton": "Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] [condition/situation] → [résultat attendu]",
+        "skeleton_short": "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]",
+        "example": "Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse",
+        "name_example": "Ouverture nouveau client janvier",
+    },
+    "en": {
+        "skeleton": "For [subject with concrete values: IDs, dates, amounts, statuses] [condition/situation] → [expected result]",
+        "skeleton_short": "For [subject with concrete values] [condition] → [expected result]",
+        "example": "For cardholder COLLAB789 (bank 001) whose card starts on 2026-01-15 → it is counted as an OPENING for the analysis month",
+        "name_example": "New customer opening January",
+    },
+}
+
+
+def description_format() -> dict:
+    """Squelette/exemples de `unit_test_description` dans la langue de sortie configurée."""
+    return _DESC_FORMAT.get(get_language(), _DESC_FORMAT["en"])
 
 
 def _focus_note(focus_path: str) -> str:
@@ -932,7 +995,9 @@ def generate_data_prompt(
     focus_note = _focus_note(focus_path)
 
     system_message_content = (
-        """
+        output_language_directive()
+        + """
+
 Vous êtes un data QA, expert en test de requêtes SQL et en génération de données de test JSON.
 À partir du schéma des tables sources et de la requête SQL fournis, générez UN seul test unitaire au format JSON.
 
@@ -977,11 +1042,12 @@ Privilégier des scénarios où **la logique métier** — les filtres, jointure
 **Format de sortie obligatoire** : un objet JSON unique, champs dans l'ordre du schéma (reasoning d'abord).
 """
         + reasoning_bullet
-        + """
-- `test_name`: 3-6 mots, lecteur métier, sans jargon SQL ni noms techniques (ex. "Ouverture nouveau client janvier"). Pas de noms de CTE/colonnes.
-- `unit_test_description`: Description **métier contextualisée** au format *"Pour [sujet avec valeurs concrètes : IDs, dates, montants, statuts] [condition/situation] → [résultat attendu]"*. Nommer la branche choisie quand le SQL a des alternatives. Exemple : "Pour le porteur COLLAB789 (banque 001) dont la carte démarre le 2026-01-15 → il est compté comme OUVERTURE sur le mois d'analyse". Interdits : noms de colonnes/CTE, syntaxe SQL, formulations génériques type "Vérifie que le calcul est correct", et **toute valeur calculée** (z-score, moyenne, total agrégé) que vous ne pouvez pas connaître sans exécuter la requête.
-- `tags`: Labels décrivant les types de cas couverts. Choisir parmi : `Logique métier`, `Null checks`, `Cas limites`, `Intégration`, `Valeurs dupliquées`, `Performance`.
-- `data`: Données cohérentes, correctes pour la requête.
+        + f"""
+- `test_name`: 3-6 mots, lecteur métier, sans jargon SQL ni noms techniques (ex. "{description_format()["name_example"]}"). Pas de noms de CTE/colonnes.
+- `unit_test_description`: Description **métier contextualisée** au format *"{description_format()["skeleton"]}"*. Nommer la branche choisie quand le SQL a des alternatives. Exemple : "{description_format()["example"]}". Interdits : noms de colonnes/CTE, syntaxe SQL, formulations génériques type "Vérifie que le calcul est correct", et **toute valeur calculée** (z-score, moyenne, total agrégé) que vous ne pouvez pas connaître sans exécuter la requête.
+"""
+        + f"- `tags`: Labels décrivant les types de cas couverts. Choisir parmi : {', '.join(f'`{t}`' for t in tag_labels())}.\n"
+        + """- `data`: Données cohérentes, correctes pour la requête.
 
 Répondez uniquement avec l'objet JSON brut, sans texte additionnel et **sans clôture markdown** (pas de ```json ni de backticks autour de l'objet)."""
     )
@@ -1071,7 +1137,7 @@ Génère **un seul** test unitaire en appliquant les consignes du message systè
     # Ordre : system → référence → exemple travaillé (P2a, statique) →
     # few-shot history → eval retry → ask.
     prompt_messages: list = [system_msg, reference_human_msg]
-    prompt_messages.extend(_FEW_SHOT_MESSAGES)
+    prompt_messages.extend(_few_shot_messages())
     prompt_messages.extend(history_with_results)
     if eval_history:
         prompt_messages.extend(eval_history)
@@ -1114,6 +1180,7 @@ def update_data_prompt(
         else ""
     )
     system_message_content = (
+        output_language_directive() + "\n\n"
         "Vous êtes un data QA, testeur de requêtes SQL et expert en génération et modification de données de test JSON.\n"
         "Votre objectif est de produire un test complet et correct selon les instructions données.\n\n"
         "**Règle de non-destruction des données d'environnement :**\n"
@@ -1167,8 +1234,8 @@ Modifie les données JSON selon l'instruction ci-dessous :
 
 Génère un unique test unitaire modifié selon l'instruction ci-dessus.
 Respecte l'ordre des champs : unit_test_description, unit_test_build_reasoning, tags, data.
-- `unit_test_description` : description métier au format "Pour [sujet avec valeurs concrètes] [condition] → [résultat attendu]" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
-- `tags` : labels pertinents parmi Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance
+- `unit_test_description` : description métier au format "{description_format()["skeleton_short"]}" — mentionner des valeurs concrètes (IDs, dates, statuts), pas de formulation générique
+- `tags` : labels pertinents parmi {", ".join(tag_labels())}
 - Ne pas tester les expressions constantes, les agrégats purs (SUM/AVG/COUNT), ni le comportement interne des fonctions SQL
 
 {format_instructions}
@@ -1224,8 +1291,8 @@ def query_change_data_prompt(
         "The query has been changed. Generate a single unit test adapted to the new query.\n\n"
         f"{format_instructions}\n\n"
         "Field order: unit_test_description, unit_test_build_reasoning, tags, data.\n"
-        "- unit_test_description: business-contextualized description in the format 'Pour [subject with concrete values] [condition/situation] → [expected business result]'. Mention concrete values (IDs, dates, statuses). Avoid generic formulations like 'Vérifie que le calcul est correct'.\n"
-        "- tags: relevant labels among Logique métier, Null checks, Cas limites, Intégration, Valeurs dupliquées, Performance.\n"
+        f"- unit_test_description: business-contextualized description in the format '{description_format()['skeleton_short']}'. Mention concrete values (IDs, dates, statuses). Avoid generic formulations like 'Checks the computation is correct'.\n"
+        f"- tags: relevant labels among {', '.join(tag_labels())}.\n"
         "- Do NOT test constant expressions, pure aggregates (SUM/AVG/COUNT), or internal SQL function behavior — these are guaranteed correct by the warehouse engine.\n"
         "- If the SQL has OR conditions or multiple CASE branches, pick ONE branch per test and name it explicitly in the description.\n\n"
         "old query :\n"
@@ -1474,6 +1541,7 @@ def concatenate_successive_messages(messages: List[MessageLike]) -> List[BaseMes
 
 
 def explain_query_prompt(script1, script2):
+    lang = output_language_name()
     if script1 and script2:
         diff = difflib.unified_diff(
             script1.splitlines(),
@@ -1483,14 +1551,14 @@ def explain_query_prompt(script1, script2):
         diff_text = "\n".join(diff)
         if diff_text.strip() != "":
             query_text = (
-                f"Please explain in French what exactly has changed in the initial query "
+                f"Please explain in {lang} what exactly has changed in the initial query "
                 f"without 100 words.\nDo not translate table names.\n{diff_text}"
             )
         else:
-            query_text = f"Please explain in French the query without 100 words.\nDo not translate table names.\n{script1}"
+            query_text = f"Please explain in {lang} the query without 100 words.\nDo not translate table names.\n{script1}"
     else:
         script = script1 or script2
-        query_text = f"Please explain in French the query without 100 words.\nDo not translate table names.\n{script}"
+        query_text = f"Please explain in {lang} the query without 100 words.\nDo not translate table names.\n{script}"
 
     prompt_messages = [
         (

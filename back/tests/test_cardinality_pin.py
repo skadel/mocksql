@@ -45,7 +45,8 @@ _LONG = [
 
 def test_cardinality_pin_shape():
     pin = _cardinality_pin(3)
-    assert pin["description"] == "Le résultat contient exactement 3 ligne(s)."
+    # Langue par défaut du produit : anglais (cf. get_language / language: dans mocksql.yml).
+    assert pin["description"] == "The result contains exactly 3 row(s)."
     assert pin["expected_condition"] == "COUNT(*) = 3"
     assert pin["quantifier"] == "aggregate"
     assert pin["sql"] == _assertion_sql_from_condition(
@@ -234,7 +235,7 @@ async def test_generate_assertions_appends_pin_and_dedupes(monkeypatch):
     # Le doublon LLM est retiré, le pin mécanique est appendé en dernier.
     assert conditions.count("COUNT(*) = 3") == 1
     pin = results[-1]
-    assert pin["description"] == "Le résultat contient exactement 3 ligne(s)."
+    assert pin["description"] == "The result contains exactly 3 row(s)."
     assert pin["quantifier"] == "aggregate"
     assert pin["passed"] is True
     # L'assertion métier du LLM est conservée et passe.

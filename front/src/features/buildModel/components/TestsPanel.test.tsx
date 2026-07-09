@@ -51,20 +51,22 @@ const renderPanel = (buildModel: Record<string, any>) =>
     </Provider>
   );
 
+// Libellés UI en anglais (langue par défaut du produit) : badge « Good »,
+// états « Evaluating… » / « Evaluation in progress… ».
 describe("TestsPanel — badge de verdict pendant l'évaluation", () => {
-  it("masque le badge « Bon » tant que le verdict LLM n'est pas rendu (ligne compacte)", () => {
+  it("masque le badge « Good » tant que le verdict LLM n'est pas rendu (ligne compacte)", () => {
     renderPanel({ testResults: [completedTest()], loading: true });
     const row = screen.getByTestId('test-card-1');
-    expect(within(row).queryByText('Bon')).not.toBeInTheDocument();
-    expect(within(row).getByText(/Évaluation/)).toBeInTheDocument();
+    expect(within(row).queryByText('Good')).not.toBeInTheDocument();
+    expect(within(row).getByText(/Evaluating/)).toBeInTheDocument();
   });
 
-  it("masque le badge « Bon » tant que le verdict LLM n'est pas rendu (carte dépliée)", () => {
+  it("masque le badge « Good » tant que le verdict LLM n'est pas rendu (carte dépliée)", () => {
     renderPanel({ testResults: [completedTest()], loading: true });
     fireEvent.click(screen.getByTestId('test-card-1'));
     const card = screen.getByTestId('test-card-1');
-    expect(within(card).queryByText('Bon')).not.toBeInTheDocument();
-    expect(within(card).getByText('Évaluation en cours…')).toBeInTheDocument();
+    expect(within(card).queryByText('Good')).not.toBeInTheDocument();
+    expect(within(card).getByText('Evaluation in progress…')).toBeInTheDocument();
   });
 
   it('affiche le badge une fois le verdict LLM arrivé, même si le run continue', () => {
@@ -73,15 +75,15 @@ describe("TestsPanel — badge de verdict pendant l'évaluation", () => {
       loading: true,
     });
     const row = screen.getByTestId('test-card-1');
-    expect(within(row).getByText('Bon')).toBeInTheDocument();
-    expect(within(row).queryByText(/Évaluation/)).not.toBeInTheDocument();
+    expect(within(row).getByText('Good')).toBeInTheDocument();
+    expect(within(row).queryByText(/Evaluating/)).not.toBeInTheDocument();
   });
 
   it("affiche le badge basé sur l'exécution hors run (modèle rechargé sans évaluation)", () => {
     renderPanel({ testResults: [completedTest()], loading: false });
     const row = screen.getByTestId('test-card-1');
-    expect(within(row).getByText('Bon')).toBeInTheDocument();
-    expect(within(row).queryByText(/Évaluation/)).not.toBeInTheDocument();
+    expect(within(row).getByText('Good')).toBeInTheDocument();
+    expect(within(row).queryByText(/Evaluating/)).not.toBeInTheDocument();
   });
 
   it("ne masque pas le badge d'un autre test quand le run cible un test précis", () => {
@@ -91,8 +93,8 @@ describe("TestsPanel — badge de verdict pendant l'évaluation", () => {
       loadingTestIndex: 1,
     });
     // Test 0 : pas concerné par le run → badge exec affiché.
-    expect(within(screen.getByTestId('test-card-1')).getByText('Bon')).toBeInTheDocument();
+    expect(within(screen.getByTestId('test-card-1')).getByText('Good')).toBeInTheDocument();
     // Test 1 : évaluation en cours → badge masqué.
-    expect(within(screen.getByTestId('test-card-2')).queryByText('Bon')).not.toBeInTheDocument();
+    expect(within(screen.getByTestId('test-card-2')).queryByText('Good')).not.toBeInTheDocument();
   });
 });

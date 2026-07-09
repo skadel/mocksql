@@ -226,6 +226,89 @@ def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 
 
+# --- Langue de sortie -------------------------------------------------------
+# Pilote À LA FOIS la langue des textes générés par le LLM (noms de tests,
+# descriptions, verdicts, réponses de chat, suggestions) ET le défaut de l'UI
+# (exposé au front via l'endpoint /api/config). Défaut anglais : MockSQL vise un
+# public international ; le français reste disponible via `language: fr` dans
+# mocksql.yml. On mappe le code langue vers son nom anglais parce que c'est ce
+# nom qu'on injecte dans les prompts LLM (« write in French / English »).
+_LANGUAGE_NAMES = {
+    "en": "English",
+    "fr": "French",
+}
+_DEFAULT_LANGUAGE = "en"
+
+
+def get_language() -> str:
+    """Code langue de sortie ('en' par défaut).
+
+    Lu depuis `language:` dans mocksql.yml, avec repli sur l'env
+    ``MOCKSQL_LANGUAGE`` (tests / CI), puis l'anglais. Toute valeur inconnue
+    (langue non supportée, faute de frappe) retombe silencieusement sur
+    l'anglais — jamais d'erreur au démarrage pour un réglage cosmétique. Tolère
+    les formes régionales (`en-US`, `fr_FR`) en ne gardant que le préfixe.
+    """
+    raw = (
+        load_config().get("language")
+        or os.getenv("MOCKSQL_LANGUAGE")
+        or _DEFAULT_LANGUAGE
+    )
+    code = str(raw).strip().lower().replace("_", "-").split("-")[0]
+    return code if code in _LANGUAGE_NAMES else _DEFAULT_LANGUAGE
+
+
+def output_language_name() -> str:
+    """Nom anglais de la langue de sortie configurée — à injecter dans les prompts LLM."""
+    return _LANGUAGE_NAMES[get_language()]
+
+
+# Étiquettes de tags proposées aux LLM (prompts de génération / modification).
+# Les tags sont des DONNÉES persistées sur les tests : la liste localisée ne
+# s'applique qu'aux nouvelles générations, les tests existants gardent la leur.
+_TAG_LABELS = {
+    "fr": [
+        "Logique métier",
+        "Null checks",
+        "Cas limites",
+        "Intégration",
+        "Valeurs dupliquées",
+        "Performance",
+    ],
+    "en": [
+        "Business logic",
+        "Null checks",
+        "Edge cases",
+        "Integration",
+        "Duplicate values",
+        "Performance",
+    ],
+}
+
+
+def tag_labels() -> list[str]:
+    """Étiquettes de tags dans la langue de sortie, à énumérer dans les prompts."""
+    return _TAG_LABELS[get_language()]
+
+
+def output_language_directive() -> str:
+    """Directive impérative de langue de sortie, à préfixer aux prompts LLM.
+
+    Les prompts MockSQL et leurs exemples few-shot sont rédigés en français :
+    cette directive prime et précise explicitement que ces exemples ne fixent que
+    le FORMAT, pas la langue — sinon le modèle recopie la langue des exemples.
+    """
+    name = output_language_name()
+    return (
+        f"IMPORTANT — Output language: write EVERY natural-language field you "
+        f"produce (test names, descriptions, assertion wording, verdict "
+        f"explanations, chat replies, suggestions) in {name}. Instructions and "
+        f"worked examples in this prompt may be written in another language: "
+        f"reproduce their FORMAT and intent, never their language. Never translate "
+        f"SQL identifiers (table and column names)."
+    )
+
+
 def get_dbt_project():
     """Retourne un `DbtProject` si un bloc `dbt:` est configuré dans mocksql.yml, sinon None.
 

@@ -38,6 +38,20 @@ export const fetchSqlFiles = async (): Promise<SqlFile[]> => {
   return response.json();
 };
 
+export interface AppConfig {
+  language: string;
+}
+
+export const fetchConfig = async (): Promise<AppConfig | null> => {
+  try {
+    const response = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/config`);
+    if (!response.ok) return null;
+    return response.json();
+  } catch {
+    return null;
+  }
+};
+
 export const fetchModelSql = async (modelName: string): Promise<string | null> => {
   const response = await fetch(
     `${import.meta.env.VITE_BACKEND_URL}/api/models/sql?name=${encodeURIComponent(modelName)}`,

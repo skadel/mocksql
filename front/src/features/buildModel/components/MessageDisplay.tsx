@@ -284,7 +284,7 @@ const MessageDisplay: React.FC<MessageDisplayProps> = ({ sendMessage, renderMess
                   sx={{ width: 22, height: 22 }}
                 />
                 <Typography variant="caption" sx={{ fontWeight: 700, color: '#555' }}>
-                  {isUser ? 'Vous' : 'MockSQL'}
+                  {isUser ? t('chatcol.you') : 'MockSQL'}
                 </Typography>
                 {isRestored && (
                   <Chip

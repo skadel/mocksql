@@ -1,7 +1,7 @@
 """Câblage du prompt de `generate_suggestions` :
 
 - #1 : la directive de raisonnement s'adapte au thinking natif (conclusion brève dans
-  `analyse_des_manques` si actif ; chain-of-thought in-schema sinon). Plus aucune
+  `coverage_gap_analysis` si actif ; chain-of-thought in-schema sinon). Plus aucune
   demande de CoT *dans le JSON* quand le thinking natif porte déjà le raisonnement.
 - #6 : la consigne « contextualisée » ne prétend s'appuyer sur les résultats d'exécution
   que si au moins un test a réellement retourné des lignes ; sinon elle recentre sur la
@@ -28,7 +28,7 @@ def _install_capture(monkeypatch, captured: dict):
     def _capture(prompt_value):
         captured["system"] = prompt_value.to_messages()[0].content
         captured["user"] = prompt_value.to_messages()[1].content
-        return SuggestionsOutput(analyse_des_manques="ok", suggestions=[])
+        return SuggestionsOutput(coverage_gap_analysis="ok", suggestions=[])
 
     class _FakeLLM:
         def with_structured_output(self, _model):
@@ -103,7 +103,7 @@ async def test_native_thinking_directive_keeps_cot_out_of_json(monkeypatch):
 async def test_non_native_directive_requests_in_schema_cot(monkeypatch):
     captured = await _run(monkeypatch, native=False, with_result=True)
     system = captured["system"]
-    assert "chain-of-thought directement dans `analyse_des_manques`" in system
+    assert "chain-of-thought directement dans `coverage_gap_analysis`" in system
 
 
 @pytest.mark.asyncio

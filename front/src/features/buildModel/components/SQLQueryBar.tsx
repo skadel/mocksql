@@ -17,6 +17,7 @@ import {
 } from '@mui/material';
 import { TealIconButton } from '../../../style/AppButtons';
 import React, { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import SqlEditor from '../../../shared/SqlEditor';
 import { SqlHistoryEntry } from '../../../utils/types';
 
@@ -40,6 +41,7 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
   onHistorySelect,
   historyRestoreTrigger,
 }) => {
+  const { t } = useTranslation();
   const [expanded, setExpanded] = useState(true);
   const [viewMode, setViewMode] = useState<'raw' | 'optimized'>('raw');
   const [historyAnchor, setHistoryAnchor] = useState<HTMLElement | null>(null);
@@ -186,7 +188,7 @@ const SQLQueryBar: React.FC<SQLQueryBarProps> = ({
                   '&:hover': { backgroundColor: isOptimizedView ? '#159e9a' : '#e8f7f6' },
                 }}
               >
-                Optimisé
+                {t('panel.optimized')}
               </Button>
             </Box>
           )}

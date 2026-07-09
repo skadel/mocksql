@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Avatar, Box, Card, CardContent, Collapse, Typography } from '@mui/material';
 import ChevronRightIcon from '@mui/icons-material/ChevronRight';
+import { useTranslation } from 'react-i18next';
 import { Message, RequestGroup } from '../../../utils/types';
 import { isStepMessage } from '../../../selectors/getRenderMessages';
 
@@ -18,6 +19,7 @@ interface RequestGroupBubbleProps {
  * (Les suggestions ne sont plus dans le fil : panneau dédié, cf. TestsPanel.)
  */
 const RequestGroupBubble: React.FC<RequestGroupBubbleProps> = ({ group, renderBody }) => {
+  const { t } = useTranslation();
   const [stepsOpen, setStepsOpen] = useState(false);
 
   const steps = group.items.filter(isStepMessage);
@@ -56,7 +58,7 @@ const RequestGroupBubble: React.FC<RequestGroupBubbleProps> = ({ group, renderBo
               >
                 <ChevronRightIcon sx={{ fontSize: 16, color: '#8da0a4', transform: stepsOpen ? 'rotate(90deg)' : 'none', transition: 'transform 0.17s' }} />
                 <Typography component="span" sx={{ fontSize: 12.5, fontWeight: 600, color: 'inherit' }}>
-                  Étapes
+                  {t('chatcol.steps')}
                 </Typography>
                 <Box sx={{ flex: 1 }} />
                 <Box
