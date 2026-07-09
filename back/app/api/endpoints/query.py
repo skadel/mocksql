@@ -469,6 +469,7 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
     from build_query.schema_fetcher import (
         fetch_tables_schema,
         fetch_tables_schema_snowflake,
+        fetch_tables_schema_trino,
         validate_bq_ref,
     )
     from utils.schema_utils import generate_tables_and_columns_from_project_schema
@@ -477,6 +478,10 @@ async def import_missing_tables_route(body: ImportMissingTablesRequest):
         schema_data, failed = await fetch_tables_schema_snowflake(body.tables_to_import)
         partitions: dict = {}
         source_label = "Snowflake"
+    elif body.dialect == "trino":
+        schema_data, failed = await fetch_tables_schema_trino(body.tables_to_import)
+        partitions = {}
+        source_label = "Trino"
     else:
         unqualified = [t for t in body.tables_to_import if not validate_bq_ref(t)]
         if unqualified:

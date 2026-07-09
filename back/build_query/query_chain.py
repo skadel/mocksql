@@ -36,7 +36,7 @@ from storage.config import get_llm_model
 from storage.context_loader import load_model_context
 from storage.test_repository import get_test, update_test
 from utils.msg_types import MsgType
-from utils.saver import history_saver, get_history_from_state
+from utils.saver import history_saver, get_history_from_state, get_message_type
 
 logger = logging.getLogger(__name__)
 
@@ -129,11 +129,29 @@ async def _bad_data_to_agent(state: QueryState):
         )
 
         failing_cte, trace = _get_failing_cte_from_results(state.get("messages", []))
-        digest = (
-            f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
-            if failing_cte
-            else "verdict toujours Insuffisant (bad_data)"
+        # Désync prémisse↔entrée : pas de CTE en échec (le résultat n'est pas vide, ce
+        # sont les valeurs injectées qui ≠ prémisse) → digest dédié plutôt que le fallback
+        # générique qui laisserait croire à un blocage structurel inexistant.
+        latest_eval = next(
+            (
+                m
+                for m in reversed(state.get("messages", []))
+                if get_message_type(m) == MsgType.EVALUATION
+            ),
+            None,
         )
+        is_premise_desync = (
+            (latest_eval.additional_kwargs.get("diagnostic") or {}).get("kind")
+            == "premise_desync"
+            if latest_eval
+            else False
+        )
+        if failing_cte:
+            digest = f"toujours 0 ligne — étape bloquante inchangée ({failing_cte})"
+        elif is_premise_desync:
+            digest = "données d'entrée toujours ≠ prémisse utilisateur"
+        else:
+            digest = "verdict toujours Insuffisant (bad_data)"
         outcome: dict = {"blocking_cte": failing_cte, "digest": digest}
         # Trace structuré complet (profil row_count de TOUTES les CTE + valeurs des
         # pivots + mismatch jointure) : conservé par tentative pour que l'agent lise
@@ -142,6 +160,54 @@ async def _bad_data_to_agent(state: QueryState):
             outcome["cte_trace"] = _compact_cte_trace(failing_cte, trace)
         attempts[-1] = {**attempts[-1], "outcome": outcome}
         update["correction_attempts"] = attempts
+    return update
+
+
+async def _focus_fallback(state: QueryState):
+    """Dernier recours d'un test FOCALISÉ non convergent : régénération en ``all``.
+
+    Un test focalisé sur une branche (``target_path != "all"``) peut être
+    structurellement infaisable — ex. branches d'un UNION qui se compensent sur une
+    clé partagée (sf_bq012 : la même ligne TRACES alimente inflow + et outflow −,
+    net = 0 ≠ scénario). On ne PRÉDIT pas ces cas statiquement (toute heuristique
+    SQL sur-apprend le corpus, cf. revert de « agrégat en aval ») : on constate la
+    non-convergence à l'exécution et on dégrade vers le chemin sûr — régénérer le
+    test sur le script complet, toutes tables sources peuplées.
+
+    Pose ``target_path="all"`` + ``focus_fallback`` (trigger one-shot lu par
+    ``_should_regenerate``) + ``focus_fallback_used`` (garde anti-boucle lue par
+    ``route_evaluator``), et restaure 1 retry pour le test régénéré. Le
+    ``test_uid`` du state (s'il est posé) fait cibler le même test par
+    ``_resolve_target_key`` ; l'``evaluation_feedback`` est purgé pour ne pas
+    fuiter dans le prompt du régénérateur."""
+    logger.diag(
+        "[focus_fallback] focus %r non convergent (%s) → régénération target_path=all",
+        state.get("target_path"),
+        state.get("evaluation_feedback"),
+    )
+    update: dict = {
+        "target_path": "all",
+        "focus_fallback": True,
+        "focus_fallback_used": True,
+        "gen_retries": 1,
+        "evaluation_feedback": None,
+    }
+    # Cible du regen = le test évalué : son identité n'existe que dans les kwargs du
+    # dernier message EVALUATION (l'évaluateur ne pose pas test_index dans le state).
+    # Sans elle, _resolve_target_key créerait un test SUPPLÉMENTAIRE au lieu de
+    # remplacer le focalisé non convergent (doublon dans la suite côté UI).
+    latest_eval = next(
+        (
+            m
+            for m in reversed(state.get("messages", []))
+            if get_message_type(m) == MsgType.EVALUATION
+        ),
+        None,
+    )
+    if latest_eval is not None:
+        eval_test_index = latest_eval.additional_kwargs.get("test_index")
+        if eval_test_index is not None:
+            update["test_index"] = eval_test_index
     return update
 
 
@@ -398,6 +464,15 @@ def route_agent_output(state: QueryState):
     if tool_call == "request_reevaluation":
         return "test_evaluator"
     if tool_call == "ask_clarification":
+        # Boucle multi-tests (suggestion machine, cf. generate_single_suggestion) : la
+        # question n'a pas de destinataire — la laisser passer tuerait le lot (N-1 tests
+        # + question orpheline). Backstop de l'interception côté agent : on retombe sur
+        # le generator, l'input porte déjà le texte de la suggestion.
+        if state.get("suggestion_intent") and state.get("auto_tests_built"):
+            logger.diag(
+                "[route_agent_output] ask_clarification en boucle batch → generator (backstop)"
+            )
+            return "generator"
         logger.diag("[route_agent_output] → history_saver (ask_clarification)")
         return "history_saver"
     # Auto-correction loop (bad_data) : si l'agent n'a émis aucun outil actionnable,
@@ -456,11 +531,26 @@ def route_evaluator(state: QueryState):
     if feedback == "too_many_rows":
         logger.diag("[route_evaluator] → history_saver (too_many_rows)")
         return "history_saver"
+    # Fallback focus → all : un test FOCALISÉ (target_path != "all") en sortie
+    # non-convergente EXPLICITE est régénéré UNE fois sur le script complet — le
+    # scénario mono-branche est souvent l'artefact (compensation inter-branches,
+    # sf_bq012). Jamais sur verdict absent (un focus que rien ne condamne, ex.
+    # sf_bq091, ne doit pas être régénéré) ; jamais deux fois (focus_fallback_used).
+    _tp = state.get("target_path")
+    focus_fallback_ok = bool(
+        _tp and _tp != "all" and not state.get("focus_fallback_used")
+    )
     # Désync description↔réel (données valides) : pas de boucle — l'état est sauvé et un
     # VALIDATION_PROMPT a été émis ; on attend la décision de l'utilisateur (Valider / Corriger).
     # needs_validation = écart de cardinalité ; bad_description = écart de valeur de SORTIE ;
     # bad_input_description = écart description ↔ valeurs d'ENTRÉE injectées (TICKET-2).
+    # Sur un test focalisé, la désync est d'abord présumée artefact du focus → fallback all.
     if feedback in ("needs_validation", "bad_description", "bad_input_description"):
+        if focus_fallback_ok:
+            logger.diag(
+                "[route_evaluator] → focus_fallback (%s, focus=%s)", feedback, _tp
+            )
+            return "focus_fallback"
         logger.diag("[route_evaluator] → history_saver (%s)", feedback)
         return "history_saver"
     if feedback == "bad_data":
@@ -470,6 +560,11 @@ def route_evaluator(state: QueryState):
                 retries,
             )
             return "bad_data_to_agent"
+        if focus_fallback_ok:
+            logger.diag(
+                "[route_evaluator] → focus_fallback (bad_data épuisé, focus=%s)", _tp
+            )
+            return "focus_fallback"
         logger.diag("[route_evaluator] → bad_data_exhausted (bad_data retries épuisés)")
         return "bad_data_exhausted"
     if feedback == "bad_assertions":
@@ -482,8 +577,8 @@ def route_evaluator(state: QueryState):
     # 1ʳᵉ génération : boucle multi-tests puis suggestions de couverture.
     # L'utilisateur a demandé N tests au total (tests_target) ; le nominal compte pour 1,
     # on auto-construit N-1 tests supplémentaires depuis des suggestions uniques. Tant qu'il
-    # reste des tests à construire → generate_single_suggestion (qui enchaîne sur le
-    # conversational_agent). Sinon, dernière étape : suggestions_generator (panneau, pas de
+    # reste des tests à construire → generate_single_suggestion (qui enchaîne directement
+    # sur le generator). Sinon, dernière étape : suggestions_generator (panneau, pas de
     # boucle). Ce point n'est atteint qu'une fois le test courant RÉGLÉ (les branches
     # bad_data / needs_validation / etc. ci-dessus sont prioritaires).
     # Boucle active à la 1ʳᵉ génération (pas de tests préexistants) OU lors de la reprise d'un
@@ -571,6 +666,7 @@ def build_query_graph():
     add_timed_node("test_evaluator", evaluate_tests)
     add_timed_node("bad_data_to_agent", _bad_data_to_agent)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
+    add_timed_node("focus_fallback", _focus_fallback)
     add_timed_node("suggestions_generator", generate_suggestions)
     add_timed_node("generate_single_suggestion", generate_single_suggestion)
     add_timed_node("final_response", final_response)
@@ -662,12 +758,18 @@ def build_query_graph():
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("bad_data_to_agent", "conversational_agent")
     builder.add_edge("bad_data_exhausted", "history_saver")
+    # Fallback focus → all : régénération complète du test sur le script entier.
+    builder.add_edge("focus_fallback", "generator")
     builder.add_edge("assertion_corrector", "test_evaluator")
     builder.add_conditional_edges("suggestions_generator", route_after_suggestions)
-    # Boucle multi-tests : la suggestion unique enchaîne sur le conversational_agent, qui
-    # construit le test (generate_test_data → generator → executor → test_evaluator), puis
-    # route_evaluator décide de reboucler ou de clore via suggestions_generator.
-    builder.add_edge("generate_single_suggestion", "conversational_agent")
+    # Boucle multi-tests : la suggestion unique enchaîne DIRECTEMENT sur le generator
+    # (executor → test_evaluator ensuite), puis route_evaluator décide de reboucler ou de
+    # clore via suggestions_generator. Historique : passait par le conversational_agent
+    # (chemin clic-suggestion) — retiré car la suggestion est machine : rien à clarifier
+    # (incident ask_clarification terminal → lot inachevé), dédup déjà faite dans le
+    # prompt du suggesteur, focus déjà posé dans le state (target_path). L'agent reste
+    # dans la boucle de CORRECTION bad_data d'un test du lot (bad_data_to_agent).
+    builder.add_edge("generate_single_suggestion", "generator")
     builder.add_edge("final_response", "history_saver")
     builder.add_edge("other", "history_saver")
     builder.add_edge("history_saver", END)

@@ -1,0 +1,8 @@
+version: '2'
+dialect: trino
+models_path: ./models
+duckdb_path: .mocksql/mocksql.duckdb
+llm:
+  provider: vertexai
+  streaming: false
+schema_cache: .mocksql/schema_cache.json

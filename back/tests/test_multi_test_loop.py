@@ -2,9 +2,11 @@
 
 À la 1ʳᵉ génération, l'utilisateur peut demander N tests au total (``tests_target``).
 Le nominal compte pour 1 ; on auto-construit ``N-1`` tests supplémentaires en générant
-UNE suggestion à la fois (``generate_single_suggestion``) puis en l'enchaînant sur le
-``conversational_agent`` (chemin clic-suggestion). ``route_evaluator`` décide de reboucler
-ou de clore via le ``suggestions_generator`` (qui remplit le panneau, sans boucler).
+UNE suggestion à la fois (``generate_single_suggestion``) qui enchaîne DIRECTEMENT sur
+le ``generator`` (plus de passage par le ``conversational_agent`` : la suggestion est
+machine, il n'y a rien à clarifier ni à dédupliquer — cf. incident ask_clarification).
+``route_evaluator`` décide de reboucler ou de clore via le ``suggestions_generator``
+(qui remplit le panneau, sans boucler).
 """
 
 import json
@@ -15,6 +17,7 @@ from langchain_core.runnables import RunnableLambda
 from build_query.query_chain import route_evaluator
 from build_query import suggestions_node
 from build_query.suggestions_node import generate_single_suggestion
+from utils.msg_types import MsgType
 
 
 # --- route_evaluator : décision de boucle vs clôture --------------------------
@@ -128,6 +131,89 @@ async def test_single_suggestion_fallback_on_llm_error(monkeypatch):
     assert out["suggestion_intent"] is True
     assert out["auto_tests_built"] == 1
     assert "cas limite" in out["input"]
+
+
+# --- Rebranch : la boucle batch va DIRECTEMENT au generator (plus d'agent) --------
+#
+# La suggestion est générée par MockSQL lui-même : l'agent conversationnel n'apportait
+# que des pannes (ask_clarification sans destinataire) et un appel LLM de tampon.
+# generate_single_suggestion doit donc être autosuffisant : nettoyer le ciblage périmé
+# (test_uid/test_index laissés par une correction du test précédent → sinon le generator
+# ÉCRASERAIT ce test au lieu d'en créer un nouveau) et émettre lui-même la carte
+# scénario (GENERATE_TEST_SCENARIO) sous laquelle le generator chaîne ses messages.
+
+
+def test_graph_wires_single_suggestion_to_generator():
+    from build_query.query_chain import build_query_graph
+
+    # `get_graph()` (API de dessin) ne matérialise pas les edges en présence de
+    # conditional edges sans path_map → on inspecte le StateGraph source.
+    edges = build_query_graph().builder.edges
+    assert ("generate_single_suggestion", "generator") in edges
+    assert ("generate_single_suggestion", "conversational_agent") not in edges
+
+
+@pytest.mark.asyncio
+async def test_single_suggestion_clears_stale_targeting_and_emits_card(monkeypatch):
+    """Tour LLM contextuel : ciblage nettoyé + carte scénario émise."""
+
+    async def _no_tests(_session, _state):
+        return []
+
+    monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _no_tests)
+    _patch_llm(monkeypatch, text="Vérifie le cas NULL")
+
+    state = {
+        "session": "s1",
+        "query": "SELECT 1",
+        "dialect": "bigquery",
+        "messages": [],
+        "auto_tests_built": 1,
+        # Ciblage périmé d'une correction du test précédent (focus_fallback,
+        # update_test_data…) : sans nettoyage, le generator écraserait ce test.
+        "test_uid": "stale-uid",
+        "test_index": "2",
+        "user_message_id": "um1",
+        "request_id": "req1",
+    }
+    out = await generate_single_suggestion(state)
+
+    assert out["test_uid"] is None
+    assert out["test_index"] is None
+    msgs = out["messages"]
+    assert len(msgs) == 1
+    assert msgs[0].additional_kwargs["type"] == MsgType.GENERATE_TEST_SCENARIO
+    assert msgs[0].additional_kwargs["action"] == "add"
+    assert msgs[0].additional_kwargs["parent"] == "um1"
+    assert msgs[0].content == out["input"]
+    assert out["agent_message_id"] == msgs[0].id
+
+
+@pytest.mark.asyncio
+async def test_branch_round_also_clears_targeting_and_emits_card(monkeypatch):
+    """Tour déterministe (branche UNION ALL) : mêmes invariants, sans LLM."""
+    test_cases = [{"test_index": "1", "target_path": "ouverture"}]
+
+    async def _tests(_session, _state):
+        return test_cases
+
+    monkeypatch.setattr(suggestions_node, "retrieve_existing_tests", _tests)
+    _no_llm_guard(monkeypatch)
+
+    state = _paths_state(test_cases, "ouverture")
+    state["test_uid"] = "stale-uid"
+    out = await generate_single_suggestion(state)
+
+    assert out["target_path"] == "fermeture"
+    assert out["test_uid"] is None
+    assert out["test_index"] is None
+    msgs = out["messages"]
+    assert msgs[0].additional_kwargs["type"] == MsgType.GENERATE_TEST_SCENARIO
+    assert out["agent_message_id"] == msgs[0].id
+    # Carte : libellé humain lisible, PAS la consigne impérative envoyée au generator.
+    assert "fermeture" in msgs[0].content
+    assert msgs[0].content != out["input"]
+    assert not msgs[0].content.startswith("Génère")
 
 
 # --- Priorité de couverture UNION ALL : branches d'abord, puis assemblage --------

@@ -88,6 +88,72 @@ def _cast_nontext_string_slicing(
     return tree.sql(dialect=dialect) if changed else sql
 
 
+def _is_empty_intent_sentinel(raw_sql: str) -> bool:
+    """Vrai si l'assertion est la sentinelle « résultat vide intentionnel » : un
+    ``SELECT * FROM __result__`` NU (sans ``WHERE``). Émise par ``test_evaluator`` quand
+    le scénario attend explicitement 0 ligne (plage vide, anti-jointure ciblée…). Sa
+    présence dans la suite signale que le vide est VOULU → la garde anti-vacuité sur
+    résultat vide (ci-dessous) ne doit pas s'appliquer.
+    """
+    norm = " ".join((raw_sql or "").strip().rstrip(";").split()).lower()
+    return norm == "select * from __result__"
+
+
+_RESERVED_KEYWORDS: frozenset[str] | None = None
+
+
+def _duckdb_reserved_keywords() -> frozenset[str]:
+    """Mots réservés DuckDB (catégorie ``reserved``), lus depuis le moteur lui-même
+    (``duckdb_keywords()``) — la liste embarquée de sqlglot est incomplète (elle quote
+    ``offset`` mais pas ``end``). Cache module ; best-effort : échec → noyau connu.
+    """
+    global _RESERVED_KEYWORDS
+    if _RESERVED_KEYWORDS is None:
+        try:
+            import duckdb
+
+            rows = duckdb.execute(
+                "SELECT keyword_name FROM duckdb_keywords() "
+                "WHERE keyword_category = 'reserved'"
+            ).fetchall()
+            _RESERVED_KEYWORDS = frozenset(r[0].lower() for r in rows)
+        except Exception:
+            _RESERVED_KEYWORDS = frozenset({"offset", "end", "order", "group", "all"})
+    return _RESERVED_KEYWORDS
+
+
+def _quote_reserved_identifiers(sql: str, dialect: str = "duckdb") -> str:
+    """Quote les identifiants mots réservés (``offset``, ``end``, …) — et eux seuls,
+    sans sur-quoting — via l'AST sqlglot re-rendu.
+
+    Un LLM les écrit nus (il ignore la liste des mots réservés DuckDB) → ``Parser
+    Error`` sur TOUTE la suite d'assertions dès que le résultat expose une telle
+    colonne (incident c6 : ``UNNEST(...) WITH OFFSET AS offset``), et les boucles de
+    régénération/correction thrashent sans converger — aucun modèle ne peut réparer
+    une erreur dont il ignore la cause. Accepte un fragment (condition, scope) comme
+    une requête complète. Best-effort : parsing en échec → SQL inchangé, jamais
+    bloquant (même posture que ``_cast_nontext_string_slicing``).
+    """
+    if not sql:
+        return sql
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect)
+        if tree is None:
+            return sql
+        reserved = _duckdb_reserved_keywords()
+        changed = False
+        for ident in tree.find_all(exp.Identifier):
+            if not ident.args.get("quoted") and ident.name.lower() in reserved:
+                ident.set("quoted", True)
+                changed = True
+        # Re-rendu seulement si un identifiant a été quoté : le SQL d'origine reste
+        # byte-identique dans le cas courant (pas de reformatage cosmétique, ex.
+        # `(c) IS NOT TRUE` → `NOT (c) IS TRUE`) — même posture que la garde sœur.
+        return tree.sql(dialect=dialect) if changed else sql
+    except Exception:
+        return sql
+
+
 def _evaluate_assertions(
     assertions: List[Dict[str, Any]], view_name: str, con
 ) -> List[Dict[str, Any]]:
@@ -110,6 +176,27 @@ def _evaluate_assertions(
     # TEXT avant exécution — calcul des types de la vue une seule fois (cf. incident c3).
     non_text_cols = _nontext_columns(view_name, con)
 
+    # Garde anti-vacuité sur RÉSULTAT VIDE (P0-1, incident c2) : une assertion `all` non
+    # scopée (`SELECT * FROM __result__ WHERE (cond) IS NOT TRUE`) retourne 0 ligne
+    # violante sur une vue VIDE → « passe » à tort. Une régression SQL qui vide la sortie
+    # (la plus courante) shipperait alors au vert. On échoue ces assertions — SAUF si le
+    # scénario attend explicitement un vide (sentinelle `SELECT * FROM __result__`), auquel
+    # cas toute la suite est exemptée. Les assertions SCOPÉES sont déjà couvertes par la
+    # garde de scope (périmètre vide → échec) ; les `exists` échouent déjà (aucun match) ;
+    # les `aggregate` sont naturellement NON-vacuées sur vide (sous-requête scalaire :
+    # SUM → NULL → IS NOT TRUE → violation, COUNT(*) = 0 → pass légitime) — on les laisse
+    # s'exécuter pour un signal honnête plutôt qu'un force-fail.
+    result_empty = False
+    if assertions and not any(
+        _is_empty_intent_sentinel(a.get("sql") or "") for a in assertions
+    ):
+        try:
+            result_empty = (
+                con.execute(f"SELECT COUNT(*) FROM {view_name}").fetchone()[0] == 0
+            )
+        except Exception:
+            result_empty = False
+
     results = []
     for a in assertions:
         raw_sql = (a.get("sql") or "").strip()
@@ -127,17 +214,36 @@ def _evaluate_assertions(
                 }
             )
             continue
+        raw_sql = _quote_reserved_identifiers(raw_sql)
         raw_sql = _cast_nontext_string_slicing(raw_sql, non_text_cols)
         sql = raw_sql.replace("__result__", view_name)
         scope = (a.get("scope") or "").strip().rstrip(";").strip()
+        scope = _quote_reserved_identifiers(scope)
         scope = _cast_nontext_string_slicing(scope, non_text_cols)
         quantifier = (a.get("quantifier") or "all").strip() or "all"
+        if result_empty and not scope and quantifier not in ("exists", "aggregate"):
+            results.append(
+                {
+                    "description": a.get("description", ""),
+                    "expected_condition": a.get("expected_condition", ""),
+                    "sql": raw_sql,
+                    "passed": False,
+                    "error": (
+                        "résultat vide — l'assertion ne teste rien (vacante) : sur une "
+                        "sortie vide, la condition n'a aucune ligne à contredire"
+                    ),
+                }
+            )
+            continue
         try:
             # Garde anti-vacuité du scope : une assertion scopée dont le périmètre ne
             # sélectionne AUCUNE ligne du résultat ne teste rien (0 ligne violante →
             # « passe » à tort). On l'échoue explicitement plutôt que de la laisser verte.
             # Inapplicable au mode `exists` : un scope (fondu dans l'EXISTS) qui ne couvre
             # aucune ligne fait DÉJÀ échouer l'assertion (rien à matcher) — pas de vacuité.
+            # Applicable au mode `aggregate` : un agrégat sur un scope à 0 ligne est une
+            # assertion d'absence déguisée (`COUNT(*) = 0` sur un label inexistant) —
+            # interdite par la philosophie positive-only, comme en mode `all`.
             if scope and quantifier != "exists":
                 scope_sql = scope.replace("__result__", view_name)
                 covered = con.execute(
@@ -160,12 +266,12 @@ def _evaluate_assertions(
                     continue
             fail_df = con.execute(sql).fetchdf()
             passed = len(fail_df) == 0
-            # Mode `exists` : l'échec = « aucune ligne ne satisfait la condition ». La
-            # requête renvoie une ligne sentinelle (`_no_match`) sans valeur métier — on
-            # n'expose pas de contre-exemple (l'absence n'est pas une ligne du résultat).
+            # Modes `exists` / `aggregate` : l'échec renvoie une ligne sentinelle
+            # (`_no_match` / `_agg_violation`) sans valeur métier — on n'expose pas de
+            # contre-exemple (l'absence ou un agrégat faux n'est pas une ligne du résultat).
             failing_rows = (
                 []
-                if (passed or quantifier == "exists")
+                if (passed or quantifier in ("exists", "aggregate"))
                 else fail_df.to_dict(orient="records")
             )
             results.append(

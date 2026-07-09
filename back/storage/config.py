@@ -261,13 +261,65 @@ def get_duckdb_extensions() -> list[str]:
     return [str(e).strip() for e in exts if str(e).strip()]
 
 
-def apply_duckdb_extensions(con) -> None:
-    """Installe et charge les extensions configurées sur une connexion DuckDB.
+# Snowflake parse une chaîne '0x…' castée en FLOAT comme de l'hexadécimal ;
+# DuckDB ne parse l'hexa que comme littéral, jamais depuis une chaîne runtime.
+# Accumulateur en DOUBLE : un uint256 (jusqu'à 64 chiffres hexa, Ethereum
+# calldata) déborde tout type entier, HUGEINT compris (127 bits).
+# Chaîne vide → 0.0 (valeur 0 dont LTRIM a mangé tous les chiffres) ;
+# caractère non-hexa → NULL : c'est la sémantique de TRY_CAST/TRY_TO_DOUBLE.
+# La variante STRICTE (hexstr_to_double_strict, ci-dessous) LÈVE sur invalide,
+# fidèle à un CAST/TO_DOUBLE strict Snowflake ; le fixer choisit selon le nœud.
+#
+# TEMP (connection-local) OBLIGATOIRE : un CREATE OR REPLACE MACRO non-temp écrit
+# le catalogue de la base. Comme on l'exécute à CHAQUE ouverture de connexion et
+# que DUCKDB_PATH est un fichier PARTAGÉ, deux connexions concurrentes (executor,
+# validator, pool) le posent en transactions chevauchantes → « Catalog
+# write-write conflict », cassant l'ouverture pour tous les dialectes. TEMP =
+# zéro écriture catalogue, exactement l'intention d'un enregistrement par
+# connexion.
+_HEXSTR_TO_DOUBLE_MACRO = """
+CREATE OR REPLACE TEMP MACRO hexstr_to_double(h) AS (
+  CASE
+    WHEN h IS NULL THEN NULL
+    WHEN length(h) = 0 THEN 0.0
+    ELSE list_reduce(
+      [CASE
+         WHEN c BETWEEN '0' AND '9' THEN (ord(c) - 48)::DOUBLE
+         WHEN c BETWEEN 'a' AND 'f' THEN (ord(c) - 87)::DOUBLE
+         ELSE NULL
+       END
+       FOR c IN string_split(lower(h), '')],
+      (acc, d) -> acc * 16 + d
+    )
+  END
+)
+"""
 
-    Idempotent (INSTALL/LOAD sont sûrs à rejouer). Une extension qui échoue
-    (réseau absent au premier INSTALL, nom inconnu) est journalisée en warning
-    et n'interrompt pas l'ouverture de la connexion — l'erreur de requête en
-    aval restera explicite.
+# Variante stricte : NULL/vide traités comme la version lenient (un CAST Snowflake
+# sur NULL ne lève pas), mais un caractère non-hexa LÈVE au lieu de rendre NULL —
+# fidèle à un CAST/TO_DOUBLE strict Snowflake. coalesce court-circuite : error()
+# n'est évalué que si hexstr_to_double a rendu NULL sur une entrée non-nulle.
+_HEXSTR_TO_DOUBLE_STRICT_MACRO = """
+CREATE OR REPLACE TEMP MACRO hexstr_to_double_strict(h) AS (
+  CASE
+    WHEN h IS NULL THEN NULL
+    WHEN length(h) = 0 THEN 0.0
+    ELSE coalesce(
+      hexstr_to_double(h),
+      error('hexstr_to_double: chaîne hexadécimale invalide: ' || h)
+    )
+  END
+)
+"""
+
+
+def apply_duckdb_extensions(con) -> None:
+    """Prépare une connexion DuckDB : extensions configurées + macros MockSQL.
+
+    Idempotent (INSTALL/LOAD et CREATE OR REPLACE sont sûrs à rejouer). Une
+    extension qui échoue (réseau absent au premier INSTALL, nom inconnu) est
+    journalisée en warning et n'interrompt pas l'ouverture de la connexion —
+    l'erreur de requête en aval restera explicite.
     """
     import logging
 
@@ -283,6 +335,31 @@ def apply_duckdb_extensions(con) -> None:
                 ext,
                 e,
             )
+    try:
+        con.execute(_HEXSTR_TO_DOUBLE_MACRO)
+        con.execute(_HEXSTR_TO_DOUBLE_STRICT_MACRO)  # dépend du précédent
+    except Exception as e:  # pragma: no cover - défensif, comme les extensions
+        logger.warning(
+            "Macro DuckDB 'hexstr_to_double' non enregistré: %r "
+            "(les requêtes hexa→double échoueront)",
+            e,
+        )
+
+
+def open_duckdb_connection(path: str, *, read_only: bool = False):
+    """Ouvre une connexion DuckDB PRÊTE : extensions + macros MockSQL appliqués.
+
+    Point d'entrée UNIQUE pour toute connexion qui exécute du SQL MockSQL — le
+    dry-run du validateur, l'executor, le pool, le réplay CLI. Passer par ici
+    garantit que le macro ``hexstr_to_double`` (et les extensions configurées)
+    sont présents : un ``duckdb.connect`` nu manquerait le macro et la requête
+    échouerait à l'exécution seulement, sur les seuls modèles concernés.
+    """
+    import duckdb
+
+    con = duckdb.connect(path, read_only=read_only)
+    apply_duckdb_extensions(con)
+    return con
 
 
 def load_preprocessor_fn(fn_ref: str, config_dir: Path):

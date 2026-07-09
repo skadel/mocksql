@@ -39,6 +39,18 @@ class _Assertion(BaseModel):
             "fait échouer l'assertion."
         ),
     )
+    quantifier: Literal["all", "exists", "aggregate"] = Field(
+        default="all",
+        description=(
+            'Quantificateur : `"all"` (défaut) = `expected_condition` vraie sur CHAQUE '
+            'ligne (de `scope` si fourni) ; `"exists"` = vraie sur AU MOINS UNE ligne '
+            '(affirmation de présence dans un résultat multi-lignes) ; `"aggregate"` = '
+            "condition sur les AGRÉGATS de l'ensemble de `__result__` (`SUM(revenue) = 40`, "
+            "`COUNT(*) = 2` avec `scope`) — propriété globale, jamais de borne vraie par "
+            "définition (`COUNT(*) >= 0`), et pas de simple `COUNT(*) = N` global (pin de "
+            "cardinalité déjà ajouté automatiquement)."
+        ),
+    )
 
 
 class _ImprovedAssertions(BaseModel):
@@ -175,6 +187,11 @@ Règles strictes :
   lieu de tout mettre dans `expected_condition` :
   `scope: "d = (SELECT MIN(d) FROM __result__)"`, `expected_condition: "id = 'X'"`. Reste positif et
   pince une régression de tri/association. Un scope ne couvrant aucune ligne fait échouer l'assertion.
+- `quantifier` : `"all"` (défaut) = vrai pour CHAQUE ligne ; `"exists"` = vrai pour AU MOINS UNE
+  ligne (présence d'une ligne précise) ; `"aggregate"` = condition sur les AGRÉGATS de l'ensemble
+  (`SUM(montant) = 40`, `COUNT(*) = 2` avec `scope`). En aggregate, jamais de borne vraie par
+  définition (`COUNT(*) >= 0`), et pas de simple `COUNT(*) = N` sur tout le résultat — ce pin de
+  cardinalité est déjà ajouté automatiquement par MockSQL.
 - Utilise UNIQUEMENT les colonnes du schéma ci-dessus (noms exacts, sensibles à la casse)
 
 Puis évalue la qualité de ces nouvelles assertions :
@@ -277,8 +294,10 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
         # Evaluate new assertions against __result__ rebuilt from results_json
         from build_query.examples_executor import (
             _assertion_to_executable,
+            _cardinality_pin,
             _evaluate_assertions_with_retry,
             _fix_logically_failing_assertions,
+            _is_bare_rowcount_pin,
         )
 
         session_id = state["session"].replace("-", "_")
@@ -298,8 +317,17 @@ async def correct_assertions(state: QueryState) -> Dict[str, Any]:
                     result_df=result_df,
                     test_description=current_test.get("unit_test_description", ""),
                 )
+                # La correction écrase assertion_results en bloc : le pin de cardinalité
+                # (cf. assertion_generator) doit être ré-appendé, sinon il disparaîtrait
+                # à la 1ʳᵉ passe de correction. Même dédup des pins bruts émis par le LLM.
+                executables = []
+                for a in improved.assertions:
+                    ex = _assertion_to_executable(a)
+                    if not _is_bare_rowcount_pin(ex):
+                        executables.append(ex)
+                executables.append(_cardinality_pin(len(result_df)))
                 assertion_results = await _evaluate_assertions_with_retry(
-                    [_assertion_to_executable(a) for a in improved.assertions],
+                    executables,
                     **retry_kwargs,
                 )
                 assertion_results = await _fix_logically_failing_assertions(

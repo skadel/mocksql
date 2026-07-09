@@ -4,6 +4,14 @@ from typing import get_args
 from utils.examples import create_pydantic_models
 
 
+def _field_description(model, table, col):
+    """Descend Optional[list[RowModel]] → RowModel et rend la description d'un champ."""
+    row_model = model.model_fields[table].annotation
+    inner = get_args(row_model)[0]  # list[RowModel]
+    row_cls = get_args(inner)[0]  # RowModel
+    return row_cls.model_fields[col].description
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -243,3 +251,107 @@ def test_description_attached_to_field():
     inner = get_args(row_model)[0]  # list[RowModel]
     row_cls = get_args(inner)[0]  # RowModel
     assert row_cls.model_fields["id"].description == "Primary key"
+
+
+# ---------------------------------------------------------------------------
+# Rappel ISO sur les champs typés date/timestamp (P1-3, retry Pydantic c2)
+# ---------------------------------------------------------------------------
+
+
+def test_date_field_carries_iso_hint():
+    """Un champ typé DATE porte un rappel ISO dans sa description — il survit au retry
+    Pydantic (schéma + erreur seuls, sans system prompt)."""
+    model = create_pydantic_models([_table("T", _col("partition_date", "DATE"))])
+    desc = _field_description(model, "T", "partition_date")
+    assert desc and "ISO" in desc and "YYYY-MM-DD" in desc
+
+
+def test_timestamp_field_carries_iso_hint():
+    model = create_pydantic_models([_table("T", _col("event_ts", "TIMESTAMP"))])
+    desc = _field_description(model, "T", "event_ts")
+    assert desc and "ISO" in desc
+
+
+def test_string_field_has_no_iso_hint():
+    """Une colonne TEXTE (que le SQL peut parser via PARSE_DATE) ne reçoit PAS le rappel
+    ISO : sa valeur doit respecter le format attendu par le SQL, pas ISO."""
+    model = create_pydantic_models([_table("T", _col("date_str", "STRING"))])
+    desc = _field_description(model, "T", "date_str")
+    assert not desc or "ISO" not in desc
+
+
+def test_date_hint_appended_to_existing_description():
+    model = create_pydantic_models(
+        [_table("T", _col("d", "DATE", description="Date d'ouverture"))]
+    )
+    desc = _field_description(model, "T", "d")
+    assert desc.startswith("Date d'ouverture")
+    assert "YYYY-MM-DD" in desc
+
+
+# ---------------------------------------------------------------------------
+# Colonne NUMBER au nom horodaté = epoch, pas une date ISO (incident sf_bq028)
+#
+# Un type Snowflake `NUMBER` n'est pas dans `type_mapping` → le champ retombe sur
+# `str`, donc un littéral date ISO ('2024-01-01T00:00:00') passe la validation
+# Pydantic sans broncher… puis DuckDB (colonne DECIMAL) le rejette :
+# « Could not convert string "2024-01-01T00:00:00" to DECIMAL(38,9) » → INSERT
+# échoués, données dégradées en NULL. Le nom (`SnapshotAt`, `UpstreamPublishedAt`)
+# induit le LLM en erreur ; on injecte un rappel « epoch → entier » dans la
+# description (seul canal survivant au retry).
+# ---------------------------------------------------------------------------
+
+
+def test_number_timestamp_named_col_carries_epoch_hint():
+    """Colonne NUMBER dont le nom implique un horodatage → rappel epoch (entier),
+    surtout PAS un rappel date ISO."""
+    model = create_pydantic_models([_table("T", _col("SnapshotAt", "NUMBER"))])
+    desc = _field_description(model, "T", "snapshotat")
+    assert desc and "epoch" in desc.lower()
+    # Pas le rappel DATE ISO (dont le marqueur est le format YYYY-MM-DD).
+    assert "YYYY-MM-DD" not in desc
+
+
+def test_number_camelcase_published_at_carries_epoch_hint():
+    model = create_pydantic_models([_table("T", _col("UpstreamPublishedAt", "NUMBER"))])
+    desc = _field_description(model, "T", "upstreampublishedat")
+    assert desc and "epoch" in desc.lower()
+
+
+def test_number_snake_created_at_carries_epoch_hint():
+    model = create_pydantic_models([_table("T", _col("created_at", "NUMBER(38,0)"))])
+    desc = _field_description(model, "T", "created_at")
+    assert desc and "epoch" in desc.lower()
+
+
+def test_number_non_temporal_name_has_no_epoch_hint():
+    """Un NUMBER au nom non-horodaté (StarsCount) ne reçoit AUCUN rappel epoch."""
+    model = create_pydantic_models([_table("T", _col("StarsCount", "NUMBER"))])
+    desc = _field_description(model, "T", "starscount")
+    assert not desc or "epoch" not in desc.lower()
+
+
+def test_string_ending_in_at_no_epoch_hint():
+    """Garde anti-faux-positif : `format` (TEXTE) se termine par 'at' mais n'est ni
+    numérique ni un token temporel → aucun rappel epoch."""
+    model = create_pydantic_models([_table("T", _col("format", "STRING"))])
+    desc = _field_description(model, "T", "format")
+    assert not desc or "epoch" not in desc.lower()
+
+
+def test_date_typed_at_col_keeps_iso_hint_not_epoch():
+    """Une colonne TYPÉE date/timestamp nommée `...At` garde le rappel ISO : le rappel
+    epoch est réservé aux colonnes NUMÉRIQUES (gate sur le type, pas seulement le nom)."""
+    model = create_pydantic_models([_table("T", _col("EventAt", "TIMESTAMP"))])
+    desc = _field_description(model, "T", "eventat")
+    assert desc and "ISO" in desc and "YYYY-MM-DD" in desc
+    assert "epoch" not in desc.lower()
+
+
+def test_epoch_hint_appended_to_existing_description():
+    model = create_pydantic_models(
+        [_table("T", _col("SnapshotAt", "NUMBER", description="Instant du snapshot"))]
+    )
+    desc = _field_description(model, "T", "snapshotat")
+    assert desc.startswith("Instant du snapshot")
+    assert "epoch" in desc.lower()

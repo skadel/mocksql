@@ -9,7 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from sqlglot import expressions as exp
 from sqlglot.optimizer import traverse_scope, find_all_in_scope
 
-from common_vars import type_mapping
+import datetime
+
+from common_vars import FlexibleDatetime, type_mapping
 from models.env_variables import BQ_TEST_PROJECT
 
 logger = logging.getLogger(__name__)
@@ -38,23 +40,33 @@ def filter_columns(schemas, used_columns):
         db_name_from_schema = parts[-2]
         table_name_from_schema = parts[-1]
 
-        # Construire le nom de table qualifié pour le résultat final (ex: MARKETING_Referentiels_correspondance_cartes)
-        # On prend les deux dernières parties pour formater le 'table_name' final
-        qualified_under_parts = parts[-2:]
-        qualified_under_name = "_".join(qualified_under_parts)
-
-        # Rechercher dans used_columns en comparant à la fois la base de données et le nom de la table
+        # Rechercher dans used_columns en comparant base de données + table.
+        # Comparaison INSENSIBLE À LA CASSE : la qualification sqlglot de certains
+        # dialectes (Trino…) met les identifiants de used_columns en minuscules,
+        # alors que le schema_cache conserve la casse d'origine de l'entrepôt
+        # (BigQuery). Sans .lower() des deux côtés, aucune table ne matche → le
+        # schéma de génération se vide, le LLM ne produit aucune donnée, et seul
+        # Faker survit (tables de fait manquantes → Catalog Error à l'exécution).
         used_table_entry = next(
             (
                 item
                 for item in used_columns
-                if item.get("database") == db_name_from_schema
-                and item.get("table") == table_name_from_schema
+                if (item.get("database") or "").lower() == db_name_from_schema.lower()
+                and (item.get("table") or "").lower() == table_name_from_schema.lower()
             ),
             None,
         )
 
         if used_table_entry:
+            # Nom de table final aligné sur la casse de used_columns (source de
+            # vérité du pipeline : faker_cols et l'executor construisent tous la
+            # clé f"{db}_{table}" à partir de used_columns). En BigQuery la casse
+            # coïncide avec le schéma → sortie inchangée ; en Trino elle suit
+            # used_columns (minuscules) → cohérence des clés en aval.
+            db_key = used_table_entry.get("database") or db_name_from_schema
+            tbl_key = used_table_entry.get("table") or table_name_from_schema
+            qualified_under_name = f"{db_key}_{tbl_key}"
+
             used_cols = {uc.lower() for uc in used_table_entry["used_columns"]}
             used_ids = {
                 ui.lower() for ui in used_table_entry.get("used_identifiers", [])
@@ -291,6 +303,86 @@ def _safe_field_name(name: str, used: set[str]) -> str:
     return candidate
 
 
+def _iso_format_hint(col_type) -> str:
+    """Rappel de format ISO pour un champ TYPÉ date/timestamp, à coller à sa description.
+
+    Un champ `date`/`timestamp` du schéma de sortie s'écrit TOUJOURS en ISO, quel que soit
+    le format des littéraux du SQL (un `PARSE_DATE('%d-%m-%Y', col)` ne concerne QUE les
+    colonnes TEXTE). Sans ce rappel, le LLM recopie le format du SQL (ex. `01-01-2026`) →
+    `OutputParserException` Pydantic → retry coûteux (incident c2). Porté par la DESCRIPTION
+    du champ pour survivre au retry sans contexte (schéma + erreur seuls). Cf. consigne 5.
+    Chaîne vide pour tout autre type (identité stricte : `datetime.datetime` sous-classe
+    `datetime.date`, mais `type_mapping` mappe TIMESTAMP → FlexibleDatetime, jamais date).
+    """
+    if col_type is datetime.date:
+        return " (⚠️ champ typé date : littéral ISO obligatoire, format YYYY-MM-DD)"
+    if col_type is FlexibleDatetime:
+        return " (⚠️ champ typé timestamp : littéral ISO obligatoire, format YYYY-MM-DDTHH:MM:SS)"
+    return ""
+
+
+# Tokens de nom signalant qu'une colonne porte un horodatage.
+_TEMPORAL_NAME_TOKENS = {"at", "time", "timestamp", "date", "datetime", "epoch", "ts"}
+# Familles de types numériques (base, précision retirée). NUMBER/NUMERIC/DECIMAL ne
+# sont PAS dans `type_mapping` → champ Pydantic `str` : un littéral date les traverse
+# sans validation. Les types int/float y sont aussi pour la robustesse (le rappel
+# reste vrai), même si Pydantic les rejetterait déjà.
+_NUMERIC_BASE_TYPES = {
+    "NUMBER",
+    "NUMERIC",
+    "DECIMAL",
+    "BIGDECIMAL",
+    "BIGNUMERIC",
+    "INT",
+    "INTEGER",
+    "INT64",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "FLOAT",
+    "FLOAT64",
+    "DOUBLE",
+    "REAL",
+}
+
+
+def _tokenize_col_name(name: str) -> set[str]:
+    """Découpe un nom de colonne en tokens minuscules (snake_case ET camelCase).
+
+    `SnapshotAt`→{snapshot, at}, `created_at`→{created, at}, `block_timestamp`→
+    {block, timestamp}. Le découpage camelCase évite les faux positifs de sous-chaîne
+    (`update` ne contient pas le token `date`, `format` ne contient pas `at`).
+    """
+    tokens: set[str] = set()
+    for part in re.split(r"[_\s]+", name):
+        for tok in re.findall(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+|\d+", part):
+            tokens.add(tok.lower())
+    return tokens
+
+
+def _numeric_epoch_hint(col_type_str: str | None, col_name: str) -> str:
+    """Rappel « epoch → entier » pour une colonne NUMÉRIQUE au nom horodaté.
+
+    Un `NUMBER` Snowflake au nom temporel (`SnapshotAt`, `UpstreamPublishedAt`) stocke
+    un epoch, pas une date. Comme `NUMBER` retombe sur `str` (cf. `parse_field_type`),
+    le LLM y colle volontiers un littéral ISO — que DuckDB refuse d'insérer dans la
+    colonne DECIMAL (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
+    survit au retry sans contexte. Gaté sur le TYPE numérique (pas seulement le nom) :
+    une colonne TYPÉE date/timestamp nommée `...At` garde son rappel ISO.
+    """
+    if not col_type_str:
+        return ""
+    base = col_type_str.split("(")[0].strip().upper()
+    if base not in _NUMERIC_BASE_TYPES:
+        return ""
+    if _tokenize_col_name(col_name) & _TEMPORAL_NAME_TOKENS:
+        return (
+            " (⚠️ colonne numérique au nom horodaté : valeur stockée en epoch → "
+            "émettre un ENTIER (ex. 1704067200000000), jamais un littéral date ISO)"
+        )
+    return ""
+
+
 def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]:
     models = {}
     for table in filtered_tables_and_columns:
@@ -315,6 +407,28 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
                 col_type = _bq_ddl_to_pydantic(f"{table_name}_{col_name}", bq_ddl)
             else:
                 col_type = parse_field_type(column["type"])
+
+            # Champ typé date/timestamp → rappel ISO dans la description (survit au retry
+            # Pydantic sans contexte). No-op pour tout autre type. Cf. _iso_format_hint.
+            iso_hint = _iso_format_hint(col_type)
+            if iso_hint:
+                col_description = (
+                    (str(col_description) + iso_hint)
+                    if col_description
+                    else iso_hint.strip()
+                )
+
+            # Colonne NUMÉRIQUE au nom horodaté (NUMBER Snowflake = str en Pydantic) →
+            # rappel « epoch → entier », sinon le LLM y met un littéral date que DuckDB
+            # refuse d'insérer en DECIMAL (incident sf_bq028). Exclusif du rappel ISO
+            # (gaté sur le type numérique). Cf. _numeric_epoch_hint.
+            epoch_hint = _numeric_epoch_hint(column.get("type"), column["name"])
+            if epoch_hint:
+                col_description = (
+                    (str(col_description) + epoch_hint)
+                    if col_description
+                    else epoch_hint.strip()
+                )
 
             # Underscore initial → clé assainie + alias sur le nom réel.
             if col_name.startswith("_"):
@@ -446,8 +560,14 @@ def create_test_tables(
     errors = []
 
     # Si used_columns est None, on crée un dictionnaire vide afin de ne pas filtrer les colonnes.
+    # Clés en minuscules (cf. filter_schemas_by_used_columns) : used_columns peut être
+    # en minuscules (qualification Trino) alors que le nom de table du schéma garde la
+    # casse d'origine → sans normalisation le filtrage retombe silencieusement sur
+    # « toutes les colonnes ».
     if used_columns is not None:
-        used_columns_dict = {_uc_key(uc): uc["used_columns"] for uc in used_columns}
+        used_columns_dict = {
+            _uc_key(uc).lower(): uc["used_columns"] for uc in used_columns
+        }
     else:
         used_columns_dict = {}
 
@@ -456,7 +576,9 @@ def create_test_tables(
         try:
             parts = table["table_name"].split(".")
             duckdb_base = "_".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
-            qualified_key = duckdb_base  # même format que used_columns_dict
+            qualified_key = (
+                duckdb_base.lower()
+            )  # même format que used_columns_dict (minuscule)
             table_name = f"{duckdb_base}_{suffix.replace('-', '_')}"
 
             # Filtrage avec sous-champs inclus pour pouvoir reconstruire les types STRUCT
@@ -1509,6 +1631,145 @@ def _fix_snowflake_to_timestamp(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _strip_hex_prefix(concat: exp.Expression) -> exp.Expression | None:
+    """Retire le littéral ``'0x'`` en tête d'une chaîne de concaténations.
+
+    Retourne le reste de la concaténation (copie), ou ``None`` si l'expression
+    n'est pas une concaténation préfixée par ``'0x'``. Les ``||`` chaînés sont
+    imbriqués à gauche par sqlglot (``('0x' || a) || b``) et peuvent porter des
+    parenthèses explicites : on déballe les ``Paren`` et on descend récursivement
+    jusqu'à la feuille la plus à gauche, y compris à travers un ``CONCAT`` imbriqué
+    (``CONCAT(CONCAT('0x', a), b)``).
+    """
+
+    def _is_0x(n: exp.Expression) -> bool:
+        return isinstance(n, exp.Literal) and n.is_string and n.this.lower() == "0x"
+
+    while isinstance(concat, exp.Paren):
+        concat = concat.this
+
+    if isinstance(concat, exp.DPipe):
+        if _is_0x(concat.this):
+            return concat.expression.copy()
+        stripped = _strip_hex_prefix(concat.this)
+        if stripped is not None:
+            return exp.DPipe(this=stripped, expression=concat.expression.copy())
+        return None
+    if isinstance(concat, exp.Concat):
+        exprs = concat.expressions
+        if not exprs:
+            return None
+        if _is_0x(exprs[0]):
+            rest = [e.copy() for e in exprs[1:]]
+        else:
+            # Le préfixe peut être enfoui dans le 1ᵉʳ opérande (CONCAT imbriqué).
+            head = _strip_hex_prefix(exprs[0])
+            if head is None:
+                return None
+            rest = [head] + [e.copy() for e in exprs[1:]]
+        if not rest:
+            return None  # '0x' seul, rien après → dégénéré, on ne réécrit pas
+        if len(rest) == 1:
+            return rest[0]
+        return exp.Concat(
+            expressions=rest,
+            safe=concat.args.get("safe"),
+            coalesce=concat.args.get("coalesce"),
+        )
+    return None
+
+
+# Cibles de cast où la chaîne hexa Snowflake est valide. FLOAT/DOUBLE → le macro
+# rend directement un DOUBLE ; les cibles entières/décimales sont enveloppées dans
+# un CAST vers le type d'origine (hexstr_to_double rend un DOUBLE).
+_HEX_DOUBLE_TARGETS = frozenset({exp.DataType.Type.FLOAT, exp.DataType.Type.DOUBLE})
+_HEX_INT_DEC_TARGETS = frozenset(
+    {
+        exp.DataType.Type.INT,
+        exp.DataType.Type.BIGINT,
+        exp.DataType.Type.SMALLINT,
+        exp.DataType.Type.TINYINT,
+        exp.DataType.Type.INT128,  # DuckDB HUGEINT ≡ sqlglot INT128
+        exp.DataType.Type.DECIMAL,
+        exp.DataType.Type.BIGDECIMAL,
+    }
+)
+
+
+def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
+    """Réécrit l'idiome hexa Snowflake ``'0x' || h`` casté en numérique.
+
+    Snowflake interprète une chaîne ``'0x…'`` castée en nombre comme de
+    l'hexadécimal ; DuckDB refuse (il ne parse l'hexa que comme littéral). On
+    réécrit vers le macro ``hexstr_to_double`` (enregistré par
+    ``storage.config:apply_duckdb_extensions``). Couvre :
+
+    - ``CAST``/``TRY_CAST`` (sous-classe) vers FLOAT/DOUBLE → ``hexstr_to_double(h)`` ;
+    - ``CAST`` vers entier/décimal (INT, NUMBER…) → ``CAST(hexstr_to_double(h) AS <cible>)`` ;
+    - les formes fonction ``TO_DOUBLE``/``TRY_TO_DOUBLE`` (``exp.ToDouble``) et
+      ``TO_NUMBER``/``TO_DECIMAL`` (``exp.ToNumber``).
+
+    Sémantique d'erreur fidèle à Snowflake : un cast STRICT (``CAST``,
+    ``TO_DOUBLE``, ``TO_NUMBER``) vise ``hexstr_to_double_strict`` qui lève sur
+    hexa invalide ; une forme ``TRY_*`` vise ``hexstr_to_double`` (NULL sur
+    invalide). Un cast vers texte, ou un cast numérique sans préfixe ``'0x'``,
+    n'est pas touché. La boucle tourne jusqu'au point fixe : un idiome hexa
+    imbriqué dans l'opérande d'un autre est entièrement réécrit, sans faux succès.
+    """
+
+    def _operand_target_strict(
+        node: exp.Expression,
+    ) -> tuple[exp.Expression, exp.DataType | None, bool] | None:
+        """(opérande, type-cible-à-réappliquer, strict) ou None si non éligible.
+        type-cible None => résultat DOUBLE direct ; strict=True => lève sur hexa
+        invalide, False => NULL (variante TRY_*)."""
+        if isinstance(node, exp.Cast):  # inclut TryCast (sous-classe)
+            target = node.to
+            if not isinstance(target, exp.DataType):
+                return None
+            strict = not isinstance(node, exp.TryCast)
+            if target.this in _HEX_DOUBLE_TARGETS:
+                return node.this, None, strict
+            if target.this in _HEX_INT_DEC_TARGETS:
+                return node.this, target.copy(), strict
+            return None
+        if isinstance(node, exp.ToDouble):
+            return node.this, None, not node.args.get("safe")
+        if isinstance(node, exp.ToNumber):
+            prec = node.args.get("precision")
+            scale = node.args.get("scale")
+            if prec is not None and scale is not None:
+                tgt = exp.DataType.build(f"DECIMAL({prec.name}, {scale.name})")
+            else:
+                # Défaut Snowflake TO_NUMBER = NUMBER(38, 0).
+                tgt = exp.DataType.build("DECIMAL(38, 0)")
+            return node.this, tgt, not node.args.get("safe")
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for node in list(tree.find_all(exp.Cast, exp.ToDouble, exp.ToNumber)):
+            found = _operand_target_strict(node)
+            if found is None:
+                continue
+            operand, wrap_target, strict = found
+            inner = operand
+            while isinstance(inner, exp.Paren):
+                inner = inner.this
+            stripped = _strip_hex_prefix(inner)
+            if stripped is None:
+                continue
+            macro_name = "hexstr_to_double_strict" if strict else "hexstr_to_double"
+            macro = exp.Anonymous(this=macro_name, expressions=[stripped])
+            replacement: exp.Expression = (
+                macro if wrap_target is None else exp.Cast(this=macro, to=wrap_target)
+            )
+            node.replace(replacement)
+            changed = True
+    return tree
+
+
 def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
 
@@ -1516,6 +1777,130 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """
     _fix_snowflake_to_char(tree)
     _fix_snowflake_to_timestamp(tree)
+    _fix_snowflake_hex_cast(tree)
+    return tree
+
+
+# Tokens de format Joda-Time (Trino format_datetime) → tokens strftime DuckDB.
+# CASSE-SENSIBLE : en Joda, MM=mois et mm=minute, HH=24h et hh=12h — surtout PAS
+# de IGNORECASE. Alternation longest-first (yyyy avant yy, MMMM avant MM…).
+_TRINO_JODA_TOKENS: list[tuple[str, str]] = [
+    ("yyyy", "%Y"),
+    ("YYYY", "%Y"),
+    ("MMMM", "%B"),
+    ("EEEE", "%A"),
+    ("MMM", "%b"),
+    ("EEE", "%a"),
+    ("yy", "%y"),
+    ("YY", "%y"),
+    ("MM", "%m"),
+    ("dd", "%d"),
+    ("HH", "%H"),
+    ("hh", "%I"),
+    ("mm", "%M"),
+    ("ss", "%S"),
+]
+_TRINO_JODA_RE = re.compile(
+    "|".join(
+        re.escape(k) for k, _ in sorted(_TRINO_JODA_TOKENS, key=lambda kv: -len(kv[0]))
+    )
+)
+_TRINO_JODA_MAP = {k: v for k, v in _TRINO_JODA_TOKENS}
+
+
+def _trino_joda_to_strftime(joda_fmt: str) -> str | None:
+    """Traduit un format Joda-Time (Trino) en format strftime DuckDB.
+
+    Retourne ``None`` si AUCUN token de date n'est reconnu — dans ce cas on laisse
+    l'expression telle quelle plutôt que de fabriquer un format vide.
+    """
+    matched = False
+
+    def _repl(m: re.Match) -> str:
+        nonlocal matched
+        matched = True
+        return _TRINO_JODA_MAP[m.group(0)]
+
+    out = _TRINO_JODA_RE.sub(_repl, joda_fmt)
+    return out if matched else None
+
+
+def _fix_trino_format_datetime(tree: exp.Expression) -> exp.Expression:
+    """Réécrit ``format_datetime(x, '<fmt Joda>')`` en ``strftime(x, '<fmt duckdb>')``.
+
+    sqlglot laisse ``format_datetime`` en Anonymous (DuckDB n'a pas cette fonction →
+    Catalog Error). On réécrit sur l'AST avant le rendu DuckDB en traduisant le
+    format Joda-Time vers strftime.
+    """
+    for node in list(tree.find_all(exp.Anonymous)):
+        if (node.this or "").lower() != "format_datetime":
+            continue
+        args = node.expressions
+        if len(args) != 2 or not (
+            isinstance(args[1], exp.Literal) and args[1].is_string
+        ):
+            continue
+        duck_fmt = _trino_joda_to_strftime(args[1].this)
+        if duck_fmt is None:
+            continue
+        node.replace(
+            exp.Anonymous(
+                this="strftime",
+                expressions=[args[0].copy(), exp.Literal.string(duck_fmt)],
+            )
+        )
+    return tree
+
+
+def _fix_trino_reduce_finish(tree: exp.Expression) -> exp.Expression:
+    """Préserve la lambda de finition de ``reduce(arr, init, merge, finish)``.
+
+    sqlglot transpile Trino ``reduce`` vers DuckDB ``list_reduce`` en **abandonnant
+    silencieusement** la 4ᵉ lambda (finition), avec un simple warning : le résultat
+    devient faux sans erreur dès que la finition n'est pas l'identité (ex.
+    ``s -> s / cardinality(arr)`` pour une moyenne). On inline donc la finition :
+    ``finish(reduce_sans_finish(...))``, ce qui reste correct y compris pour
+    l'identité (``s -> s`` → juste le reduce). Perte silencieuse → résultat exact.
+    """
+    for node in list(tree.find_all(exp.Reduce)):
+        finish = node.args.get("finish")
+        if not isinstance(finish, exp.Lambda) or len(finish.expressions) != 1:
+            continue
+        param_name = finish.expressions[0].name
+        body = finish.this.copy()
+        inner = exp.Reduce(
+            this=node.this.copy(),
+            initial=node.args["initial"].copy(),
+            merge=node.args["merge"].copy(),
+        )
+
+        def _is_param(n: exp.Expression) -> bool:
+            # Dans une lambda, une référence de paramètre est un Identifier nu ;
+            # une vraie colonne est un Column (qui enveloppe son Identifier — exclu).
+            if isinstance(n, exp.Identifier):
+                return n.name == param_name and not isinstance(n.parent, exp.Column)
+            if isinstance(n, exp.Column):
+                return not n.table and n.name == param_name
+            return False
+
+        if _is_param(body):
+            new_expr: exp.Expression = inner
+        else:
+            for n in list(body.find_all(exp.Column, exp.Identifier)):
+                if _is_param(n):
+                    n.replace(inner.copy())
+            new_expr = body
+        node.replace(new_expr)
+    return tree
+
+
+def _fix_trino_idioms(tree: exp.Expression) -> exp.Expression:
+    """Réécritures d'idiomes Trino que sqlglot ne transpile pas correctement.
+
+    Appliquées sur l'AST trino AVANT ``.sql(dialect="duckdb")``.
+    """
+    _fix_trino_format_datetime(tree)
+    _fix_trino_reduce_finish(tree)
     return tree
 
 
@@ -1526,10 +1911,16 @@ async def parse_test_query(query, suffix, dialect):
     tree = sqlglot.parse_one(query_on_test_ds, dialect=dialect)
     _qualify_group_order_by_aliases(tree)
     _fix_group_by_strict_mode(tree)
-    _fix_unnest_with_offset(tree)
+    # _fix_unnest_with_offset traduit la sémantique 0-based de BigQuery WITH OFFSET.
+    # Trino WITH ORDINALITY est déjà 1-based comme DuckDB (et la forme t(x, i) est
+    # native DuckDB) : appliquer le fix décale l'ordinal et perd la colonne valeur.
+    if dialect != "trino":
+        _fix_unnest_with_offset(tree)
     _alias_unnamed_final_projections(tree)
     if dialect == "snowflake":
         _fix_snowflake_idioms(tree)
+    elif dialect == "trino":
+        _fix_trino_idioms(tree)
     duckdb_sql = tree.sql(dialect="duckdb")
     return duckdb_sql
 
@@ -1755,8 +2146,6 @@ def transform_timestamp(sql_query):
 
 
 def initialize_duckdb(db_path: str):
-    from storage.config import apply_duckdb_extensions
+    from storage.config import open_duckdb_connection
 
-    con = duckdb.connect(db_path)
-    apply_duckdb_extensions(con)
-    return con
+    return open_duckdb_connection(db_path)

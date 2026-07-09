@@ -40,6 +40,14 @@ class QueryState(TypedDict):
     ]  # JSON {path_name: {sliced_sql, used_columns, branch_index, host_cte}} + "all".
     # Construit UNE fois a la validation (AST pur, cf. path_slicer) ; lu par le generator
     # et suggestions au lieu de re-slicer. Le constraints_hint (simplify) reste lazy+cache.
+    focus_fallback: Optional[
+        bool
+    ]  # Trigger one-shot pose par le noeud focus_fallback : force _should_regenerate
+    # a relancer le generator en target_path="all" apres un focus non convergent.
+    focus_fallback_used: Optional[
+        bool
+    ]  # Garde anti-boucle : le fallback focus->all ne se declenche qu'UNE fois par run
+    # (route_evaluator retombe ensuite sur les sorties historiques).
     user_tables: str
     used_columns: list
     used_columns_changed: bool
@@ -108,7 +116,8 @@ class QueryState(TypedDict):
     agent_tool_args: Optional[Dict]  # args of the tool call
     agent_message_id: Optional[
         str
-    ]  # ID of the GENERATE_TEST_SCENARIO msg emitted by conversational_agent
+    ]  # ID of the GENERATE_TEST_SCENARIO msg (conversational_agent, or
+    # generate_single_suggestion in the batch loop); generator chains under it
     model_context: Optional[
         str
     ]  # concatenated mocksql.md files (global → file-specific)

@@ -81,6 +81,37 @@ _SKIP_IN_TRANSFORM = (exp.Alias,)
 # ---------------------------------------------------------------------------
 
 
+def _is_hex_string_concat(node: exp.Expression) -> bool:
+    """Le nœud est-il une concaténation préfixée par le littéral ``'0x'`` ?
+
+    C'est l'idiome hexa Snowflake (``'0x' || …`` casté en numérique, cf.
+    ``utils.examples._fix_snowflake_hex_cast``). Quand ses opérandes sont tous
+    littéraux, il est scalaire pur donc foldable — mais l'évaluer ici sur une
+    connexion nue le replierait en ``NULL`` (DuckDB ne parse pas l'hexa runtime),
+    et le fixer aval, qui tourne APRÈS le fold, ne verrait plus jamais le CAST.
+    On le déclare donc impur pour que le folder descende dedans sans le replier,
+    laissant l'idiome intact jusqu'au fixer. Sonde la feuille littérale la plus à
+    gauche (les ``||`` chaînés sont imbriqués à gauche par sqlglot).
+    """
+    while isinstance(node, exp.Paren):
+        node = node.this
+    if isinstance(node, exp.DPipe):
+        return _is_hex_string_concat(node.this) or (
+            isinstance(node.this, exp.Literal)
+            and node.this.is_string
+            and node.this.this.lower() == "0x"
+        )
+    if isinstance(node, exp.Concat):
+        exprs = node.expressions
+        return bool(
+            exprs
+            and isinstance(exprs[0], exp.Literal)
+            and exprs[0].is_string
+            and exprs[0].this.lower() == "0x"
+        )
+    return False
+
+
 def _is_foldable(node: exp.Expression) -> bool:
     """
     Retourne True si node est une expression scalaire pure évaluable par DuckDB :
@@ -165,7 +196,11 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
     pure: dict[int, bool] = {}
 
     def _compute_pure(node: exp.Expression) -> bool:
-        node_pure = not isinstance(node, _DISQUALIFYING_TYPES)
+        # L'idiome hexa '0x' || … est laissé au fixer aval : impur ici pour ne
+        # pas être replié en NULL avant que le CAST ne soit réécrit.
+        node_pure = not isinstance(node, _DISQUALIFYING_TYPES) and not (
+            _is_hex_string_concat(node)
+        )
         for value in node.args.values():
             if isinstance(value, exp.Expression):
                 # NB : pas de court-circuit — on doit calculer la pureté de TOUS

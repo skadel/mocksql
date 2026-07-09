@@ -21,3 +21,16 @@ def import_bigquery():
             "Le connecteur BigQuery n'est pas installé. "
             "Installez l'extra correspondant : pip install mocksql[bigquery]"
         ) from e
+
+
+def import_trino():
+    """Retourne le module `trino` ou lève un message clair."""
+    try:
+        import trino
+
+        return trino
+    except ImportError as e:
+        raise ImportError(
+            "Le connecteur Trino n'est pas installé. "
+            "Installez l'extra correspondant : pip install mocksql[trino]"
+        ) from e

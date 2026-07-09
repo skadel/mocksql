@@ -12,7 +12,7 @@ from langchain_core.prompts import ChatPromptTemplate
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
 from build_query.examples_generator import retrieve_existing_tests
-from build_query.path_slicer import ALL_PATH
+from build_query.path_slicer import ALL_PATH, list_all_union_branches
 from build_query.prompt_tools import (
     _format_profile_block,
     build_sql_digest,
@@ -329,6 +329,35 @@ def _branch_catalog_block(state: QueryState, covered: set, dialect: str) -> str:
     )
 
 
+def _branch_inventory_block(state: QueryState, dialect: str) -> str:
+    """Repli du catalogue de branches quand aucun path plan n'est disponible : les UNION ALL
+    sont INTERNES aux CTE (plusieurs, sans union finale) → non sliçables en focus, donc absents
+    de ``_branch_catalog_block``. On liste quand même les branches détectées pour que le
+    suggesteur les NOMME (cf. c2 : sans ce bloc, MEG/FERMETURE n'avaient aucun chemin
+    actionnable). ``""`` si aucun UNION ALL de 1er niveau détecté.
+    """
+    try:
+        query_decomposed = json.loads(state.get("query_decomposed") or "[]")
+    except Exception:
+        return ""
+    inventory = list_all_union_branches(query_decomposed, dialect)
+    if not inventory:
+        return ""
+    lines = [
+        f"- CTE `{host}` : " + ", ".join(f"`{n}`" for n in names)
+        for host, names in inventory
+    ]
+    return (
+        "<branches_union_all>\n"
+        "Ce SQL contient des UNION ALL INTERNES (une CTE assemble plusieurs présentations des "
+        "mêmes sources). Ces branches ne sont PAS sliçables en focus autonome — laisse "
+        "`target_path` vide. Mais chacune est un CHEMIN LOGIQUE distinct à couvrir : en lisant "
+        "les tests existants, repère les branches NON couvertes et propose AU MOINS une "
+        "suggestion par branche manquante, en la NOMMANT explicitement dans le texte.\n"
+        "Branches détectées :\n" + "\n".join(lines) + "\n</branches_union_all>"
+    )
+
+
 # Prompt compact pour la génération d'UNE suggestion enchaînée immédiatement en test
 # (boucle multi-tests). Réutilise les helpers de formatage (_format_test_block,
 # _select_pitfalls, _format_profile_block) et le modèle structuré TestSuggestionsOutput.
@@ -343,17 +372,54 @@ requête retourne réellement. Une seule suggestion, la plus pertinente."""
 )
 
 
-async def generate_single_suggestion(state: QueryState):
-    """Boucle multi-tests : génère UNE suggestion (au lieu de 3 pour le panneau) et prépare
-    immédiatement sa construction en test via le chemin clic-suggestion existant.
+def _finalize_single_suggestion(
+    state: QueryState, base: dict, card_text: str | None = None
+) -> dict:
+    """Rend le tour de boucle batch autosuffisant pour enchaîner DIRECTEMENT sur le
+    ``generator`` (plus de passage par le ``conversational_agent``) :
 
-    Ne persiste rien dans le panneau et n'émet pas de message SUGGESTIONS : on pose
-    ``input`` (le texte de la suggestion) + ``suggestion_intent`` pour que le
-    ``conversational_agent`` produise un nouveau test, et on incrémente ``auto_tests_built``
-    (le compteur que ``route_evaluator`` lit pour décider de continuer ou de clore via le
-    ``suggestions_generator``). Fallback : si le LLM ne rend rien, on pose tout de même
-    ``suggestion_intent`` avec une consigne générique — le garde-fou ``route_agent_output``
-    garantit qu'un test sort quand même."""
+    - émet la carte scénario (``GENERATE_TEST_SCENARIO``) que l'agent émettait via
+      ``generate_test_data`` — le front l'affiche à l'identique (chip « Nouveau test »),
+      et le generator chaîne ses messages dessous via ``agent_message_id`` ;
+    - le nettoyage du ciblage périmé (``test_uid``/``test_index`` laissés par une
+      correction du test précédent) est posé dans ``base`` à sa construction — sans
+      lui, ``_resolve_target_key`` ÉCRASERAIT ce test au lieu d'en créer un nouveau
+      (c'était le rôle de la branche ``generate_test_data`` de l'agent).
+
+    ``card_text`` : texte AFFICHÉ dans la carte, distinct de ``base["input"]`` qui pilote
+    le generator. Les tours déterministes (branche/assemblage) passent un libellé humain
+    lisible ; ``input`` y reste une consigne impérative pour le generator. Défaut = l'input
+    (cas de la suggestion LLM contextuelle, déjà formulée comme symptôme lisible)."""
+    card = AIMessage(
+        content=card_text or base["input"],
+        id=str(uuid.uuid4()),
+        additional_kwargs={
+            "type": MsgType.GENERATE_TEST_SCENARIO,
+            "action": "add",
+            # Même parent que l'agent hors bad_data : la demande utilisateur du run.
+            "parent": state.get("user_message_id"),
+            "request_id": state.get("request_id"),
+        },
+    )
+    base["messages"] = [card]
+    base["agent_message_id"] = card.id
+    return base
+
+
+async def generate_single_suggestion(state: QueryState):
+    """Boucle multi-tests : génère UNE suggestion (au lieu de 3 pour le panneau) et
+    enchaîne DIRECTEMENT sur le ``generator`` pour la construire en test.
+
+    La suggestion est machine : il n'y a personne à qui demander une clarification et
+    la dédup est déjà faite dans le prompt (tests existants injectés) — passer par le
+    ``conversational_agent`` n'ajoutait qu'un appel LLM de tampon et une classe de
+    pannes (ask_clarification terminal → lot inachevé). Ne persiste rien dans le
+    panneau et n'émet pas de message SUGGESTIONS : on pose ``input`` (le texte de la
+    suggestion) + ``suggestion_intent`` (consommation par history_saver + contexte
+    batch de la boucle de correction bad_data) et on incrémente ``auto_tests_built``
+    (le compteur que ``route_evaluator`` lit pour décider de continuer ou de clore via
+    le ``suggestions_generator``). Fallback : si le LLM ne rend rien, une consigne
+    générique part au generator — un test sort quand même."""
     # Checkpoint incrémental : le test qui vient d'être réglé (dernier RESULTS) est
     # persisté AVANT de lancer la génération du suivant — une coupure pendant la suite
     # de la boucle ne fait alors plus perdre les tests déjà finis.
@@ -367,7 +433,14 @@ async def generate_single_suggestion(state: QueryState):
         )
 
     built = (state.get("auto_tests_built") or 0) + 1
-    base = {"auto_tests_built": built, "suggestion_intent": True}
+    base = {
+        "auto_tests_built": built,
+        "suggestion_intent": True,
+        # Ciblage périmé (correction du test précédent) : à nettoyer, sinon le
+        # generator écrase ce test au lieu d'en créer un nouveau.
+        "test_uid": None,
+        "test_index": None,
+    }
 
     test_cases = await retrieve_existing_tests(state["session"], state)
 
@@ -396,7 +469,12 @@ async def generate_single_suggestion(state: QueryState):
                 built,
                 next_branch,
             )
-            return base
+            return _finalize_single_suggestion(
+                state,
+                base,
+                card_text=f"Test ciblé sur la branche « {next_branch} » du UNION ALL "
+                "— le cas propre à cette présentation.",
+            )
         if ALL_PATH not in covered:
             base["target_path"] = ALL_PATH
             base["input"] = (
@@ -406,7 +484,12 @@ async def generate_single_suggestion(state: QueryState):
             logger.diag(
                 "[single_suggestion] tour %d → assemblage complet (nominal, all)", built
             )
-            return base
+            return _finalize_single_suggestion(
+                state,
+                base,
+                card_text="Test nominal sur l'assemblage complet de la requête "
+                "— toutes les branches réunies, cas standard de bout en bout.",
+            )
         # Toutes les branches + l'assemblage sont couverts → on retombe sur la suggestion
         # LLM contextuelle (cas limites : NULL, vide, ex æquo, format…) ci-dessous.
 
@@ -489,7 +572,7 @@ Renseigne aussi `analyse_des_manques` en une phrase.""",
         "Génère un nouveau test couvrant un cas limite non encore couvert par les tests "
         "existants (valeurs NULL, plage vide, ex æquo, ou format de sortie)."
     )
-    return base
+    return _finalize_single_suggestion(state, base)
 
 
 async def generate_suggestions(state: QueryState):
@@ -756,7 +839,12 @@ Autre bon exemple (cas analytique — **une anomalie en masque une autre**, term
     # (via le champ `target_path`). Plus de track déterministe « une suggestion par
     # branche » : le focus est devenu une suggestion contextuelle parmi les autres.
     covered_paths = _covered_paths(state, test_cases)
-    branch_catalog_block = _branch_catalog_block(state, covered_paths, dialect)
+    # Catalogue sliçable si un UNION ALL de 1er niveau porte des paths ; sinon repli sur un
+    # inventaire NOMMÉ des branches (UNION internes non sliçables, cf. c2) pour que le
+    # suggesteur couvre quand même les branches manquantes.
+    branch_catalog_block = _branch_catalog_block(
+        state, covered_paths, dialect
+    ) or _branch_inventory_block(state, dialect)
 
     # Échec LLM → panneau vide (pas de repli déterministe, cf. décision produit).
     suggestions: list[str] = []

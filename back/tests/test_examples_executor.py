@@ -30,6 +30,7 @@ from build_query.examples_executor import (
     _Assertion,
     _parse_unit_tests_from_state,
     _prepare_test_data,
+    _result_schema_and_sample,
     format_result,
 )
 from build_query.examples_generator import _format_cte_trace_hint
@@ -484,6 +485,60 @@ class TestEvaluateAssertions:
         results = _evaluate_assertions(assertions, "v_result4", con)
         assert results[0]["passed"] is True
         assert results[1]["passed"] is False
+
+
+# ---------------------------------------------------------------------------
+# _result_schema_and_sample — schéma + échantillon montrés au juge (P1-1)
+# ---------------------------------------------------------------------------
+
+
+class TestResultSchemaAndSample:
+    """Le juge doit voir les types MOTEUR (DuckDB), pas les dtypes pandas mutés du
+    round-trip JSON (`VARCHAR '001'` → `int64 1`, `NULL` → `NaN`) — sinon il épingle des
+    artefacts de sérialisation. Cf. incident c2."""
+
+    def test_engine_path_uses_duckdb_types_and_native_null(self):
+        con = duckdb.connect()
+        con.execute("CREATE TABLE v (cd VARCHAR, amt BIGINT, seg VARCHAR)")
+        con.execute("INSERT INTO v VALUES ('001', 150, NULL)")
+        # result_df volontairement vide : prouve que le chemin moteur prime sur le df.
+        schema_str, sample, row_count = _result_schema_and_sample(
+            pd.DataFrame(), con=con, view_name="v"
+        )
+        assert "VARCHAR" in schema_str and "BIGINT" in schema_str
+        assert row_count == 1
+        assert sample[0]["cd"] == "001"  # PAS 1
+        assert sample[0]["seg"] is None  # PAS NaN
+
+    def test_fallback_to_pandas_when_no_view(self):
+        df = pd.DataFrame({"id": [1, 2], "label": ["x", "y"]})
+        schema_str, sample, row_count = _result_schema_and_sample(df)
+        assert "id" in schema_str and "label" in schema_str
+        assert row_count == 2
+        assert sample == [{"id": 1, "label": "x"}, {"id": 2, "label": "y"}]
+
+    @pytest.mark.asyncio
+    async def test_full_roundtrip_preserves_leading_zeros(self):
+        """Chaîne réelle : résultat DuckDB → format_result (JSON) → read_json(dtype=False)
+        → register → _result_schema_and_sample. Le `'001'` VARCHAR survit, le NULL reste
+        null, et le schéma annonce VARCHAR (pas int64)."""
+        import io
+
+        con = duckdb.connect()
+        con.execute("CREATE TABLE src (cd VARCHAR, seg VARCHAR)")
+        con.execute("INSERT INTO src VALUES ('001', NULL), ('002', NULL)")
+        engine_df = con.execute("SELECT * FROM src").fetchdf()
+        results_json = await format_result(engine_df)
+
+        reread = pd.read_json(io.StringIO(results_json), orient="records", dtype=False)
+        con.register("__result__x", reread)
+        schema_str, sample, _ = _result_schema_and_sample(
+            reread, con=con, view_name="__result__x"
+        )
+        assert "int64" not in schema_str.lower()
+        assert "`cd`: VARCHAR" in schema_str
+        assert sample[0]["cd"] == "001"
+        assert sample[0]["seg"] is None
 
 
 # ---------------------------------------------------------------------------

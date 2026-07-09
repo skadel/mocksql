@@ -58,6 +58,132 @@ def _format_debug_message(msg: BaseMessage) -> BaseMessage:
     )
 
 
+# ── Plafonds du contexte agent (incident c6_v3_2 : 400 INVALID_ARGUMENT, ~1,23M tokens).
+# Le message RESULTS + sa copie eval_context rendaient la sortie COMPLÈTE du test
+# (1344 lignes × ~45 colonnes sur c6) + le result_json de CHAQUE CTE
+# (step_by_step_results) + les failing_rows de chaque assertion. L'agent n'a besoin que
+# d'un échantillon : le diagnostic et le profil CTE portent l'analyse. Même principe que
+# _build_result_sample_block côté assertions : lignes ENTIÈRES + marqueurs, jamais de
+# troncature caractère.
+_AGENT_MAX_RESULT_ROWS = 20  # sortie finale (eval_context et message RESULTS)
+_AGENT_MAX_CTE_ROWS = 3  # échantillon par CTE (step_by_step_results)
+_AGENT_MAX_FAILING_ROWS = 3  # contre-exemples par assertion en échec
+_AGENT_MAX_ARRAY_ITEMS = 6  # éléments par colonne ARRAY (ex. *_lags de c6 : 14)
+
+
+def _truncate_long_arrays(value):
+    """Tronque récursivement les listes longues d'une valeur (colonnes ARRAY type
+    ``*_lags``/``preceding_values`` de c6 : 14 éléments × 6 colonnes × N lignes) en
+    gardant un JSON valide : ``[v1..v6, "… (+8)"]``. Dicts parcourus, scalaires intacts."""
+    if isinstance(value, list):
+        items = [_truncate_long_arrays(v) for v in value[:_AGENT_MAX_ARRAY_ITEMS]]
+        hidden = len(value) - _AGENT_MAX_ARRAY_ITEMS
+        if hidden > 0:
+            items.append(f"… (+{hidden})")
+        return items
+    if isinstance(value, dict):
+        return {k: _truncate_long_arrays(v) for k, v in value.items()}
+    return value
+
+
+def _capped_rows(rows: list, cap: int) -> list:
+    """Échantillon par LIGNES ENTIÈRES (arrays tronqués) + marqueur ``… (+N autres
+    lignes)`` en fin de liste — jamais de troncature caractère (JSON coupé mi-objet =
+    hallucinations, cf. leçon assertions)."""
+    shown = [_truncate_long_arrays(r) for r in rows[:cap]]
+    hidden = len(rows) - cap
+    if hidden > 0:
+        shown.append(f"… (+{hidden} autres lignes)")
+    return shown
+
+
+def _compact_assertion_result(a: dict) -> dict:
+    """Assertion réduite aux champs utiles à l'agent. Le ``sql`` est omis (dérivé de
+    ``expected_condition``, que l'agent ne répare pas lui-même) et les ``failing_rows``
+    sont plafonnées : sur un échec en mode ``all`` elles peuvent contenir la
+    quasi-totalité du résultat."""
+    out = {k: v for k, v in a.items() if k not in ("sql", "failing_rows")}
+    rows = a.get("failing_rows") or []
+    if rows:
+        out["failing_rows"] = _capped_rows(rows, _AGENT_MAX_FAILING_ROWS)
+    return out
+
+
+def _compact_results_message(msg: BaseMessage) -> BaseMessage:
+    """Copie COMPACTE d'un message RESULTS pour le prompt agent — le message original
+    reste intact dans le state (le front continue de recevoir le résultat complet).
+
+    Compacte chaque résultat de test : ``results_json`` → ``results_row_count`` +
+    ``results_sample`` plafonné ; ``step_by_step_results`` → nom/row_count/échantillon
+    par CTE (``sql_code`` omis : l'agent a déjà la requête complète dans son prompt) ;
+    ``assertion_results`` → cf. ``_compact_assertion_result``. Les données d'ENTRÉE
+    (``test_data``) restent entières : c'est sur elles que l'agent patche.
+    Best-effort : contenu non parsable ou non-RESULTS → message inchangé."""
+    if get_message_type(msg) != MsgType.RESULTS:
+        return msg
+    try:
+        tests = json.loads(msg.content)
+    except Exception:
+        return msg
+    if not isinstance(tests, list):
+        return msg
+
+    compact = []
+    for tr in tests:
+        if not isinstance(tr, dict):
+            compact.append(tr)
+            continue
+        out = {
+            k: v
+            for k, v in tr.items()
+            if k not in ("results_json", "step_by_step_results", "assertion_results")
+        }
+        raw = tr.get("results_json")
+        try:
+            rows = json.loads(raw) if isinstance(raw, str) else (raw or [])
+        except Exception:
+            rows = []
+        if isinstance(rows, list):
+            out["results_row_count"] = len(rows)
+            out["results_sample"] = _capped_rows(rows, _AGENT_MAX_RESULT_ROWS)
+        steps = []
+        for s in tr.get("step_by_step_results") or []:
+            if not isinstance(s, dict):
+                continue
+            raw_s = s.get("result_json")
+            try:
+                rows_s = json.loads(raw_s) if isinstance(raw_s, str) else (raw_s or [])
+            except Exception:
+                rows_s = []
+            if not isinstance(rows_s, list):
+                rows_s = []
+            steps.append(
+                {
+                    "cte_name": s.get("cte_name"),
+                    "row_count": s.get("row_count", len(rows_s)),
+                    "sample": _capped_rows(rows_s, _AGENT_MAX_CTE_ROWS),
+                }
+            )
+        if steps:
+            out["step_by_step_results"] = steps
+        assertions = [
+            _compact_assertion_result(a)
+            for a in tr.get("assertion_results") or []
+            if isinstance(a, dict)
+        ]
+        if assertions:
+            out["assertion_results"] = assertions
+        if "cte_trace" in out:
+            out["cte_trace"] = _truncate_long_arrays(out["cte_trace"])
+        compact.append(out)
+
+    return AIMessage(
+        content=json.dumps(compact, ensure_ascii=False, default=str),
+        id=msg.id,
+        additional_kwargs=msg.additional_kwargs,
+    )
+
+
 def _validate_data_patch_calls(calls: list, uid_to_test: dict) -> tuple[list, list]:
     """Valide les opérations de patch contre les données réelles des tests ciblés.
 
@@ -424,20 +550,25 @@ def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
             test_data_block += f"\n\nDonnées d'entrée du test [{failing_uid}] :\n{_format_data_indexed(input_data)}"
 
         if results_json and results_json != "[]":
+            # Échantillon plafonné (cf. _capped_rows) : sur c6 le résultat complet
+            # dépassait à lui seul la limite de contexte modèle. La cardinalité
+            # réelle reste visible dans l'en-tête — c'est elle que l'agent raisonne.
             try:
                 parsed_results = (
                     json.loads(results_json)
                     if isinstance(results_json, str)
                     else results_json
                 )
+                header = f"{len(parsed_results)} ligne(s)"
                 results_summary = json.dumps(
-                    parsed_results, ensure_ascii=False, indent=2
+                    _capped_rows(parsed_results, _AGENT_MAX_RESULT_ROWS),
+                    ensure_ascii=False,
+                    default=str,
                 )
             except Exception:
+                header = "?"
                 results_summary = str(results_json)[:500]
-            test_data_block += (
-                f"\n\nSortie DuckDB obtenue :\n```json\n{results_summary}\n```"
-            )
+            test_data_block += f"\n\nSortie DuckDB obtenue ({header}) :\n```json\n{results_summary}\n```"
         else:
             test_data_block += "\n\nSortie DuckDB obtenue : **vide (0 lignes)**"
 
@@ -448,7 +579,9 @@ def _build_agent_eval_context(state: QueryState, existing_tests: list) -> tuple:
             if failing_assertions:
                 try:
                     assertions_summary = json.dumps(
-                        failing_assertions, ensure_ascii=False, indent=2
+                        [_compact_assertion_result(a) for a in failing_assertions],
+                        ensure_ascii=False,
+                        default=str,
                     )
                 except Exception:
                     assertions_summary = str(failing_assertions)[:500]
@@ -645,22 +778,46 @@ async def conversational_agent(state: QueryState):
     # Clic sur une suggestion de couverture : l'utilisateur veut un test concret, pas une
     # réponse conversationnelle. On laisse à l'agent la latitude de dédupliquer (étendre un test
     # proche au lieu d'en créer un quasi-identique), mais on lui interdit la non-action.
+    # Boucle multi-tests (batch) : la « suggestion » est générée par MockSQL lui-même
+    # (generate_single_suggestion) — il n'y a PAS d'utilisateur derrière. Depuis le
+    # rebranch (generate_single_suggestion → generator direct), l'agent ne voit cet état
+    # que dans la boucle de CORRECTION bad_data d'un test du lot. Discriminant fiable :
+    # auto_tests_built n'est posé que par le backend, jamais par un clic front.
     suggestion_note = ""
+    is_batch_auto = bool(state.get("suggestion_intent")) and bool(
+        state.get("auto_tests_built")
+    )
     if state.get("suggestion_intent"):
-        suggestion_note = (
-            "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
-            "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
-            "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
-            "- S'il recoupe largement un test existant → DIS-LE à l'utilisateur (quel test "
-            "ressemble) et étends/ajuste ce test (`add_test_row` ou `update_test_data`) plutôt "
-            "que de créer un doublon. Si seule la DESCRIPTION du test existant gagnerait à être "
-            "ajustée, n'écris JAMAIS la nouvelle description toi-même : appelle "
-            "`update_test_description` qui ne fait que la PROPOSER à l'utilisateur (il valide).\n"
-            "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
-            "`ask_clarification`.\n"
-            "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
-            "renforce le test existant via `add_test_row`."
-        )
+        if is_batch_auto:
+            suggestion_note = (
+                "\n\n⚠️ SUGGESTION AUTOMATIQUE (boucle multi-tests) : cette consigne a été "
+                "générée par MockSQL lui-même pour construire le prochain test du lot — il "
+                "n'y a PAS d'utilisateur derrière ce message, donc n'appelle JAMAIS "
+                "`ask_clarification` (personne ne répondra, le lot resterait inachevé). "
+                "Tu DOIS produire une action de test :\n"
+                "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
+                "- S'il recoupe largement un test existant → étends ce test "
+                "(`add_test_row` ou `update_test_data`) plutôt que de créer un doublon.\n"
+                "- Si la suggestion décrit un comportement que le SQL EXCLUT (ex. une ligne "
+                "filtrée qui n'apparaît pas dans le résultat), c'est PRÉCISÉMENT le cas à "
+                "tester : crée le test qui AFFIRME ce comportement observable "
+                "(ex. résultat vide, ligne absente de la sortie)."
+            )
+        else:
+            suggestion_note = (
+                "\n\n⚠️ L'utilisateur a cliqué sur une SUGGESTION de couverture pour en faire un test. "
+                "Tu DOIS produire une action de test, jamais une simple réponse texte :\n"
+                "- Si le scénario n'est pas couvert → `generate_test_data` (nouveau test).\n"
+                "- S'il recoupe largement un test existant → DIS-LE à l'utilisateur (quel test "
+                "ressemble) et étends/ajuste ce test (`add_test_row` ou `update_test_data`) plutôt "
+                "que de créer un doublon. Si seule la DESCRIPTION du test existant gagnerait à être "
+                "ajustée, n'écris JAMAIS la nouvelle description toi-même : appelle "
+                "`update_test_description` qui ne fait que la PROPOSER à l'utilisateur (il valide).\n"
+                "- Seulement si la suggestion suppose un comportement que le SQL ne fait pas → "
+                "`ask_clarification`.\n"
+                "Ne réponds JAMAIS que « c'est déjà vérifié » sans agir : si c'est déjà couvert, "
+                "renforce le test existant via `add_test_row`."
+            )
         # Focus déterministe : si la suggestion cliquée a été marquée par le suggesteur comme
         # focalisée sur une branche (suggestion_paths persisté), on impose le nom machine exact
         # à l'agent → set_target_path sans deviner. Évite tout remap fuzzy texte → branche.
@@ -1080,7 +1237,11 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             if mtype in (MsgType.RESULTS, MsgType.EXAMPLES):
                 break
 
-    formatted_history = [_format_debug_message(m) for m in history]
+    # RESULTS compactés à la frontière agent (échantillon + arrays tronqués) : le
+    # message complet reste dans le state pour le front — cf. _compact_results_message.
+    formatted_history = [
+        _format_debug_message(_compact_results_message(m)) for m in history
+    ]
     messages_for_llm = [
         SystemMessage(content=system_content + resume_context)
     ] + formatted_history
@@ -1126,7 +1287,36 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
             if user_premise
             else ""
         )
-        if any(get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history):
+        # Désync prémisse↔données d'ENTRÉE (kind="premise_desync", posé par l'évaluateur) :
+        # cas où la DIRECTION de correction est connue — ramener les données injectées vers
+        # la prémisse. Le premise_guard générique (ci-dessus) pousse vers la délégation
+        # (request_reevaluation) car il couvre le cas ambigu « prémisse OU SQL faux » ; ici
+        # l'ambiguïté est levée (le juge a vu des données valides ≠ prémisse), donc on émet
+        # un trigger dédié qui ordonne d'aligner les données SUR la prémisse, sans déléguer.
+        _latest_eval = next(
+            (
+                m
+                for m in reversed(state.get("messages", []))
+                if get_message_type(m) == MsgType.EVALUATION
+            ),
+            None,
+        )
+        _diag_kind = (
+            (_latest_eval.additional_kwargs.get("diagnostic") or {}).get("kind")
+            if _latest_eval
+            else None
+        )
+        if _diag_kind == "premise_desync" and user_premise:
+            trigger = (
+                f"Le test [{failing_uid_trigger}] a des données d'entrée qui ne "
+                f"respectent PAS la prémisse explicitement énoncée par l'utilisateur "
+                f"— « {user_premise} ». Corrige les DONNÉES D'ENTRÉE "
+                f"(`patch_test_field` / `add_test_row` / `remove_test_row`) pour "
+                f"qu'elles respectent cette prémisse. Aligner les données SUR la "
+                f"prémisse est exactement la correction attendue ici — ne réécris ni "
+                f"la prémisse ni la description du test."
+            ) + branch_plan_hint
+        elif any(get_message_type(m) == MsgType.DEBUG_RUN_CTE for m in history):
             trigger = (
                 (
                     f"Le diagnostic est terminé — les résultats sont visibles ci-dessus. "
@@ -1199,6 +1389,8 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     noop_retries = 0
     _MALFORMED_RETRY_MAX = 2
     malformed_retries = 0
+    _CLARIF_RETRY_MAX = 2
+    clarif_retries = 0
 
     logger.diag("[conv_agent] PROMPT SYSTEM (extrait):\n%s", system_content[:2000])
     if eval_context:
@@ -1262,6 +1454,41 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         clarif_tc = next(
             (tc for tc in tool_calls if tc["name"] == "ask_clarification"), None
         )
+        # Boucle multi-tests : la « suggestion » vient de MockSQL, pas d'un utilisateur —
+        # une question resterait sans réponse et tuerait le lot (incident : N-1 tests +
+        # question orpheline dans le chat). On ignore la clarification : l'action co-émise
+        # dans la même réponse est conservée s'il y en a une, sinon on renvoie l'agent
+        # agir (retry capé) ; à l'épuisement, break sans outil → route_agent_output
+        # retombe sur le generator (l'input porte le texte de la suggestion).
+        if clarif_tc and is_batch_auto:
+            other_calls = [tc for tc in tool_calls if tc["name"] != "ask_clarification"]
+            logger.diag(
+                "[conv_agent] ask_clarification ignoré (boucle batch) — %s",
+                f"{len(other_calls)} outil(s) co-émis conservé(s)"
+                if other_calls
+                else f"retry {clarif_retries + 1}/{_CLARIF_RETRY_MAX}",
+            )
+            if other_calls:
+                tool_calls = other_calls
+                clarif_tc = None
+            elif clarif_retries < _CLARIF_RETRY_MAX:
+                clarif_retries += 1
+                messages_for_llm = messages_for_llm + [
+                    result,
+                    HumanMessage(
+                        content=(
+                            "Il n'y a pas d'utilisateur à qui poser cette question : cette "
+                            "suggestion a été générée automatiquement par MockSQL (boucle "
+                            "multi-tests). Si le SQL exclut le cas décrit, c'est le "
+                            "comportement à tester : appelle `generate_test_data` avec un "
+                            "scénario qui AFFIRME ce comportement observable (ex. la ligne "
+                            "est absente du résultat)."
+                        )
+                    ),
+                ]
+                continue
+            else:
+                break
         if clarif_tc:
             agent_tool_call = "ask_clarification"
             agent_tool_args = dict(clarif_tc["args"])

@@ -1,0 +1,5 @@
+.env
+.mocksql/data/
+.mocksql/cache/
+.mocksql/*.duckdb
+.mocksql/profile.json

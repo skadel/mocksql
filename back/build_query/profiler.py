@@ -259,6 +259,28 @@ def _regularity_case_seconds(dialect: str) -> str:
     )
 
 
+def _string_agg_expr(
+    value_expr: exp.Expression, sep: str, dialect: str
+) -> exp.Expression:
+    """Concatène les valeurs d'une colonne en une seule chaîne, selon le dialecte.
+
+    Trino n'a ni ``STRING_AGG`` ni ``LISTAGG`` sans ``WITHIN GROUP`` : on passe par
+    ``ARRAY_JOIN(ARRAY_AGG(x), sep)``. Les autres dialectes utilisent ``STRING_AGG``.
+    """
+    if dialect == "trino":
+        return exp.Anonymous(
+            this="ARRAY_JOIN",
+            expressions=[
+                exp.Anonymous(this="ARRAY_AGG", expressions=[value_expr]),
+                exp.Literal.string(sep),
+            ],
+        )
+    return exp.Anonymous(
+        this="STRING_AGG",
+        expressions=[value_expr, exp.Literal.string(sep)],
+    )
+
+
 def _build_regularity_query(
     table_name: str, col: str, col_type: str, dialect: str = "bigquery"
 ) -> str | None:
@@ -291,6 +313,10 @@ def _build_regularity_query(
             diff_expr = (
                 f"DATEDIFF('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
             )
+        elif dialect == "trino":
+            diff_expr = (
+                f"date_diff('day', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            )
         else:
             diff_expr = f"({col_q} - LAG({col_q}) OVER (ORDER BY {col_q}))"
         case_sql = _regularity_case_days(dialect)
@@ -303,6 +329,10 @@ def _build_regularity_query(
         elif dialect in ("duckdb", "snowflake"):
             diff_expr = (
                 f"DATEDIFF('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
+            )
+        elif dialect == "trino":
+            diff_expr = (
+                f"date_diff('second', LAG({col_q}) OVER (ORDER BY {col_q}), {col_q})"
             )
         else:
             diff_expr = (
@@ -426,9 +456,7 @@ def build_column_profile_queries(
 
     basic_q = exp.select(
         exp.alias_(exp.Count(this=exp.Star()), "total_count"),
-        exp.alias_(
-            exp.Anonymous(this="COUNTIF", expressions=[_is_null()]), "null_count"
-        ),
+        exp.alias_(exp.CountIf(this=_is_null()), "null_count"),
         exp.alias_(
             exp.Count(this=exp.Distinct(expressions=[_cref()])), "distinct_count"
         ),
@@ -730,16 +758,13 @@ def detect_correlations(
                     ),
                     exp.alias_(exp.Count(this=exp.Star()), "row_count"),
                     exp.alias_(
-                        exp.Anonymous(
-                            this="COUNTIF",
-                            expressions=[
-                                exp.Is(
-                                    this=exp.Column(
-                                        this=exp.Identifier(this=target, quoted=True)
-                                    ),
-                                    expression=exp.Null(),
-                                )
-                            ],
+                        exp.CountIf(
+                            this=exp.Is(
+                                this=exp.Column(
+                                    this=exp.Identifier(this=target, quoted=True)
+                                ),
+                                expression=exp.Null(),
+                            )
                         ),
                         "target_null_count",
                     ),
@@ -1678,13 +1703,7 @@ def _build_col_query(
             .limit(top_k)
         )
         top_expr: exp.Expression = exp.select(
-            exp.Anonymous(
-                this="STRING_AGG",
-                expressions=[
-                    exp.Cast(this=_cref(), to=str_dtype),
-                    exp.Literal.string("|||"),
-                ],
-            )
+            _string_agg_expr(exp.Cast(this=_cref(), to=str_dtype), "|||", dialect)
         ).from_(top_inner.subquery(top_alias))
 
         distinct_expr: exp.Expression = exp.Count(
@@ -2100,9 +2119,8 @@ def _build_join_query(
         l_pw_expr,
     )
     ks_outer = exp.select(
-        exp.Anonymous(
-            this="STRING_AGG",
-            expressions=[exp.Cast(this=exp.column("join_key"), to=str_dtype)],
+        _string_agg_expr(
+            exp.Cast(this=exp.column("join_key"), to=str_dtype), ",", dialect
         )
     ).from_(ks_inner.subquery(ks_alias))
 
@@ -3308,6 +3326,11 @@ def _build_one_derived_expr_branch(
         )
     elif dialect == "snowflake":
         top_values_scalar = f"(SELECT LISTAGG(_v, '|||') FROM ({inner}) AS _tv_{idx})"
+    elif dialect == "trino":
+        # Trino n'a ni STRING_AGG ni LISTAGG sans WITHIN GROUP : array_join(array_agg).
+        top_values_scalar = (
+            f"(SELECT ARRAY_JOIN(ARRAY_AGG(_v), '|||') FROM ({inner}) AS _tv_{idx})"
+        )
     else:
         top_values_scalar = (
             f"(SELECT STRING_AGG(_v, '|||') FROM ({inner}) AS _tv_{idx})"

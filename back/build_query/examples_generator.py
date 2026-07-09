@@ -55,6 +55,10 @@ def _should_regenerate(state, existing_tests: list) -> bool:
         return True
     if state.get("status") == "empty_results":
         return True
+    # Fallback focus → all (query_chain._focus_fallback) : un test focalisé non
+    # convergent vient d'être rebasculé sur le script complet → régénérer.
+    if state.get("focus_fallback"):
+        return True
     return False
 
 
@@ -826,6 +830,11 @@ async def generate_examples(state: QueryState):
     if generated_test.get("target_path"):
         result["target_path"] = generated_test["target_path"]
 
+    # Trigger one-shot du fallback focus → all : consommé par cette régénération,
+    # il ne doit pas fuiter aux entrées suivantes du générateur (batch loop, edits).
+    if state.get("focus_fallback"):
+        result["focus_fallback"] = False
+
     # Boucle bad_data : consigne la régénération complète dans le ledger des
     # tentatives, au même titre qu'un lot de patches (le round suivant doit savoir
     # qu'un regen a déjà été tenté sans effet).
@@ -894,10 +903,15 @@ def _resolve_user_premise(
     """
     if existing_tc is not None:
         return existing_tc.get("user_premise")
+    # Suggestion machine (boucle batch ou clic sur le panneau, suggestion_intent) :
+    # le texte est écrit par MockSQL, pas AFFIRMÉ par l'utilisateur → pas de prémisse.
+    # Sans ce garde, le premise_guard de la boucle bad_data refuse de patcher les
+    # données « énoncées » et délègue via ask_clarification — sans destinataire en batch.
     if (
         existing_tests
         and state.get("input", "").strip()
         and state.get("evaluation_feedback") != "bad_data"
+        and not state.get("suggestion_intent")
     ):
         return state["input"].strip()
     return None
@@ -1073,7 +1087,11 @@ async def generate_examples_(
             c_copy = dict(c)
             hints = col_hints.get((uc_key, col_name))
             if hints:
-                hint_str = " | ATTENTION contrainte SQL : " + " ; ".join(hints)
+                hint_str = (
+                    " | ⚠️ indice extrait du SQL (peut être partiel ou conditionnel à "
+                    "UNE branche d'un OR/UNION — la requête fait foi) : "
+                    + " ; ".join(hints)
+                )
                 existing_desc = c_copy.get("description")
                 if existing_desc:
                     c_copy["description"] = str(existing_desc) + hint_str
@@ -1519,6 +1537,28 @@ async def create_appropriate_prompt(
             join_recipes_block=join_recipes_block,
             multi_branch=multi_branch,
             focus_path=focus_path,
+        )
+    elif state.get("focus_fallback"):
+        # Fallback focus → all (query_chain._focus_fallback) : le test focalisé n'a
+        # pas convergé, l'état porte des tests existants SANS input ni empty_results
+        # → sans cette branche on tombait dans le `return None` (l'executor rejouait
+        # l'ancien test focalisé à l'identique). Régénération COMPLÈTE sur le script
+        # entier : mêmes ingrédients qu'une première génération, sans focus_path (le
+        # scénario doit couvrir toutes les branches — c'est le but du fallback).
+        return generate_data_prompt(
+            history,
+            dialect,
+            format_instructions,
+            used_columns,
+            constraints_hint=constraints_hint,
+            sql=stripped_sql,
+            profile=profile,
+            model_context=model_context,
+            eval_history=eval_history,
+            native_thinking=native_thinking,
+            join_recipes_block=join_recipes_block,
+            multi_branch=multi_branch,
+            focus_path="",
         )
     else:
         return None

@@ -50,7 +50,13 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
 
     results_json = current_test.get("results_json", "[]")
     try:
-        result_df = pd.read_json(io.StringIO(results_json), orient="records")
+        # dtype=False : NE PAS ré-inférer les types depuis le JSON. Sans lui, une colonne
+        # VARCHAR de chiffres (`'001'`) est coercée en int64 (`1`) et une colonne NULL en
+        # float64/NaN → le juge, qui lit le schéma et l'échantillon, épingle des artefacts
+        # de sérialisation (`CD = 1` au lieu de `'001'`). Cf. incident c2 / P1-1.
+        result_df = pd.read_json(
+            io.StringIO(results_json), orient="records", dtype=False
+        )
     except Exception:
         result_df = pd.DataFrame()
 
@@ -73,10 +79,12 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
     from build_query.examples_executor import (
         _assertion_to_executable,
         _autoscope_failing_assertions,
+        _cardinality_pin,
         _evaluate_assertions_with_retry,
         _fix_logically_failing_assertions,
         _generate_assertions_and_evaluate,
         _generate_diagnostic,
+        _is_bare_rowcount_pin,
     )
     from utils.timing import atimed
 
@@ -100,14 +108,24 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 result_df=result_df,
                 test_description=test_description,
                 focus_path=focus_path,
+                con=con,
+                view_name=view_name,
             )
 
             async with atimed("assertion_gen:eval+fix"):
                 # _Assertion n'expose que description/expected_condition ; le SQL dbt-style
                 # exécutable est dérivé ici via _assertion_to_executable. Passer model_dump()
                 # brut laisserait `sql` vide → con.execute("") → None → crash .fetchdf().
+                # Pin de cardinalité déterministe (COUNT(*) = N, hors LLM) appendé en fin de
+                # suite ; les pins bruts émis par le LLM malgré la consigne sont dédoublonnés.
+                executables = []
+                for a in eval_result.assertions:
+                    ex = _assertion_to_executable(a)
+                    if not _is_bare_rowcount_pin(ex):
+                        executables.append(ex)
+                executables.append(_cardinality_pin(len(result_df)))
                 assertion_results = await _evaluate_assertions_with_retry(
-                    [_assertion_to_executable(a) for a in eval_result.assertions],
+                    executables,
                     **retry_kwargs,
                 )
                 # Rattrapage déterministe (sans LLM) du pattern « format long » : une
