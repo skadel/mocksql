@@ -2,6 +2,8 @@ import IosShareIcon from '@mui/icons-material/IosShare';
 import { Tooltip } from '@mui/material';
 import React from 'react';
 import { MutedIconButton } from '../style/AppButtons';
+import { computeCoverage } from '../utils/coverage';
+import { escapeHtml as esc, renderStaticTable, STATIC_TABLE_STYLES } from '../utils/staticTable';
 import { getVerdictInfo } from '../utils/verdict';
 
 interface HtmlExporterProps {
@@ -9,55 +11,13 @@ interface HtmlExporterProps {
   sqlFileName?: string;
 }
 
-/* ─── coverage (mirrors TestsPanel logic) ─────────────────────────── */
-const BUCKETS = [
-  { key: 'happy', label: 'Cas nominal',     weight: 25, re: /logique.m.tier|calcul|pourcentage|croissance|nominal|résultat|attendu|standard/ },
-  { key: 'null',  label: 'Valeurs NULL',    weight: 20, re: /null.checks|null|manquant|absent/ },
-  { key: 'empty', label: 'Données vides',   weight: 15, re: /vide|aucune|inexistant|0.ligne|zéro|sans.données|ensemble.vide/ },
-  { key: 'dup',   label: 'Doublons',        weight: 15, re: /valeurs.dupliqu|doublon|dupliqué|répété/ },
-  { key: 'limit', label: 'Valeurs limites', weight: 15, re: /cas.limites|limite|extrême|bord|boundary|borne|plage/ },
-  { key: 'tie',   label: 'Tri / Ex æquo',  weight: 10, re: /ex.æquo|ex.aequo|\btie\b|classement|rang\b/ },
-];
-
-function axisCompleteness(n: number) {
-  if (n === 0) return 0; if (n === 1) return 40; if (n === 2) return 65; if (n === 3) return 85;
-  return 100;
-}
-
-function computeScore(tests: any[]): number {
-  const counts: Record<string, number> = {};
-  BUCKETS.forEach(b => { counts[b.key] = 0; });
-  tests.forEach(t => {
-    const s = ((t.unit_test_description ?? '') + ' ' + (t.tags ?? []).join(' ')).toLowerCase();
-    BUCKETS.forEach(b => { if (b.re.test(s)) counts[b.key]++; });
-  });
-  let score = 0;
-  BUCKETS.forEach(b => { score += (b.weight * axisCompleteness(counts[b.key])) / 100; });
-  return Math.round(score);
-}
-
-/* ─── table renderer ──────────────────────────────────────────────── */
-function renderTable(rows: Record<string, any>[], title: string): string {
-  if (!rows || rows.length === 0) return '';
-  const cols = Object.keys(rows[0]);
-  const header = cols.map(c => `<th>${esc(c)}</th>`).join('');
-  const body = rows.map(r =>
-    `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? ''))}</td>`).join('')}</tr>`
-  ).join('');
-  return `<p class="tbl-title">${esc(title)}</p><div class="tbl-scroll"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
-}
-
-function esc(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
-
 /* ─── HTML generator ──────────────────────────────────────────────── */
 function generateHtml(tests: any[], sqlFileName?: string): string {
-  const score = computeScore(tests);
+  const { n, total, pct } = computeCoverage(tests);
   const dateStr = new Date().toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
   const title = sqlFileName ?? 'Tests SQL';
 
-  const scoreColor = score >= 80 ? '#23a26d' : score >= 50 ? '#d89323' : '#d0503f';
+  const scoreColor = pct >= 80 ? '#23a26d' : pct >= 50 ? '#d89323' : '#d0503f';
 
   const testsHtml = tests.map((test, idx) => {
     const vi = getVerdictInfo(test);
@@ -77,9 +37,9 @@ function generateHtml(tests: any[], sqlFileName?: string): string {
     const tagsHtml = tags.map(t => `<span class="tag">${esc(t)}</span>`).join('');
 
     const inputTablesHtml = Object.entries(inputData)
-      .map(([name, rows]) => renderTable(rows as Record<string, any>[], name))
+      .map(([name, rows]) => renderStaticTable(rows as Record<string, any>[], name))
       .join('');
-    const outputTableHtml = renderTable(outputData as Record<string, any>[], 'Résultat attendu');
+    const outputTableHtml = renderStaticTable(outputData as Record<string, any>[], 'Résultat attendu');
     const hasData = inputTablesHtml || outputTableHtml;
 
     return `
@@ -124,12 +84,7 @@ function generateHtml(tests: any[], sqlFileName?: string): string {
   summary { font-size: 12px; font-weight: 600; color: #2BB0A8; cursor: pointer; user-select: none; }
   summary:hover { color: #1a8a82; }
   .data-body { margin-top: 10px; }
-  .tbl-title { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: .05em; margin: 12px 0 4px; }
-  .tbl-scroll { overflow-x: auto; border: 1px solid #e5e8ea; border-radius: 8px; max-width: 100%; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #f4f7f7; font-weight: 600; color: #555; text-align: left; padding: 5px 8px; border: 1px solid #e5e8ea; white-space: nowrap; }
-  td { padding: 4px 8px; border: 1px solid #e5e8ea; color: #333; white-space: nowrap; }
-  tr:nth-child(even) td { background: #fbfcfc; }
+${STATIC_TABLE_STYLES}
   footer { margin-top: 40px; font-size: 11px; color: #aaa; text-align: center; border-top: 1px solid #eee; padding-top: 16px; }
 </style>
 </head>
@@ -140,7 +95,7 @@ function generateHtml(tests: any[], sqlFileName?: string): string {
     <div class="meta">
       <span>Exporté le ${dateStr}</span>
       <span>${tests.length} test${tests.length > 1 ? 's' : ''}</span>
-      <span class="coverage-chip">Couverture ${score}/100</span>
+      <span class="coverage-chip">Couverture ${n}/${total} axes</span>
     </div>
   </header>
   <main>${testsHtml}</main>
