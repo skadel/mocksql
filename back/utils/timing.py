@@ -70,7 +70,17 @@ class LLMTimingCallback(BaseCallbackHandler):
         self._starts: dict = {}
 
     def on_chat_model_start(self, serialized, messages, *, run_id, **kwargs):
-        self._starts[run_id] = (time.perf_counter(), _model_name(serialized, kwargs))
+        model = _model_name(serialized, kwargs)
+        self._starts[run_id] = (time.perf_counter(), model)
+        approx_tokens = _estimate_prompt_tokens(messages)
+        if approx_tokens >= _PROMPT_SIZE_WARN_TOKENS:
+            # Un prompt géant explose la latence et risque un 429 (quota TPM Vertex) —
+            # p. ex. un <result_sample> non plafonné (cf. audit c6.sql). Surface le tôt.
+            logger.warning(
+                "[llm:%s] prompt volumineux (~%d k tokens estimés) — risque de latence/429 TPM",
+                model,
+                approx_tokens // 1000,
+            )
 
     def on_llm_end(self, response, *, run_id, **kwargs):
         self._log(run_id)
@@ -85,6 +95,29 @@ class LLMTimingCallback(BaseCallbackHandler):
         start, model = entry
         elapsed_ms = (time.perf_counter() - start) * 1000
         logger.diag("[timing] llm:%s: %.0f ms%s", model, elapsed_ms, suffix)
+
+
+# Seuil d'alerte : au-delà, un prompt risque la latence et le 429 (quota TPM Vertex).
+_PROMPT_SIZE_WARN_TOKENS = 200_000
+
+
+def _estimate_prompt_tokens(messages) -> int:
+    """Estimation grossière (≈ 4 caractères/token) de la taille d'un prompt de chat, à partir
+    des messages passés à ``on_chat_model_start`` (liste de listes de messages). Sert au seul
+    garde-fou de taille — pas de comptage exact requis."""
+    total_chars = 0
+    for group in messages or []:
+        for m in group:
+            content = getattr(m, "content", m)
+            if isinstance(content, str):
+                total_chars += len(content)
+            elif isinstance(content, list):
+                for part in content:
+                    if isinstance(part, str):
+                        total_chars += len(part)
+                    elif isinstance(part, dict):
+                        total_chars += len(str(part.get("text", "")))
+    return total_chars // 4
 
 
 def _model_name(serialized, kwargs) -> str:

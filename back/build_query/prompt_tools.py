@@ -527,6 +527,11 @@ def _build_min_points_agg_hint_block(sql: str, dialect: str = "bigquery") -> str
         "`ABS(corr) <= 0.5`), prévois **≥3 points dispersés** : 2 points donnent une "
         "corrélation parfaite (±1) qui serait exclue. La description doit décrire un "
         "scénario MULTI-entités, pas une entité unique.\n"
+        "⚠️ **Fenêtre temporelle** : si la variance est calculée sur une fenêtre "
+        "(`OVER (... ORDER BY <date> ROWS/RANGE ...)`), les « plusieurs points » sont "
+        "**plusieurs PÉRIODES pour la MÊME entité** (varie dans le TEMPS), PAS plusieurs "
+        "entités. N'ajoute alors AUCUNE dimension/entité superflue — elle ferait exploser "
+        "un CUBE/GROUP BY multi-axes sans servir la variance.\n"
     )
 
 
