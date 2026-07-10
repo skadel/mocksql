@@ -2,6 +2,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 
 from storage.config import (
     get_llm_location,
+    get_llm_max_retries,
     get_llm_model,
     get_llm_streaming,
     get_llm_thinking_budget,
@@ -30,6 +31,9 @@ def make_llm(
         vertexai=True,
         temperature=temperature,
         streaming=streaming if streaming is not None else get_llm_streaming(),
+        # Retry/backoff explicite sur erreur transitoire (429 quota TPM notamment) : rendu
+        # déterministe et surchargeable plutôt que de dépendre du défaut implicite du client.
+        max_retries=get_llm_max_retries(),
         callbacks=[_timing_callback, _dump_callback],
     )
     if resolved_location:
