@@ -44,6 +44,7 @@ import SqlEditor from '../../../shared/SqlEditor';
 import { patchModelTests, applyAssertions } from '../../../api/messages';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { relativeDate } from '../../../utils/dates';
+import { COVERAGE_AXES, computeCoverage } from '../../../utils/coverage';
 import ExcelDownloader from '../../../shared/ExcelDownloader';
 import ExcelUploader from '../../../shared/ExcelUploader';
 import HtmlExporter from '../../../shared/HtmlExporter';
@@ -79,58 +80,12 @@ function tagStyle(tag: string) {
   return TAG_COLORS[tag] ?? { bg: '#f0f0f0', fg: '#555' };
 }
 
-/* ─── coverage ────────────────────────────────────────────────────── */
-// v15 coverage axes (cf. data.js:coverageAxes).
-// Drops happy/equal/types ; adds bornes/doublons/volumetrie.
-const COVERAGE_AXES = [
-  { key: 'null',       label: 'Valeurs NULL',      hint: 'colonnes manquantes / vides' },
-  { key: 'vide',       label: 'Fenêtre vide',      hint: 'aucune ligne sur la période' },
-  { key: 'ex_aequo',   label: 'Ex æquo',           hint: 'égalités de tri / départage' },
-  { key: 'bornes',     label: 'Bornes & négatifs', hint: '0, valeurs négatives, hors plage' },
-  { key: 'doublons',   label: 'Doublons',          hint: 'lignes dupliquées en entrée' },
-  { key: 'volumetrie', label: 'Volumétrie',        hint: '1 ligne vs. N lignes' },
-];
-
-const AXIS_KEYS = new Set(COVERAGE_AXES.map((a) => a.key));
-
-// Coverage prefers backend-declared axes (the v15 model: each test carries
-// `axes: string[]`). Until the backend tags them, we fall back to regex
-// heuristics over the test title + tags.
-function detectCoveredAxes(tests: any[]): Set<string> {
-  const covered = new Set<string>();
-
-  // 1. Trust explicit backend-declared axes when at least one test has them.
-  const declared = tests.some((t) => Array.isArray(t.axes) && t.axes.length > 0);
-  if (declared) {
-    tests.forEach((t) =>
-      (t.axes ?? []).forEach((a: string) => {
-        if (AXIS_KEYS.has(a)) covered.add(a);
-      }),
-    );
-    return covered;
-  }
-
-  // 2. Fallback heuristics on the test text.
-  tests.forEach((t) => {
-    const s = ((t.unit_test_description ?? '') + ' ' + (t.tags ?? []).join(' ')).toLowerCase();
-    if (/null.checks|null|manquant|absent/.test(s))                                          covered.add('null');
-    if (/vide|aucune|inexistant|0.ligne|z[ée]ro|sans.donn[ée]es|ensemble.vide|fen[êe]tre.vide|plage.vide/.test(s)) covered.add('vide');
-    if (/ex.[æa]quo|\btie\b|classement|d[ée]partage|non.d[ée]terministe/.test(s))            covered.add('ex_aequo');
-    if (/borne|n[ée]gatif|hors.plage|hors.borne|d[ée]bordement|overflow|valeur.limite/.test(s)) covered.add('bornes');
-    if (/doublon|dupliqu|duplicate|m[êe]me.cl[ée]/.test(s))                                   covered.add('doublons');
-    if (/volum|cardinalit|une.seule.ligne|1.ligne|plusieurs.lignes|n.lignes|grand.volume/.test(s)) covered.add('volumetrie');
-  });
-  return covered;
-}
-
 /* ─── CoverageGrid ────────────────────────────────────────────────── */
+// Modèle d'axes + détection factorisés dans utils/coverage (partagés avec l'export HTML).
 // Conservé volontairement : couverture 6 axes dépriorisée (cf. CLAUDE.md), non montée mais gardée.
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 function CoverageGrid({ tests, onSuggestionClick }: { tests: any[]; onSuggestionClick?: (text: string) => void }) {
-  const covered = useMemo(() => detectCoveredAxes(tests), [tests]);
-  const n = covered.size;
-  const total = COVERAGE_AXES.length;
-  const pct = total > 0 ? Math.round((n / total) * 100) : 0;
+  const { covered, n, total, pct } = useMemo(() => computeCoverage(tests), [tests]);
   const gaps = total - n;
 
   return (
