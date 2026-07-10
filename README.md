@@ -1,3 +1,5 @@
+
+
 # MockSQL
 
 [![Backend CI](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml)
@@ -6,6 +8,10 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **A native unit-testing layer for data engineers.** MockSQL takes a `.sql` file, automatically generates test data via LLM, runs it locally on DuckDB (zero cost on BigQuery), assigns an argued verdict to each test, and suggests the edge cases you haven't covered.
+
+https://github.com/user-attachments/assets/ce95cacb-c245-432a-8e4b-6ffc76507980
+
+<p align="center"><em>Full flow: pick a <code>.sql</code> model → MockSQL generates the input data, runs the query locally on DuckDB, and returns an argued verdict per test — plus suggestions for the edge cases you haven't covered.</em></p>
 
 MockSQL never hands raw SQL to the LLM. It first parses the query with **SQLGlot** to extract the used columns, filters, and JOINs — then feeds those constraints to the LLM as structured context. The generated data is then executed on **DuckDB**: if a CTE returns 0 rows, MockSQL identifies which one and automatically re-runs generation until it gets non-empty results. Once the tests are generated, a **contextual chat** lets you refine, add, or edit them directly in natural language — anchored to a specific test or to the whole model.
 

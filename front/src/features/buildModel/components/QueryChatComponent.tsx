@@ -2277,7 +2277,8 @@ const ChatComponent: React.FC = () => {
             >
               {t('cancel')}
             </Button>
-            {pendingAutoProfile.step === 'profiling' && (
+            {(pendingAutoProfile.step === 'profiling' ||
+              (pendingAutoProfile.step === 'count' && pendingAutoProfile.needsProfiling)) && (
               <Button
                 variant="text"
                 onClick={() => pendingAutoProfile.onSkip(testsTarget)}

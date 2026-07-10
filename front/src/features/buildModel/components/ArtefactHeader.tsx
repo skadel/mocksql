@@ -71,7 +71,7 @@ const ArtefactHeader: React.FC<ArtefactHeaderProps> = ({ testCount, onRerun, rer
 
       <Box sx={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 1 }}>
         {onRefreshProfile && !refreshing && (
-          <Typography sx={{ fontSize: 11, color: freshness ? '#9aacb0' : '#a86a00' }}>
+          <Typography data-testid="profile-freshness" sx={{ fontSize: 11, color: freshness ? '#9aacb0' : '#a86a00' }}>
             {freshness ?? t('panel.never_profiled')}
           </Typography>
         )}
