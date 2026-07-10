@@ -44,7 +44,7 @@ function renderTable(rows: Record<string, any>[], title: string): string {
   const body = rows.map(r =>
     `<tr>${cols.map(c => `<td>${esc(String(r[c] ?? ''))}</td>`).join('')}</tr>`
   ).join('');
-  return `<p class="tbl-title">${esc(title)}</p><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`;
+  return `<p class="tbl-title">${esc(title)}</p><div class="tbl-scroll"><table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
 function esc(s: string): string {
@@ -125,9 +125,10 @@ function generateHtml(tests: any[], sqlFileName?: string): string {
   summary:hover { color: #1a8a82; }
   .data-body { margin-top: 10px; }
   .tbl-title { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: .05em; margin: 12px 0 4px; }
+  .tbl-scroll { overflow-x: auto; border: 1px solid #e5e8ea; border-radius: 8px; max-width: 100%; }
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th { background: #f4f7f7; font-weight: 600; color: #555; text-align: left; padding: 5px 8px; border: 1px solid #e5e8ea; }
-  td { padding: 4px 8px; border: 1px solid #e5e8ea; color: #333; }
+  th { background: #f4f7f7; font-weight: 600; color: #555; text-align: left; padding: 5px 8px; border: 1px solid #e5e8ea; white-space: nowrap; }
+  td { padding: 4px 8px; border: 1px solid #e5e8ea; color: #333; white-space: nowrap; }
   tr:nth-child(even) td { background: #fbfcfc; }
   footer { margin-top: 40px; font-size: 11px; color: #aaa; text-align: center; border-top: 1px solid #eee; padding-top: 16px; }
 </style>
