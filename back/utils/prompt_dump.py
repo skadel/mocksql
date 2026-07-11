@@ -128,6 +128,19 @@ def _render_output(response):
                 msg = getattr(gen, "message", None)
                 if msg is None:
                     continue
+                content = getattr(msg, "content", None)
+                if isinstance(content, list):
+                    # include_thoughts=True → blocs {"type": "reasoning"} : les rendre
+                    # pour voir sur quoi le modèle rumine (gen.text les exclut).
+                    thoughts = [
+                        b["reasoning"]
+                        for b in content
+                        if isinstance(b, dict)
+                        and b.get("type") == "reasoning"
+                        and b.get("reasoning")
+                    ]
+                    if thoughts:
+                        parts.insert(0, "### reasoning\n\n" + "\n\n".join(thoughts))
                 tcs = getattr(msg, "tool_calls", None)
                 if tcs:
                     rendered = json.dumps(
@@ -152,7 +165,9 @@ def _write_dump(
         fname = ts.strftime("%Y%m%d-%H%M%S-%f")[:-3] + f"-{str(run_id)[:8]}{suffix}.md"
         usage_line = ""
         if usage:
-            usage_line = f"- tokens: in={usage.get('input_tokens')} out={usage.get('output_tokens')}\n"
+            reasoning = (usage.get("output_token_details") or {}).get("reasoning")
+            thinking = f" (dont thinking={reasoning})" if reasoning else ""
+            usage_line = f"- tokens: in={usage.get('input_tokens')} out={usage.get('output_tokens')}{thinking}\n"
         body = (
             f"# Prompt dump — {label}\n\n"
             f"- timestamp: {ts.isoformat(timespec='seconds')}\n"
