@@ -453,3 +453,170 @@ def test_strict_cast_valid_hex_executes(monkeypatch):
     con = _fresh_con(monkeypatch)
     out = _ptq("SELECT CAST('0x' || LTRIM('000f4240', '0') AS FLOAT) AS v")
     assert con.execute(out).fetchone()[0] == 1_000_000.0
+
+
+# ---------------------------------------------------------------------------
+# LATERAL FLATTEN → CROSS/LEFT JOIN UNNEST (Snowflake → DuckDB)
+# ---------------------------------------------------------------------------
+
+
+def _run_duck(sql: str, setup: list[str]) -> list:
+    """Exécute `sql` sur un DuckDB in-memory après avoir joué `setup`."""
+    con = duckdb.connect(":memory:")
+    for stmt in setup:
+        con.execute(stmt)
+    return con.execute(sql).fetchall()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Canari : sqlglot 30.11.0 rend LATERAL FLATTEN en DuckDB invalide (virgule "
+        "orpheline + kwarg `input =>` survivant), d'où le workaround "
+        "_fix_snowflake_flatten. Le jour où sqlglot corrige ce rendu, ce test passe "
+        "(xpass) → la suite échoue en mode strict, signalant qu'on peut retirer le "
+        "contournement (examples.py:_fix_snowflake_flatten + _fix_snowflake_variant_string_cast)."
+    ),
+)
+def test_canary_sqlglot_flatten_render_still_broken():
+    """Alerte si sqlglot corrige nativement la transpilation FLATTEN → DuckDB.
+
+    Rendu BRUT (sans passer par `_fix_snowflake_idioms`) : on affirme que sqlglot
+    produit un DuckDB VALIDE. Tant que le bug persiste, l'assertion échoue → xfail.
+    """
+    tree = sqlglot.parse_one(
+        'SELECT x.value FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c")) x',
+        dialect="snowflake",
+    )
+    raw = tree.sql(dialect="duckdb")
+    assert ", CROSS JOIN" not in " ".join(raw.split())  # pas de virgule orpheline
+    assert "=>" not in raw  # kwarg Snowflake ne survit pas
+
+
+def test_flatten_input_parse_json_transpiles_and_executes():
+    """Cas nominal : `LATERAL FLATTEN(input => PARSE_JSON(x))` + `.value::STRING`.
+
+    Vérifie la correction des 3 défauts : virgule orpheline, kwarg `input =>`
+    survivant, et alias 6-colonnes sans équivalent DuckDB.
+    """
+    out = _ptq(
+        "SELECT FLATTENED.value::STRING AS address "
+        'FROM inputs i, LATERAL FLATTEN(input => PARSE_JSON(i."addresses")) FLATTENED'
+    )
+    # défaut 1 : plus de virgule implicite qui coexiste avec le CROSS JOIN
+    assert ", CROSS JOIN" not in " ".join(out.split())
+    # défaut 2 : le kwarg Snowflake `input =>` a disparu
+    assert "=>" not in out
+    # défaut 3 : rendu en CROSS JOIN UNNEST sur une seule colonne value
+    assert "CROSS JOIN UNNEST" in out.upper()
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE inputs (addresses TEXT)",
+            'INSERT INTO inputs VALUES (\'["addr1","addr2"]\'), (\'["solo"]\')',
+        ],
+    )
+    # unquoting : `.value::STRING` ne garde pas les guillemets JSON
+    assert sorted(r[0] for r in rows) == ["addr1", "addr2", "solo"]
+
+
+def test_flatten_bare_column_input_executes():
+    """Entrée = colonne nue (VARIANT/ARRAY Snowflake, texte JSON côté DuckDB)."""
+    out = _ptq(
+        'SELECT c.value:"code"::STRING AS code '
+        'FROM pubs p, LATERAL FLATTEN(input => p."cpc") c'
+    )
+    assert "->>" in out  # value:"code"::STRING → unquoting
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE pubs (cpc TEXT)",
+            'INSERT INTO pubs VALUES (\'[{"code":"A61"},{"code":"B22"}]\')',
+        ],
+    )
+    assert sorted(r[0] for r in rows) == ["A61", "B22"]
+
+
+def test_flatten_variant_field_string_cast_unquoted():
+    """`value:"name"::STRING` → `value ->> '$.name'` (déquotage JSON)."""
+    out = _ptq(
+        'SELECT f.value:"name"::STRING AS n '
+        'FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c")) f'
+    )
+    assert "->>" in out
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (c TEXT)",
+            'INSERT INTO t VALUES (\'[{"name":"ACME"},{"name":"BETA"}]\')',
+        ],
+    )
+    assert sorted(r[0] for r in rows) == ["ACME", "BETA"]
+
+
+def test_flatten_outer_true_preserves_empty_rows():
+    """`outer => TRUE` → LEFT JOIN UNNEST … ON TRUE (ligne parent conservée)."""
+    out = _ptq(
+        "SELECT t.id, x.value::STRING AS v "
+        'FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c"), outer => TRUE) x'
+    )
+    assert "LEFT JOIN UNNEST" in out.upper()
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (id INT, c TEXT)",
+            "INSERT INTO t VALUES (1, '[\"a\"]'), (2, '[]')",
+        ],
+    )
+    # la ligne 2 (tableau vide) survit avec value NULL
+    assert (2, None) in rows
+    assert (1, "a") in rows
+
+
+def test_flatten_left_join_lateral_is_outer():
+    """`LEFT JOIN LATERAL FLATTEN(...)` implique aussi la sémantique outer."""
+    out = _ptq(
+        "SELECT t.id, x.value::STRING AS v "
+        'FROM t LEFT JOIN LATERAL FLATTEN(input => PARSE_JSON(t."c")) x'
+    )
+    assert "LEFT JOIN UNNEST" in out.upper()
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (id INT, c TEXT)",
+            "INSERT INTO t VALUES (1, '[\"a\"]'), (2, '[]')",
+        ],
+    )
+    assert (2, None) in rows
+
+
+def test_flatten_table_function_form_executes():
+    """Forme `TABLE(FLATTEN(...))` → UNNEST (pas de `TABLE(` résiduel)."""
+    out = _ptq(
+        'SELECT ld.value::STRING AS v FROM t, TABLE(FLATTEN(PARSE_JSON(t."c"))) ld'
+    )
+    assert "UNNEST" in out.upper()
+    assert "TABLE(" not in out.upper()
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (c TEXT)",
+            'INSERT INTO t VALUES (\'["x","y"]\')',
+        ],
+    )
+    assert sorted(r[0] for r in rows) == ["x", "y"]
+
+
+def test_parse_json_field_string_cast_unquoted_without_flatten():
+    """Correctif variant→string général : `PARSE_JSON(x):field::STRING` déquote
+    même hors FLATTEN (cf. sf_bq412)."""
+    out = _ptq('SELECT PARSE_JSON(t."d"):"reason"::STRING AS r FROM t')
+    assert "->>" in out
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (d TEXT)",
+            'INSERT INTO t VALUES (\'{"reason":"spam"}\')',
+        ],
+    )
+    assert rows[0][0] == "spam"

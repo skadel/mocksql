@@ -1770,6 +1770,154 @@ def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+# Types cible d'un cast Snowflake ``::STRING``/``::VARCHAR``… : sur une VARIANT, ce
+# cast DÉQUOTE la valeur JSON. DuckDB ``CAST(json AS TEXT)`` garde les guillemets ; on
+# réécrit alors vers ``->>`` (JSONExtractScalar) qui déquote (cf.
+# _fix_snowflake_variant_string_cast).
+_SNOW_STRING_CAST_TYPES = frozenset(
+    {
+        exp.DataType.Type.TEXT,
+        exp.DataType.Type.VARCHAR,
+        exp.DataType.Type.CHAR,
+        exp.DataType.Type.NCHAR,
+        exp.DataType.Type.NVARCHAR,
+    }
+)
+
+
+def _flatten_input_and_outer(explode: exp.Expression) -> tuple[exp.Expression, bool]:
+    """Extrait ``(expression source, flag outer)`` d'un nœud FLATTEN (``exp.Explode``).
+
+    Snowflake FLATTEN accepte ``INPUT => e`` (kwarg) ou une forme positionnelle, plus
+    des kwargs optionnels dont ``OUTER => TRUE``. sqlglot range le 1ᵉʳ argument dans
+    ``Explode.this`` (un ``Kwarg`` s'il est nommé) et les suivants dans
+    ``Explode.expressions``. On ignore ``PATH =>`` (hors corpus) ; ``SEQ``/``INDEX``…
+    ne sont pas exploités.
+    """
+    inner = explode.this
+    source = inner.expression if isinstance(inner, exp.Kwarg) else inner
+    outer = False
+    for extra in explode.args.get("expressions") or []:
+        if (
+            isinstance(extra, exp.Kwarg)
+            and isinstance(extra.this, exp.Var)
+            and extra.this.name.upper() == "OUTER"
+        ):
+            val = extra.expression
+            if isinstance(val, exp.Boolean) and val.this:
+                outer = True
+    return source, outer
+
+
+def _fix_snowflake_flatten(tree: exp.Expression) -> set[str]:
+    """Réécrit ``LATERAL FLATTEN`` / ``TABLE(FLATTEN(...))`` en ``… JOIN UNNEST(…)`` DuckDB.
+
+    sqlglot parse FLATTEN en ``exp.Explode`` (enveloppé dans un ``Lateral`` pour la
+    forme ``LATERAL FLATTEN``, un ``TableFromRows`` pour ``TABLE(FLATTEN(...))``), mais
+    son rendu DuckDB est invalide sur trois points :
+      1. il conserve la virgule de jointure implicite ET ajoute un CROSS JOIN
+         (``FROM t,  CROSS JOIN UNNEST(...)``) → erreur de parse DuckDB ;
+      2. il laisse survivre le kwarg Snowflake ``input =>`` dans l'UNNEST ;
+      3. il rend l'alias 6-colonnes ``x(SEQ, KEY, PATH, INDEX, VALUE, THIS)``, sans
+         équivalent DuckDB.
+
+    On reconstruit donc explicitement la jointure :
+
+        CROSS JOIN UNNEST(CAST(<source> AS JSON[])) AS <alias>(value)
+
+    - ``CAST(<source> AS JSON[])`` transforme le texte/variant JSON (colonne nue,
+      ``PARSE_JSON(col)``, extraction imbriquée ``sd.value:"champ"``…) en vraie liste
+      DuckDB — condition sine qua non d'UNNEST (``UNNEST(JSON(x))`` seul échoue avec
+      "UNNEST requires a single list as input").
+    - Sémantique ``outer`` (``OUTER => TRUE`` ou ``LEFT JOIN LATERAL``) → ``LEFT JOIN
+      … ON TRUE`` pour conserver la ligne parent quand la liste est vide (sinon CROSS
+      JOIN élimine ces lignes, comme le FLATTEN par défaut).
+
+    Retourne l'ensemble (minuscule) des alias FLATTEN reconstruits, pour que
+    ``_fix_snowflake_variant_string_cast`` sache déquoter les
+    ``<alias>.value::STRING``.
+
+    Limite assumée : seule la colonne de sortie ``value`` est reconstruite. Les
+    colonnes ``SEQ/KEY/PATH/INDEX/THIS`` de Snowflake FLATTEN n'ont pas d'équivalent
+    trivial via UNNEST et ne sont pas mappées (usage marginal dans le corpus).
+    ``path =>`` n'est pas géré (absent du corpus).
+    """
+    flatten_aliases: set[str] = set()
+    for join in list(tree.find_all(exp.Join)):
+        src = join.this
+        if isinstance(src, exp.Lateral) and isinstance(src.this, exp.Explode):
+            explode = src.this
+        elif isinstance(src, exp.TableFromRows) and isinstance(src.this, exp.Explode):
+            explode = src.this
+        else:
+            continue
+        talias = src.args.get("alias")
+        if not isinstance(talias, exp.TableAlias) or talias.this is None:
+            continue  # alias obligatoire pour référencer .value
+
+        source, outer = _flatten_input_and_outer(explode)
+        outer = outer or join.args.get("side") == "LEFT"
+
+        list_expr = exp.cast(source.copy(), exp.DataType.build("JSON[]"))
+        new_alias = exp.TableAlias(
+            this=talias.this.copy(), columns=[exp.to_identifier("value")]
+        )
+        unnest = exp.Unnest(expressions=[list_expr], alias=new_alias)
+        if outer:
+            new_join = exp.Join(this=unnest, side="LEFT", on=exp.true())
+        else:
+            new_join = exp.Join(this=unnest, kind="CROSS")
+        join.replace(new_join)
+        flatten_aliases.add(talias.name.lower())
+    return flatten_aliases
+
+
+def _fix_snowflake_variant_string_cast(
+    tree: exp.Expression, flatten_aliases: set[str]
+) -> exp.Expression:
+    """Déquote les casts Snowflake VARIANT→STRING rendus en ``CAST(json AS TEXT)``.
+
+    En Snowflake, ``v:"champ"::STRING`` (ou ``v::STRING`` sur un scalaire VARIANT)
+    DÉQUOTE : ``"abc"`` → ``abc``. sqlglot transpile ça en
+    ``CAST(v -> '$.champ' AS TEXT)`` — l'opérateur ``->`` renvoie du JSON et
+    ``CAST(json AS TEXT)`` GARDE les guillemets côté DuckDB. On réécrit vers ``->>``
+    (JSONExtractScalar), qui déquote. Deux formes :
+
+    - ``CAST(<extraction :champ> AS <type texte>)`` → ``<v> ->> '$.champ'`` : vaut
+      pour tout accès VARIANT, FLATTEN ou non (``PARSE_JSON(x):champ::STRING``,
+      cf. sf_bq412) ;
+    - ``CAST(<alias_flatten>.value AS <type texte>)`` → ``<alias>.value ->> '$'`` : le
+      scalaire brut d'un FLATTEN. Scopé aux alias FLATTEN connus pour ne PAS toucher
+      un ``CAST(col AS TEXT)`` légitime sur une vraie colonne texte.
+
+    Les casts numériques/booléens (``::INT``, ``::BOOLEAN``) sont laissés tels quels :
+    ``CAST(json AS INT/BOOLEAN)`` parse correctement le nombre/booléen JSON sous DuckDB.
+    """
+    for cast in list(tree.find_all(exp.Cast)):
+        to = cast.to
+        if not isinstance(to, exp.DataType) or to.this not in _SNOW_STRING_CAST_TYPES:
+            continue
+        operand = cast.this
+        if isinstance(operand, exp.JSONExtract):
+            cast.replace(
+                exp.JSONExtractScalar(
+                    this=operand.this.copy(), expression=operand.expression.copy()
+                )
+            )
+        elif (
+            isinstance(operand, exp.Column)
+            and operand.name.lower() == "value"
+            and operand.table.lower() in flatten_aliases
+        ):
+            cast.replace(
+                exp.JSONExtractScalar(
+                    this=operand.copy(),
+                    expression=exp.JSONPath(expressions=[exp.JSONPathRoot()]),
+                )
+            )
+    return tree
+
+
 def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
 
@@ -1778,6 +1926,10 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     _fix_snowflake_to_char(tree)
     _fix_snowflake_to_timestamp(tree)
     _fix_snowflake_hex_cast(tree)
+    # FLATTEN doit précéder le fix variant→string : il crée les jointures UNNEST et
+    # recense les alias dont ``.value`` est un élément JSON à déquoter.
+    flatten_aliases = _fix_snowflake_flatten(tree)
+    _fix_snowflake_variant_string_cast(tree, flatten_aliases)
     return tree
 
 
