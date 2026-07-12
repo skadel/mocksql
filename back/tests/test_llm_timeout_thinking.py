@@ -305,3 +305,21 @@ def test_render_output_includes_reasoning_blocks():
     assert "### reasoning" in output_md
     assert "doublons par device" in output_md
     assert usage["input_tokens"] == 10
+
+
+def test_render_output_includes_thinking_blocks():
+    # Format legacy Google constaté en réel : {"type": "thinking", "thinking": …}
+    # (le format v1 dit "reasoning") — les deux doivent être rendus.
+    msg = SimpleNamespace(
+        content=[
+            {"type": "thinking", "thinking": "My thought process for the join…"},
+            {"type": "text", "text": "OK"},
+        ],
+        tool_calls=None,
+        usage_metadata={"input_tokens": 5, "output_tokens": 48},
+    )
+    gen = SimpleNamespace(message=msg, text="OK")
+    resp = SimpleNamespace(generations=[[gen]], llm_output=None)
+    output_md, _ = _render_output(resp)
+    assert "### reasoning" in output_md
+    assert "thought process for the join" in output_md

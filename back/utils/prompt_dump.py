@@ -130,14 +130,16 @@ def _render_output(response):
                     continue
                 content = getattr(msg, "content", None)
                 if isinstance(content, list):
-                    # include_thoughts=True → blocs {"type": "reasoning"} : les rendre
-                    # pour voir sur quoi le modèle rumine (gen.text les exclut).
+                    # include_thoughts=True → rendre les blocs de pensée pour voir sur
+                    # quoi le modèle rumine (gen.text les exclut). Deux formats selon
+                    # output_version : legacy Google {"type": "thinking"} (constaté en
+                    # réel) et v1 standardisé {"type": "reasoning"}.
                     thoughts = [
-                        b["reasoning"]
+                        b[b["type"]]
                         for b in content
                         if isinstance(b, dict)
-                        and b.get("type") == "reasoning"
-                        and b.get("reasoning")
+                        and b.get("type") in ("reasoning", "thinking")
+                        and b.get(b["type"])
                     ]
                     if thoughts:
                         parts.insert(0, "### reasoning\n\n" + "\n\n".join(thoughts))
