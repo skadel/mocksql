@@ -192,7 +192,125 @@ def _directive_hint_text(directive: dict) -> str:
             "(⚠️ structure imposée par la requête : objet JSON avec le(s) "
             f"champ(s) {fields_repr} — ex. {{{ex_obj}}})"
         )
+    if kind == "epoch_date_eq":
+        # Le LLM ne calcule pas fiablement un epoch (sf_bq093) → on lui donne l'entier exact
+        # ET on corrige déterministiquement toute valeur hors plage (_pin_epoch_date_values).
+        return (
+            f"(⚠️ colonne epoch imposée par la requête : pour la date "
+            f"{directive.get('date')}, émettre l'entier {directive.get('value')} — c'est un "
+            "timestamp epoch, PAS une date ISO ni un autre nombre ; toute valeur hors du "
+            "jour filtré est corrigée automatiquement)"
+        )
     return ""
+
+
+def _epoch_pin_as_int(v) -> int | None:
+    """Coerce une valeur epoch générée en entier, ou None (non entier → ignoré)."""
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    if isinstance(v, float) and v.is_integer():
+        return int(v)
+    if isinstance(v, str):
+        try:
+            return int(v.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _apply_epoch_pin(rows: list, col_lower: str, pin: dict) -> int:
+    """Applique un pin ``epoch_date_eq`` aux ``rows`` d'une table (in-place).
+
+    Remplace toute valeur hors ``[low, high)`` par le minuit du jour, mais SEULEMENT si
+    AUCUNE ligne n'y tombe déjà (sinon la CTE n'est pas vide et une valeur hors plage est
+    peut-être un cas d'exclusion voulu). Retourne le nombre de valeurs corrigées."""
+    low, high, value = pin.get("low"), pin.get("high"), pin.get("value")
+    if low is None or high is None or value is None:
+        return 0
+    if not isinstance(rows, list) or not rows:
+        return 0
+    col_key = None
+    for row in rows:
+        if isinstance(row, dict):
+            col_key = next((k for k in row if k.lower() == col_lower), None)
+            if col_key is not None:
+                break
+    if col_key is None:
+        return 0
+    nums = [
+        (row, _epoch_pin_as_int(row.get(col_key)))
+        for row in rows
+        if isinstance(row, dict)
+    ]
+    if any(n is not None and low <= n < high for _, n in nums):
+        return 0  # au moins une ligne dans la plage → CTE non vide, on ne touche à rien
+    corrected = 0
+    for row, n in nums:
+        if n is not None and not (low <= n < high):
+            row[col_key] = value
+            corrected += 1
+    return corrected
+
+
+def _pin_epoch_date_values(
+    filled_data: dict,
+    directives_by_uc: dict[tuple[str, str], list[dict]],
+    unresolved_epoch_pins: list[tuple[str, dict]] | None = None,
+) -> None:
+    """Corrige déterministiquement (in-place) les valeurs epoch hors du jour filtré.
+
+    Le LLM ne calcule pas fiablement un epoch : sf_bq093 a produit ``1476326400000000``
+    pour un filtre ``TO_DATE(TO_TIMESTAMP_NTZ(col / 1000000)) = '2016-10-14'`` (attendu
+    ``1476403200000000``) → la CTE d'entrée est vide, résultat dégénéré. Quand le SQL
+    impose une plage epoch (directive ``epoch_date_eq`` extraite hors LLM par le
+    constraint_simplifier), on remplace toute valeur hors ``[low, high)`` par le minuit du
+    jour (cf. ``_apply_epoch_pin``). Post-passe déterministe, même esprit que ``COUNT(*)=N``.
+
+    ``unresolved_epoch_pins`` : pins dont la colonne n'a pas résolu vers une table de base
+    (le résolveur s'est arrêté sur un nom de CTE — collision d'alias inter-scopes, ex.
+    ``t`` = TRANSACTIONS puis ``t`` = FILTERED_TX dans sf_bq093). On les applique par nom de
+    colonne, mais UNIQUEMENT si ce nom est présent dans une SEULE table de ``filled_data``
+    (non-ambigu) — sinon on s'abstient (le hint texte + le garde-fou CTE amont vide prennent
+    le relais)."""
+    for (uc_key, col_lower), entries in (directives_by_uc or {}).items():
+        pin = next((e for e in entries if e.get("kind") == "epoch_date_eq"), None)
+        if pin is None:
+            continue
+        corrected = _apply_epoch_pin(filled_data.get(uc_key), col_lower, pin)
+        if corrected:
+            logger.diag(
+                "[generator] pin epoch %s.%s : %d valeur(s) hors du jour %s → %s",
+                uc_key,
+                col_lower,
+                corrected,
+                pin.get("date"),
+                pin.get("value"),
+            )
+
+    for col_lower, pin in unresolved_epoch_pins or []:
+        # Tables de filled_data qui portent cette colonne (casse-insensible).
+        candidates = [
+            uc
+            for uc, rows in filled_data.items()
+            if isinstance(rows, list)
+            and any(
+                isinstance(r, dict) and any(k.lower() == col_lower for k in r)
+                for r in rows
+            )
+        ]
+        if len(candidates) != 1:
+            continue  # ambigu (ou absent) → on s'abstient
+        corrected = _apply_epoch_pin(filled_data.get(candidates[0]), col_lower, pin)
+        if corrected:
+            logger.diag(
+                "[generator] pin epoch (col non résolue) %s.%s : %d valeur(s) → %s",
+                candidates[0],
+                col_lower,
+                corrected,
+                pin.get("value"),
+            )
 
 
 def _format_filter_constraints(constraints: list) -> list[str]:
@@ -1118,11 +1236,19 @@ async def generate_examples_(
     # Directives de format/structure par colonne (clé `table.col` résolue par le
     # simplifier) → re-clés sur (uc_key, col) pour le merge dans le schéma LLM.
     directives_by_uc: dict[tuple[str, str], list[dict]] = {}
+    # Pins epoch dont la colonne n'a pas résolu vers une table de base (le résolveur s'est
+    # arrêté sur un nom de CTE — collision d'alias inter-scopes, sf_bq093) : appliqués en
+    # post-passe par nom de colonne non-ambigu (cf. _pin_epoch_date_values).
+    unresolved_epoch_pins: list[tuple[str, dict]] = []
     for dir_key, dir_entries in (column_directives or {}).items():
         tbl, _, coln = dir_key.rpartition(".")
         uc_key = table_to_uc.get(tbl.lower())
         if uc_key and coln:
             directives_by_uc[(uc_key, coln.lower())] = dir_entries
+        elif coln:
+            for entry in dir_entries:
+                if entry.get("kind") == "epoch_date_eq":
+                    unresolved_epoch_pins.append((coln.lower(), entry))
 
     col_hints = {}
     if sim_result is not None:
@@ -1350,6 +1476,11 @@ async def generate_examples_(
                 ]
             else:
                 filled_data[uc_key] = faker_rows
+
+    # Fix 4 — pin déterministe date→epoch : le LLM ne calcule pas fiablement un epoch
+    # (sf_bq093). Quand le SQL compare une date à une colonne epoch (directive
+    # `epoch_date_eq`), on corrige hors LLM toute valeur qui manque le jour filtré.
+    _pin_epoch_date_values(filled_data, directives_by_uc, unresolved_epoch_pins)
 
     generated = {
         "test_name": generated_data.test_name,

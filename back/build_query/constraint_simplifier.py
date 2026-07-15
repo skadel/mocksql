@@ -48,6 +48,7 @@ SimplificationResult fields
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 import time
@@ -1761,6 +1762,145 @@ def _serialize_cond(
     return _resolve_pred_node(node, alias_map, resolver, dialect)
 
 
+# Fonctions timestamp-depuis-epoch → nombre d'unités de leur argument par seconde.
+# Snowflake TO_TIMESTAMP[_NTZ/LTZ/TZ] et BigQuery TIMESTAMP_SECONDS : argument en
+# SECONDES (1). TIMESTAMP_MILLIS : millisecondes (1000). TIMESTAMP_MICROS : µs (1e6).
+_EPOCH_TS_UNITS_PER_SECOND: dict[str, int] = {
+    "TO_TIMESTAMP": 1,
+    "TO_TIMESTAMP_NTZ": 1,
+    "TO_TIMESTAMP_LTZ": 1,
+    "TO_TIMESTAMP_TZ": 1,
+    "TIMESTAMP_SECONDS": 1,
+    "TIMESTAMP_MILLIS": 1000,
+    "TIMESTAMP_MICROS": 1_000_000,
+}
+
+
+def _epoch_units_per_second(node: exp.Expression) -> int | None:
+    """Unités par seconde de l'argument d'une fonction timestamp-depuis-epoch, ou None.
+
+    ``exp.UnixToTime`` (BigQuery TIMESTAMP_SECONDS/MILLIS/MICROS) porte l'échelle dans
+    ``scale`` (0/3/6 chiffres sub-seconde) ; les variantes Snowflake ``TO_TIMESTAMP*``
+    arrivent en ``exp.Anonymous``."""
+    if isinstance(node, exp.UnixToTime):
+        scale = node.args.get("scale")
+        try:
+            s = int(getattr(scale, "name", scale) or 0)
+        except (TypeError, ValueError):
+            s = 0
+        return {0: 1, 3: 1000, 6: 1_000_000, 9: 1_000_000_000}.get(s, 1)
+    if isinstance(node, exp.Anonymous):
+        return _EPOCH_TS_UNITS_PER_SECOND.get((node.name or "").upper())
+    return None
+
+
+def _epoch_date_range(d: datetime.date, factor: int) -> tuple[int, int, int]:
+    """Plage epoch valide ``[low, high)`` d'une colonne pour le jour *d*, dans son unité.
+
+    ``factor`` = ``divisor * units_per_second`` : ``col / divisor`` est interprété par la
+    fonction timestamp comme ``units_per_second`` unités par seconde → ``col`` couvre le
+    jour *d* ssi ``col ∈ [minuit_s(d) * factor, (minuit_s(d) + 86400) * factor)``. La
+    valeur pinnée est le minuit (borne basse, dans la plage). UTC : les filtres date sur
+    epoch sont évalués en UTC (TO_TIMESTAMP_NTZ / TIMESTAMP_MICROS ne portent pas de zone)."""
+    midnight = int(
+        datetime.datetime(
+            d.year, d.month, d.day, tzinfo=datetime.timezone.utc
+        ).timestamp()
+    )
+    low = midnight * factor
+    high = (midnight + 86400) * factor
+    return low, high, low
+
+
+def _date_literal_date(node: exp.Expression) -> datetime.date | None:
+    """Date d'un littéral date ``'YYYY-MM-DD'`` (à travers un CAST éventuel), ou None."""
+    v = _literal_value(node)
+    if isinstance(v, str):
+        try:
+            return datetime.date.fromisoformat(v[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_epoch_date_eq(eq: exp.EQ, dialect: str) -> tuple[exp.Column, dict] | None:
+    """``<date>(<tsfunc>(col [/ divisor])) = 'YYYY-MM-DD'`` → ``(col_node, directive)``.
+
+    Cible le pattern sf_bq093 : une colonne epoch numérique (éventuellement divisée pour
+    convertir µs→s) coercée en date et comparée à un littéral date. Le LLM ne sait pas
+    calculer l'epoch → on renvoie une directive ``epoch_date_eq`` portant la plage
+    ``[low, high)`` et la valeur à pinner (minuit du jour), calculées hors LLM.
+
+    Ignore les ``TO_DATE(col, 'format')`` explicites (traités par la directive
+    ``date_format``) et tout ce qui n'est pas un epoch numérique."""
+    lhs, rhs = eq.this, eq.args.get("expression")
+    for date_side, lit_side in ((lhs, rhs), (rhs, lhs)):
+        d = _date_literal_date(lit_side)
+        if d is None:
+            continue
+        node = date_side
+        if isinstance(node, exp.TsOrDsToDate):
+            if node.args.get("format") is not None:
+                continue  # format explicite → directive date_format
+            inner = node.this
+        elif isinstance(node, exp.Date):
+            inner = node.this
+        elif isinstance(node, exp.Anonymous) and (node.name or "").upper() in (
+            "TO_DATE",
+            "DATE",
+        ):
+            date_args = node.args.get("expressions") or []
+            if not date_args:
+                continue
+            inner = date_args[0]
+        else:
+            continue
+
+        ups = _epoch_units_per_second(inner)
+        if ups is None:
+            continue
+
+        if isinstance(inner, exp.UnixToTime):
+            arg = inner.this
+        else:  # Anonymous TO_TIMESTAMP*
+            iargs = inner.args.get("expressions") or []
+            if not iargs:
+                continue
+            arg = iargs[0]
+
+        divisor = 1
+        col_expr: exp.Expression = arg
+        if isinstance(arg, exp.Div):
+            denom = arg.args.get("expression")
+            if not (isinstance(denom, exp.Literal) and denom.is_number):
+                continue
+            try:
+                divisor = int(float(denom.name))
+            except (TypeError, ValueError):
+                continue
+            if divisor <= 0:
+                continue
+            col_expr = arg.this
+
+        col_node = (
+            col_expr
+            if isinstance(col_expr, exp.Column)
+            else next(iter(col_expr.find_all(exp.Column)), None)
+        )
+        if col_node is None:
+            continue
+
+        low, high, value = _epoch_date_range(d, divisor * ups)
+        return col_node, {
+            "kind": "epoch_date_eq",
+            "date": d.isoformat(),
+            "low": low,
+            "high": high,
+            "value": value,
+        }
+    return None
+
+
 def _collect_format_directives(
     statement: exp.Expression,
     alias_map: dict[str, str],
@@ -1968,6 +2108,24 @@ def _collect_format_directives(
             _add_directive(
                 tbl, col_name, {"kind": "date_format", "fn": fname, "format": fmt_str}
             )
+
+    # Epoch → date : colonne epoch numérique comparée à une date via TO_TIMESTAMP*/
+    # TIMESTAMP_MICROS (sf_bq093). Le format est « bon » (entier) mais le LLM ne calcule
+    # pas l'epoch → directive `epoch_date_eq` (plage valide hors LLM, pinnée en post-passe
+    # côté générateur). Distincte de `date_format` (qui couvre les TO_DATE avec format).
+    for eq_node in statement.find_all(exp.EQ):
+        extracted = _extract_epoch_date_eq(eq_node, dialect)
+        if extracted is None:
+            continue
+        col_node, directive = extracted
+        tc = _resolved_tbl_col(col_node)
+        if tc is None:
+            continue
+        tbl, col_name = tc
+        _add(
+            f"{tbl}.{col_name} : epoch (date {directive['date']} → {directive['value']})"
+        )
+        _add_directive(tbl, col_name, directive)
 
     _collect_variant_structures(
         statement, resolver, _resolved_tbl_col, _add, _add_directive

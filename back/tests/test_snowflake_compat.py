@@ -19,7 +19,10 @@ import sqlglot
 
 from build_query.debug_executor import _quote_ident
 from build_query.schema_fetcher import _sf_get, _sf_quote, _sf_snow_data_type
+from build_query.examples_executor import _is_duckdb_data_error
 from utils.examples import (
+    _get_ddl_type,
+    _resolve_duck_type,
     _widen_bare_decimals,
     create_test_tables,
     fix_duck_db_sql,
@@ -695,3 +698,150 @@ def test_flatten_without_index_keeps_simple_unnest():
     )
     assert "CROSS JOIN UNNEST" in out.upper()
     assert "LATERAL (" not in out.upper()
+
+
+# ---------------------------------------------------------------------------
+# VARIANT — exécution (sf_bq444) : DDL VARIANT→JSON + bracket 0-based
+# ---------------------------------------------------------------------------
+
+
+def test_variant_ddl_maps_to_json():
+    """VARIANT/OBJECT → JSON DuckDB (accès 0-based + fail-fast INSERT), pas VARIANT nu."""
+    assert _resolve_duck_type("VARIANT") == "JSON"
+    assert _resolve_duck_type("OBJECT") == "JSON"
+    cols = [{"name": "topics", "type": "VARIANT", "mode": "NULLABLE"}]
+    assert _get_ddl_type("topics", cols) == "JSON"
+
+
+def test_variant_column_created_as_json():
+    con = duckdb.connect(":memory:")
+    create_test_tables(
+        tables=[
+            {
+                "table_name": "ce.logs",
+                "database": "ce",
+                "table": "logs",
+                "columns": [{"name": "topics", "type": "VARIANT", "mode": "NULLABLE"}],
+            }
+        ],
+        suffix="v1",
+        overwrite=True,
+        con=con,
+        dialect="snowflake",
+    )
+    dtype = con.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_name = 'ce_logs_v1' AND column_name = 'topics'"
+    ).fetchone()[0]
+    assert dtype == "JSON"
+
+
+def test_variant_bracket_string_cast_zero_based():
+    # Snowflake `col[0]::STRING` (0-based) → `col ->> 0` (déquoté, 0-based DuckDB JSON),
+    # PAS `col[1]` (le +1 de sqlglot viserait le 2ᵉ élément sur une colonne JSON).
+    out = _ptq('SELECT "topics"[0]::STRING AS x FROM t')
+    assert "->> 0" in out
+    assert "[1]" not in out
+
+
+def test_variant_bracket_without_cast_zero_based():
+    out = _ptq('SELECT "topics"[0] AS x FROM t')
+    assert "-> 0" in out and "->> 0" not in out
+    assert "[1]" not in out
+
+
+def test_bracket_on_function_result_untouched():
+    # Un bracket sur résultat de fonction transpile vers une liste native DuckDB
+    # (1-based) : le +1 de sqlglot est correct, on n'y touche pas.
+    out = _ptq("SELECT SPLIT(s, ',')[0] AS y FROM t")
+    assert "[1]" in out  # 0-based Snowflake → 1-based liste native, inchangé
+    assert "-> 0" not in out
+
+
+def test_variant_bracket_roundtrip_first_element():
+    # array JSON ["0xAAA","0xBBB"] → topics[0]::STRING doit rendre "0xAAA" (0-based).
+    rows = _run_duck(
+        _ptq('SELECT "topics"[0]::STRING AS first FROM ce_logs_v1'),
+        [
+            "CREATE TABLE ce_logs_v1 (topics JSON)",
+            'INSERT INTO ce_logs_v1 VALUES (\'["0xAAA","0xBBB"]\')',
+        ],
+    )
+    assert rows == [("0xAAA",)]
+
+
+def test_variant_bare_string_insert_fails_fast_as_data_error():
+    # Un INSERT de string non-JSON dans une colonne JSON échoue tôt → classé
+    # bad_data_error (routé vers la boucle de correction), pas un NULL silencieux.
+    con = duckdb.connect(":memory:")
+    con.execute("CREATE TABLE ce_logs_v1 (topics JSON)")
+    with pytest.raises(Exception) as exc_info:
+        con.execute("INSERT INTO ce_logs_v1 VALUES ('0xAAA')")
+    assert _is_duckdb_data_error(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# ARRAY_SIZE / ARRAY_LENGTH sur VARIANT/JSON → json_array_length (sf_bq091)
+# ---------------------------------------------------------------------------
+
+
+def test_array_size_on_variant_column_uses_json_array_length():
+    # ARRAY_SIZE(col) Snowflake → array_length (sqlglot) qui n'existe pas sur JSON/VARIANT ;
+    # on réécrit en json_array_length (couvre les deux).
+    out = _ptq('SELECT ARRAY_SIZE(awm."assignee_harmonized") AS n FROM t AS awm')
+    assert "JSON_ARRAY_LENGTH" in out.upper()
+    # pas d'array_length NU (json_array_length contient array_length en sous-chaîne)
+    assert "ARRAY_LENGTH(" not in out.upper().replace("JSON_ARRAY_LENGTH(", "")
+
+
+def test_array_length_on_split_stays_native():
+    # ARRAY_SIZE sur une vraie liste native (SPLIT) garde array_length (1-based natif OK).
+    out = _ptq("SELECT ARRAY_SIZE(SPLIT(s, ',')) AS n FROM t")
+    assert "JSON_ARRAY_LENGTH" not in out.upper()
+    assert "LENGTH(" in out.upper()  # array_length / length natif
+
+
+def test_array_size_json_column_executes():
+    rows = _run_duck(
+        _ptq('SELECT ARRAY_SIZE(t."arr") AS n FROM ce_arr AS t'),
+        [
+            "CREATE TABLE ce_arr (arr JSON)",
+            "INSERT INTO ce_arr VALUES ('[1,2,3]'), ('[]')",
+        ],
+    )
+    assert (3,) in rows and (0,) in rows
+
+
+# ---------------------------------------------------------------------------
+# TO_DATE(CAST(col AS VARCHAR), 'YYYYMMDD') sur colonne numérique (sf_bq216)
+# ---------------------------------------------------------------------------
+
+
+def test_numeric_date_parse_wraps_bigint():
+    # Une colonne NUMBER→DECIMAL(38,9) rend '20160101.000000000' → STRPTIME('%Y%m%d')
+    # casse. On intercale CAST(... AS BIGINT) pour supprimer le suffixe décimal.
+    out = _ptq(
+        "SELECT TO_DATE(CAST(p.\"filing_date\" AS VARCHAR), 'YYYYMMDD') AS d FROM t p"
+    )
+    assert "AS BIGINT)" in out.upper()
+
+
+def test_separator_date_format_not_wrapped():
+    # Format avec séparateur → la valeur est déjà une date formatée, pas un entier compact :
+    # aucun cast BIGINT (qui casserait '2016-01-01').
+    out = _ptq("SELECT TO_DATE(p.d, 'YYYY-MM-DD') AS d FROM t p")
+    assert "AS BIGINT)" not in out.upper()
+
+
+def test_numeric_date_parse_decimal_executes():
+    rows = _run_duck(
+        _ptq(
+            'SELECT EXTRACT(YEAR FROM TO_DATE(CAST(p."filing_date" AS VARCHAR), '
+            "'YYYYMMDD')) AS y FROM fd_tbl p"
+        ),
+        [
+            'CREATE TABLE fd_tbl ("filing_date" DECIMAL(38, 9))',
+            "INSERT INTO fd_tbl VALUES (20160101), (20150701)",
+        ],
+    )
+    assert sorted(rows) == [(2015,), (2016,)]

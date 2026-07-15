@@ -1818,6 +1818,192 @@ def _select_failing_cte(ctes: list, cte_trace: dict, dialect: str) -> Optional[s
     )
 
 
+def _is_happy_path_test(current_test: Dict[str, Any]) -> bool:
+    """Un test « happy-path » attend AU MOINS une ligne en sortie (pas un scénario de
+    vide intentionnel).
+
+    Signaux (tous requis) :
+    - ``branch_plan.must_hold`` non vide : la sortie DOIT satisfaire des contraintes,
+      donc produire des lignes (un vide intentionnel a `must_hold` vide) ;
+    - aucune assertion sentinelle de résultat-vide intentionnel
+      (``is_empty_result_sentinel``) — le juge d'intention a déjà entériné un vide voulu.
+
+    Sur un tel test, une CTE amont REQUISE vide trahit des données mal construites, pas
+    un cas limite recherché : c'est le garde-fou anti-échafaudage (Fix 3, sf_bq093, où
+    l'agrégat d'une CTE vide + LEFT JOIN + COALESCE fabrique des lignes dégénérées qui
+    masquent le vide et blanchissent le verdict). Conservateur par construction : un test
+    sans `branch_plan` n'est jamais sondé (pas de faux positif sur un vide voulu)."""
+    branch_plan = current_test.get("branch_plan") or {}
+    must_hold = branch_plan.get("must_hold") or []
+    if not must_hold:
+        return False
+    for a in current_test.get("assertion_results") or []:
+        if is_empty_result_sentinel(a):
+            return False
+    return True
+
+
+async def _scan_blocking_empty_cte(
+    ctes: list, suffix: str, project: str, dialect: str, con
+) -> Optional[tuple[str, dict]]:
+    """Sonde à la demande : renvoie ``(failing_cte, cte_trace)`` si une CTE amont
+    **requise** a produit 0 ligne, sinon ``None``.
+
+    Appelée UNIQUEMENT quand un verdict tombe ``Insuffisant`` sur un résultat NON vide
+    (chemin rare — zéro coût sur le happy path). Un résultat final non vide peut masquer
+    une CTE amont vide (agrégat d'un ensemble vide → 1 ligne NULL, puis LEFT JOIN +
+    COALESCE d'échafaudage) : le circuit ``empty_results`` de l'executor ne se déclenche
+    alors jamais. On rejoue ici le CTE-trace pour détecter ce cas.
+
+    Ne cible que les CTE vides **atteignables depuis le résultat final par des arêtes
+    requises** (``classify_blocking_ctes``) : une CTE vide seulement LEFT-jointe ou en
+    anti-join est un résultat métier valide, pas un défaut. Enrichit la trace de la CTE
+    bloquante avec la décomposition par prédicat (JOIN / filtre scalaire) pour nommer le
+    prédicat fautif avec les valeurs des deux côtés."""
+    if not any(c.get("name") != "final_query" for c in ctes):
+        return None
+    cte_trace = await _run_cte_trace(ctes, suffix, project, dialect, con)
+
+    from build_query.cte_graph import classify_blocking_ctes
+
+    try:
+        blocking = classify_blocking_ctes(ctes, cte_trace, dialect)
+    except Exception as exc:
+        logger.debug("classify_blocking_ctes failed: %s", exc)
+        blocking = []
+    if not blocking:
+        return None
+    # Annoter `blocking` sur les CTE vides (rendu du hint) et cibler la première
+    # bloquante en ordre topologique (la racine du vide, pas une propagation aval).
+    blocking_set = set(blocking)
+    for name, info in cte_trace.items():
+        if isinstance(info, dict) and info.get("row_count") == 0:
+            info["blocking"] = name in blocking_set
+    failing_cte = blocking[0]
+
+    failing_idx = next(
+        (i for i, c in enumerate(ctes) if c["name"] == failing_cte), None
+    )
+    if failing_idx is not None:
+        breakdown: list = []
+        try:
+            breakdown += await _run_join_predicate_breakdown(
+                ctes, failing_idx, suffix, project, dialect, con
+            )
+        except Exception as exc:
+            logger.debug("join predicate breakdown failed for %s: %s", failing_cte, exc)
+        try:
+            breakdown += await _run_scalar_filter_breakdown(
+                ctes, failing_idx, suffix, project, dialect, con
+            )
+        except Exception as exc:
+            logger.debug("scalar filter breakdown failed for %s: %s", failing_cte, exc)
+        if breakdown:
+            cte_trace[failing_cte]["join_breakdown"] = breakdown
+    return failing_cte, cte_trace
+
+
+def _build_empty_cte_diagnostic(
+    failing_cte: str, cte_trace: dict, ctes: list, dialect: str
+) -> Dict[str, Any]:
+    """Construit le ``DiagnosticBlock`` (dict) pour une CTE amont requise vide.
+
+    Le ``data_issue`` porte le CTE-trace formaté (étape bloquante + prédicat fautif) ;
+    l'agent voit par ailleurs les données injectées du test (bloc `input_data` de
+    ``_build_agent_eval_context``) → prédicat et valeurs sont ainsi « en regard », ce qui
+    rend la correction triviale (ex. voir ``block_timestamp = 1476326400000000`` face à
+    ``TO_DATE(...) = '2016-10-14'``). Mêmes clés que le diagnostic LLM (lues telles quelles
+    par ``_build_agent_eval_context``)."""
+    from build_query.examples_generator import _format_cte_trace_hint
+    from build_query.cte_graph import _required_source_tables
+
+    trace_hint = _format_cte_trace_hint(failing_cte, cte_trace)
+    try:
+        src_tables = sorted(_required_source_tables(failing_cte, ctes, dialect))
+    except Exception:
+        src_tables = []
+    return {
+        "root_cause": (
+            f"La CTE requise `{failing_cte}` produit 0 ligne alors que le test attend des "
+            "lignes en sortie — un filtre ou une jointure élimine toutes les lignes "
+            "injectées, et le résultat final n'est qu'un échafaudage dégénéré (agrégat "
+            "d'un ensemble vide, LEFT JOIN + COALESCE)."
+        ),
+        "sql_pattern": "empty_upstream_cte",
+        "data_issue": trace_hint,
+        "fix_summary": f"Rendre `{failing_cte}` non vide.",
+        "fix_recipe": (
+            f"Ajuste les VALEURS injectées dans les tables sources de `{failing_cte}` pour "
+            "qu'au moins une ligne satisfasse le prédicat bloquant identifié ci-dessus "
+            "(compare la valeur injectée au prédicat : le diff est la correction)."
+        ),
+        "affected_tables": src_tables,
+        "affected_ctes": [failing_cte],
+    }
+
+
+async def probe_empty_upstream_cte(
+    state: QueryState, current_test: Dict[str, Any], con
+) -> Optional[Dict[str, Any]]:
+    """Garde-fou « CTE amont vide » (Fix 3), à la demande sur verdict ``Insuffisant``.
+
+    Sur un test happy-path (``_is_happy_path_test``) dont le résultat NON vide est en
+    réalité un échafaudage masquant une CTE amont requise vide, matérialise les tables
+    d'entrée dans ``con`` (fraîche connexion de ``generate_assertions`` — les tables de
+    l'executor n'y sont plus, cf. `DB_PATH = ":memory:"`), rejoue le CTE-trace et renvoie
+    un ``diagnostic`` prêt à router vers la boucle ``bad_data``. Renvoie ``None`` si le
+    test n'est pas happy-path ou si aucune CTE requise n'est vide.
+
+    Coût payé UNIQUEMENT sur le chemin Insuffisant (rare) — happy path intact."""
+    if not _is_happy_path_test(current_test):
+        return None
+    ctes = json.loads(state.get("query_decomposed") or "[]")
+    if not any(c.get("name") != "final_query" for c in ctes):
+        return None
+
+    dialect = state.get("dialect", "bigquery")
+    session_id = state["session"].replace("-", "_")
+    test_index = current_test.get("test_index", "1")
+    suffix = f"{session_id}{test_index}"
+
+    from models.schemas import get_schemas
+
+    schemas = await get_schemas(project_id=state["project"])
+    _active_sql, active_used_columns = resolve_active_sql(state, ALL_PATH)
+    active_schemas = filter_schemas_by_used_columns(schemas, active_used_columns)
+
+    try:
+        test_data = _prepare_test_data(current_test, active_schemas)
+        duckdb_tables_schema = create_test_tables(
+            tables=active_schemas,
+            suffix=suffix,
+            overwrite=True,
+            con=con,
+            dialect=dialect,
+        )
+        insert_queries = insert_examples(
+            data_dict=test_data,
+            schemas=duckdb_tables_schema,
+            suffix=suffix,
+            used_columns=active_used_columns,
+        )
+        execute_queries(list(insert_queries), con)
+    except Exception as exc:
+        logger.debug("[probe_empty_upstream_cte] matérialisation échouée: %s", exc)
+        return None
+
+    scan = await _scan_blocking_empty_cte(ctes, suffix, state["project"], dialect, con)
+    if scan is None:
+        return None
+    failing_cte, cte_trace = scan
+    logger.diag(
+        "[probe_empty_upstream_cte] CTE amont requise vide `%s` sur test happy-path %s → bad_data",
+        failing_cte,
+        test_index,
+    )
+    return _build_empty_cte_diagnostic(failing_cte, cte_trace, ctes, dialect)
+
+
 async def _run_single_test_case(
     state: QueryState,
     test_case: Dict[str, Any],

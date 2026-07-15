@@ -514,6 +514,14 @@ def _resolve_duck_type(bq_ddl_type: str) -> str:
     Le type d'entrée est toujours en syntaxe BigQuery (STRING / STRUCT<> /
     ARRAY<>), donc on parse comme bigquery quel que soit le dialect source.
     """
+    # Snowflake semi-structuré (VARIANT/OBJECT) → JSON DuckDB. Laissé tel quel, `VARIANT`
+    # est un type opaque : l'accès bracket/`->>` rend NULL en silence et un INSERT de
+    # string nu passe sans broncher → résultats faux muets (sf_bq444). En JSON, l'accès
+    # `->`/`->>` est 0-based (aligné avec la réécriture bracket de _fix_snowflake_idioms)
+    # et un INSERT de string non-JSON échoue tôt (`Conversion Error: Malformed JSON`),
+    # routé vers la boucle bad_data par `_is_duckdb_data_error`.
+    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT"):
+        return "JSON"
     try:
         dummy = sqlglot.parse_one(
             f"CREATE TABLE _t (_c {bq_ddl_type})", dialect="bigquery"
@@ -554,8 +562,17 @@ def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
     """Recursively resolve the DuckDB DDL type for a column, handling STRUCT/ARRAY."""
     col = next(c for c in filtered_columns if c["name"] == col_name)
     if bq_ddl_type := col.get("bq_ddl_type"):
-        return bq_ddl_type
+        # Snowflake semi-structuré → JSON (cf. _resolve_duck_type) : le CREATE TABLE et le
+        # schéma retourné passent tous deux par ici, il faut donc mapper à la source pour
+        # que la colonne DuckDB soit réellement JSON (accès 0-based + fail-fast INSERT).
+        return (
+            "JSON"
+            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT")
+            else bq_ddl_type
+        )
     base = col["type"].upper()
+    if base in ("VARIANT", "OBJECT"):
+        base = "JSON"
     mode = col.get("mode", "NULLABLE").upper()
     if base in ("RECORD", "STRUCT"):
         depth = col_name.count(".")
@@ -2008,6 +2025,105 @@ def _fix_snowflake_variant_string_cast(
     return tree
 
 
+def _fix_snowflake_variant_bracket(tree: exp.Expression) -> exp.Expression:
+    """Réécrit l'accès bracket 0-based Snowflake sur colonne VARIANT en extraction JSON.
+
+    En Snowflake, ``col[N]`` sur une colonne semi-structurée (VARIANT/ARRAY, toujours
+    0-based) accède à l'élément N. sqlglot le rend ``col[N+1]`` (convention liste native
+    DuckDB, 1-based) — MAIS après le mapping VARIANT→JSON (``_resolve_duck_type``), la
+    colonne est un JSON, et le bracket JSON DuckDB est **0-based** : le ``+1`` vise alors
+    le mauvais élément (ou NULL en fin de tableau) — bug muet de sf_bq444
+    (``"topics"[0]::STRING``). On réécrit ``col[N]`` → ``col -> N`` (``JSONExtract``,
+    0-based) ; combiné à un ``::STRING``, ``_fix_snowflake_variant_string_cast`` le
+    transforme ensuite en ``col ->> N`` (scalaire déquoté).
+
+    Scopé aux brackets dont la base est une **colonne nue** avec un indice entier : en
+    Snowflake une colonne bracket-indexée est toujours semi-structurée (pas de tableau
+    typé natif). Les brackets sur résultat de fonction (``SPLIT``, ``ARRAY_CONSTRUCT``…)
+    transpilent vers une vraie liste DuckDB 1-based où le ``+1`` de sqlglot est correct —
+    on n'y touche pas (leur ``this`` n'est pas une ``Column``)."""
+    for br in list(tree.find_all(exp.Bracket)):
+        if not isinstance(br.this, exp.Column):
+            continue
+        subs = br.expressions
+        if len(subs) != 1:
+            continue
+        idx = subs[0]
+        if not (isinstance(idx, exp.Literal) and not idx.is_string):
+            continue
+        br.replace(
+            exp.JSONExtract(
+                this=br.this.copy(), expression=exp.Literal.number(idx.name)
+            )
+        )
+    return tree
+
+
+def _fix_snowflake_array_size(tree: exp.Expression) -> exp.Expression:
+    """``ARRAY_SIZE`` / ``ARRAY_LENGTH`` sur une colonne VARIANT/JSON → ``json_array_length``.
+
+    sqlglot rend ``ARRAY_SIZE(col)`` (Snowflake, semi-structuré) en ``array_length(col)``,
+    qui n'existe QUE pour les listes natives DuckDB — pas pour JSON/VARIANT (sf_bq091 :
+    ``Binder Error: No function matches 'array_length(JSON)'``). ``json_array_length`` couvre
+    JSON ET VARIANT. Scopé aux accès semi-structurés (colonne nue ou extraction JSON) : un
+    ``ARRAY_SIZE(SPLIT(...))`` sur une vraie liste native garde ``array_length`` (son ``this``
+    n'est ni une ``Column`` ni une extraction JSON)."""
+    for node in list(tree.find_all(exp.ArraySize)):
+        arg = node.this
+        if isinstance(arg, (exp.Column, exp.JSONExtract, exp.JSONExtractScalar)):
+            node.replace(
+                exp.Anonymous(this="json_array_length", expressions=[arg.copy()])
+            )
+    return tree
+
+
+_STRFTIME_TOKEN_RE = re.compile(r"%[A-Za-z]")
+
+
+def _is_compact_numeric_date_format(fmt: str | None) -> bool:
+    """True si le format ne contient QUE des directives strftime accolées (aucun
+    séparateur) → la valeur source est un entier compact (YYYYMMDD), PAS une date déjà
+    formatée avec tirets/slashs (où un cast BIGINT casserait le parse)."""
+    if not fmt:
+        return False
+    return _STRFTIME_TOKEN_RE.sub("", fmt) == ""
+
+
+def _fix_snowflake_numeric_date_parse(tree: exp.Expression) -> exp.Expression:
+    """Cast BIGINT de la colonne avant un ``TO_DATE(CAST(col AS VARCHAR), 'YYYYMMDD')``.
+
+    Une colonne ``NUMBER`` élargie en ``DECIMAL(38, 9)`` (anti-débordement,
+    ``_widen_bare_decimals``) rend ``CAST(col AS VARCHAR)`` = ``'20160101.000000000'`` →
+    ``STRPTIME('%Y%m%d')`` échoue (sf_bq216 : *Could not parse ... trailing characters*).
+    Quand le format est compact-numérique (aucun séparateur) et que la valeur parsée porte
+    UNE seule colonne, on intercale ``CAST(col AS BIGINT)`` pour supprimer le suffixe
+    décimal — no-op sur une vraie colonne texte ``'20160101'`` (les années YYYY ≥ 1000 →
+    pas de perte de zéro de tête)."""
+    for node in list(tree.find_all(exp.TsOrDsToDate, exp.StrToDate, exp.StrToTime)):
+        fmt_node = node.args.get("format")
+        fmt = (
+            fmt_node.name
+            if isinstance(fmt_node, exp.Literal)
+            else (fmt_node.sql() if fmt_node else None)
+        )
+        if not _is_compact_numeric_date_format(fmt):
+            continue
+        value = node.this
+        # Une valeur déjà stringifiée (Cast AS TEXT / ToChar) ou une colonne nue ; on cible
+        # la colonne source unique. Les valeurs multi-colonnes / littérales sont ignorées.
+        cols = list(value.find_all(exp.Column))
+        if len(cols) != 1:
+            continue
+        col = cols[0]
+        # Déjà casté en entier (BIGINT/INT…) juste au-dessus de la colonne → ne pas re-wrap.
+        if isinstance(col.parent, exp.Cast):
+            to = col.parent.args.get("to")
+            if isinstance(to, exp.DataType) and to.this in exp.DataType.INTEGER_TYPES:
+                continue
+        col.replace(exp.cast(col.copy(), exp.DataType.build("BIGINT")))
+    return tree
+
+
 def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
 
@@ -2016,10 +2132,15 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     _fix_snowflake_to_char(tree)
     _fix_snowflake_to_timestamp(tree)
     _fix_snowflake_hex_cast(tree)
+    _fix_snowflake_numeric_date_parse(tree)
     # FLATTEN doit précéder le fix variant→string : il crée les jointures UNNEST et
     # recense les alias dont ``.value`` est un élément JSON à déquoter.
     flatten_aliases = _fix_snowflake_flatten(tree)
+    # Bracket VARIANT 0-based → JSONExtract AVANT le fix variant→string : ce dernier
+    # convertit ``CAST(<JSONExtract> AS TEXT)`` en ``->>`` (scalaire déquoté).
+    _fix_snowflake_variant_bracket(tree)
     _fix_snowflake_variant_string_cast(tree, flatten_aliases)
+    _fix_snowflake_array_size(tree)
     return tree
 
 
