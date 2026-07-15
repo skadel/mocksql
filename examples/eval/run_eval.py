@@ -23,12 +23,19 @@ load_dotenv(_BACK_ENV)
 sys.path.insert(0, str(Path(__file__).parent))
 from judge import judge_first_test
 
+# L'import de judge a mis back/ dans sys.path — les modules storage sont accessibles.
+from storage.test_files import read_test_doc  # noqa: E402
+
 
 def load_test_file(path: Path) -> dict | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    """Lit le fichier de tests via la fonction de lecture OFFICIELLE, qui fusionne le
+    sidecar gitignoré `.mocksql/cache/{model}.json` (status, results_json…).
+
+    Un `json.loads` brut du seul fichier commité privait le juge du résultat réel
+    (`results_json`) et du `status` → 13 faux « KO — résultat vide » sur l'éval
+    spider2-snow (~12 points de pass-rate perdus par artefact de harnais).
+    """
+    return read_test_doc(path)
 
 
 def collect_models(tests_dir: Path, filter_names: list[str] | None) -> list[Path]:

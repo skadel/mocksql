@@ -15,7 +15,7 @@ from sqlglot.optimizer.simplify import simplify
 from utils.llm_errors import normalize_llm_content, loads_lenient_json
 from utils.llm_factory import make_llm
 from utils.msg_types import MsgType
-from utils.sqlglot_ast import get_from, set_from
+from utils.sqlglot_ast import get_from, quote_identifier, set_from
 from build_query.assertion_eval import _evaluate_assertions
 from build_query.path_slicer import ALL_PATH, resolve_active_sql
 from build_query.state import QueryState
@@ -1357,7 +1357,10 @@ def _build_count_steps_query(
     body = f"SELECT\n  {select_cols}\n{from_sql}{joins_sql}"
 
     if preceding_ctes:
-        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding_ctes]
+        with_parts = [
+            f"{quote_identifier(c['name'], dialect)} AS ({c['code']})"
+            for c in preceding_ctes
+        ]
         return f"WITH {', '.join(with_parts)}\n{body}", labels
 
     return body, labels
@@ -1478,7 +1481,10 @@ async def _run_scalar_filter_breakdown(
 
     with_prefix = ""
     if preceding:
-        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding]
+        with_parts = [
+            f"{quote_identifier(c['name'], dialect)} AS ({c['code']})"
+            for c in preceding
+        ]
         with_prefix = "WITH " + ",\n".join(with_parts) + "\n"
 
     def _norm(v) -> str:
@@ -1575,7 +1581,10 @@ async def _run_join_predicate_breakdown(
 
     with_prefix = ""
     if preceding:
-        with_parts = [f"`{c['name']}` AS ({c['code']})" for c in preceding]
+        with_parts = [
+            f"{quote_identifier(c['name'], dialect)} AS ({c['code']})"
+            for c in preceding
+        ]
         with_prefix = "WITH " + ",\n".join(with_parts) + "\n"
 
     async def _distinct_values(side_expr: exp.Expression, alias: str) -> list:
@@ -1706,6 +1715,26 @@ async def _run_join_predicate_breakdown(
     return lines
 
 
+def _build_cte_probe_sql(ctes: list, upto: int, dialect: str) -> str:
+    """Sonde du CTE-trace : ``WITH <cte_0..upto> SELECT * FROM <cte_upto>``.
+
+    Les identifiants sont quotés selon le dialecte : la sonde est re-parsée par
+    ``run_query_on_test_dataset`` avec ``read=dialect``, et des backticks codés en dur
+    cassaient le parse sur tout dialecte non-BigQuery (« Expecting ( ») → ``row_count
+    -1`` sur toutes les CTEs, ``failing_cte=None``, boucle de correction aveugle
+    (root-cause spider2-snow, 28 empty_results non convergés).
+    """
+    with_parts = [
+        f"{quote_identifier(ctes[j]['name'], dialect)} AS ({ctes[j]['code']})"
+        for j in range(upto + 1)
+    ]
+    return (
+        "WITH "
+        + ",\n".join(with_parts)
+        + f"\nSELECT * FROM {quote_identifier(ctes[upto]['name'], dialect)}"
+    )
+
+
 async def _run_cte_trace(
     ctes: list, suffix: str, project: str, dialect: str, con
 ) -> dict:
@@ -1718,10 +1747,7 @@ async def _run_cte_trace(
     for i, cte in enumerate(ctes):
         if cte["name"] == "final_query":
             continue
-        with_parts = [
-            f"`{ctes[j]['name']}` AS ({ctes[j]['code']})" for j in range(i + 1)
-        ]
-        sql = "WITH " + ",\n".join(with_parts) + f"\nSELECT * FROM `{cte['name']}`"
+        sql = _build_cte_probe_sql(ctes, i, dialect)
         try:
             df, _ = await run_query_on_test_dataset(sql, suffix, project, dialect, con)
             row_count = df.shape[0]

@@ -1288,6 +1288,10 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
     is_auto_correct = bool(state.get("auto_correct")) or (
         not user_input and evaluation_feedback == "bad_data"
     )
+    # Prémisse du test en échec (posée dans le bloc auto_correct ci-dessous) : lue aussi
+    # par l'interception ask_clarification — une clarification en boucle auto n'est
+    # légitime QUE pour protéger une prémisse utilisateur (TICKET-1).
+    user_premise = None
     if is_auto_correct:
         failing_test_obj = next(
             (
@@ -1492,14 +1496,19 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
         )
         # Boucle multi-tests : la « suggestion » vient de MockSQL, pas d'un utilisateur —
         # une question resterait sans réponse et tuerait le lot (incident : N-1 tests +
-        # question orpheline dans le chat). On ignore la clarification : l'action co-émise
-        # dans la même réponse est conservée s'il y en a une, sinon on renvoie l'agent
-        # agir (retry capé) ; à l'épuisement, break sans outil → route_agent_output
-        # retombe sur le generator (l'input porte le texte de la suggestion).
-        if clarif_tc and is_batch_auto:
+        # question orpheline dans le chat). Même angle mort en boucle de correction auto
+        # (bad_data) SANS prémisse utilisateur à protéger : personne ne répondra (CLI/éval),
+        # et le tour terminal gaspillerait les retries restants (root-cause spider2-snow :
+        # sortie au 4ᵉ tour, 5 retries perdus). On ignore la clarification : l'action
+        # co-émise dans la même réponse est conservée s'il y en a une, sinon on renvoie
+        # l'agent agir (retry capé) ; à l'épuisement, break sans outil →
+        # route_agent_output retombe sur le generator. Une clarification protégeant une
+        # `user_premise` (TICKET-1) reste TERMINALE : l'utilisateur doit trancher.
+        if clarif_tc and (is_batch_auto or (is_auto_correct and not user_premise)):
             other_calls = [tc for tc in tool_calls if tc["name"] != "ask_clarification"]
             logger.diag(
-                "[conv_agent] ask_clarification ignoré (boucle batch) — %s",
+                "[conv_agent] ask_clarification ignoré (%s) — %s",
+                "boucle batch" if is_batch_auto else "boucle auto_correct",
                 f"{len(other_calls)} outil(s) co-émis conservé(s)"
                 if other_calls
                 else f"retry {clarif_retries + 1}/{_CLARIF_RETRY_MAX}",
@@ -1509,18 +1518,29 @@ Traite maintenant la demande initiale à la lumière de cette réponse, sans rep
                 clarif_tc = None
             elif clarif_retries < _CLARIF_RETRY_MAX:
                 clarif_retries += 1
+                if is_batch_auto:
+                    no_recipient_feedback = (
+                        "Il n'y a pas d'utilisateur à qui poser cette question : cette "
+                        "suggestion a été générée automatiquement par MockSQL (boucle "
+                        "multi-tests). Si le SQL exclut le cas décrit, c'est le "
+                        "comportement à tester : appelle `generate_test_data` avec un "
+                        "scénario qui AFFIRME ce comportement observable (ex. la ligne "
+                        "est absente du résultat)."
+                    )
+                else:
+                    no_recipient_feedback = (
+                        "Il n'y a pas d'utilisateur à qui poser cette question : tu es "
+                        "dans la boucle de correction AUTOMATIQUE (bad_data). Corrige "
+                        "toi-même le bloqueur : inspecte avec `run_cte` si besoin, puis "
+                        "ajuste les données via `patch_test_field` / `add_test_row` / "
+                        "`remove_test_row` ; si le patch ciblé est impossible, appelle "
+                        "`update_test_data` (régénération complète). Si le comportement "
+                        "observé est en réalité correct pour ce scénario, appelle "
+                        "`request_reevaluation` avec la justification."
+                    )
                 messages_for_llm = messages_for_llm + [
                     result,
-                    HumanMessage(
-                        content=(
-                            "Il n'y a pas d'utilisateur à qui poser cette question : cette "
-                            "suggestion a été générée automatiquement par MockSQL (boucle "
-                            "multi-tests). Si le SQL exclut le cas décrit, c'est le "
-                            "comportement à tester : appelle `generate_test_data` avec un "
-                            "scénario qui AFFIRME ce comportement observable (ex. la ligne "
-                            "est absente du résultat)."
-                        )
-                    ),
+                    HumanMessage(content=no_recipient_feedback),
                 ]
                 continue
             else:

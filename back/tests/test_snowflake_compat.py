@@ -620,3 +620,78 @@ def test_parse_json_field_string_cast_unquoted_without_flatten():
         ],
     )
     assert rows[0][0] == "spam"
+
+
+def test_flatten_index_column_executes():
+    """`f.index` référencé → forme LATERAL zippée value+index (0-based, cf. sf_bq216).
+
+    L'ancienne reconstruction n'exposait que `value` → `Binder Error: Table "f"
+    does not have a column named "index"`.
+    """
+    out = _ptq(
+        "SELECT f.index AS i, f.value::STRING AS v "
+        'FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c")) f'
+    )
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (c TEXT)",
+            'INSERT INTO t VALUES (\'["a","b","c"]\')',
+        ],
+    )
+    # index Snowflake = position 0-based, zippée avec value
+    assert sorted(rows) == [(0, "a"), (1, "b"), (2, "c")]
+
+
+def test_flatten_index_join_dot_product_sf_bq216():
+    """Jointure de deux FLATTEN sur `.index` (produit scalaire, forme sf_bq216)."""
+    out = _ptq(
+        "WITH tgt AS ("
+        "  SELECT f.index, f.value::FLOAT AS v"
+        '  FROM emb, LATERAL FLATTEN(input => emb."e") f'
+        "  WHERE emb.\"pub\" = 'TARGET'"
+        "), cand AS ("
+        '  SELECT emb."pub" AS pub, f.index, f.value::FLOAT AS v'
+        '  FROM emb, LATERAL FLATTEN(input => emb."e") f'
+        "  WHERE emb.\"pub\" <> 'TARGET'"
+        ") "
+        "SELECT c.pub FROM cand c JOIN tgt t ON c.index = t.index "
+        "GROUP BY c.pub ORDER BY SUM(c.v * t.v) DESC"
+    )
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE emb (pub TEXT, e TEXT)",
+            "INSERT INTO emb VALUES ('TARGET', '[1.0, 2.0]'), "
+            "('A', '[1.0, 2.0]'), ('B', '[2.0, 0.0]')",
+        ],
+    )
+    assert [r[0] for r in rows] == ["A", "B"]
+
+
+def test_flatten_index_outer_preserves_empty_rows():
+    """`.index` + `outer => TRUE` → LEFT JOIN LATERAL, ligne parent conservée."""
+    out = _ptq(
+        "SELECT t.id, f.index AS i, f.value::STRING AS v "
+        'FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c"), outer => TRUE) f'
+    )
+    rows = _run_duck(
+        out,
+        [
+            "CREATE TABLE t (id INT, c TEXT)",
+            "INSERT INTO t VALUES (1, '[\"a\"]'), (2, '[]')",
+        ],
+    )
+    assert (1, 0, "a") in rows
+    assert (2, None, None) in rows
+
+
+def test_flatten_without_index_keeps_simple_unnest():
+    """Non-régression : `.index` absent → forme simple CROSS JOIN UNNEST inchangée
+    (pas de sous-requête LATERAL inutile)."""
+    out = _ptq(
+        "SELECT x.value::STRING AS v "
+        'FROM t, LATERAL FLATTEN(input => PARSE_JSON(t."c")) x'
+    )
+    assert "CROSS JOIN UNNEST" in out.upper()
+    assert "LATERAL (" not in out.upper()

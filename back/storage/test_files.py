@@ -19,6 +19,36 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Champs dérivables-du-SQL ou runtime, sortis du fichier commité vers le cache.
 _CACHE_TOP_KEYS: Tuple[str, ...] = ("optimized_sql", "query_decomposed", "last_error")
+
+# Statuts d'exécution « mort-né » : le test n'a jamais tourné avec succès. Matérialisés
+# dans la DÉFINITION commitée sous `exec_status`/`exec_error` (c'est un fait du test,
+# pas un dérivable — ils ne doivent PAS rejoindre _CACHE_CASE_KEYS) : sans ça, `status`
+# part dans le sidecar gitignoré et un consommateur du fichier commité (run_eval, CI,
+# clone frais) ne peut pas distinguer un test sain d'un mort-né (root-cause spider2-snow).
+FAILED_EXEC_STATUSES: Tuple[str, ...] = ("empty_results", "error", "bad_data_error")
+_SUCCESS_VERDICTS: Tuple[str, ...] = ("Excellent", "Bon")
+_EXEC_ERROR_MAX_LEN = 500
+
+
+def is_deadborn_case(case: Dict[str, Any]) -> bool:
+    """Mort-né : statut d'exécution en échec, hors PASS « vide intentionnel ».
+
+    Ce PASS (cf. test_evaluator._classify_empty_intent) conserve
+    ``status="empty_results"`` dans le dict AVEC un verdict Bon/Excellent + assertion
+    sentinelle — ce n'est PAS un mort-né et il ne doit porter aucun marquage d'échec.
+    L'exemption est limitée à ``empty_results`` : un ``error``/``bad_data_error`` est
+    un échec quel que soit le verdict hérité (ex. test autrefois sain qui casse à la
+    relance). Un verdict « Insuffisant » posé par un marquage précédent reste un
+    mort-né (idempotence du marquage CLI).
+    """
+    status = case.get("status")
+    if status not in FAILED_EXEC_STATUSES:
+        return False
+    if status == "empty_results" and case.get("verdict") in _SUCCESS_VERDICTS:
+        return False
+    return True
+
+
 _CACHE_CASE_KEYS: Tuple[str, ...] = (
     "unit_test_build_reasoning",
     "status",
@@ -86,6 +116,18 @@ def split_doc(doc: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     clean_cases: List[Dict[str, Any]] = []
     for i, case in enumerate(definition.get("test_cases") or []):
         c = dict(case)
+        status = c.get("status")
+        if is_deadborn_case(c):
+            c["exec_status"] = status
+            err = c.get("exec_error") or c.get("error")
+            if err:
+                c["exec_error"] = str(err)[:_EXEC_ERROR_MAX_LEN]
+        elif status:
+            # Run redevenu sain (complete, needs_validation…) ou PASS vide
+            # intentionnel : purge le marquage d'échec périmé. Sans statut connu,
+            # on ne touche à rien.
+            c.pop("exec_status", None)
+            c.pop("exec_error", None)
         popped = {k: c.pop(k) for k in _CACHE_CASE_KEYS if k in c}
         if popped:
             case_cache[str(c.get("test_index", i))] = popped

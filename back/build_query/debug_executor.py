@@ -3,7 +3,6 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import duckdb
-from sqlglot import exp
 
 from storage.test_repository import get_test
 from utils.examples import (
@@ -15,17 +14,11 @@ from utils.examples import (
 )
 from utils.insert_examples import replace_missing_with_null, insert_examples
 
+# Helper partagé (utils/sqlglot_ast) : même cause corrigée ici PUIS dans le CTE-trace
+# de l'executor — l'alias préserve les imports existants (tests snowflake).
+from utils.sqlglot_ast import quote_identifier as _quote_ident
+
 logger = logging.getLogger(__name__)
-
-
-def _quote_ident(name: str, dialect: str) -> str:
-    """Quote an identifier with the dialect's quote char.
-
-    Le SQL de debug est reparsé par ``run_query_on_test_dataset`` avec
-    ``read=dialect`` : des backticks codés en dur cassaient le parse sur tout
-    dialecte non-BigQuery (snowflake/postgres/duckdb → ParseError "Expecting (").
-    """
-    return exp.to_identifier(name, quoted=True).sql(dialect=dialect)
 
 
 async def _setup_test_tables(

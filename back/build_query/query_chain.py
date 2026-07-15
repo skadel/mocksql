@@ -473,6 +473,11 @@ def route_agent_output(state: QueryState):
                 "[route_agent_output] ask_clarification en boucle batch → generator (backstop)"
             )
             return "generator"
+        # Boucle de correction auto (bad_data) : l'interception vit dans l'AGENT
+        # (cf. conversational_agent, garde « no recipient ») — une clarification sans
+        # prémisse utilisateur y est renvoyée en retry puis dégradée vers le generator
+        # via le fallback ci-dessous. La seule qui arrive ICI en boucle auto est celle
+        # qui protège une `user_premise` (TICKET-1) : terminale par design.
         logger.diag("[route_agent_output] → history_saver (ask_clarification)")
         return "history_saver"
     # Auto-correction loop (bad_data) : si l'agent n'a émis aucun outil actionnable,

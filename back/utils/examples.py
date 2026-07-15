@@ -111,7 +111,41 @@ def parse_field_type(field_type_str: str) -> Type | List | Dict:
         return Dict[str, Any]
 
     else:
-        return type_mapping.get(field_type_str, str)
+        return _scalar_field_type(field_type_str)
+
+
+# Familles décimales à précision optionnelle. Résolues par `_scalar_field_type` — PAS
+# dans `type_mapping` : la forme paramétrée (`NUMBER(38,0)`) exige un parse du scale.
+_DECIMAL_FIELD_BASE_TYPES = {"NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "BIGDECIMAL"}
+
+
+def _scalar_field_type(field_type_str: str) -> Any:
+    """Type Pydantic d'un scalaire SQL, robuste à la casse et à la précision.
+
+    Racine du root-cause spider2-snow : `NUMBER`/`NUMERIC`/`DECIMAL` absents de
+    `type_mapping` → champ Pydantic `str` → AUCUN signal numérique dans le schéma JSON
+    envoyé au LLM, qui colle des ids alphanumériques (`"M001"`) ou des mots dans des
+    colonnes DECIMAL — INSERT rejeté en aval (cf. execute_queries). Résolution :
+      - scale explicite 0 (`NUMBER(38,0)`, `NUMBER(10)`) → int ;
+      - scale explicite > 0 (`NUMBER(12,2)`)             → float ;
+      - sans précision (`NUMBER`)                        → int | float — forcer float
+        perdrait la précision des grands entiers (epoch µs, wei > 2^53).
+    Le lookup `type_mapping` reste prioritaire (base sans précision, casse normalisée) ;
+    tout type inconnu retombe sur `str` comme avant.
+    """
+    cleaned = field_type_str.strip()
+    if exact := type_mapping.get(cleaned):
+        return exact
+    base = cleaned.split("(")[0].strip().upper()
+    if exact := type_mapping.get(base):
+        return exact
+    if base in _DECIMAL_FIELD_BASE_TYPES:
+        params = re.match(r"[^(]*\(\s*\d+\s*(?:,\s*(\d+)\s*)?\)", cleaned)
+        if params:
+            scale = int(params.group(1) or 0)
+            return int if scale == 0 else float
+        return int | float
+    return str
 
 
 def parse_struct_fields(fields_str: str) -> List[str]:
@@ -274,7 +308,7 @@ def _bq_ddl_to_pydantic(model_name: str, bq_ddl_type: str):
             **fields_def,
         )
 
-    return type_mapping.get(bq_ddl_type.upper(), str)
+    return _scalar_field_type(bq_ddl_type)
 
 
 # Config partagée : `populate_by_name` accepte le nom réel ET la clé assainie en
@@ -323,10 +357,9 @@ def _iso_format_hint(col_type) -> str:
 
 # Tokens de nom signalant qu'une colonne porte un horodatage.
 _TEMPORAL_NAME_TOKENS = {"at", "time", "timestamp", "date", "datetime", "epoch", "ts"}
-# Familles de types numériques (base, précision retirée). NUMBER/NUMERIC/DECIMAL ne
-# sont PAS dans `type_mapping` → champ Pydantic `str` : un littéral date les traverse
-# sans validation. Les types int/float y sont aussi pour la robustesse (le rappel
-# reste vrai), même si Pydantic les rejetterait déjà.
+# Familles de types numériques (base, précision retirée). Tous typés numériques en
+# Pydantic (cf. _scalar_field_type) : le rappel epoch évite qu'un littéral date ISO
+# soit rejeté à la validation → retry coûteux, au lieu d'être prévenu à la source.
 _NUMERIC_BASE_TYPES = {
     "NUMBER",
     "NUMERIC",
@@ -364,9 +397,9 @@ def _numeric_epoch_hint(col_type_str: str | None, col_name: str) -> str:
     """Rappel « epoch → entier » pour une colonne NUMÉRIQUE au nom horodaté.
 
     Un `NUMBER` Snowflake au nom temporel (`SnapshotAt`, `UpstreamPublishedAt`) stocke
-    un epoch, pas une date. Comme `NUMBER` retombe sur `str` (cf. `parse_field_type`),
-    le LLM y colle volontiers un littéral ISO — que DuckDB refuse d'insérer dans la
-    colonne DECIMAL (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
+    un epoch, pas une date. Sans le rappel, le LLM y colle volontiers un littéral ISO —
+    désormais rejeté dès la validation Pydantic (champ numérique, cf. _scalar_field_type)
+    → retry coûteux (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
     survit au retry sans contexte. Gaté sur le TYPE numérique (pas seulement le nom) :
     une colonne TYPÉE date/timestamp nommée `...At` garde son rappel ISO.
     """
@@ -422,7 +455,15 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
             # rappel « epoch → entier », sinon le LLM y met un littéral date que DuckDB
             # refuse d'insérer en DECIMAL (incident sf_bq028). Exclusif du rappel ISO
             # (gaté sur le type numérique). Cf. _numeric_epoch_hint.
-            epoch_hint = _numeric_epoch_hint(column.get("type"), column["name"])
+            # ARBITRAGE : si le générateur a posé une directive de format extraite du
+            # SQL (`sql_format_directive`, ex. TO_DATE(...,'YYYYMMDD') sur sf_bq216),
+            # le SQL fait foi — l'heuristique de nom s'efface, sinon le prompt porte
+            # deux prescriptions contradictoires et le LLM tranche au hasard.
+            epoch_hint = (
+                ""
+                if column.get("sql_format_directive")
+                else _numeric_epoch_hint(column.get("type"), column["name"])
+            )
             if epoch_hint:
                 col_description = (
                     (str(col_description) + epoch_hint)
@@ -668,15 +709,26 @@ def create_test_tables(
 
 
 def execute_queries(queries: list[str], con: duckdb.DuckDBPyConnection):
-    try:
-        for idx, query in enumerate(queries, start=1):
-            try:
-                result = con.execute(query).fetchall()  # Fetch results for verification
-                logger.debug("Result for query %d: %s", idx, result)
-            except Exception as e:
-                logger.error("Error executing query %d: %s", idx, e)
-    except Exception as e:
-        logger.error("Error establishing database connection: %s", e)
+    """Exécute chaque requête ; toutes sont tentées, puis la PREMIÈRE exception est relancée.
+
+    Ne jamais avaler l'échec : un INSERT rejeté (ex. `Conversion Error: Could not convert
+    string "M001" to DECIMAL(38,9)`) laissait des tables vides → misclassification
+    `empty_results` avec un diagnostic CTE mensonger, boucle de correction aveugle
+    (root-cause spider2-snow). Relancer l'exception d'origine (message DuckDB intact)
+    rend le circuit `bad_data_error` de l'executor atteignable — l'évaluateur transmet
+    alors le vrai message au correcteur. On tente quand même toutes les requêtes avant
+    de relancer, pour loguer TOUS les échecs (plusieurs tables fautives = un seul retry).
+    """
+    errors: list[Exception] = []
+    for idx, query in enumerate(queries, start=1):
+        try:
+            result = con.execute(query).fetchall()  # Fetch results for verification
+            logger.debug("Result for query %d: %s", idx, result)
+        except Exception as e:
+            logger.error("Error executing query %d: %s\n  Requête : %s", idx, e, query)
+            errors.append(e)
+    if errors:
+        raise errors[0]
 
 
 def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
@@ -1837,11 +1889,29 @@ def _fix_snowflake_flatten(tree: exp.Expression) -> set[str]:
     ``_fix_snowflake_variant_string_cast`` sache déquoter les
     ``<alias>.value::STRING``.
 
-    Limite assumée : seule la colonne de sortie ``value`` est reconstruite. Les
-    colonnes ``SEQ/KEY/PATH/INDEX/THIS`` de Snowflake FLATTEN n'ont pas d'équivalent
-    trivial via UNNEST et ne sont pas mappées (usage marginal dans le corpus).
-    ``path =>`` n'est pas géré (absent du corpus).
+    Si ``<alias>.index`` est référencé (position 0-based Snowflake, cf. sf_bq216 :
+    jointure de deux FLATTEN sur l'index), la forme simple ne suffit plus — on émet
+    une sous-requête LATERAL où DuckDB **zippe** les deux UNNEST du même SELECT :
+
+        CROSS JOIN LATERAL (
+          SELECT UNNEST(CAST(<source> AS JSON[])) AS value,
+                 UNNEST(RANGE(LEN(CAST(<source> AS JSON[])))) AS "index"
+        ) AS <alias>
+
+    Limite assumée : seules les colonnes de sortie ``value`` et ``index`` sont
+    reconstruites. Les colonnes ``SEQ/KEY/PATH/THIS`` de Snowflake FLATTEN n'ont pas
+    d'équivalent trivial via UNNEST et ne sont pas mappées (usage marginal dans le
+    corpus). ``path =>`` n'est pas géré (absent du corpus).
     """
+    # Alias dont `.index` est référencé quelque part dans la requête. Scan global :
+    # un même nom d'alias dans deux CTEs peut sur-matcher, au pire on émet la forme
+    # riche pour un FLATTEN qui n'en avait pas besoin (colonne en plus, sans effet).
+    index_aliases = {
+        col.table.lower()
+        for col in tree.find_all(exp.Column)
+        if col.table and col.name.lower() == "index"
+    }
+
     flatten_aliases: set[str] = set()
     for join in list(tree.find_all(exp.Join)):
         src = join.this
@@ -1859,14 +1929,34 @@ def _fix_snowflake_flatten(tree: exp.Expression) -> set[str]:
         outer = outer or join.args.get("side") == "LEFT"
 
         list_expr = exp.cast(source.copy(), exp.DataType.build("JSON[]"))
-        new_alias = exp.TableAlias(
-            this=talias.this.copy(), columns=[exp.to_identifier("value")]
-        )
-        unnest = exp.Unnest(expressions=[list_expr], alias=new_alias)
-        if outer:
-            new_join = exp.Join(this=unnest, side="LEFT", on=exp.true())
+        if talias.name.lower() in index_aliases:
+            # Forme zippée value+index : deux UNNEST dans le même SELECT sont
+            # alignés positionnellement par DuckDB ; RANGE(LEN(l)) = 0..n-1.
+            inner_select = exp.select(
+                exp.alias_(exp.Unnest(expressions=[list_expr]), "value"),
+                exp.alias_(
+                    exp.Unnest(
+                        expressions=[
+                            exp.func("RANGE", exp.func("LEN", list_expr.copy()))
+                        ]
+                    ),
+                    "index",
+                    quoted=True,
+                ),
+            )
+            joined = exp.Lateral(
+                this=exp.Subquery(this=inner_select),
+                alias=exp.TableAlias(this=talias.this.copy()),
+            )
         else:
-            new_join = exp.Join(this=unnest, kind="CROSS")
+            new_alias = exp.TableAlias(
+                this=talias.this.copy(), columns=[exp.to_identifier("value")]
+            )
+            joined = exp.Unnest(expressions=[list_expr], alias=new_alias)
+        if outer:
+            new_join = exp.Join(this=joined, side="LEFT", on=exp.true())
+        else:
+            new_join = exp.Join(this=joined, kind="CROSS")
         join.replace(new_join)
         flatten_aliases.add(talias.name.lower())
     return flatten_aliases

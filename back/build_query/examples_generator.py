@@ -101,9 +101,15 @@ _CONDITIONS_MAX_CHARS = 2000
 def _serialize_hint(hint: dict | None) -> str:
     """Sérialise le hint de contraintes en JSON, en tronquant `conditions` au-delà
     du budget (P2b). La troncature se fait sur la *valeur* (chaîne), pas sur le JSON
-    global, pour ne pas casser les autres clés (`anti_joins`, `format_constraints`…)."""
+    global, pour ne pas casser les autres clés (`anti_joins`, `format_constraints`…).
+
+    `column_directives` est retiré : ces directives sont injectées dans les
+    descriptions des champs Pydantic (cf. `_directive_hint_text`), les resservir
+    dans le hint serait du bruit de prompt."""
     if not hint:
         return ""
+    if "column_directives" in hint:
+        hint = {k: v for k, v in hint.items() if k != "column_directives"}
     conditions = hint.get("conditions")
     if isinstance(conditions, str) and len(conditions) > _CONDITIONS_MAX_CHARS:
         hint = {
@@ -140,6 +146,53 @@ def _run_simplify(
             exc_info=True,
         )
         return None
+
+
+def _directive_hint_text(directive: dict) -> str:
+    """Texte de description Pydantic pour une directive de format/structure.
+
+    Directives extraites du SQL par le constraint_simplifier (`column_directives`) :
+    le format/la structure y sont PROUVÉS par le parsing de la requête — le texte
+    est donc prescriptif, avec un exemple concret (c'est l'exemple qui ancre le
+    LLM, cf. incident sf_bq216 : hint epoch vs TO_DATE('YYYYMMDD'), coin-flip).
+    """
+    kind = directive.get("kind")
+    if kind == "date_format":
+        fmt = directive.get("format") or ""
+        fn = directive.get("fn") or "PARSE"
+        example = ""
+        try:
+            example = f", ex. {date(2016, 3, 15).strftime(fmt)}"
+        except Exception:
+            pass
+        return (
+            f"(⚠️ format imposé par la requête : la colonne est parsée via "
+            f"{fn}('{fmt}') — émettre la valeur exactement à ce format{example} ; "
+            "PAS un epoch, pas un autre format de date)"
+        )
+    if kind == "json_object_array":
+        fields = directive.get("fields") or []
+        ex_obj = ", ".join(f'"{f}": "…"' for f in fields)
+        fields_repr = ", ".join(f"'{f}'" for f in fields)
+        return (
+            "(⚠️ structure imposée par la requête : tableau JSON d'OBJETS avec "
+            f"le(s) champ(s) {fields_repr} — ex. [{{{ex_obj}}}] ; jamais un "
+            "scalaire nu)"
+        )
+    if kind == "json_array":
+        return (
+            "(⚠️ structure imposée par la requête : tableau JSON — "
+            'ex. ["…", "…"] ; jamais un scalaire nu)'
+        )
+    if kind == "json_object":
+        fields = directive.get("fields") or []
+        ex_obj = ", ".join(f'"{f}": "…"' for f in fields)
+        fields_repr = ", ".join(f"'{f}'" for f in fields)
+        return (
+            "(⚠️ structure imposée par la requête : objet JSON avec le(s) "
+            f"champ(s) {fields_repr} — ex. {{{ex_obj}}})"
+        )
+    return ""
 
 
 def _format_filter_constraints(constraints: list) -> list[str]:
@@ -242,36 +295,44 @@ def _simplification_to_hint(
         cache_key = (sql, dialect)
         cached = _hint_cache.get(cache_key)
         if cached is not None:
-            return cached
+            return _serialize_hint(cached)
 
         from build_query.constraint_simplifier import build_conditions_hint
 
         hint = build_conditions_hint(sql, dialect=dialect, schema=schema)
-        result_str = _serialize_hint(hint)
         if len(_hint_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
             _hint_cache.pop(next(iter(_hint_cache)))
-        _hint_cache[cache_key] = result_str
-        return result_str
+        _hint_cache[cache_key] = hint or {}
+        return _serialize_hint(hint)
     return ""
 
 
 def _run_simplify_and_hint(
     sql: str, schema: list[dict] | None = None, dialect: str = "bigquery"
 ):
-    """Return ``(SimplificationResult|None, hint_str)`` sharing one parse + qualify pass.
+    """Return ``(SimplificationResult|None, hint_str, column_directives)`` sharing
+    one parse + qualify pass.
 
     Equivalent to calling ``_run_simplify`` then ``_simplification_to_hint`` but
     ``simplify_with_hint`` reuses a single qualified scope map across both, halving the
     (expensive) qualify cost on wide queries. Populates ``_simplify_cache`` and
     ``_hint_cache`` so retries on the same SQL stay free, just like the split path.
+
+    ``column_directives`` (format date / structure JSON par colonne, extraits du
+    SQL — cf. constraint_simplifier) sont destinés aux descriptions Pydantic et
+    ne figurent PAS dans ``hint_str``.
     """
     if not sql:
-        return None, ""
+        return None, "", {}
     cache_key = (sql, dialect)
     sim_cached = _simplify_cache.get(cache_key)
     hint_cached = _hint_cache.get(cache_key)
     if sim_cached is not None and hint_cached is not None:
-        return sim_cached, hint_cached
+        return (
+            sim_cached,
+            _serialize_hint(hint_cached),
+            hint_cached.get("column_directives") or {},
+        )
 
     try:
         from build_query.constraint_simplifier import simplify_with_hint
@@ -287,14 +348,17 @@ def _run_simplify_and_hint(
         )
         sim_result, hint = None, {}
 
-    hint_str = _serialize_hint(hint)
     if len(_simplify_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
         _simplify_cache.pop(next(iter(_simplify_cache)))
     _simplify_cache[cache_key] = sim_result
     if len(_hint_cache) >= _SIMPLIFY_CACHE_MAXSIZE:
         _hint_cache.pop(next(iter(_hint_cache)))
-    _hint_cache[cache_key] = hint_str
-    return sim_result, hint_str
+    _hint_cache[cache_key] = hint or {}
+    return (
+        sim_result,
+        _serialize_hint(hint),
+        (hint or {}).get("column_directives") or {},
+    )
 
 
 def _prepare_generation_constraints(sql: str, schema: list[dict] | None, dialect: str):
@@ -996,9 +1060,11 @@ async def generate_examples_(
     # pour ne pas figer les streams SSE des autres onglets. Le `check_having_cardinality`
     # interne peut lever — l'exception est re-levée telle quelle par `to_thread`.
     with timed("gen:simplify+hint"):
-        sim_result, constraints = await _aprepare_generation_constraints(
-            optimized_sql, schema, dialect
-        )
+        (
+            sim_result,
+            constraints,
+            column_directives,
+        ) = await _aprepare_generation_constraints(optimized_sql, schema, dialect)
 
     logger.debug("[generator] constraints_hint: %s", constraints or "(empty)")
     if sim_result is not None:
@@ -1042,15 +1108,24 @@ async def generate_examples_(
     )
 
     # Precompute constraints per column
+    table_to_uc = {}
+    for entry in used_columns:
+        db = entry.get("database", "")
+        table = entry["table"]
+        uc_key = f"{db}_{table}" if db else table
+        table_to_uc[table.lower()] = uc_key
+
+    # Directives de format/structure par colonne (clé `table.col` résolue par le
+    # simplifier) → re-clés sur (uc_key, col) pour le merge dans le schéma LLM.
+    directives_by_uc: dict[tuple[str, str], list[dict]] = {}
+    for dir_key, dir_entries in (column_directives or {}).items():
+        tbl, _, coln = dir_key.rpartition(".")
+        uc_key = table_to_uc.get(tbl.lower())
+        if uc_key and coln:
+            directives_by_uc[(uc_key, coln.lower())] = dir_entries
+
     col_hints = {}
     if sim_result is not None:
-        table_to_uc = {}
-        for entry in used_columns:
-            db = entry.get("database", "")
-            table = entry["table"]
-            uc_key = f"{db}_{table}" if db else table
-            table_to_uc[table.lower()] = uc_key
-
         for ref, constraints_list in sim_result.source_columns.items():
             if not constraints_list:
                 continue
@@ -1106,6 +1181,21 @@ async def generate_examples_(
                     c_copy["description"] = str(existing_desc) + hint_str
                 else:
                     c_copy["description"] = hint_str.lstrip(" | ")
+            # Directive de format/structure extraite du SQL (TO_DATE, FLATTEN,
+            # GET_PATH, bracket…) : ajoutée à la description ET signalée à
+            # create_pydantic_models via `sql_format_directive` pour que le rappel
+            # epoch (heuristique de nom) s'efface — le SQL fait foi.
+            directive_entries = directives_by_uc.get((uc_key, col_name))
+            if directive_entries:
+                dtext = " ".join(
+                    t for t in (_directive_hint_text(d) for d in directive_entries) if t
+                )
+                if dtext:
+                    existing_desc = c_copy.get("description")
+                    c_copy["description"] = (
+                        f"{existing_desc} {dtext}" if existing_desc else dtext
+                    )
+                    c_copy["sql_format_directive"] = True
             new_columns.append(c_copy)
 
         if new_columns:

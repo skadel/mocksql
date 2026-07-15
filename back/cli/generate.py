@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,7 +19,7 @@ from cli.schema_cache import (
     save_schema_cache,
 )
 from storage.config import load_preprocessor_fn
-from storage.test_files import read_test_doc, write_test_doc
+from storage.test_files import is_deadborn_case, read_test_doc, write_test_doc
 from utils.sqlglot_ast import get_from
 from utils.schema_utils import generate_tables_and_columns_from_project_schema
 from utils.sql_code import (
@@ -327,6 +328,93 @@ def _extract_suggestions(final_state: dict) -> list[str]:
             except Exception:
                 pass
     return []
+
+
+def _last_evaluation_by_test_index(messages: list) -> dict:
+    """Dernier message EVALUATION par test_index, préfixe « **verdict** — » retiré.
+
+    Sur le chemin `empty_results`, le verdict « Insuffisant » de l'évaluateur n'existe
+    QUE dans ces messages (jamais fusionné dans le RESULTS que la CLI persiste) — c'est
+    ici qu'on le récupère pour le fichier.
+    """
+    from utils.msg_types import MsgType
+    from utils.saver import get_message_type
+
+    out: dict = {}
+    for msg in messages:
+        if get_message_type(msg) != MsgType.EVALUATION:
+            continue
+        idx = msg.additional_kwargs.get("test_index")
+        if idx is None:
+            continue
+        text = re.sub(r"^\*\*[^*]+\*\*\s*—\s*", "", str(msg.content)).strip()
+        if text:
+            out[str(idx)] = text
+    return out
+
+
+def _fallback_explanation(tc: dict) -> str:
+    """Explication dérivée du cas lui-même quand aucun message EVALUATION n'existe
+    (statut `error` : route directe vers history_saver, sans évaluateur)."""
+    err_lines = str(tc.get("exec_error") or tc.get("error") or "").strip().splitlines()
+    first = err_lines[0] if err_lines else ""
+    status = tc.get("status")
+    if status == "empty_results":
+        cte = tc.get("failing_cte")
+        return (
+            f"La requête ne retourne aucune ligne — CTE bloquante : {cte}."
+            if cte
+            else "La requête ne retourne aucune ligne avec les données générées."
+        )
+    if status == "bad_data_error":
+        return (
+            f"Les données générées ont été rejetées par DuckDB : {first}"
+            if first
+            else "Les données générées ont été rejetées par DuckDB."
+        )
+    return (
+        f"Le test n'a pas pu s'exécuter : {first}"
+        if first
+        else ("Le test n'a pas pu s'exécuter.")
+    )
+
+
+def mark_failed_cases(test_cases: list, messages: list | None = None) -> list:
+    """Tague les cas morts-nés (statut d'exécution en échec) et les renvoie.
+
+    Le stub `FAILED_AUTO_GEN` du circuit-breaker de `test_evaluator` part sur le canal
+    `examples`, que la CLI ne lit pas (`_extract_test_cases` ne parcourt que
+    messages/RESULTS) — le marquage n'atteignait donc jamais le fichier. On le dérive
+    ici du `status` porté par chaque cas, ce qui couvre AUSSI les échecs hors
+    circuit-breaker (transpile `error`, sortie de boucle anticipée). Contrairement au
+    stub, on ne vide PAS les données : elles sont souvent à un patch près de
+    fonctionner, et le mode additif doit pouvoir repartir d'elles.
+
+    Pose aussi le verdict qui manquait au fichier (root-cause 12/07 : `verdict=null`
+    sur 66/110 modèles d'éval) : `Insuffisant` + cause typée + explication reprise du
+    dernier message EVALUATION du test (fallback : dérivée de l'erreur d'exécution).
+    Le PASS « vide intentionnel » (verdict Bon/Excellent) n'est jamais marqué — cf.
+    `is_deadborn_case`. Idempotent : un mort-né déjà marqué garde son explication.
+    """
+    failed = [tc for tc in test_cases if is_deadborn_case(tc)]
+    explanations = _last_evaluation_by_test_index(messages or [])
+    for tc in failed:
+        tags = list(tc.get("tags") or [])
+        tags += [
+            t for t in ("FAILED_AUTO_GEN", "MANUAL_REVIEW_NEEDED") if t not in tags
+        ]
+        tc["tags"] = tags
+        if not tc.get("verdict"):
+            tc["verdict"] = "Insuffisant"
+        if not tc.get("reason_type"):
+            tc["reason_type"] = (
+                "execution_error" if tc.get("status") == "error" else "bad_data"
+            )
+        if not tc.get("evaluation_explanation"):
+            tc["evaluation_explanation"] = explanations.get(
+                str(tc.get("test_index"))
+            ) or _fallback_explanation(tc)
+    return failed
 
 
 def merge_test_cases(existing: list | None, generated: list | None) -> list:
@@ -884,6 +972,9 @@ async def run_generate(
     # Step 6 — write outputs
     test_cases = _extract_test_cases(final_state)
     suggestions = _extract_suggestions(final_state)
+    failed_cases = (
+        mark_failed_cases(test_cases, final_state.get("messages")) if test_cases else []
+    )
     if test_cases and update_uid:
         existing_doc = read_test_doc(out_path)
         before = next(
@@ -930,3 +1021,25 @@ async def run_generate(
         typer.echo("\nSuggestions de cas non couverts :")
         for i, s in enumerate(suggestions, 1):
             typer.echo(f"  {i}. {s}")
+
+    # Morts-nés : le fichier est écrit (les données restent exploitables) mais l'échec
+    # doit être VISIBLE — `[OK] … écrits` seul était indistinguable d'un succès et
+    # l'éval batch enchaînait sans broncher (root-cause spider2-snow, 66 modèles).
+    # rc reste 0 (décision 13/07) : le fichier EST écrit, et un rc≠0 casserait les
+    # harnais batch (set -e) ; l'échec est porté par [FAIL] + verdict/exec_status.
+    if failed_cases:
+        for tc in failed_cases:
+            name = (
+                tc.get("test_name")
+                or tc.get("unit_test_description")
+                or f"test {tc.get('test_index')}"
+            )
+            err = str(tc.get("exec_error") or tc.get("error") or "").strip()
+            detail = f" — {err[:200]}" if err else ""
+            typer.echo(f"[FAIL] {name} : {tc.get('status')}{detail}", err=True)
+        typer.echo(
+            f"[FAIL] {len(failed_cases)} test(s) mort-né(s) (verdict Insuffisant, "
+            f"exec_status posé dans {out_path}) — corrige les données ou relance "
+            "la génération.",
+            err=True,
+        )

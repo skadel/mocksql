@@ -12,6 +12,7 @@ si VERTEX_PROJECT est configuré — même pattern que les autres agents MockSQL
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -146,6 +147,30 @@ def _format_assertions(expected_output: dict | list | str) -> str:
     return json.dumps(expected_output, ensure_ascii=False)
 
 
+def _derive_nonempty_from_assertions(test_case: dict) -> bool:
+    """Non-vacuité dérivée des données COMMITÉES quand le résultat brut est absent
+    (sidecar cache gitignoré → clone frais / CI sans lui).
+
+    Un verdict présent + une assertion de présence (`NOT EXISTS … FROM __result__`) ou
+    de cardinalité (`COUNT(*) = N`, N ≥ 1) passée ⇒ le résultat contenait au moins une
+    ligne. Moins précis que le résultat brut, mais suffisant pour `is_valid`."""
+    if not test_case.get("verdict"):
+        return False
+    for a in test_case.get("assertion_results") or []:
+        if not isinstance(a, dict) or a.get("passed") is not True:
+            continue
+        cond = str(a.get("expected_condition") or "")
+        sql = str(a.get("sql") or "")
+        m = re.search(r"COUNT\s*\(\s*\*\s*\)\s*=\s*(\d+)", cond, flags=re.IGNORECASE)
+        if m and int(m.group(1)) >= 1:
+            return True
+        if re.search(
+            r"NOT\s+EXISTS\s*\(\s*SELECT[^)]*__result__", sql, flags=re.IGNORECASE
+        ):
+            return True
+    return False
+
+
 def _format_real_result(test_case: dict) -> str:
     """Rend le résultat réel produit par DuckDB (la vérité d'exécution), pour que le juge
     n'ait PAS à simuler mentalement la requête — source des hallucinations de « résultat vide »
@@ -154,6 +179,12 @@ def _format_real_result(test_case: dict) -> str:
     if raw is None:
         raw = test_case.get("results") or test_case.get("real_res")
     if raw is None:
+        if _derive_nonempty_from_assertions(test_case):
+            return (
+                "(résultat brut non disponible — mais le test porte un verdict et une "
+                "assertion de présence/cardinalité VÉRIFIÉE : le résultat contenait au "
+                "moins une ligne, il n'était PAS vide)"
+            )
         return "(non disponible)"
     if isinstance(raw, str):
         try:
