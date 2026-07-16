@@ -435,6 +435,7 @@ async def run_tests(
       - exit_code 0 = all pass, 1 = at least one failure / error
       - model_results is a list of {model, cases} dicts
     """
+    from cli.parity import compute_fingerprint, parity_state
     from utils.examples import DB_PATH, initialize_duckdb
 
     cfg = _load_config(config_path)
@@ -527,6 +528,11 @@ async def run_tests(
                     con=con,
                     precompiled_sql=precompiled_sql,
                     setup_error=setup_error,
+                )
+                # Attestation de parité warehouse (informatif, jamais bloquant) :
+                # verified / stale (empreinte périmée) / unverified (jamais audité).
+                result["parity"] = parity_state(
+                    tc, compute_fingerprint(sql, tc.get("data"), dialect), dialect
                 )
                 case_results.append(result)
 
