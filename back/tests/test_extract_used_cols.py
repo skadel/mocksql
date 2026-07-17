@@ -421,6 +421,31 @@ ON
         result = await _extract(query, tables)
         assert _used_cols(result) == expected
 
+    async def test_snowflake_uppercase_tables_lowercase_quoted_columns(self):
+        """Régression (sf_bq263) : cache Snowflake en casse exacte (minuscule) +
+        SQL quotant les colonnes en minuscule. Ajoutées NON-quotées au
+        MappingSchema, les colonnes du cache étaient normalisées MAJUSCULE par le
+        dialecte snowflake → ``OptimizeError: Unknown column: created_at``.
+        Même famille que le fix CLI ``extract_used_columns_from_sql``."""
+        query = """
+        SELECT DATE_TRUNC('MONTH', TO_TIMESTAMP_NTZ("O"."created_at" / 1000000)) AS "month",
+               SUM("OI"."sale_price") AS "total_sales"
+        FROM "TE"."ORDER_ITEMS" AS "OI"
+        JOIN "TE"."ORDERS" AS "O" ON "OI"."order_id" = "O"."order_id"
+        WHERE "O"."status" = 'Complete'
+        GROUP BY 1
+        """
+        tables = {
+            "TE.ORDERS": {"order_id": "INT", "status": "TEXT", "created_at": "INT"},
+            "TE.ORDER_ITEMS": {"order_id": "INT", "sale_price": "FLOAT"},
+        }
+        result = await _extract(query, tables, dialect="snowflake")
+        cols = {e["table"]: sorted(e["used_columns"]) for e in result["used_columns"]}
+        assert cols == {
+            "ORDERS": ["created_at", "order_id", "status"],
+            "ORDER_ITEMS": ["order_id", "sale_price"],
+        }
+
     async def test_same_column_name_in_different_cte(self):
         query = """
     WITH

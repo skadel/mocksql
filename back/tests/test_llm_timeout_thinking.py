@@ -212,6 +212,50 @@ def test_make_llm_explicit_level_skips_safety(project_dir, captured_llm_kwargs):
     assert "thinking_budget" not in captured_llm_kwargs
 
 
+def test_make_llm_thinking_cap_bounds_derived_safety(project_dir, captured_llm_kwargs):
+    """Le plafond dérivé (24 576) est anti-hang, jamais mordant pour un nœud à
+    sortie courte : `thinking_cap` le borne par appel (cf. suggestions_generator,
+    6,6 k tokens de rumination mesurés pour 3 phrases)."""
+    _write_yml(project_dir, "llm:\n  model: gemini-2.5-flash\n")
+    llm_factory.make_llm(thinking_cap=2048)
+    assert captured_llm_kwargs["thinking_budget"] == 2048
+
+
+def test_make_llm_thinking_cap_never_raises_explicit_budget(
+    project_dir, captured_llm_kwargs
+):
+    """Un thinking_budget explicite de l'utilisateur prime toujours sur le cap."""
+    _write_yml(project_dir, "llm:\n  thinking_budget: 512\n")
+    llm_factory.make_llm(thinking_cap=2048)
+    assert captured_llm_kwargs["thinking_budget"] == 512
+
+
+def test_make_llm_thinking_cap_respects_explicit_zero(project_dir, captured_llm_kwargs):
+    """thinking_budget: 0 (thinking coupé) n'est pas réactivé par le cap."""
+    _write_yml(project_dir, "llm:\n  thinking_budget: 0\n")
+    llm_factory.make_llm(thinking_cap=2048)
+    assert captured_llm_kwargs["thinking_budget"] == 0
+
+
+def test_make_llm_thinking_cap_respects_explicit_level(
+    project_dir, captured_llm_kwargs
+):
+    """Un thinking_level explicite est un choix utilisateur : le cap s'efface."""
+    _write_yml(project_dir, "llm:\n  thinking_level: high\n")
+    llm_factory.make_llm(thinking_cap=2048)
+    assert captured_llm_kwargs.get("thinking_level") == "high"
+    assert "thinking_budget" not in captured_llm_kwargs
+
+
+def test_make_llm_thinking_cap_applies_when_safety_disabled(
+    project_dir, captured_llm_kwargs
+):
+    """safety 0 = pas de plafond GLOBAL ; le cap par appel reste efficace."""
+    _write_yml(project_dir, "llm:\n  thinking_safety_budget: 0\n")
+    llm_factory.make_llm(thinking_cap=2048)
+    assert captured_llm_kwargs["thinking_budget"] == 2048
+
+
 def test_make_llm_safety_disabled_sends_no_budget(project_dir, captured_llm_kwargs):
     _write_yml(
         project_dir, "llm:\n  model: gemini-2.5-flash\n  thinking_safety_budget: 0\n"

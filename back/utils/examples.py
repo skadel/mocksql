@@ -1356,10 +1356,38 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _resolve_grouped_expr(
+    g: exp.Expression,
+    projections: list[exp.Expression],
+    alias_map: dict[str, exp.Expression],
+) -> exp.Expression:
+    """
+    Resolve a GROUP BY expression to the SELECT projection it designates:
+    ordinal (GROUP BY 1 → 1st projection) or alias (GROUP BY month → aliased expr).
+    Returns the expression unchanged when it designates nothing.
+    """
+    if isinstance(g, exp.Literal) and g.is_int:
+        idx = int(g.name) - 1
+        if 0 <= idx < len(projections):
+            proj = projections[idx]
+            return proj.this if isinstance(proj, exp.Alias) else proj
+    if isinstance(g, exp.Column) and not g.args.get("table"):
+        resolved = alias_map.get(g.name.lower())
+        if resolved is not None:
+            return resolved
+    return g
+
+
 def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
     """
-    Add to GROUP BY any SELECT column not wrapped in an aggregate and not already present.
-    DuckDB requires strict GROUP BY (no functional-dependency shortcut like BigQuery).
+    Add to GROUP BY any SELECT column not wrapped in an aggregate and not already
+    covered by the GROUP BY. DuckDB requires strict GROUP BY (no functional-
+    dependency shortcut like BigQuery).
+
+    A column is covered when it appears inside any grouped expression, after
+    resolving ordinals and SELECT aliases to their projection — adding it anyway
+    would change the aggregation grain (GROUP BY DATE_TRUNC('MONTH', col), col
+    yields one row per timestamp instead of one per month).
     Modifies the tree in-place.
     """
     for select in tree.find_all(exp.Select):
@@ -1374,10 +1402,22 @@ def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
         ):
             continue
 
-        grouped_sqls = {g.sql(dialect="duckdb").lower() for g in group.expressions}
+        projections = select.expressions
+        alias_map = {
+            proj.alias.lower(): proj.this
+            for proj in projections
+            if isinstance(proj, exp.Alias) and proj.alias
+        }
+        covered_cols = {
+            col.sql(dialect="duckdb").lower()
+            for g in group.expressions
+            for col in _resolve_grouped_expr(g, projections, alias_map).find_all(
+                exp.Column
+            )
+        }
 
         to_add = []
-        for sel_expr in select.expressions:
+        for sel_expr in projections:
             inner = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
             if isinstance(inner, (exp.Star, exp.Literal)):
                 continue
@@ -1385,9 +1425,9 @@ def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
                 continue
             for col in inner.find_all(exp.Column):
                 col_sql = col.sql(dialect="duckdb").lower()
-                if col_sql not in grouped_sqls:
+                if col_sql not in covered_cols:
                     to_add.append(col.copy())
-                    grouped_sqls.add(col_sql)
+                    covered_cols.add(col_sql)
 
         if to_add:
             group.set("expressions", list(group.expressions) + to_add)

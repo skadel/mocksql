@@ -106,6 +106,10 @@ class QueryState(TypedDict):
         bool
     ]  # True when the user explicitly asks for fresh coverage suggestions (panel button):
     # routing → suggestions_generator directly, and skip final_response (no "tests generated" msg)
+    cli_mode: Optional[
+        bool
+    ]  # True when the graph is driven by the CLI (mocksql generate): final_response skips
+    # its LLM call (closing message never displayed by the CLI; templated fallback persisted)
     coverage_gap_analysis: Optional[
         str
     ]  # `coverage_gap_analysis` from suggestions_generator: short gap analysis woven into

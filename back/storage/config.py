@@ -529,6 +529,11 @@ def open_duckdb_connection(path: str, *, read_only: bool = False):
     import duckdb
 
     con = duckdb.connect(path, read_only=read_only)
+    # Fuseau de session FIGÉ en UTC : DuckDB hérite sinon du fuseau machine, et
+    # TO_TIMESTAMP(epoch) (transpilé de TO_TIMESTAMP_NTZ Snowflake, naïf) rend
+    # un TIMESTAMPTZ décalé — « May 2023 » sérialisé 2023-04-30T22:00:00Z,
+    # bornes WHERE >= '2023-01-01' décalées de 2 h (incident sf_bq263).
+    con.execute("SET TimeZone='UTC'")
     apply_duckdb_extensions(con)
     return con
 

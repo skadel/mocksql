@@ -154,6 +154,22 @@ def _parent_for_summary(state: QueryState) -> str | None:
     return state.get("parent_message_id")
 
 
+def _closing_message(text: str, parent_id: str | None, state: QueryState) -> dict:
+    return {
+        "messages": [
+            AIMessage(
+                content=text,
+                id=str(uuid.uuid4()),
+                additional_kwargs={
+                    "type": MsgType.FINAL_RESPONSE,
+                    "parent": parent_id,
+                    "request_id": state.get("request_id"),
+                },
+            )
+        ]
+    }
+
+
 async def final_response(state: QueryState):
     """Émet un court message de clôture en langage naturel."""
     ctx = _collect_run_context(state)
@@ -163,6 +179,22 @@ async def final_response(state: QueryState):
     # dans le message de clôture pour expliquer ce qui n'est pas couvert et renvoyer au
     # panneau Suggestions. Absente sur les éditions (pas de suggestions auto) → bloc ignoré.
     gap_analysis = (state.get("coverage_gap_analysis") or "").strip()
+
+    en = get_language() == "en"
+    if not gap_analysis:
+        panel_pointer = ""
+    elif en:
+        panel_pointer = " I also dropped test suggestions in the Suggestions panel to strengthen coverage."
+    else:
+        panel_pointer = " J'ai aussi déposé des suggestions pour renforcer la couverture dans le panneau Suggestions."
+
+    # Mode CLI : le message de clôture n'est jamais affiché par la CLI → aucun
+    # appel LLM (~24 s/modèle, ~44 min sur un batch de 110). Le fallback templaté
+    # reste persisté pour l'UI si le modèle est ouvert ensuite.
+    if state.get("cli_mode"):
+        return _closing_message(
+            _fallback_message(ctx) + panel_pointer, parent_id, state
+        )
 
     system_lines = [
         output_language_directive() + " ",
@@ -200,7 +232,6 @@ async def final_response(state: QueryState):
     plural = "s" if n_tests > 1 else ""
     # Facts localisés : le LLM recopie la langue des facts plus sûrement que celle
     # de la directive — des facts français font basculer la réponse en français.
-    en = get_language() == "en"
     if en:
         facts = [
             f"Action performed: {n_tests} test{plural} {ctx['action']}.",
@@ -225,12 +256,6 @@ async def final_response(state: QueryState):
             facts.append(f"Analyse de couverture (manques identifiés) : {gap_analysis}")
     human = HumanMessage(content="\n".join(facts))
 
-    if not gap_analysis:
-        panel_pointer = ""
-    elif en:
-        panel_pointer = " I also dropped test suggestions in the Suggestions panel to strengthen coverage."
-    else:
-        panel_pointer = " J'ai aussi déposé des suggestions pour renforcer la couverture dans le panneau Suggestions."
     try:
         llm = make_llm()
         result = await llm.ainvoke([system, human])
@@ -241,16 +266,4 @@ async def final_response(state: QueryState):
         logger.diag("[final_response] LLM indisponible, fallback templaté : %s", exc)
         text = _fallback_message(ctx) + panel_pointer
 
-    return {
-        "messages": [
-            AIMessage(
-                content=text,
-                id=str(uuid.uuid4()),
-                additional_kwargs={
-                    "type": MsgType.FINAL_RESPONSE,
-                    "parent": parent_id,
-                    "request_id": state.get("request_id"),
-                },
-            )
-        ]
-    }
+    return _closing_message(text, parent_id, state)

@@ -1,6 +1,7 @@
 """mocksql generate — parse SQL, fetch schemas, generate test data."""
 
 import json
+import logging
 import os
 import re
 import uuid
@@ -27,6 +28,8 @@ from utils.sql_code import (
     extract_select_statement,
     extract_used_columns_from_sql,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ── Config ────────────────────────────────────────────────────────────────────
@@ -71,8 +74,17 @@ def build_used_columns(
     if sql:
         try:
             return extract_used_columns_from_sql(sql, dialect, schemas)
-        except Exception:
-            pass
+        except Exception as e:
+            # Repli sûr (sur-inclusion) mais jamais silencieux : toutes les
+            # colonnes du schéma gonflent le prompt du generator (29 au lieu
+            # de 9 sur sf_bq263) et diluent les contraintes.
+            logger.warning(
+                "Extraction des used_columns échouée (%s: %s) — repli sur "
+                "TOUTES les colonnes du schéma. SQL fautif :\n%s",
+                type(e).__name__,
+                e,
+                sql,
+            )
 
     result = []
     for tbl in schemas:
@@ -266,6 +278,8 @@ def build_initial_state(
         "optimize": False,
         "save": None,
         "changed_message_id": "",
+        # final_response skippe son appel LLM (message jamais affiché en CLI).
+        "cli_mode": True,
     }
 
 

@@ -39,6 +39,13 @@ logger = logging.getLogger(__name__)
 # le plafond est déjà atteint, on prévient l'utilisateur au lieu d'ajouter en silence.
 SUGGESTIONS_CAP = 5
 
+# Plafond de thinking PAR APPEL pour la génération des suggestions du panneau : la
+# sortie est courte (3 suggestions ≈ 3 phrases + une phrase d'analyse), or le plafond
+# dérivé global de make_llm est anti-hang (24 576 tok) et ne mord jamais ici —
+# 6,6 k tokens de rumination mesurés (44 s) pour 3 suggestions. Ne s'applique pas si
+# l'utilisateur a fixé thinking_budget/thinking_level (cf. make_llm).
+SUGGESTIONS_THINKING_CAP = 2048
+
 
 def _merge_suggestions(
     new: list[str], pending: list[str], cap: int = SUGGESTIONS_CAP
@@ -829,7 +836,7 @@ Another good example (analytical case — **one anomaly masks another**, essenti
     )
 
     # --- 3. Exécution avec LangChain (Structured Output) ---
-    llm = make_llm()
+    llm = make_llm(thinking_cap=SUGGESTIONS_THINKING_CAP)
     structured_llm = llm.with_structured_output(TestSuggestionsOutput)
     chain = prompt_template | structured_llm
 

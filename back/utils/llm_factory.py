@@ -27,6 +27,7 @@ def make_llm(
     model: str | None = None,
     streaming: bool | None = None,
     location: str | None = None,
+    thinking_cap: int | None = None,
 ) -> ChatGoogleGenerativeAI:
     resolved_location = location or get_llm_location()
     kwargs: dict = dict(
@@ -60,6 +61,17 @@ def make_llm(
         # la rumination s'épuise DANS la fenêtre (le budget mord avant le kill dur du
         # timeout). Anti-rumination proactif, cf. incident bq001. None = pas de plafond.
         safety_budget = get_llm_thinking_safety_budget()
+        # `thinking_cap` : borne PAR APPEL posée par un nœud à sortie courte
+        # (cf. suggestions_generator) — le plafond dérivé est anti-hang (24 576 tok)
+        # et ne mord jamais pour quelques phrases. Le cap ne s'applique QUE dans
+        # cette branche : un thinking_budget/thinking_level explicite de
+        # l'utilisateur prime toujours.
+        if thinking_cap is not None:
+            safety_budget = (
+                thinking_cap
+                if safety_budget is None
+                else min(safety_budget, thinking_cap)
+            )
         if safety_budget is not None:
             kwargs["thinking_budget"] = safety_budget
 
