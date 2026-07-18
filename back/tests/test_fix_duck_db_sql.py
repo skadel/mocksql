@@ -569,24 +569,22 @@ class TestGroupByCaseOriginalColumnBug:
     """
     Comportement de _fix_group_by_strict_mode sur un CASE en GROUP BY.
 
-    Symptôme : _fix_group_by_strict_mode parcourt les exp.Column dans chaque
-    expression SELECT non-agrégée. Quand la SELECT est un CASE WHEN col = ...,
-    elle trouve `col` et l'ajoute au GROUP BY si elle n'y est pas littéralement.
-
-    Résultat si le GROUP BY contenait déjà le CASE :
+    Historique : la fonction parcourait les exp.Column de chaque expression
+    SELECT non-agrégée et ajoutait `s` au GROUP BY quand seul le CASE y figurait :
         GROUP BY CASE WHEN s = 'a' THEN 'A' ELSE 'B' END
-        → après fix : GROUP BY CASE WHEN s = 'a' THEN 'A' ELSE 'B' END, s
+        → GROUP BY CASE WHEN s = 'a' THEN 'A' ELSE 'B' END, s
+    Ce n'était pas qu'une redondance : deux valeurs de s tombant dans 'Other'
+    produisaient deux lignes 'Other' au lieu d'une (grain cassé — même famille
+    que la régression sf_bq263, section 15).
 
-    Constat (vérifié par les tests ci-dessous) :
-    - La colonne originale EST bien ajoutée au GROUP BY (redondance inutile).
-    - DuckDB n'en lève PAS "Cannot mix aggregates" — il accepte le GROUP BY redondant.
-    - La prémisse "DuckDB lèvera l'erreur" était incorrecte pour ce pattern.
+    Comportement corrigé : une colonne apparaissant dans une expression groupée
+    est considérée couverte et n'est plus ajoutée.
     """
 
-    def test_fix_group_by_adds_original_column_inside_case(self):
+    def test_fix_group_by_keeps_column_covered_by_case(self):
         """
-        _fix_group_by_strict_mode ajoute s au GROUP BY quand CASE WHEN s = ...
-        est déjà dans GROUP BY mais que s seul n'y figure pas.
+        _fix_group_by_strict_mode n'ajoute PAS s au GROUP BY quand s apparaît
+        dans le CASE déjà groupé.
         """
         sql = (
             "SELECT CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END AS cat,"
@@ -599,8 +597,8 @@ class TestGroupByCaseOriginalColumnBug:
         result_sql = tree.sql(dialect="duckdb")
 
         group_part = result_sql[result_sql.upper().rfind("GROUP BY") :]
-        assert re.search(r",\s*s\b", group_part, re.IGNORECASE), (
-            f"_fix_group_by_strict_mode n'a pas ajouté s au GROUP BY.\nSQL: {result_sql}"
+        assert not re.search(r",\s*s\b", group_part, re.IGNORECASE), (
+            f"Clé GROUP BY parasite s ajoutée à côté du CASE groupé.\nSQL: {result_sql}"
         )
 
     def test_duckdb_accepts_case_plus_original_column_in_group_by(self, con):
@@ -618,9 +616,8 @@ class TestGroupByCaseOriginalColumnBug:
 
     def test_pipeline_produces_valid_duckdb_sql(self, con):
         """
-        Pipeline complet : même après que _fix_group_by_strict_mode a ajouté s
-        au GROUP BY, DuckDB exécute la requête sans erreur.
-        La redondance du GROUP BY est inoffensive pour DuckDB.
+        Pipeline complet : après passage de _fix_group_by_strict_mode (qui ne
+        touche plus au GROUP BY ici), DuckDB exécute la requête sans erreur.
         """
         sql = (
             "SELECT CASE WHEN s = '2024-01-15' THEN 'Match' ELSE 'Other' END AS cat,"
@@ -828,3 +825,113 @@ class TestSqlglotVersionCanaries:
             "Re-activer la correction dans fix_duck_db_sql."
         )
         con.execute(raw)
+
+
+# ===========================================================================
+# Section 15 : Bug — _fix_group_by_strict_mode ajoute une clé GROUP BY parasite
+#              quand la colonne est couverte par une expression groupée,
+#              un ordinal ou un alias (régression sf_bq263, 20/111 modèles)
+# ===========================================================================
+
+
+class TestGroupByParasiteKey:
+    """
+    Régression sf_bq263 : _fix_group_by_strict_mode comparait le SQL des colonnes
+    nues du SELECT aux SQL bruts des expressions groupées, sans résoudre :
+      - les ordinaux      (GROUP BY 1        → grouped_sqls = {'1'})
+      - les alias         (GROUP BY month    → grouped_sqls = {'month'})
+      - la couverture par expression (GROUP BY DATE_TRUNC('MONTH', col) couvre col)
+
+    Il ajoutait alors la colonne nue au GROUP BY → le grain d'agrégation change :
+    2 commandes du même mois → 2 lignes (30 / 25) au lieu d'1 (55).
+    """
+
+    @pytest.fixture
+    def orders(self):
+        c = duckdb.connect()
+        c.execute(
+            "CREATE TABLE orders (order_id INTEGER, created_at TIMESTAMP, amount INTEGER)"
+        )
+        c.execute("""
+            INSERT INTO orders VALUES
+            (101, '2023-05-15 10:00:00', 30),
+            (102, '2023-05-20 11:00:00', 25)
+        """)
+        return c
+
+    @staticmethod
+    def _group_exprs(tree):
+        return tree.args["group"].expressions
+
+    def test_column_covered_by_grouped_expression_not_readded(self, orders):
+        """GROUP BY DATE_TRUNC(col) couvre col : pas de clé parasite, grain préservé."""
+        sql = (
+            'SELECT DATE_TRUNC(\'MONTH\', "o"."created_at") AS month,'
+            ' SUM("o"."amount") AS total'
+            ' FROM orders AS "o"'
+            ' GROUP BY DATE_TRUNC(\'MONTH\', "o"."created_at")'
+        )
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        assert len(self._group_exprs(tree)) == 1, (
+            f"Clé GROUP BY parasite ajoutée.\nSQL: {result_sql}"
+        )
+        rows = orders.execute(result_sql).fetchall()
+        assert len(rows) == 1 and rows[0][1] == 55, (
+            f"Grain d'agrégation cassé : {rows}\nSQL: {result_sql}"
+        )
+
+    def test_ordinal_group_by_resolved_to_projection(self, orders):
+        """GROUP BY 1 est résolu vers la projection : pas de clé parasite."""
+        sql = (
+            "SELECT DATE_TRUNC('MONTH', created_at) AS month, SUM(amount) AS total"
+            " FROM orders GROUP BY 1"
+        )
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        assert len(self._group_exprs(tree)) == 1, (
+            f"Clé GROUP BY parasite ajoutée.\nSQL: {result_sql}"
+        )
+        rows = orders.execute(result_sql).fetchall()
+        assert len(rows) == 1 and rows[0][1] == 55, (
+            f"Grain d'agrégation cassé : {rows}\nSQL: {result_sql}"
+        )
+
+    def test_alias_group_by_resolved_to_projection(self, orders):
+        """GROUP BY month (alias du SELECT) est résolu : pas de clé parasite."""
+        sql = (
+            "SELECT DATE_TRUNC('MONTH', created_at) AS month, SUM(amount) AS total"
+            " FROM orders GROUP BY month"
+        )
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        assert len(self._group_exprs(tree)) == 1, (
+            f"Clé GROUP BY parasite ajoutée.\nSQL: {result_sql}"
+        )
+        rows = orders.execute(result_sql).fetchall()
+        assert len(rows) == 1 and rows[0][1] == 55, (
+            f"Grain d'agrégation cassé : {rows}\nSQL: {result_sql}"
+        )
+
+    def test_uncovered_column_still_added(self, con):
+        """
+        Objet original de la fonction préservé : une colonne du SELECT absente
+        du GROUP BY et non couverte par une expression groupée est toujours ajoutée
+        (raccourci de dépendance fonctionnelle des dialectes sources).
+        """
+        sql = "SELECT user_id, s, COUNT(*) AS cnt FROM events GROUP BY user_id"
+        tree = sqlglot.parse_one(sql, dialect="duckdb")
+        _fix_group_by_strict_mode(tree)
+        result_sql = tree.sql(dialect="duckdb")
+
+        group_exprs = self._group_exprs(tree)
+        assert len(group_exprs) == 2, (
+            f"La colonne s aurait dû être ajoutée au GROUP BY.\nSQL: {result_sql}"
+        )
+        con.execute(result_sql)

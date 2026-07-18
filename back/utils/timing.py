@@ -83,22 +83,56 @@ class LLMTimingCallback(BaseCallbackHandler):
             )
 
     def on_llm_end(self, response, *, run_id, **kwargs):
-        self._log(run_id)
+        self._log(run_id, usage=_extract_usage(response))
 
     def on_llm_error(self, error, *, run_id, **kwargs):
         self._log(run_id, suffix=" (erreur)")
 
-    def _log(self, run_id, suffix: str = "") -> None:
+    def _log(self, run_id, suffix: str = "", usage=None) -> None:
         entry = self._starts.pop(run_id, None)
         if entry is None:
             return
         start, model = entry
         elapsed_ms = (time.perf_counter() - start) * 1000
-        logger.diag("[timing] llm:%s: %.0f ms%s", model, elapsed_ms, suffix)
+        tokens = ""
+        reasoning = 0
+        if usage:
+            reasoning = (usage.get("output_token_details") or {}).get("reasoning") or 0
+            thinking = f" dont thinking={reasoning}" if reasoning else ""
+            tokens = f" (in={usage.get('input_tokens')} out={usage.get('output_tokens')}{thinking})"
+        logger.diag("[timing] llm:%s: %.0f ms%s%s", model, elapsed_ms, tokens, suffix)
+        if reasoning >= _THINKING_WARN_TOKENS:
+            # Rumination : un appel qui brûle des dizaines de k-tokens de thinking pour
+            # une sortie minuscule explique à lui seul des minutes de latence (302 s
+            # constatées sur gemini-3-flash-preview) — surface-le au niveau par défaut.
+            logger.warning(
+                "[llm:%s] thinking massif (%d tokens de reasoning, %.0f s) — modèle qui "
+                "rumine ; envisager gemini-2.5-flash/pro ou un thinking_level plus bas",
+                model,
+                reasoning,
+                elapsed_ms / 1000,
+            )
 
 
 # Seuil d'alerte : au-delà, un prompt risque la latence et le 429 (quota TPM Vertex).
 _PROMPT_SIZE_WARN_TOKENS = 200_000
+
+# Seuil de rumination : les appels sains observés restent < 10 k tokens de thinking ;
+# l'appel pathologique de référence en brûlait ~63 k.
+_THINKING_WARN_TOKENS = 20_000
+
+
+def _extract_usage(response) -> dict | None:
+    """usage_metadata du premier message d'une LLMResult (best-effort, jamais bloquant)."""
+    try:
+        for gen_list in response.generations or []:
+            for gen in gen_list:
+                usage = getattr(getattr(gen, "message", None), "usage_metadata", None)
+                if usage:
+                    return usage
+    except Exception:
+        return None
+    return None
 
 
 def _estimate_prompt_tokens(messages) -> int:

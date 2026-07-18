@@ -151,12 +151,54 @@ async def generate_assertions(state: QueryState) -> Dict[str, Any]:
                 pass
 
     has_failing = any(not a.get("passed") for a in assertion_results)
+
+    # Fix 3 — garde-fou « CTE amont vide ». Un verdict Insuffisant sur un résultat NON
+    # vide peut masquer une CTE amont REQUISE vide (agrégat d'un ensemble vide → 1 ligne
+    # NULL, puis LEFT JOIN + COALESCE d'échafaudage) : le circuit empty_results ne se
+    # déclenche jamais, et les assertions blanchies sur les lignes dégénérées laissent le
+    # test en Insuffisant mort (reason_type None → aucune boucle). On sonde À LA DEMANDE
+    # (chemin Insuffisant, rare — zéro coût happy path), et si une CTE requise est vide sur
+    # un test happy-path on reclasse en bad_data → boucle de correction ciblée (sf_bq093).
+    # On ne double-traite PAS les cas où le LLM route déjà ailleurs (validation, bad_data).
+    empty_cte_diag = None
+    if eval_result.reason_type not in (
+        "needs_validation",
+        "bad_description",
+        "bad_input_description",
+        "bad_data",
+    ) and (eval_result.verdict == "Insuffisant" or has_failing):
+        from build_query.examples_executor import (
+            probe_empty_upstream_cte,
+        )
+
+        with initialize_duckdb(DB_PATH) as probe_con:
+            empty_cte_diag = await probe_empty_upstream_cte(
+                state, current_test, probe_con
+            )
+
     # Désync description↔cardinalité : prioritaire sur `has_failing`. Les assertions sont
     # au niveau ligne (conditions positives sur __result__) et passent généralement sur la
     # vraie sortie ; l'écart est entre le NOMBRE de lignes annoncé et le réel. On ne corrige
     # pas en boucle : on sauve l'état et on demande validation à l'utilisateur (cf.
     # test_evaluator → VALIDATION_PROMPT, accept_validation). Voir aussi state.py.
-    if eval_result.reason_type == "needs_validation":
+    if empty_cte_diag is not None:
+        # CTE amont requise vide sur un test happy-path : la vraie cause est des données
+        # d'entrée qui ne franchissent pas un filtre/jointure, pas les assertions. On route
+        # vers la boucle bad_data avec le diagnostic prédicat↔valeurs (cf. Fix 3).
+        updated_test = {
+            **current_test,
+            "assertion_results": assertion_results,
+            "verdict": "Insuffisant",
+            "reason_type": "bad_data",
+            "evaluation_explanation": (
+                "Une étape intermédiaire de la requête ne produit aucune ligne : "
+                "les données d'entrée ne franchissent pas un filtre ou une jointure."
+            ),
+            "diagnostic": empty_cte_diag,
+        }
+        updated_test.pop("assertion_fix", None)
+        updated_test.pop("expected_row_count", None)
+    elif eval_result.reason_type == "needs_validation":
         updated_test = {
             **current_test,
             "assertion_results": assertion_results,

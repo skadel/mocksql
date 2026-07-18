@@ -18,6 +18,7 @@ from build_query.examples_executor import (
     filter_schemas_by_used_columns,
     _extract_conditions,
     _build_countif_expressions,
+    _build_cte_probe_sql,
     _build_cte_sql_with_suffix,
     _build_count_steps_query,
     _extract_right_key_from_join,
@@ -1102,3 +1103,41 @@ def test_focus_missing_used_columns_inserted_as_null():
     con.close()
     assert out == [("C1", "activite", 100.0)]
     assert all(r[1] != "parc" for r in out)  # la branche parc est absente
+
+
+# ---------------------------------------------------------------------------
+# _build_cte_probe_sql — quoting par dialecte du CTE-trace
+# ---------------------------------------------------------------------------
+# Régression root-cause spider2-snow : la sonde `WITH `name` AS (…)` construite avec
+# des backticks codés en dur cassait le re-parse `read=dialect` sur tout dialecte
+# non-BigQuery (ParseError « Expecting ( ») → row_count -1 sur TOUTES les CTEs,
+# failing_cte=None → boucle de correction aveugle (28 empty_results non convergés).
+# Même cause déjà corrigée dans debug_executor (_quote_ident) — jamais propagée ici.
+
+
+_PROBE_CTES = [
+    {"name": "approved_repos", "code": "SELECT 1 AS repo_id"},
+    {"name": "events_agg", "code": "SELECT repo_id FROM approved_repos"},
+]
+
+
+@pytest.mark.parametrize("dialect", ["snowflake", "bigquery", "postgres", "duckdb"])
+def test_cte_probe_sql_parses_in_dialect(dialect):
+    sql = _build_cte_probe_sql(_PROBE_CTES, 1, dialect)
+    parsed = sqlglot.parse_one(sql, read=dialect)  # ne doit PAS lever
+    # La sonde interroge bien la CTE cible.
+    assert isinstance(parsed, exp.Select) or parsed.find(exp.Select) is not None
+
+
+def test_cte_probe_sql_includes_all_preceding_ctes():
+    sql = _build_cte_probe_sql(_PROBE_CTES, 1, "snowflake")
+    assert "approved_repos" in sql and "events_agg" in sql
+    # Une seule clause WITH, la sonde SELECT * porte sur la dernière CTE.
+    assert sql.count("WITH ") == 1
+    assert sql.rstrip().endswith('"events_agg"')
+
+
+def test_cte_probe_sql_keeps_bigquery_backticks():
+    """Comportement historique BigQuery inchangé : identifiants backtickés."""
+    sql = _build_cte_probe_sql(_PROBE_CTES, 0, "bigquery")
+    assert "`approved_repos`" in sql

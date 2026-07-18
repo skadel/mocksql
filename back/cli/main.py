@@ -414,7 +414,13 @@ def _print_test_results(model_results: list) -> None:
             ]
             idx = c.get("index", "?")
             title = c.get("name") or f"Test {idx}"
-            typer.echo(f"  [{label}] {title}")
+            # Attestation de parité warehouse (cf. `mocksql parity`) — informatif,
+            # jamais bloquant. `unverified` reste silencieux (pas de bruit).
+            parity_badge = {
+                "verified": "  [parité ✓]",
+                "stale": "  [parité périmée]",
+            }.get(c.get("parity", ""), "")
+            typer.echo(f"  [{label}] {title}{parity_badge}")
             # Description complète en sous-ligne quand elle apporte plus que le titre.
             desc = c.get("description")
             if desc and desc != title:
@@ -446,6 +452,137 @@ def _print_test_results(model_results: list) -> None:
     typer.echo(f"  Results: {passed}/{total} tests passed{skip_summary}")
     if failed:
         typer.echo(f"  {failed} test(s) FAILED — exit code 1")
+
+
+@app.command()
+def parity(
+    model: str = typer.Argument(
+        None,
+        help="Model name (e.g. orders, demo/payment_summary). Default: all models.",
+    ),
+    config: Path = typer.Option(
+        Path("mocksql.yml"),
+        "--config",
+        "-c",
+        help="Path to mocksql.yml config.",
+    ),
+    all_tests: bool = typer.Option(
+        False,
+        "--all",
+        help="Force le rejeu même des tests déjà vérifiés (empreinte à jour).",
+    ),
+    output_json: bool = typer.Option(
+        False,
+        "--json",
+        help="Output results as JSON (même convention que test --json).",
+    ),
+) -> None:
+    """Audit de parité DuckDB ↔ warehouse : rejoue les tests sauvegardés sur la
+    warehouse (BigQuery / Snowflake) avec les MÊMES données synthétiques, compare.
+
+    Jamais de données réelles : les tables sont remplacées par des CTEs inline
+    (coût ~0 — requête sans lecture de table). Audit ponctuel opt-in, idempotent :
+    seuls les tests non vérifiés ou à empreinte périmée sont rejoués.
+
+    Codes de sortie : 0 = parité (ou rien à rejouer) · 1 = au moins un diff ·
+    2 = erreur d'exécution warehouse. Un diff n'est PAS un échec de test.
+    """
+    import asyncio
+    import json as _json
+
+    from cli.parity import ParityExecutionError, run_parity
+
+    model_filters = [model] if model else None
+    try:
+        exit_code, model_results = asyncio.run(
+            run_parity(config.resolve(), model_filters, force_all=all_tests)
+        )
+    except ParityExecutionError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(2)
+
+    if output_json:
+        typer.echo(
+            _json.dumps(model_results, indent=2, ensure_ascii=False, default=str)
+        )
+    else:
+        _print_parity_results(model_results)
+
+    raise typer.Exit(exit_code)
+
+
+_PARITY_DIALECT_LABELS = {"bigquery": "BigQuery", "snowflake": "Snowflake"}
+
+
+def _print_parity_results(model_results: list) -> None:
+    import json as _json
+
+    if not model_results:
+        typer.echo("No tests found. Run `mocksql generate <model.sql>` first.")
+        return
+
+    n_verified = n_diff = n_skip = n_error = 0
+
+    for mr in model_results:
+        typer.echo(f"\n{mr['model']}")
+        wh_label = _PARITY_DIALECT_LABELS.get(mr.get("dialect", ""), "Warehouse")
+
+        for c in mr["cases"]:
+            state = c["state"]
+            name = c.get("name", f"Test {c.get('index', '?')}")
+            if state == "verified_cached":
+                n_verified += 1
+                typer.echo(
+                    f"  ✓  {name:<40} parité OK (déjà vérifié, empreinte à jour)"
+                )
+            elif state == "verified":
+                n_verified += 1
+                typer.echo(f"  ✓  {name:<40} parité OK")
+            elif state == "diff":
+                n_diff += 1
+                diff = c.get("diff") or {}
+                n_lines = max(
+                    len(diff.get("local_only") or []),
+                    len(diff.get("warehouse_only") or []),
+                )
+                reason = (
+                    "colonnes divergentes"
+                    if diff.get("reason") == "columns_mismatch"
+                    else f"{n_lines} ligne(s) divergent"
+                )
+                typer.echo(f"  ✗  {name:<40} DIFF — {reason}")
+                typer.echo(
+                    f"       DuckDB   : "
+                    f"{_json.dumps(diff.get('local_only'), ensure_ascii=False, default=str)}"
+                )
+                typer.echo(
+                    f"       {wh_label:<9}: "
+                    f"{_json.dumps(diff.get('warehouse_only'), ensure_ascii=False, default=str)}"
+                )
+                typer.echo(
+                    "       Causes possibles : bug de transpilation MockSQL · "
+                    "sémantique du dialecte ·"
+                )
+                typer.echo(
+                    "       non-déterminisme du modèle (ordre non total ?). "
+                    "Voir docs/parity.md."
+                )
+            elif state == "skip":
+                n_skip += 1
+                typer.echo(f"  ─  {name:<40} sauté ({c.get('detail', '')})")
+            else:  # error
+                n_error += 1
+                typer.echo(f"  !  {name:<40} ERREUR — {c.get('detail', '')}")
+
+    typer.echo("")
+    parts = [f"{n_verified} vérifié(s)"]
+    if n_diff:
+        parts.append(f"{n_diff} diff")
+    if n_skip:
+        parts.append(f"{n_skip} sauté(s)")
+    if n_error:
+        parts.append(f"{n_error} erreur(s)")
+    typer.echo(" · ".join(parts))
 
 
 @app.command()

@@ -23,12 +23,19 @@ load_dotenv(_BACK_ENV)
 sys.path.insert(0, str(Path(__file__).parent))
 from judge import judge_first_test
 
+# L'import de judge a mis back/ dans sys.path — les modules storage sont accessibles.
+from storage.test_files import read_test_doc  # noqa: E402
+
 
 def load_test_file(path: Path) -> dict | None:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
+    """Lit le fichier de tests via la fonction de lecture OFFICIELLE, qui fusionne le
+    sidecar gitignoré `.mocksql/cache/{model}.json` (status, results_json…).
+
+    Un `json.loads` brut du seul fichier commité privait le juge du résultat réel
+    (`results_json`) et du `status` → 13 faux « KO — résultat vide » sur l'éval
+    spider2-snow (~12 points de pass-rate perdus par artefact de harnais).
+    """
+    return read_test_doc(path)
 
 
 def collect_models(tests_dir: Path, filter_names: list[str] | None) -> list[Path]:
@@ -120,6 +127,7 @@ def run_eval(
         "meta": {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "project": project_dir.name,
+            # Clé conservée pour compat des rapports ; peut porter un modèle OpenAI.
             "gemini_model": gemini_model or os.environ.get("DEFAULT_MODEL_NAME", "auto"),
             "n_models": n_total,
             "n_valid": n_valid,
@@ -141,7 +149,14 @@ def main() -> None:
     parser.add_argument("--models", nargs="*", help="Subset de modèles (ex: bq282 bq199)")
     parser.add_argument("--out", help="Chemin du rapport JSON de sortie")
     parser.add_argument("--gcp-project", help="GCP project ID pour VertexAI")
-    parser.add_argument("--gemini-model", default=None, help="Modèle à utiliser (défaut : DEFAULT_MODEL_NAME ou config mocksql)")
+    parser.add_argument(
+        "--model",
+        "--gemini-model",  # alias historique
+        dest="gemini_model",
+        default=None,
+        help="Modèle du juge : gemini-* (Vertex) ou gpt-*/o* (OpenAI, clé OPENAI_API_KEY "
+        "dans back/.env). Défaut : DEFAULT_MODEL_NAME ou config mocksql",
+    )
     args = parser.parse_args()
 
     project_dir = Path(args.project).resolve()

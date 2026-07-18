@@ -70,3 +70,16 @@ def pop_with(expr: exp.Expression) -> exp.Expression:
 def strip_with(expr: exp.Expression) -> exp.Expression:
     """Renvoie une **copie** de ``expr`` sans sa clause WITH (les deux clés)."""
     return pop_with(expr.copy())
+
+
+def quote_identifier(name: str, dialect: str) -> str:
+    """Identifiant quoté selon le dialecte (backticks BigQuery, guillemets ailleurs).
+
+    Un backtick codé en dur casse le re-parse ``read=dialect`` sur tout dialecte
+    non-BigQuery (snowflake/postgres/duckdb → ParseError « Expecting ( »). Incidents :
+    le ``run_cte`` de debug_executor (corrigé localement, _quote_ident), puis le
+    CTE-trace de l'executor (root-cause spider2-snow : ``row_count -1`` sur toutes les
+    CTEs, ``failing_cte=None`` → boucle de correction aveugle). Toute construction de
+    SQL par f-string qui cite un identifiant doit passer par ici.
+    """
+    return exp.to_identifier(name, quoted=True).sql(dialect=dialect)

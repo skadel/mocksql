@@ -622,9 +622,17 @@ def optimize_query(parsed, tables, dialect="bigquery", optimize=False):
     from sqlglot.optimizer.qualify_tables import qualify_tables
 
     with timed("validate:       build MappingSchema"):
+        # Noms du cache ajoutés QUOTÉS = casse exacte de l'entrepôt. Non-quotés,
+        # ils seraient normalisés selon la convention du dialecte (MAJUSCULE en
+        # snowflake) et ne matcheraient plus les identifiants quotés minuscule
+        # du SQL → OptimizeError « Unknown column: created_at » (sf_bq263).
+        # No-op pour les dialectes case-insensitive (bigquery/duckdb), qui
+        # normalisent aussi les identifiants quotés.
         schema = MappingSchema()
         for table_name, columns in tables.items():
-            schema.add_table(table_name, columns, dialect=dialect)
+            quoted_name = ".".join(f'"{p}"' for p in str(table_name).split("."))
+            quoted_cols = {f'"{col}"': typ for col, typ in columns.items()}
+            schema.add_table(quoted_name, quoted_cols, dialect=dialect)
 
     # Casse d'origine capturée AVANT normalize_identifiers, restaurée en sortie.
     case_map = _build_identifier_case_map(parsed, tables)

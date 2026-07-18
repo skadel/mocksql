@@ -34,7 +34,11 @@ def _install_capture(monkeypatch, captured: dict):
         def with_structured_output(self, _model):
             return RunnableLambda(_capture)
 
-    monkeypatch.setattr(suggestions_node, "make_llm", lambda *a, **k: _FakeLLM())
+    def _factory(*_a, **kwargs):
+        captured["llm_kwargs"] = kwargs
+        return _FakeLLM()
+
+    monkeypatch.setattr(suggestions_node, "make_llm", _factory)
     monkeypatch.setattr(suggestions_node, "get_test", lambda *a, **k: {})
     monkeypatch.setattr(suggestions_node, "update_test", lambda *a, **k: None)
 
@@ -86,6 +90,18 @@ async def _run(
     }
     await suggestions_node.generate_suggestions(state)
     return captured
+
+
+@pytest.mark.asyncio
+async def test_suggestions_llm_called_with_thinking_cap(monkeypatch):
+    """Sortie courte (3 suggestions ≈ 3 phrases) : le plafond dérivé global est
+    anti-hang (24 576 tok), jamais mordant ici — 6,6 k tokens de rumination
+    mesurés (44 s). Le nœud borne donc son thinking par appel."""
+    captured = await _run(monkeypatch, native=True, with_result=True)
+    assert (
+        captured["llm_kwargs"].get("thinking_cap")
+        == suggestions_node.SUGGESTIONS_THINKING_CAP
+    )
 
 
 @pytest.mark.asyncio

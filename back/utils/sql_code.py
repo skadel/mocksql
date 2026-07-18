@@ -3,7 +3,6 @@ import json
 import sqlglot as sg
 from sqlglot import MappingSchema
 from sqlglot import expressions as exp
-from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
 from sqlglot.optimizer.qualify_columns import qualify_columns
 from sqlglot.optimizer.qualify_tables import qualify_tables
 from sqlglot.optimizer.scope import traverse_scope
@@ -632,20 +631,28 @@ def extract_used_columns_from_sql(
     """
     mapping: dict[str, dict] = {}
     for tbl in schemas:
-        parts = tbl["table_name"].split(".")
+        parts = tbl["table_name"].lower().split(".")
         key = ".".join(parts[-2:]) if len(parts) >= 2 else parts[-1]
         mapping[key] = {
-            col["name"]: col.get("bq_ddl_type") or col.get("type", "STRING")
+            col["name"].lower(): col.get("bq_ddl_type") or col.get("type", "STRING")
             for col in tbl.get("columns", [])
             if "." not in col["name"]
         }
 
-    schema = MappingSchema()
+    # Casse neutralisée (minuscule) des DEUX côtés — schéma ci-dessus, AST
+    # ci-dessous. Ajoutées non-quotées, les colonnes du schema_cache seraient
+    # normalisées selon la convention du dialecte (MAJUSCULE en snowflake) alors
+    # que les identifiants quotés du SQL gardent leur casse → OptimizeError
+    # « Unknown column: created_at » (sf_bq263 : SQL quoté minuscule). Même
+    # famille que le fix Trino (used_columns minusculisées côté serveur).
+    schema = MappingSchema(normalize=False)
     for table_name, cols in mapping.items():
         schema.add_table(table_name, cols, dialect=dialect)
 
     parsed = sg.parse_one(sql, read=dialect)
-    parsed = normalize_identifiers(parsed, dialect=dialect)
+    for ident in parsed.find_all(exp.Identifier):
+        if isinstance(ident.this, str):
+            ident.set("this", ident.this.lower())
     parsed = qualify_tables(parsed)
     parsed = qualify_columns(parsed, schema, infer_schema=True)
 

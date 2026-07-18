@@ -119,3 +119,93 @@ def test_legacy_inline_file_still_reads(tmp_path: Path):
     loaded = read_test_doc(path)
     assert loaded["optimized_sql"] == "SELECT 1 AS one"
     assert loaded["test_cases"][0]["status"] == "complete"
+
+
+# ---------------------------------------------------------------------------
+# Morts-nés visibles dans la définition commitée (root-cause spider2-snow).
+# Le `status` runtime part dans le sidecar gitignoré : sans `exec_status` dans la
+# définition, un consommateur du fichier commité (run_eval, CI, clone frais) ne
+# peut pas distinguer un test sain d'un test qui n'a jamais tourné.
+# ---------------------------------------------------------------------------
+
+
+def test_deadborn_case_exposes_exec_status_in_definition(tmp_path: Path):
+    doc = _doc()
+    case = doc["test_cases"][0]
+    case["status"] = "bad_data_error"
+    case["exec_error"] = 'Conversion Error: Could not convert string "M001" to DECIMAL'
+    case.pop("verdict")
+    path = tmp_path / ".mocksql" / "tests" / "dead.json"
+    write_test_doc(path, doc)
+
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    written = definition["test_cases"][0]
+    assert "status" not in written  # le runtime reste au sidecar
+    assert written["exec_status"] == "bad_data_error"
+    assert written["exec_error"].startswith("Conversion Error")
+    # Les données ne sont PAS détruites (souvent à un patch près de fonctionner).
+    assert written["data"] == {"t": [{"a": 1}]}
+
+
+def test_error_status_derives_exec_error_from_error_field(tmp_path: Path):
+    doc = _doc()
+    case = doc["test_cases"][0]
+    case["status"] = "error"
+    case["error"] = 'Parser Error: syntax error at or near "JOIN"'
+    path = tmp_path / ".mocksql" / "tests" / "err.json"
+    write_test_doc(path, doc)
+
+    written = json.loads(path.read_text(encoding="utf-8"))["test_cases"][0]
+    assert written["exec_status"] == "error"
+    assert "Parser Error" in written["exec_error"]
+
+
+def test_recovered_case_purges_stale_exec_status(tmp_path: Path):
+    """Un test redevenu sain (status complete) ne garde pas un marquage d'échec périmé."""
+    doc = _doc()
+    case = doc["test_cases"][0]  # status "complete"
+    case["exec_status"] = "empty_results"
+    case["exec_error"] = "vieux message"
+    path = tmp_path / ".mocksql" / "tests" / "healed.json"
+    write_test_doc(path, doc)
+
+    written = json.loads(path.read_text(encoding="utf-8"))["test_cases"][0]
+    assert "exec_status" not in written
+    assert "exec_error" not in written
+
+
+def test_empty_results_case_marked_without_error_message(tmp_path: Path):
+    doc = _doc()
+    case = doc["test_cases"][0]
+    case["status"] = "empty_results"
+    case.pop("verdict")  # mort-né réel : jamais évalué avec succès
+    path = tmp_path / ".mocksql" / "tests" / "empty.json"
+    write_test_doc(path, doc)
+
+    written = json.loads(path.read_text(encoding="utf-8"))["test_cases"][0]
+    assert written["exec_status"] == "empty_results"
+    assert "exec_error" not in written  # pas de message → pas de champ inventé
+
+
+def test_intentional_empty_pass_not_marked_deadborn(tmp_path: Path):
+    """Le PASS « vide intentionnel » (test_evaluator) garde status=empty_results dans le
+    dict AVEC un verdict Bon/Excellent + assertion sentinelle : ce n'est PAS un mort-né,
+    la définition commitée ne doit pas porter de marquage d'échec."""
+    doc = _doc()
+    case = doc["test_cases"][0]
+    case["status"] = "empty_results"
+    case["verdict"] = "Bon"
+    case["assertion_results"] = [
+        {
+            "description": "vide attendu",
+            "sql": "SELECT * FROM __result__",
+            "passed": True,
+        }
+    ]
+    path = tmp_path / ".mocksql" / "tests" / "intentional_empty.json"
+    write_test_doc(path, doc)
+
+    written = json.loads(path.read_text(encoding="utf-8"))["test_cases"][0]
+    assert "exec_status" not in written
+    assert "exec_error" not in written
+    assert written["verdict"] == "Bon"

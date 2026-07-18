@@ -48,6 +48,7 @@ SimplificationResult fields
 
 from __future__ import annotations
 
+import datetime
 import logging
 import re
 import time
@@ -59,6 +60,7 @@ from sqlglot import expressions as exp
 from sqlglot.optimizer.simplify import simplify as sg_simplify
 
 import utils.logger  # noqa: F401 — registers DIAG level (15)
+from utils.sqlglot_ast import get_from
 
 logger = logging.getLogger(__name__)
 
@@ -1760,24 +1762,203 @@ def _serialize_cond(
     return _resolve_pred_node(node, alias_map, resolver, dialect)
 
 
-def _collect_format_constraints_strings(
+# Fonctions timestamp-depuis-epoch → nombre d'unités de leur argument par seconde.
+# Snowflake TO_TIMESTAMP[_NTZ/LTZ/TZ] et BigQuery TIMESTAMP_SECONDS : argument en
+# SECONDES (1). TIMESTAMP_MILLIS : millisecondes (1000). TIMESTAMP_MICROS : µs (1e6).
+_EPOCH_TS_UNITS_PER_SECOND: dict[str, int] = {
+    "TO_TIMESTAMP": 1,
+    "TO_TIMESTAMP_NTZ": 1,
+    "TO_TIMESTAMP_LTZ": 1,
+    "TO_TIMESTAMP_TZ": 1,
+    "TIMESTAMP_SECONDS": 1,
+    "TIMESTAMP_MILLIS": 1000,
+    "TIMESTAMP_MICROS": 1_000_000,
+}
+
+
+def _epoch_units_per_second(node: exp.Expression) -> int | None:
+    """Unités par seconde de l'argument d'une fonction timestamp-depuis-epoch, ou None.
+
+    ``exp.UnixToTime`` (BigQuery TIMESTAMP_SECONDS/MILLIS/MICROS) porte l'échelle dans
+    ``scale`` (0/3/6 chiffres sub-seconde) ; les variantes Snowflake ``TO_TIMESTAMP*``
+    arrivent en ``exp.Anonymous``."""
+    if isinstance(node, exp.UnixToTime):
+        scale = node.args.get("scale")
+        try:
+            s = int(getattr(scale, "name", scale) or 0)
+        except (TypeError, ValueError):
+            s = 0
+        return {0: 1, 3: 1000, 6: 1_000_000, 9: 1_000_000_000}.get(s, 1)
+    if isinstance(node, exp.Anonymous):
+        return _EPOCH_TS_UNITS_PER_SECOND.get((node.name or "").upper())
+    return None
+
+
+def _epoch_date_range(d: datetime.date, factor: int) -> tuple[int, int, int]:
+    """Plage epoch valide ``[low, high)`` d'une colonne pour le jour *d*, dans son unité.
+
+    ``factor`` = ``divisor * units_per_second`` : ``col / divisor`` est interprété par la
+    fonction timestamp comme ``units_per_second`` unités par seconde → ``col`` couvre le
+    jour *d* ssi ``col ∈ [minuit_s(d) * factor, (minuit_s(d) + 86400) * factor)``. La
+    valeur pinnée est le minuit (borne basse, dans la plage). UTC : les filtres date sur
+    epoch sont évalués en UTC (TO_TIMESTAMP_NTZ / TIMESTAMP_MICROS ne portent pas de zone)."""
+    midnight = int(
+        datetime.datetime(
+            d.year, d.month, d.day, tzinfo=datetime.timezone.utc
+        ).timestamp()
+    )
+    low = midnight * factor
+    high = (midnight + 86400) * factor
+    return low, high, low
+
+
+def _date_literal_date(node: exp.Expression) -> datetime.date | None:
+    """Date d'un littéral date ``'YYYY-MM-DD'`` (à travers un CAST éventuel), ou None."""
+    v = _literal_value(node)
+    if isinstance(v, str):
+        try:
+            return datetime.date.fromisoformat(v[:10])
+        except ValueError:
+            return None
+    return None
+
+
+def _extract_epoch_date_eq(eq: exp.EQ, dialect: str) -> tuple[exp.Column, dict] | None:
+    """``<date>(<tsfunc>(col [/ divisor])) = 'YYYY-MM-DD'`` → ``(col_node, directive)``.
+
+    Cible le pattern sf_bq093 : une colonne epoch numérique (éventuellement divisée pour
+    convertir µs→s) coercée en date et comparée à un littéral date. Le LLM ne sait pas
+    calculer l'epoch → on renvoie une directive ``epoch_date_eq`` portant la plage
+    ``[low, high)`` et la valeur à pinner (minuit du jour), calculées hors LLM.
+
+    Ignore les ``TO_DATE(col, 'format')`` explicites (traités par la directive
+    ``date_format``) et tout ce qui n'est pas un epoch numérique."""
+    lhs, rhs = eq.this, eq.args.get("expression")
+    for date_side, lit_side in ((lhs, rhs), (rhs, lhs)):
+        d = _date_literal_date(lit_side)
+        if d is None:
+            continue
+        node = date_side
+        if isinstance(node, exp.TsOrDsToDate):
+            if node.args.get("format") is not None:
+                continue  # format explicite → directive date_format
+            inner = node.this
+        elif isinstance(node, exp.Date):
+            inner = node.this
+        elif isinstance(node, exp.Anonymous) and (node.name or "").upper() in (
+            "TO_DATE",
+            "DATE",
+        ):
+            date_args = node.args.get("expressions") or []
+            if not date_args:
+                continue
+            inner = date_args[0]
+        else:
+            continue
+
+        ups = _epoch_units_per_second(inner)
+        if ups is None:
+            continue
+
+        if isinstance(inner, exp.UnixToTime):
+            arg = inner.this
+        else:  # Anonymous TO_TIMESTAMP*
+            iargs = inner.args.get("expressions") or []
+            if not iargs:
+                continue
+            arg = iargs[0]
+
+        divisor = 1
+        col_expr: exp.Expression = arg
+        if isinstance(arg, exp.Div):
+            denom = arg.args.get("expression")
+            if not (isinstance(denom, exp.Literal) and denom.is_number):
+                continue
+            try:
+                divisor = int(float(denom.name))
+            except (TypeError, ValueError):
+                continue
+            if divisor <= 0:
+                continue
+            col_expr = arg.this
+
+        col_node = (
+            col_expr
+            if isinstance(col_expr, exp.Column)
+            else next(iter(col_expr.find_all(exp.Column)), None)
+        )
+        if col_node is None:
+            continue
+
+        low, high, value = _epoch_date_range(d, divisor * ups)
+        return col_node, {
+            "kind": "epoch_date_eq",
+            "date": d.isoformat(),
+            "low": low,
+            "high": high,
+            "value": value,
+        }
+    return None
+
+
+def _collect_format_directives(
     statement: exp.Expression,
     alias_map: dict[str, str],
     resolver: "_LineageResolver",
     dialect: str,
-) -> list[str]:
-    """Return human-readable format-constraint strings for SAFE_CAST, CAST, PARSE_DATE, etc.
+) -> tuple[list[str], dict[str, list[dict]]]:
+    """Collect format constraints as strings AND structured per-column directives.
 
-    Each entry has the form ``"base_table.col : SAFE_CAST AS FLOAT64"`` or
-    ``"base_table.col : PARSE_DATE('%Y%m')"`` so the LLM knows which columns
-    require a specific format.  Results are deduplicated.
+    Returns ``(strings, directives)`` :
+
+    * ``strings`` — human-readable entries for the prompt hint, e.g.
+      ``"base_table.col : SAFE_CAST AS FLOAT64"``, ``"pubs.filing_date : TO_DATE('%Y%m%d')"``,
+      ``"pubs.cpc : JSON ARRAY of OBJECTS — fields: 'code'"``. Deduplicated.
+    * ``directives`` — ``{"table.col": [{"kind": ..., ...}]}`` consumed by the
+      generator to annotate the Pydantic field descriptions. Kinds :
+      ``date_format`` (fn + format strftime), ``json_object_array`` (fields),
+      ``json_array``, ``json_object`` (fields).
+
+    Le SQL est la vérité du format (diagnostic sf_bq091/099/216/444 : données
+    plausibles insérées puis filtrées à zéro ligne parce que leur format ne
+    correspondait pas au parsing date/JSON de la requête) : ces directives
+    priment sur les heuristiques de nom (cf. rappel epoch) côté générateur.
     """
     seen: set[str] = set()
     results: list[str] = []
+    directives: dict[str, list[dict]] = {}
+
+    def _scope_default_table(col_node: exp.Column) -> str | None:
+        """Table de base du SELECT englobant, si elle est UNIQUE — pour rattacher
+        une colonne non qualifiée. Calculée par scope, pas globalement : les noms
+        de CTE ne sont pas candidats, et une requête à CTEs dont chaque SELECT ne
+        lit qu'une vraie table reste non-ambiguë (sf_bq444, sf_bq182)."""
+        sel = col_node.find_ancestor(exp.Select)
+        if sel is None:
+            return None
+        sources: list[exp.Expression] = []
+        from_clause = get_from(sel)
+        if from_clause is not None:
+            sources.append(from_clause.this)
+        for j in sel.args.get("joins") or []:
+            sources.append(j.this)
+        tables = {
+            src.name.lower()
+            for src in sources
+            if isinstance(src, exp.Table)
+            and src.name
+            and src.name.lower() not in resolver._cte_names
+        }
+        return next(iter(tables)) if len(tables) == 1 else None
 
     def _resolved_tbl_col(col_node: exp.Column) -> tuple[str, str] | None:
         raw = _col_ref(col_node, alias_map)
         if raw is None:
+            return None
+        if raw.table == "__unknown__":
+            default_table = _scope_default_table(col_node)
+            if default_table:
+                return default_table, raw.column.lower()
             return None
         resolved = _identity_or_raw(raw, resolver.resolve(raw))
         tbl = (
@@ -1793,6 +1974,28 @@ def _collect_format_constraints_strings(
         if entry not in seen:
             seen.add(entry)
             results.append(entry)
+
+    def _add_directive(tbl: str, col: str, d: dict) -> None:
+        entries = directives.setdefault(f"{tbl}.{col}", [])
+        for existing in entries:
+            if existing["kind"] == d["kind"]:
+                if "fields" in d:
+                    existing["fields"] = sorted(
+                        set(existing.get("fields") or []) | set(d["fields"])
+                    )
+                return
+        entries.append(d)
+
+    def _is_transparent_string_cast(n: exp.Expression) -> bool:
+        """CAST(col AS VARCHAR/TEXT…) est un no-op de format : il ne doit pas
+        masquer la fonction de parsing extérieure (sf_bq216 :
+        ``TO_DATE(CAST(filing_date AS VARCHAR), 'YYYYMMDD')``)."""
+        if not isinstance(n, (exp.Cast, exp.TryCast)):
+            return False
+        to_type = n.args.get("to")
+        return (
+            bool(to_type) and to_type.sql(dialect=dialect).upper() in _NOOP_CAST_TYPES
+        )
 
     # TryCast → SAFE_CAST AS T  /  Cast → CAST AS T
     for node in statement.find_all((exp.TryCast, exp.Cast)):
@@ -1815,34 +2018,49 @@ def _collect_format_constraints_strings(
     # exp.TimeToStr    → FORMAT_DATE('%Y-%m', col)
     # exp.StrToTime    → PARSE_TIMESTAMP('%Y', col)
     # exp.ParseDatetime → PARSE_DATETIME('%Y-%m-%d', col)
+    # exp.TsOrDsToDate → TO_DATE(col, 'YYYYMMDD') (Snowflake) — format requis :
+    #                    sqlglot insère aussi des TsOrDsToDate implicites SANS format
+    #                    (simples coercitions), qui ne portent aucune contrainte.
     _NAMED_DATE_FNS: tuple[tuple[type, str], ...] = (
         (exp.StrToDate, "PARSE_DATE"),
         (exp.TimeToStr, "FORMAT_DATE"),
         (exp.StrToTime, "PARSE_TIMESTAMP"),
         (getattr(exp, "ParseDatetime", type(None)), "PARSE_DATETIME"),
+        (exp.TsOrDsToDate, "TO_DATE"),
     )
-    _FORMAT_FN_TYPES = (
+    _HARD_FORMAT_FN_TYPES = (
         exp.StrToDate,
         exp.TimeToStr,
         exp.StrToTime,
-        exp.TryCast,
-        exp.Cast,
     )
+
+    def _blocks_outer_constraint(n: exp.Expression) -> bool:
+        """La contrainte appartient à la fonction la plus INTERNE : un nœud de
+        format (ou un cast non-string) entre la fonction et la colonne bloque
+        l'attribution. Les casts string no-op et les TsOrDsToDate sans format
+        (coercitions implicites) sont transparents."""
+        if isinstance(n, (exp.Cast, exp.TryCast)):
+            return not _is_transparent_string_cast(n)
+        if isinstance(n, exp.TsOrDsToDate):
+            return n.args.get("format") is not None
+        return isinstance(n, _HARD_FORMAT_FN_TYPES)
+
     for fn_type, fn_name in _NAMED_DATE_FNS:
         if fn_type is type(None):
             continue
         for node in statement.find_all(fn_type):
             fmt_node = node.args.get("format")
             fmt_str = _literal_value(fmt_node) if fmt_node else None
+            if fmt_node is None and isinstance(node, exp.TsOrDsToDate):
+                continue  # coercition implicite, pas une contrainte de format
             inner_col = _find_column_in(node.this)
             if inner_col is None:
                 continue
-            # Skip when a date-format/cast function sits between this node and the column
-            # (e.g. FORMAT_DATE('%d/%m', PARSE_DATE('%d%b%Y', col)) — sqlglot may insert
-            # intermediate wrappers like TsOrDsToDate; the constraint belongs to the inner
-            # function only, not to the outer FORMAT_DATE).
+            # Skip when a date-format fn or non-noop cast sits between this node and
+            # the column (e.g. FORMAT_DATE('%d/%m', PARSE_DATE('%d%b%Y', col)) — the
+            # constraint belongs to the inner function only, not the outer FORMAT_DATE).
             if not isinstance(node.this, exp.Column) and any(
-                isinstance(n, _FORMAT_FN_TYPES) for n in node.this.walk()
+                _blocks_outer_constraint(n) for n in node.this.walk()
             ):
                 continue
             tc = _resolved_tbl_col(inner_col)
@@ -1855,6 +2073,12 @@ def _collect_format_constraints_strings(
                 else (fmt_node.sql(dialect=dialect) if fmt_node else "?")
             )
             _add(f"{tbl}.{col_name} : {fn_name}({fmt_repr})")
+            if isinstance(fmt_str, str):
+                _add_directive(
+                    tbl,
+                    col_name,
+                    {"kind": "date_format", "fn": fn_name, "format": fmt_str},
+                )
 
     # Fallback: Anonymous function nodes (non-BigQuery dialects or unknown functions)
     _DATE_FNS: frozenset[str] = frozenset(
@@ -1880,8 +2104,162 @@ def _collect_format_constraints_strings(
             repr(fmt_str) if fmt_str is not None else fmt_arg.sql(dialect=dialect)
         )
         _add(f"{tbl}.{col_name} : {fname}({fmt_repr})")
+        if isinstance(fmt_str, str):
+            _add_directive(
+                tbl, col_name, {"kind": "date_format", "fn": fname, "format": fmt_str}
+            )
 
-    return results
+    # Epoch → date : colonne epoch numérique comparée à une date via TO_TIMESTAMP*/
+    # TIMESTAMP_MICROS (sf_bq093). Le format est « bon » (entier) mais le LLM ne calcule
+    # pas l'epoch → directive `epoch_date_eq` (plage valide hors LLM, pinnée en post-passe
+    # côté générateur). Distincte de `date_format` (qui couvre les TO_DATE avec format).
+    for eq_node in statement.find_all(exp.EQ):
+        extracted = _extract_epoch_date_eq(eq_node, dialect)
+        if extracted is None:
+            continue
+        col_node, directive = extracted
+        tc = _resolved_tbl_col(col_node)
+        if tc is None:
+            continue
+        tbl, col_name = tc
+        _add(
+            f"{tbl}.{col_name} : epoch (date {directive['date']} → {directive['value']})"
+        )
+        _add_directive(tbl, col_name, directive)
+
+    _collect_variant_structures(
+        statement, resolver, _resolved_tbl_col, _add, _add_directive
+    )
+
+    return results, directives
+
+
+def _json_path_field(node: exp.Expression) -> str:
+    """Field path of a JSONExtract expression ('' when not a plain key path)."""
+    path = node.args.get("expression")
+    if not isinstance(path, exp.JSONPath):
+        return ""
+    keys = [str(p.this) for p in path.expressions if isinstance(p, exp.JSONPathKey)]
+    return ".".join(keys)
+
+
+def _collect_variant_structures(
+    statement: exp.Expression,
+    resolver: "_LineageResolver",
+    _resolved_tbl_col,
+    _add,
+    _add_directive,
+) -> None:
+    """Dérive la STRUCTURE attendue des colonnes VARIANT/JSON depuis leurs accès.
+
+    Trois signaux (diagnostic sf_bq099/216/444 : le LLM générait un scalaire nu là
+    où la requête attend un tableau, et la ligne était filtrée à zéro) :
+
+    * ``LATERAL FLATTEN(input => col)`` (ou ``TABLE(FLATTEN(...))``) → ``col`` est
+      un tableau JSON ; si l'alias FLATTEN est lu via ``value:"champ"`` →
+      tableau d'OBJETS avec ces champs, sinon tableau de scalaires ;
+    * ``col[0]`` (bracket, index entier) → tableau JSON ;
+    * ``col:"champ"`` sur une colonne de base (hors FLATTEN) → objet JSON.
+    """
+    # alias FLATTEN → colonne(s) source résolue(s). Liste de paires, PAS un dict
+    # keyé par alias : deux CTEs aliasent volontiers leur FLATTEN du même nom
+    # (`f` dans les deux CTEs de sf_bq216) et un dict perdrait la première source.
+    flatten_sources: list[tuple[str, tuple[str, str]]] = []
+    # Tous les noms d'alias FLATTEN, y compris ceux dont la source n'a pas pu être
+    # résolue : leurs colonnes (`lang_data.value`…) ne doivent JAMAIS fuir en
+    # pseudo-table dans les directives objet.
+    flatten_alias_names: set[str] = set()
+    flatten_nodes: list[exp.Expression] = list(statement.find_all(exp.Lateral)) + list(
+        statement.find_all(exp.TableFromRows)
+    )
+    for nod in flatten_nodes:
+        if not isinstance(nod.this, exp.Explode):
+            continue
+        talias = nod.args.get("alias")
+        if not isinstance(talias, exp.TableAlias) or talias.this is None:
+            continue
+        alias_name = talias.name.lower()
+        flatten_alias_names.add(alias_name)
+        inner = nod.this.this
+        source = inner.expression if isinstance(inner, exp.Kwarg) else inner
+        src_col = _find_column_in(source)
+        if src_col is None:
+            continue
+        tc = _resolved_tbl_col(src_col)
+        if tc is None:
+            continue
+        flatten_sources.append((alias_name, tc))
+
+    # accès champ : value:"champ" (alias FLATTEN) vs col:"champ" (colonne de base).
+    # Les champs sont regroupés par NOM d'alias : en cas de collision de nom entre
+    # CTEs, les champs sont sur-attribués aux deux sources (sans effet nocif — la
+    # structure reste un tableau d'objets, au pire avec un champ en trop).
+    flatten_fields: dict[str, set[str]] = {a: set() for a in flatten_alias_names}
+    object_fields: dict[tuple[str, str], set[str]] = {}
+    for je in statement.find_all(exp.JSONExtract):
+        field = _json_path_field(je)
+        if not field:
+            continue
+        col = je.this if isinstance(je.this, exp.Column) else _find_column_in(je.this)
+        if col is None:
+            continue
+        ctable = (col.table or "").lower()
+        if ctable in flatten_alias_names:
+            if col.name.lower() == "value":
+                flatten_fields[ctable].add(field)
+            continue  # autre colonne de l'alias FLATTEN (index/seq…) : pas de structure
+        tc = _resolved_tbl_col(col)
+        if tc is not None:
+            object_fields.setdefault(tc, set()).add(field)
+
+    # accès bracket par index entier sur une colonne de base
+    bracket_cols: set[tuple[str, str]] = set()
+    for br in statement.find_all(exp.Bracket):
+        exprs = br.expressions
+        if (
+            len(exprs) != 1
+            or not isinstance(exprs[0], exp.Literal)
+            or exprs[0].is_string
+        ):
+            continue
+        col = br.this
+        if not isinstance(col, exp.Column):
+            continue
+        if (col.table or "").lower() in flatten_alias_names:
+            continue
+        tc = _resolved_tbl_col(col)
+        if tc is not None:
+            bracket_cols.add(tc)
+
+    # émission — les champs lus via FLATTEN priment (tableau d'objets > tableau nu)
+    flatten_by_col: dict[tuple[str, str], set[str]] = {}
+    for alias, tc in flatten_sources:
+        flatten_by_col.setdefault(tc, set()).update(flatten_fields.get(alias) or ())
+
+    for tc in sorted(flatten_by_col):
+        tbl, col_name = tc
+        fields = sorted(flatten_by_col[tc])
+        if fields:
+            fields_repr = ", ".join(f"'{f}'" for f in fields)
+            _add(f"{tbl}.{col_name} : JSON ARRAY of OBJECTS — fields: {fields_repr}")
+            _add_directive(
+                tbl, col_name, {"kind": "json_object_array", "fields": fields}
+            )
+        else:
+            _add(f"{tbl}.{col_name} : JSON ARRAY")
+            _add_directive(tbl, col_name, {"kind": "json_array"})
+
+    for tc in sorted(bracket_cols - set(flatten_by_col)):
+        tbl, col_name = tc
+        _add(f"{tbl}.{col_name} : JSON ARRAY")
+        _add_directive(tbl, col_name, {"kind": "json_array"})
+
+    for tc in sorted(object_fields.keys() - set(flatten_by_col)):
+        tbl, col_name = tc
+        fields = sorted(object_fields[tc])
+        fields_repr = ", ".join(f"'{f}'" for f in fields)
+        _add(f"{tbl}.{col_name} : JSON OBJECT — fields: {fields_repr}")
+        _add_directive(tbl, col_name, {"kind": "json_object", "fields": fields})
 
 
 # ─── Grouped AST walk ─────────────────────────────────────────────────────────
@@ -2445,7 +2823,7 @@ def build_conditions_hint(
     cond_parts = _remove_null_contradictions(cond_parts)
 
     conditions = " AND ".join(_safe_and_part(p) for p in cond_parts)
-    format_constraints = _collect_format_constraints_strings(
+    format_constraints, column_directives = _collect_format_directives(
         statement, alias_map, resolver, dialect
     )
 
@@ -2468,6 +2846,11 @@ def build_conditions_hint(
         result["conditions"] = conditions
     if format_constraints:
         result["format_constraints"] = format_constraints
+    # Directives par colonne (format date / structure JSON) — consommées par le
+    # générateur pour annoter les descriptions Pydantic, retirées du hint sérialisé
+    # dans le prompt (l'info arrive déjà par les descriptions de champs).
+    if column_directives:
+        result["column_directives"] = column_directives
     if lineages:
         result["lineages"] = lineages
     # Contrat avec le SYSTEM du générateur (qui documente la clé `anti_joins`) :

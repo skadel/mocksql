@@ -1,4 +1,5 @@
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -131,6 +132,37 @@ def get_llm_model() -> str:
     )
 
 
+def get_llm_provider(model: str) -> str:
+    """Provider LLM (``"vertexai"`` ou ``"openai"``) pour un nom de modèle donné.
+
+    Le NOM de modèle prime : ``gpt-*`` / ``o<N>*`` → OpenAI, ``gemini*`` → Vertex.
+    Les mocksql.yml des projets d'éval portent déjà ``llm.provider: vertexai`` —
+    s'il primait, un modèle gpt-* partirait vers Vertex (404 garanti). Le réglage
+    explicite (``llm.provider`` / env ``LLM_PROVIDER``) ne tranche donc que pour
+    les noms ambigus (modèle custom, proxy). Clé OpenAI : env ``OPENAI_API_KEY``
+    (chargée depuis back/.env par load_dotenv)."""
+    m = model.lower()
+    if m.startswith("gpt-") or re.match(r"^o\d", m):
+        return "openai"
+    if "gemini" in m:
+        return "vertexai"
+    cfg = load_config()
+    explicit = cfg.get("llm", {}).get("provider") or os.getenv("LLM_PROVIDER")
+    if explicit and str(explicit).lower() == "openai":
+        return "openai"
+    return "vertexai"
+
+
+def is_openai_reasoning_model(model: str) -> bool:
+    """Modèles OpenAI à raisonnement natif (gpt-5*, o-série) : ils n'acceptent que la
+    température par défaut et prennent ``reasoning_effort`` au lieu de thinking_budget.
+    Les variantes ``-chat`` (gpt-5-chat-latest) sont des modèles non-raisonnants."""
+    m = model.lower()
+    if re.match(r"^o\d", m):
+        return True
+    return m.startswith("gpt-5") and "chat" not in m
+
+
 def get_llm_streaming() -> bool:
     cfg = load_config()
     llm_cfg = cfg.get("llm", {})
@@ -184,6 +216,78 @@ def get_llm_max_retries() -> int:
         return 6
 
 
+def get_llm_timeout() -> int | None:
+    """Timeout (secondes) par appel LLM. Sans borne, une requête que le serveur ne
+    clôt jamais bloque indéfiniment (google-genai → httpx ``timeout=None``) : hang
+    CLI muet constaté sur gemini-3-flash-preview (302 s de rumination sur UN appel).
+    Un timeout client n'est PAS retenté par le SDK (son predicate tenacity ne matche
+    que les APIError HTTP) → échec unique, rapide et actionnable.
+    Surchargeable via `mocksql.yml` (`llm.timeout`) ou `LLM_TIMEOUT` ; `0` = désactivé."""
+    cfg = load_config()
+    val = cfg.get("llm", {}).get("timeout")
+    if val is None:
+        val = os.getenv("LLM_TIMEOUT")
+    if val is None:
+        return 300
+    try:
+        ival = int(val)
+    except (ValueError, TypeError):
+        return 300
+    return ival if ival > 0 else None
+
+
+def get_llm_include_thoughts() -> bool:
+    """Fait renvoyer par Gemini les résumés de thinking dans la réponse (rendus en
+    section ``### reasoning`` du dump de prompt) — pour voir sur quoi un modèle
+    rumine. Grossit les réponses → opt-in : `mocksql.yml` (`llm.include_thoughts`)
+    ou env `LLM_INCLUDE_THOUGHTS`. Défaut False."""
+    cfg = load_config()
+    val = cfg.get("llm", {}).get("include_thoughts")
+    if val is None:
+        return os.getenv("LLM_INCLUDE_THOUGHTS", "false").lower() == "true"
+    return bool(val)
+
+
+# Débit de génération de thinking observé lors du hang bq001 (62 800 tokens en 302 s
+# ≈ 208 tok/s) ; arrondi conservateur pour dimensionner un budget épuisable dans la fenêtre.
+_THINKING_TOKENS_PER_SEC = 200
+# Part de la fenêtre de timeout allouée au thinking ; le reste couvre la génération de la
+# sortie + la latence réseau, pour que le budget morde AVANT le kill dur du timeout.
+_THINKING_TIMEOUT_FRACTION = 0.6
+# Plafond API du thinking_budget sur la famille Gemini 2.5 (flash : 24 576, pro : 32 768).
+# 24 576 est valide pour les deux → plafond de sécurité universel sur les modèles cibles.
+_THINKING_SAFETY_BUDGET_MAX = 24_576
+
+
+def get_llm_thinking_safety_budget() -> int | None:
+    """Plafond de thinking (tokens) appliqué par défaut quand NI `thinking_budget` NI
+    `thinking_level` ne sont fixés explicitement. Sans réglage, il est DÉRIVÉ du timeout
+    (`get_llm_timeout`) pour que la rumination s'épuise À L'INTÉRIEUR de la fenêtre —
+    dégradation propre (le modèle arrête de penser et répond) plutôt qu'un timeout dur en
+    plein raisonnement. Les deux bornes correspondent donc : un timeout plus court réduit
+    proportionnellement le budget. La valeur dérivée est bornée au plafond API Gemini 2.5.
+    Surchargeable via `mocksql.yml` (`llm.thinking_safety_budget`) ou l'env
+    `LLM_THINKING_SAFETY_BUDGET` ; `0` = pas de plafond. Timeout désactivé
+    (`llm.timeout: 0`) et sans surcharge → None. Voir l'incident bq001."""
+    cfg = load_config()
+    val = cfg.get("llm", {}).get("thinking_safety_budget")
+    if val is None:
+        val = os.getenv("LLM_THINKING_SAFETY_BUDGET")
+    if val is not None:
+        try:
+            ival = int(val)
+        except (ValueError, TypeError):
+            ival = None
+        if ival is not None:
+            return ival if ival > 0 else None
+    # Aucune surcharge (ou surcharge invalide) → défaut dérivé du timeout, borné.
+    timeout = get_llm_timeout()
+    if timeout is None:
+        return None
+    derived = int(timeout * _THINKING_TOKENS_PER_SEC * _THINKING_TIMEOUT_FRACTION)
+    return min(derived, _THINKING_SAFETY_BUDGET_MAX)
+
+
 def is_native_thinking_active() -> bool:
     """Indique si le modèle raisonne nativement (canal thinking séparé).
 
@@ -196,13 +300,18 @@ def is_native_thinking_active() -> bool:
     chain-of-thought (thinking inactif → seul raisonnement disponible) ou juste
     une justification courte (thinking actif → le raisonnement se fait en amont).
     """
+    model = get_llm_model().lower()
+    # OpenAI : le thinking natif dépend du modèle, pas des réglages Gemini
+    # (thinking_budget/thinking_level sont ignorés par la branche OpenAI de make_llm).
+    if get_llm_provider(model) == "openai":
+        return is_openai_reasoning_model(model)
+
     budget = get_llm_thinking_budget()
     if budget is not None:
         return budget > 0
     if get_llm_thinking_level() is not None:
         return True
 
-    model = get_llm_model().lower()
     # `flash-lite` contient `flash` — le tester en premier.
     if "lite" in model:
         return False
@@ -457,6 +566,11 @@ def open_duckdb_connection(path: str, *, read_only: bool = False):
     import duckdb
 
     con = duckdb.connect(path, read_only=read_only)
+    # Fuseau de session FIGÉ en UTC : DuckDB hérite sinon du fuseau machine, et
+    # TO_TIMESTAMP(epoch) (transpilé de TO_TIMESTAMP_NTZ Snowflake, naïf) rend
+    # un TIMESTAMPTZ décalé — « May 2023 » sérialisé 2023-04-30T22:00:00Z,
+    # bornes WHERE >= '2023-01-01' décalées de 2 h (incident sf_bq263).
+    con.execute("SET TimeZone='UTC'")
     apply_duckdb_extensions(con)
     return con
 

@@ -139,6 +139,9 @@ def _eval_with_duckdb(expr_sql: str) -> Any:
     réutilise une connexion partagée pour éviter le coût d'ouverture par nœud.
     """
     with duckdb.connect(":memory:") as conn:
+        # UTC comme toute connexion MockSQL (cf. open_duckdb_connection) : un
+        # littéral foldé ne doit pas dépendre du fuseau de la machine.
+        conn.execute("SET TimeZone='UTC'")
         row = conn.execute(f"SELECT {expr_sql}").fetchone()
         return row[0] if row else None
 
@@ -260,6 +263,9 @@ def fold_scalar_expressions(ast: exp.Expression, source_dialect: str) -> exp.Exp
     # DuckDB **qu'une seule fois**. La connexion partagée évite en plus le coût
     # d'ouverture par nœud.
     conn = duckdb.connect(":memory:")
+    # UTC comme toute connexion MockSQL (cf. open_duckdb_connection) : un
+    # littéral foldé ne doit pas dépendre du fuseau de la machine.
+    conn.execute("SET TimeZone='UTC'")
     # _FAILED distingue « non foldable » d'une vraie valeur NULL, et permet de
     # cacher aussi les échecs (pas de re-tentative).
     cache: dict[str, Any] = {}

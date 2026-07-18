@@ -111,7 +111,41 @@ def parse_field_type(field_type_str: str) -> Type | List | Dict:
         return Dict[str, Any]
 
     else:
-        return type_mapping.get(field_type_str, str)
+        return _scalar_field_type(field_type_str)
+
+
+# Familles décimales à précision optionnelle. Résolues par `_scalar_field_type` — PAS
+# dans `type_mapping` : la forme paramétrée (`NUMBER(38,0)`) exige un parse du scale.
+_DECIMAL_FIELD_BASE_TYPES = {"NUMBER", "NUMERIC", "DECIMAL", "BIGNUMERIC", "BIGDECIMAL"}
+
+
+def _scalar_field_type(field_type_str: str) -> Any:
+    """Type Pydantic d'un scalaire SQL, robuste à la casse et à la précision.
+
+    Racine du root-cause spider2-snow : `NUMBER`/`NUMERIC`/`DECIMAL` absents de
+    `type_mapping` → champ Pydantic `str` → AUCUN signal numérique dans le schéma JSON
+    envoyé au LLM, qui colle des ids alphanumériques (`"M001"`) ou des mots dans des
+    colonnes DECIMAL — INSERT rejeté en aval (cf. execute_queries). Résolution :
+      - scale explicite 0 (`NUMBER(38,0)`, `NUMBER(10)`) → int ;
+      - scale explicite > 0 (`NUMBER(12,2)`)             → float ;
+      - sans précision (`NUMBER`)                        → int | float — forcer float
+        perdrait la précision des grands entiers (epoch µs, wei > 2^53).
+    Le lookup `type_mapping` reste prioritaire (base sans précision, casse normalisée) ;
+    tout type inconnu retombe sur `str` comme avant.
+    """
+    cleaned = field_type_str.strip()
+    if exact := type_mapping.get(cleaned):
+        return exact
+    base = cleaned.split("(")[0].strip().upper()
+    if exact := type_mapping.get(base):
+        return exact
+    if base in _DECIMAL_FIELD_BASE_TYPES:
+        params = re.match(r"[^(]*\(\s*\d+\s*(?:,\s*(\d+)\s*)?\)", cleaned)
+        if params:
+            scale = int(params.group(1) or 0)
+            return int if scale == 0 else float
+        return int | float
+    return str
 
 
 def parse_struct_fields(fields_str: str) -> List[str]:
@@ -274,7 +308,7 @@ def _bq_ddl_to_pydantic(model_name: str, bq_ddl_type: str):
             **fields_def,
         )
 
-    return type_mapping.get(bq_ddl_type.upper(), str)
+    return _scalar_field_type(bq_ddl_type)
 
 
 # Config partagée : `populate_by_name` accepte le nom réel ET la clé assainie en
@@ -323,10 +357,9 @@ def _iso_format_hint(col_type) -> str:
 
 # Tokens de nom signalant qu'une colonne porte un horodatage.
 _TEMPORAL_NAME_TOKENS = {"at", "time", "timestamp", "date", "datetime", "epoch", "ts"}
-# Familles de types numériques (base, précision retirée). NUMBER/NUMERIC/DECIMAL ne
-# sont PAS dans `type_mapping` → champ Pydantic `str` : un littéral date les traverse
-# sans validation. Les types int/float y sont aussi pour la robustesse (le rappel
-# reste vrai), même si Pydantic les rejetterait déjà.
+# Familles de types numériques (base, précision retirée). Tous typés numériques en
+# Pydantic (cf. _scalar_field_type) : le rappel epoch évite qu'un littéral date ISO
+# soit rejeté à la validation → retry coûteux, au lieu d'être prévenu à la source.
 _NUMERIC_BASE_TYPES = {
     "NUMBER",
     "NUMERIC",
@@ -364,9 +397,9 @@ def _numeric_epoch_hint(col_type_str: str | None, col_name: str) -> str:
     """Rappel « epoch → entier » pour une colonne NUMÉRIQUE au nom horodaté.
 
     Un `NUMBER` Snowflake au nom temporel (`SnapshotAt`, `UpstreamPublishedAt`) stocke
-    un epoch, pas une date. Comme `NUMBER` retombe sur `str` (cf. `parse_field_type`),
-    le LLM y colle volontiers un littéral ISO — que DuckDB refuse d'insérer dans la
-    colonne DECIMAL (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
+    un epoch, pas une date. Sans le rappel, le LLM y colle volontiers un littéral ISO —
+    désormais rejeté dès la validation Pydantic (champ numérique, cf. _scalar_field_type)
+    → retry coûteux (incident sf_bq028). Le rappel, porté par la DESCRIPTION du champ,
     survit au retry sans contexte. Gaté sur le TYPE numérique (pas seulement le nom) :
     une colonne TYPÉE date/timestamp nommée `...At` garde son rappel ISO.
     """
@@ -422,7 +455,15 @@ def create_pydantic_models(filtered_tables_and_columns: list) -> Type[BaseModel]
             # rappel « epoch → entier », sinon le LLM y met un littéral date que DuckDB
             # refuse d'insérer en DECIMAL (incident sf_bq028). Exclusif du rappel ISO
             # (gaté sur le type numérique). Cf. _numeric_epoch_hint.
-            epoch_hint = _numeric_epoch_hint(column.get("type"), column["name"])
+            # ARBITRAGE : si le générateur a posé une directive de format extraite du
+            # SQL (`sql_format_directive`, ex. TO_DATE(...,'YYYYMMDD') sur sf_bq216),
+            # le SQL fait foi — l'heuristique de nom s'efface, sinon le prompt porte
+            # deux prescriptions contradictoires et le LLM tranche au hasard.
+            epoch_hint = (
+                ""
+                if column.get("sql_format_directive")
+                else _numeric_epoch_hint(column.get("type"), column["name"])
+            )
             if epoch_hint:
                 col_description = (
                     (str(col_description) + epoch_hint)
@@ -473,6 +514,14 @@ def _resolve_duck_type(bq_ddl_type: str) -> str:
     Le type d'entrée est toujours en syntaxe BigQuery (STRING / STRUCT<> /
     ARRAY<>), donc on parse comme bigquery quel que soit le dialect source.
     """
+    # Snowflake semi-structuré (VARIANT/OBJECT) → JSON DuckDB. Laissé tel quel, `VARIANT`
+    # est un type opaque : l'accès bracket/`->>` rend NULL en silence et un INSERT de
+    # string nu passe sans broncher → résultats faux muets (sf_bq444). En JSON, l'accès
+    # `->`/`->>` est 0-based (aligné avec la réécriture bracket de _fix_snowflake_idioms)
+    # et un INSERT de string non-JSON échoue tôt (`Conversion Error: Malformed JSON`),
+    # routé vers la boucle bad_data par `_is_duckdb_data_error`.
+    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT"):
+        return "JSON"
     try:
         dummy = sqlglot.parse_one(
             f"CREATE TABLE _t (_c {bq_ddl_type})", dialect="bigquery"
@@ -513,8 +562,17 @@ def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
     """Recursively resolve the DuckDB DDL type for a column, handling STRUCT/ARRAY."""
     col = next(c for c in filtered_columns if c["name"] == col_name)
     if bq_ddl_type := col.get("bq_ddl_type"):
-        return bq_ddl_type
+        # Snowflake semi-structuré → JSON (cf. _resolve_duck_type) : le CREATE TABLE et le
+        # schéma retourné passent tous deux par ici, il faut donc mapper à la source pour
+        # que la colonne DuckDB soit réellement JSON (accès 0-based + fail-fast INSERT).
+        return (
+            "JSON"
+            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT")
+            else bq_ddl_type
+        )
     base = col["type"].upper()
+    if base in ("VARIANT", "OBJECT"):
+        base = "JSON"
     mode = col.get("mode", "NULLABLE").upper()
     if base in ("RECORD", "STRUCT"):
         depth = col_name.count(".")
@@ -668,15 +726,26 @@ def create_test_tables(
 
 
 def execute_queries(queries: list[str], con: duckdb.DuckDBPyConnection):
-    try:
-        for idx, query in enumerate(queries, start=1):
-            try:
-                result = con.execute(query).fetchall()  # Fetch results for verification
-                logger.debug("Result for query %d: %s", idx, result)
-            except Exception as e:
-                logger.error("Error executing query %d: %s", idx, e)
-    except Exception as e:
-        logger.error("Error establishing database connection: %s", e)
+    """Exécute chaque requête ; toutes sont tentées, puis la PREMIÈRE exception est relancée.
+
+    Ne jamais avaler l'échec : un INSERT rejeté (ex. `Conversion Error: Could not convert
+    string "M001" to DECIMAL(38,9)`) laissait des tables vides → misclassification
+    `empty_results` avec un diagnostic CTE mensonger, boucle de correction aveugle
+    (root-cause spider2-snow). Relancer l'exception d'origine (message DuckDB intact)
+    rend le circuit `bad_data_error` de l'executor atteignable — l'évaluateur transmet
+    alors le vrai message au correcteur. On tente quand même toutes les requêtes avant
+    de relancer, pour loguer TOUS les échecs (plusieurs tables fautives = un seul retry).
+    """
+    errors: list[Exception] = []
+    for idx, query in enumerate(queries, start=1):
+        try:
+            result = con.execute(query).fetchall()  # Fetch results for verification
+            logger.debug("Result for query %d: %s", idx, result)
+        except Exception as e:
+            logger.error("Error executing query %d: %s\n  Requête : %s", idx, e, query)
+            errors.append(e)
+    if errors:
+        raise errors[0]
 
 
 def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
@@ -1287,10 +1356,38 @@ def _fix_unnest_alias_conflicts(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+def _resolve_grouped_expr(
+    g: exp.Expression,
+    projections: list[exp.Expression],
+    alias_map: dict[str, exp.Expression],
+) -> exp.Expression:
+    """
+    Resolve a GROUP BY expression to the SELECT projection it designates:
+    ordinal (GROUP BY 1 → 1st projection) or alias (GROUP BY month → aliased expr).
+    Returns the expression unchanged when it designates nothing.
+    """
+    if isinstance(g, exp.Literal) and g.is_int:
+        idx = int(g.name) - 1
+        if 0 <= idx < len(projections):
+            proj = projections[idx]
+            return proj.this if isinstance(proj, exp.Alias) else proj
+    if isinstance(g, exp.Column) and not g.args.get("table"):
+        resolved = alias_map.get(g.name.lower())
+        if resolved is not None:
+            return resolved
+    return g
+
+
 def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
     """
-    Add to GROUP BY any SELECT column not wrapped in an aggregate and not already present.
-    DuckDB requires strict GROUP BY (no functional-dependency shortcut like BigQuery).
+    Add to GROUP BY any SELECT column not wrapped in an aggregate and not already
+    covered by the GROUP BY. DuckDB requires strict GROUP BY (no functional-
+    dependency shortcut like BigQuery).
+
+    A column is covered when it appears inside any grouped expression, after
+    resolving ordinals and SELECT aliases to their projection — adding it anyway
+    would change the aggregation grain (GROUP BY DATE_TRUNC('MONTH', col), col
+    yields one row per timestamp instead of one per month).
     Modifies the tree in-place.
     """
     for select in tree.find_all(exp.Select):
@@ -1305,10 +1402,22 @@ def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
         ):
             continue
 
-        grouped_sqls = {g.sql(dialect="duckdb").lower() for g in group.expressions}
+        projections = select.expressions
+        alias_map = {
+            proj.alias.lower(): proj.this
+            for proj in projections
+            if isinstance(proj, exp.Alias) and proj.alias
+        }
+        covered_cols = {
+            col.sql(dialect="duckdb").lower()
+            for g in group.expressions
+            for col in _resolve_grouped_expr(g, projections, alias_map).find_all(
+                exp.Column
+            )
+        }
 
         to_add = []
-        for sel_expr in select.expressions:
+        for sel_expr in projections:
             inner = sel_expr.this if isinstance(sel_expr, exp.Alias) else sel_expr
             if isinstance(inner, (exp.Star, exp.Literal)):
                 continue
@@ -1316,9 +1425,9 @@ def _fix_group_by_strict_mode(tree: exp.Expression) -> None:
                 continue
             for col in inner.find_all(exp.Column):
                 col_sql = col.sql(dialect="duckdb").lower()
-                if col_sql not in grouped_sqls:
+                if col_sql not in covered_cols:
                     to_add.append(col.copy())
-                    grouped_sqls.add(col_sql)
+                    covered_cols.add(col_sql)
 
         if to_add:
             group.set("expressions", list(group.expressions) + to_add)
@@ -1770,6 +1879,291 @@ def _fix_snowflake_hex_cast(tree: exp.Expression) -> exp.Expression:
     return tree
 
 
+# Types cible d'un cast Snowflake ``::STRING``/``::VARCHAR``… : sur une VARIANT, ce
+# cast DÉQUOTE la valeur JSON. DuckDB ``CAST(json AS TEXT)`` garde les guillemets ; on
+# réécrit alors vers ``->>`` (JSONExtractScalar) qui déquote (cf.
+# _fix_snowflake_variant_string_cast).
+_SNOW_STRING_CAST_TYPES = frozenset(
+    {
+        exp.DataType.Type.TEXT,
+        exp.DataType.Type.VARCHAR,
+        exp.DataType.Type.CHAR,
+        exp.DataType.Type.NCHAR,
+        exp.DataType.Type.NVARCHAR,
+    }
+)
+
+
+def _flatten_input_and_outer(explode: exp.Expression) -> tuple[exp.Expression, bool]:
+    """Extrait ``(expression source, flag outer)`` d'un nœud FLATTEN (``exp.Explode``).
+
+    Snowflake FLATTEN accepte ``INPUT => e`` (kwarg) ou une forme positionnelle, plus
+    des kwargs optionnels dont ``OUTER => TRUE``. sqlglot range le 1ᵉʳ argument dans
+    ``Explode.this`` (un ``Kwarg`` s'il est nommé) et les suivants dans
+    ``Explode.expressions``. On ignore ``PATH =>`` (hors corpus) ; ``SEQ``/``INDEX``…
+    ne sont pas exploités.
+    """
+    inner = explode.this
+    source = inner.expression if isinstance(inner, exp.Kwarg) else inner
+    outer = False
+    for extra in explode.args.get("expressions") or []:
+        if (
+            isinstance(extra, exp.Kwarg)
+            and isinstance(extra.this, exp.Var)
+            and extra.this.name.upper() == "OUTER"
+        ):
+            val = extra.expression
+            if isinstance(val, exp.Boolean) and val.this:
+                outer = True
+    return source, outer
+
+
+def _fix_snowflake_flatten(tree: exp.Expression) -> set[str]:
+    """Réécrit ``LATERAL FLATTEN`` / ``TABLE(FLATTEN(...))`` en ``… JOIN UNNEST(…)`` DuckDB.
+
+    sqlglot parse FLATTEN en ``exp.Explode`` (enveloppé dans un ``Lateral`` pour la
+    forme ``LATERAL FLATTEN``, un ``TableFromRows`` pour ``TABLE(FLATTEN(...))``), mais
+    son rendu DuckDB est invalide sur trois points :
+      1. il conserve la virgule de jointure implicite ET ajoute un CROSS JOIN
+         (``FROM t,  CROSS JOIN UNNEST(...)``) → erreur de parse DuckDB ;
+      2. il laisse survivre le kwarg Snowflake ``input =>`` dans l'UNNEST ;
+      3. il rend l'alias 6-colonnes ``x(SEQ, KEY, PATH, INDEX, VALUE, THIS)``, sans
+         équivalent DuckDB.
+
+    On reconstruit donc explicitement la jointure :
+
+        CROSS JOIN UNNEST(CAST(<source> AS JSON[])) AS <alias>(value)
+
+    - ``CAST(<source> AS JSON[])`` transforme le texte/variant JSON (colonne nue,
+      ``PARSE_JSON(col)``, extraction imbriquée ``sd.value:"champ"``…) en vraie liste
+      DuckDB — condition sine qua non d'UNNEST (``UNNEST(JSON(x))`` seul échoue avec
+      "UNNEST requires a single list as input").
+    - Sémantique ``outer`` (``OUTER => TRUE`` ou ``LEFT JOIN LATERAL``) → ``LEFT JOIN
+      … ON TRUE`` pour conserver la ligne parent quand la liste est vide (sinon CROSS
+      JOIN élimine ces lignes, comme le FLATTEN par défaut).
+
+    Retourne l'ensemble (minuscule) des alias FLATTEN reconstruits, pour que
+    ``_fix_snowflake_variant_string_cast`` sache déquoter les
+    ``<alias>.value::STRING``.
+
+    Si ``<alias>.index`` est référencé (position 0-based Snowflake, cf. sf_bq216 :
+    jointure de deux FLATTEN sur l'index), la forme simple ne suffit plus — on émet
+    une sous-requête LATERAL où DuckDB **zippe** les deux UNNEST du même SELECT :
+
+        CROSS JOIN LATERAL (
+          SELECT UNNEST(CAST(<source> AS JSON[])) AS value,
+                 UNNEST(RANGE(LEN(CAST(<source> AS JSON[])))) AS "index"
+        ) AS <alias>
+
+    Limite assumée : seules les colonnes de sortie ``value`` et ``index`` sont
+    reconstruites. Les colonnes ``SEQ/KEY/PATH/THIS`` de Snowflake FLATTEN n'ont pas
+    d'équivalent trivial via UNNEST et ne sont pas mappées (usage marginal dans le
+    corpus). ``path =>`` n'est pas géré (absent du corpus).
+    """
+    # Alias dont `.index` est référencé quelque part dans la requête. Scan global :
+    # un même nom d'alias dans deux CTEs peut sur-matcher, au pire on émet la forme
+    # riche pour un FLATTEN qui n'en avait pas besoin (colonne en plus, sans effet).
+    index_aliases = {
+        col.table.lower()
+        for col in tree.find_all(exp.Column)
+        if col.table and col.name.lower() == "index"
+    }
+
+    flatten_aliases: set[str] = set()
+    for join in list(tree.find_all(exp.Join)):
+        src = join.this
+        if isinstance(src, exp.Lateral) and isinstance(src.this, exp.Explode):
+            explode = src.this
+        elif isinstance(src, exp.TableFromRows) and isinstance(src.this, exp.Explode):
+            explode = src.this
+        else:
+            continue
+        talias = src.args.get("alias")
+        if not isinstance(talias, exp.TableAlias) or talias.this is None:
+            continue  # alias obligatoire pour référencer .value
+
+        source, outer = _flatten_input_and_outer(explode)
+        outer = outer or join.args.get("side") == "LEFT"
+
+        list_expr = exp.cast(source.copy(), exp.DataType.build("JSON[]"))
+        if talias.name.lower() in index_aliases:
+            # Forme zippée value+index : deux UNNEST dans le même SELECT sont
+            # alignés positionnellement par DuckDB ; RANGE(LEN(l)) = 0..n-1.
+            inner_select = exp.select(
+                exp.alias_(exp.Unnest(expressions=[list_expr]), "value"),
+                exp.alias_(
+                    exp.Unnest(
+                        expressions=[
+                            exp.func("RANGE", exp.func("LEN", list_expr.copy()))
+                        ]
+                    ),
+                    "index",
+                    quoted=True,
+                ),
+            )
+            joined = exp.Lateral(
+                this=exp.Subquery(this=inner_select),
+                alias=exp.TableAlias(this=talias.this.copy()),
+            )
+        else:
+            new_alias = exp.TableAlias(
+                this=talias.this.copy(), columns=[exp.to_identifier("value")]
+            )
+            joined = exp.Unnest(expressions=[list_expr], alias=new_alias)
+        if outer:
+            new_join = exp.Join(this=joined, side="LEFT", on=exp.true())
+        else:
+            new_join = exp.Join(this=joined, kind="CROSS")
+        join.replace(new_join)
+        flatten_aliases.add(talias.name.lower())
+    return flatten_aliases
+
+
+def _fix_snowflake_variant_string_cast(
+    tree: exp.Expression, flatten_aliases: set[str]
+) -> exp.Expression:
+    """Déquote les casts Snowflake VARIANT→STRING rendus en ``CAST(json AS TEXT)``.
+
+    En Snowflake, ``v:"champ"::STRING`` (ou ``v::STRING`` sur un scalaire VARIANT)
+    DÉQUOTE : ``"abc"`` → ``abc``. sqlglot transpile ça en
+    ``CAST(v -> '$.champ' AS TEXT)`` — l'opérateur ``->`` renvoie du JSON et
+    ``CAST(json AS TEXT)`` GARDE les guillemets côté DuckDB. On réécrit vers ``->>``
+    (JSONExtractScalar), qui déquote. Deux formes :
+
+    - ``CAST(<extraction :champ> AS <type texte>)`` → ``<v> ->> '$.champ'`` : vaut
+      pour tout accès VARIANT, FLATTEN ou non (``PARSE_JSON(x):champ::STRING``,
+      cf. sf_bq412) ;
+    - ``CAST(<alias_flatten>.value AS <type texte>)`` → ``<alias>.value ->> '$'`` : le
+      scalaire brut d'un FLATTEN. Scopé aux alias FLATTEN connus pour ne PAS toucher
+      un ``CAST(col AS TEXT)`` légitime sur une vraie colonne texte.
+
+    Les casts numériques/booléens (``::INT``, ``::BOOLEAN``) sont laissés tels quels :
+    ``CAST(json AS INT/BOOLEAN)`` parse correctement le nombre/booléen JSON sous DuckDB.
+    """
+    for cast in list(tree.find_all(exp.Cast)):
+        to = cast.to
+        if not isinstance(to, exp.DataType) or to.this not in _SNOW_STRING_CAST_TYPES:
+            continue
+        operand = cast.this
+        if isinstance(operand, exp.JSONExtract):
+            cast.replace(
+                exp.JSONExtractScalar(
+                    this=operand.this.copy(), expression=operand.expression.copy()
+                )
+            )
+        elif (
+            isinstance(operand, exp.Column)
+            and operand.name.lower() == "value"
+            and operand.table.lower() in flatten_aliases
+        ):
+            cast.replace(
+                exp.JSONExtractScalar(
+                    this=operand.copy(),
+                    expression=exp.JSONPath(expressions=[exp.JSONPathRoot()]),
+                )
+            )
+    return tree
+
+
+def _fix_snowflake_variant_bracket(tree: exp.Expression) -> exp.Expression:
+    """Réécrit l'accès bracket 0-based Snowflake sur colonne VARIANT en extraction JSON.
+
+    En Snowflake, ``col[N]`` sur une colonne semi-structurée (VARIANT/ARRAY, toujours
+    0-based) accède à l'élément N. sqlglot le rend ``col[N+1]`` (convention liste native
+    DuckDB, 1-based) — MAIS après le mapping VARIANT→JSON (``_resolve_duck_type``), la
+    colonne est un JSON, et le bracket JSON DuckDB est **0-based** : le ``+1`` vise alors
+    le mauvais élément (ou NULL en fin de tableau) — bug muet de sf_bq444
+    (``"topics"[0]::STRING``). On réécrit ``col[N]`` → ``col -> N`` (``JSONExtract``,
+    0-based) ; combiné à un ``::STRING``, ``_fix_snowflake_variant_string_cast`` le
+    transforme ensuite en ``col ->> N`` (scalaire déquoté).
+
+    Scopé aux brackets dont la base est une **colonne nue** avec un indice entier : en
+    Snowflake une colonne bracket-indexée est toujours semi-structurée (pas de tableau
+    typé natif). Les brackets sur résultat de fonction (``SPLIT``, ``ARRAY_CONSTRUCT``…)
+    transpilent vers une vraie liste DuckDB 1-based où le ``+1`` de sqlglot est correct —
+    on n'y touche pas (leur ``this`` n'est pas une ``Column``)."""
+    for br in list(tree.find_all(exp.Bracket)):
+        if not isinstance(br.this, exp.Column):
+            continue
+        subs = br.expressions
+        if len(subs) != 1:
+            continue
+        idx = subs[0]
+        if not (isinstance(idx, exp.Literal) and not idx.is_string):
+            continue
+        br.replace(
+            exp.JSONExtract(
+                this=br.this.copy(), expression=exp.Literal.number(idx.name)
+            )
+        )
+    return tree
+
+
+def _fix_snowflake_array_size(tree: exp.Expression) -> exp.Expression:
+    """``ARRAY_SIZE`` / ``ARRAY_LENGTH`` sur une colonne VARIANT/JSON → ``json_array_length``.
+
+    sqlglot rend ``ARRAY_SIZE(col)`` (Snowflake, semi-structuré) en ``array_length(col)``,
+    qui n'existe QUE pour les listes natives DuckDB — pas pour JSON/VARIANT (sf_bq091 :
+    ``Binder Error: No function matches 'array_length(JSON)'``). ``json_array_length`` couvre
+    JSON ET VARIANT. Scopé aux accès semi-structurés (colonne nue ou extraction JSON) : un
+    ``ARRAY_SIZE(SPLIT(...))`` sur une vraie liste native garde ``array_length`` (son ``this``
+    n'est ni une ``Column`` ni une extraction JSON)."""
+    for node in list(tree.find_all(exp.ArraySize)):
+        arg = node.this
+        if isinstance(arg, (exp.Column, exp.JSONExtract, exp.JSONExtractScalar)):
+            node.replace(
+                exp.Anonymous(this="json_array_length", expressions=[arg.copy()])
+            )
+    return tree
+
+
+_STRFTIME_TOKEN_RE = re.compile(r"%[A-Za-z]")
+
+
+def _is_compact_numeric_date_format(fmt: str | None) -> bool:
+    """True si le format ne contient QUE des directives strftime accolées (aucun
+    séparateur) → la valeur source est un entier compact (YYYYMMDD), PAS une date déjà
+    formatée avec tirets/slashs (où un cast BIGINT casserait le parse)."""
+    if not fmt:
+        return False
+    return _STRFTIME_TOKEN_RE.sub("", fmt) == ""
+
+
+def _fix_snowflake_numeric_date_parse(tree: exp.Expression) -> exp.Expression:
+    """Cast BIGINT de la colonne avant un ``TO_DATE(CAST(col AS VARCHAR), 'YYYYMMDD')``.
+
+    Une colonne ``NUMBER`` élargie en ``DECIMAL(38, 9)`` (anti-débordement,
+    ``_widen_bare_decimals``) rend ``CAST(col AS VARCHAR)`` = ``'20160101.000000000'`` →
+    ``STRPTIME('%Y%m%d')`` échoue (sf_bq216 : *Could not parse ... trailing characters*).
+    Quand le format est compact-numérique (aucun séparateur) et que la valeur parsée porte
+    UNE seule colonne, on intercale ``CAST(col AS BIGINT)`` pour supprimer le suffixe
+    décimal — no-op sur une vraie colonne texte ``'20160101'`` (les années YYYY ≥ 1000 →
+    pas de perte de zéro de tête)."""
+    for node in list(tree.find_all(exp.TsOrDsToDate, exp.StrToDate, exp.StrToTime)):
+        fmt_node = node.args.get("format")
+        fmt = (
+            fmt_node.name
+            if isinstance(fmt_node, exp.Literal)
+            else (fmt_node.sql() if fmt_node else None)
+        )
+        if not _is_compact_numeric_date_format(fmt):
+            continue
+        value = node.this
+        # Une valeur déjà stringifiée (Cast AS TEXT / ToChar) ou une colonne nue ; on cible
+        # la colonne source unique. Les valeurs multi-colonnes / littérales sont ignorées.
+        cols = list(value.find_all(exp.Column))
+        if len(cols) != 1:
+            continue
+        col = cols[0]
+        # Déjà casté en entier (BIGINT/INT…) juste au-dessus de la colonne → ne pas re-wrap.
+        if isinstance(col.parent, exp.Cast):
+            to = col.parent.args.get("to")
+            if isinstance(to, exp.DataType) and to.this in exp.DataType.INTEGER_TYPES:
+                continue
+        col.replace(exp.cast(col.copy(), exp.DataType.build("BIGINT")))
+    return tree
+
+
 def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     """Réécritures d'idiomes Snowflake que sqlglot ne transpile pas correctement.
 
@@ -1778,6 +2172,15 @@ def _fix_snowflake_idioms(tree: exp.Expression) -> exp.Expression:
     _fix_snowflake_to_char(tree)
     _fix_snowflake_to_timestamp(tree)
     _fix_snowflake_hex_cast(tree)
+    _fix_snowflake_numeric_date_parse(tree)
+    # FLATTEN doit précéder le fix variant→string : il crée les jointures UNNEST et
+    # recense les alias dont ``.value`` est un élément JSON à déquoter.
+    flatten_aliases = _fix_snowflake_flatten(tree)
+    # Bracket VARIANT 0-based → JSONExtract AVANT le fix variant→string : ce dernier
+    # convertit ``CAST(<JSONExtract> AS TEXT)`` en ``->>`` (scalaire déquoté).
+    _fix_snowflake_variant_bracket(tree)
+    _fix_snowflake_variant_string_cast(tree, flatten_aliases)
+    _fix_snowflake_array_size(tree)
     return tree
 
 
