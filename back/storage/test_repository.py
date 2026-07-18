@@ -15,6 +15,7 @@ from storage.config import (
     load_preprocessor_fn,
 )
 from storage.test_files import cache_path_for, read_test_doc, write_test_doc
+from utils.path_guard import safe_join
 
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I
@@ -22,6 +23,11 @@ _UUID_RE = re.compile(
 
 # Namespace fixe pour dériver un test_id stable d'un model_name (uuid5).
 _TEST_ID_NAMESPACE = uuid.UUID("6f9619ff-8b86-d011-b42d-00cf4fc964ff")
+
+# Un SHA de commit git = hex. Valider avant de l'injecter dans un argv git empêche
+# qu'un `source_sha` commençant par `-` soit interprété comme une option git (audit
+# sécu 2026-07).
+_GIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
 # Tests créés mais pas encore persistés (en attente de validation réussie).
 _pending_tests: Dict[str, Dict[str, Any]] = {}
@@ -39,10 +45,22 @@ def _tests_root() -> Path:
 
 
 def _test_path(model_name: str) -> Path:
-    """Single file per model: .mocksql/tests/{model_id}.json (supports nested paths)."""
-    p = _tests_root() / f"{model_name}.json"
+    """Single file per model: .mocksql/tests/{model_id}.json (supports nested paths).
+
+    ``model_name`` provient des endpoints HTTP → passer par ``safe_join`` pour qu'un
+    `../` ne fasse pas écrire/supprimer hors de la racine tests (audit sécu 2026-07).
+    """
+    p = safe_join(_tests_root(), model_name, suffix=".json")
+    if p is None:
+        raise ValueError(f"Invalid model name (path traversal): {model_name!r}")
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
+
+
+def _model_sql_path(model_name: str) -> Optional[Path]:
+    """Chemin du fichier `.sql` d'un modèle sous ``models_path``, ou ``None`` si
+    ``model_name`` tente de s'échapper de la racine (traversal)."""
+    return safe_join(get_models_path(), model_name, suffix=".sql")
 
 
 def _derive_model_name_from_path(p: Path) -> Optional[str]:
@@ -159,8 +177,8 @@ def read_model_sql(model_name: str) -> Optional[str]:
     if dbt_project and dbt_project.is_dbt_model(model_name):
         return dbt_project.compiled_sql_for_model(model_name)
 
-    sql_file = get_models_path() / f"{model_name}.sql"
-    if not sql_file.exists():
+    sql_file = _model_sql_path(model_name)
+    if sql_file is None or not sql_file.exists():
         return None
     raw_sql = sql_file.read_text(encoding="utf-8")
     fn_ref = get_preprocessor_fn()
@@ -172,12 +190,12 @@ def read_model_sql(model_name: str) -> Optional[str]:
 
 def get_model_file_git_sha(model_name: str) -> Optional[str]:
     """Return the SHA of the last commit that touched the model's .sql file, or None."""
-    sql_file = get_models_path() / f"{model_name}.sql"
-    if not sql_file.exists():
+    sql_file = _model_sql_path(model_name)
+    if sql_file is None or not sql_file.exists():
         return None
     try:
-        result = subprocess.run(
-            ["git", "log", "-1", "--format=%H", "--", str(sql_file)],
+        result = subprocess.run(  # noqa: S603 argv fixe, git en PATH, chemin validé
+            ["git", "log", "-1", "--format=%H", "--", str(sql_file)],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=5,
@@ -191,8 +209,8 @@ def get_model_file_git_sha(model_name: str) -> Optional[str]:
 
 def get_model_file_hash(model_name: str) -> Optional[str]:
     """Return a short SHA-256 hash of the model file's current content, or None."""
-    sql_file = get_models_path() / f"{model_name}.sql"
-    if not sql_file.exists():
+    sql_file = _model_sql_path(model_name)
+    if sql_file is None or not sql_file.exists():
         return None
     try:
         content = sql_file.read_bytes()
@@ -203,12 +221,14 @@ def get_model_file_hash(model_name: str) -> Optional[str]:
 
 def get_commits_since_sha(model_name: str, source_sha: str) -> int:
     """Return the number of commits that touched the model file since source_sha."""
-    sql_file = get_models_path() / f"{model_name}.sql"
-    if not sql_file.exists():
+    sql_file = _model_sql_path(model_name)
+    if sql_file is None or not sql_file.exists():
+        return 0
+    if not _GIT_SHA_RE.match(source_sha or ""):
         return 0
     try:
-        result = subprocess.run(
-            ["git", "rev-list", "--count", f"{source_sha}..HEAD", "--", str(sql_file)],
+        result = subprocess.run(  # noqa: S603 argv fixe, git en PATH, sha/chemin validés
+            ["git", "rev-list", "--count", f"{source_sha}..HEAD", "--", str(sql_file)],  # noqa: S607
             capture_output=True,
             text=True,
             timeout=5,

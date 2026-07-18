@@ -1128,7 +1128,9 @@ def ui(
 
         threading.Thread(target=_open_when_ready, daemon=True).start()
 
-    uvicorn.run(server_module, host="0.0.0.0", port=port)
+    # TODO(sécu audit 2026-07, finding #1) : binder 127.0.0.1 par défaut + token si
+    # exposition réseau voulue. Bind 0.0.0.0 conservé le temps de la décision produit.
+    uvicorn.run(server_module, host="0.0.0.0", port=port)  # noqa: S104
 
 
 def main() -> None:

@@ -101,16 +101,23 @@ async def root():
 async def serve_spa(full_path: str, request: Request):
     if request.url.path.startswith("/api"):
         raise HTTPException(status_code=404, detail="Not Found")
-    # si le fichier existe physiquement, on le renvoie
-    file_path = get_static_dir() / full_path
-    if file_path.is_file():
+    # si le fichier existe physiquement, on le renvoie — mais uniquement s'il reste
+    # sous le dossier statique (un `../` ne doit pas servir back/.env, audit sécu
+    # 2026-07). Tout chemin hors racine retombe sur l'index SPA.
+    from utils.path_guard import safe_join
+
+    static_dir = get_static_dir()
+    file_path = safe_join(static_dir, full_path)
+    if file_path is not None and file_path.is_file():
         return FileResponse(str(file_path))
     # sinon SPA
-    return FileResponse(str(get_static_dir() / "index.html"))
+    return FileResponse(str(static_dir / "index.html"))
 
 
 # ─── 9) Uvicorn – exécution directe ─────────────────
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)), reload=False)
+    # TODO(sécu audit 2026-07, finding #1) : binder 127.0.0.1 par défaut + token si
+    # exposition réseau voulue. Bind 0.0.0.0 conservé le temps de la décision produit.
+    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8080)), reload=False)  # noqa: S104
