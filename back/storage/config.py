@@ -1,4 +1,5 @@
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 
@@ -129,6 +130,37 @@ def get_llm_model() -> str:
     return cfg.get("llm", {}).get("model") or os.getenv(
         "DEFAULT_MODEL_NAME", "gemini-2.5-flash"
     )
+
+
+def get_llm_provider(model: str) -> str:
+    """Provider LLM (``"vertexai"`` ou ``"openai"``) pour un nom de modèle donné.
+
+    Le NOM de modèle prime : ``gpt-*`` / ``o<N>*`` → OpenAI, ``gemini*`` → Vertex.
+    Les mocksql.yml des projets d'éval portent déjà ``llm.provider: vertexai`` —
+    s'il primait, un modèle gpt-* partirait vers Vertex (404 garanti). Le réglage
+    explicite (``llm.provider`` / env ``LLM_PROVIDER``) ne tranche donc que pour
+    les noms ambigus (modèle custom, proxy). Clé OpenAI : env ``OPENAI_API_KEY``
+    (chargée depuis back/.env par load_dotenv)."""
+    m = model.lower()
+    if m.startswith("gpt-") or re.match(r"^o\d", m):
+        return "openai"
+    if "gemini" in m:
+        return "vertexai"
+    cfg = load_config()
+    explicit = cfg.get("llm", {}).get("provider") or os.getenv("LLM_PROVIDER")
+    if explicit and str(explicit).lower() == "openai":
+        return "openai"
+    return "vertexai"
+
+
+def is_openai_reasoning_model(model: str) -> bool:
+    """Modèles OpenAI à raisonnement natif (gpt-5*, o-série) : ils n'acceptent que la
+    température par défaut et prennent ``reasoning_effort`` au lieu de thinking_budget.
+    Les variantes ``-chat`` (gpt-5-chat-latest) sont des modèles non-raisonnants."""
+    m = model.lower()
+    if re.match(r"^o\d", m):
+        return True
+    return m.startswith("gpt-5") and "chat" not in m
 
 
 def get_llm_streaming() -> bool:
@@ -268,13 +300,18 @@ def is_native_thinking_active() -> bool:
     chain-of-thought (thinking inactif → seul raisonnement disponible) ou juste
     une justification courte (thinking actif → le raisonnement se fait en amont).
     """
+    model = get_llm_model().lower()
+    # OpenAI : le thinking natif dépend du modèle, pas des réglages Gemini
+    # (thinking_budget/thinking_level sont ignorés par la branche OpenAI de make_llm).
+    if get_llm_provider(model) == "openai":
+        return is_openai_reasoning_model(model)
+
     budget = get_llm_thinking_budget()
     if budget is not None:
         return budget > 0
     if get_llm_thinking_level() is not None:
         return True
 
-    model = get_llm_model().lower()
     # `flash-lite` contient `flash` — le tester en premier.
     if "lite" in model:
         return False

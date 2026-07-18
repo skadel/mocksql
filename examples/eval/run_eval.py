@@ -127,6 +127,7 @@ def run_eval(
         "meta": {
             "date": datetime.now().strftime("%Y-%m-%d"),
             "project": project_dir.name,
+            # Clé conservée pour compat des rapports ; peut porter un modèle OpenAI.
             "gemini_model": gemini_model or os.environ.get("DEFAULT_MODEL_NAME", "auto"),
             "n_models": n_total,
             "n_valid": n_valid,
@@ -148,7 +149,14 @@ def main() -> None:
     parser.add_argument("--models", nargs="*", help="Subset de modèles (ex: bq282 bq199)")
     parser.add_argument("--out", help="Chemin du rapport JSON de sortie")
     parser.add_argument("--gcp-project", help="GCP project ID pour VertexAI")
-    parser.add_argument("--gemini-model", default=None, help="Modèle à utiliser (défaut : DEFAULT_MODEL_NAME ou config mocksql)")
+    parser.add_argument(
+        "--model",
+        "--gemini-model",  # alias historique
+        dest="gemini_model",
+        default=None,
+        help="Modèle du juge : gemini-* (Vertex) ou gpt-*/o* (OpenAI, clé OPENAI_API_KEY "
+        "dans back/.env). Défaut : DEFAULT_MODEL_NAME ou config mocksql",
+    )
     args = parser.parse_args()
 
     project_dir = Path(args.project).resolve()

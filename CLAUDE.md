@@ -110,7 +110,7 @@ Les requêtes ne sont **jamais** exécutées sur BigQuery ou Postgres — unique
 | Couche     | Technologie                                              |
 | ---------- | -------------------------------------------------------- |
 | Backend    | Python 3.12 · FastAPI · LangGraph · LangChain            |
-| LLM        | VertexAI (Google Cloud) — **gemini-2.5-flash / pro** (thinking natif requis) |
+| LLM        | VertexAI (Google Cloud) — **gemini-2.5-flash / pro** (thinking natif requis) · OpenAI opt-in (`gpt-*`/`o*` routés par nom de modèle, clé `OPENAI_API_KEY` dans `back/.env`) |
 | SQL        | DuckDB (exécution locale) · BigQuery / Postgres (source) |
 | SQL parse  | `sqlglot`                                                |
 | Base       | PostgreSQL (Cloud SQL)                                   |

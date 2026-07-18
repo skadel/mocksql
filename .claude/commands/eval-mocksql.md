@@ -91,6 +91,14 @@ Lire `examples/eval/results/<date>_<projet>.json` et afficher un tableau markdow
 
 Terminer par le taux global : `N/M valides (X%)`.
 
+## Variante : éval avec un modèle OpenAI
+
+`make_llm` route par **nom de modèle** : `gpt-*` / `o*` → OpenAI (clé `OPENAI_API_KEY` dans `back/.env`), sinon Gemini/Vertex. Les `provider: vertexai` des mocksql.yml de projets n'interfèrent pas.
+
+- **Génération** : préfixer la commande `mocksql generate` de l'étape 3 avec `DEFAULT_MODEL_NAME=<modèle-openai>` (les mocksql.yml des projets d'éval ne fixent pas `llm.model`, l'env s'applique donc).
+- **Juge** : remplacer `--gemini-model …` par `--model <modèle-openai>` à l'étape 4 (les variables VERTEX_PROJECT/GOOGLE_CLOUD_PROJECT deviennent inutiles mais sont inoffensives).
+- ⚠️ Pour comparer un run OpenAI à la baseline Gemini, **garder le même juge** (changer uniquement le modèle de génération) — sinon les scores ne sont pas comparables.
+
 ## Notes importantes
 
 - Le `DUCKDB_PATH` doit pointer vers `<projet>/.mocksql/mocksql.duckdb` (pas `back/data/`).

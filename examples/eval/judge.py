@@ -3,6 +3,8 @@ Juge pour l'évaluation de la première génération de tests MockSQL.
 
 Utilise make_llm() du backend (Vertex AI via ChatGoogleGenerativeAI(vertexai=True))
 si VERTEX_PROJECT est configuré — même pattern que les autres agents MockSQL.
+Un modèle gpt-*/o* route automatiquement vers OpenAI (clé env OPENAI_API_KEY,
+chargée depuis back/.env par run_eval.py).
 
 Évalue un seul test (happy path) sur 3 critères :
   - cohérence_données  : les données sont-elles cohérentes avec le SQL ET la description ? (pas leur réalisme)
