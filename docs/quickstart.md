@@ -3,13 +3,15 @@
 ## Prerequisites
 
 - Python 3.11+
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install)
+- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) — only for Gemini (Vertex AI) and/or BigQuery sources
 - Poetry (`pip install poetry`) — for development from source
 - Node.js 18+ — only to build the frontend
 
 ---
 
 ## 1. Google Cloud authentication
+
+> **Using OpenAI as LLM?** Sections 1–2 are only needed for Gemini (Vertex AI) and/or a **BigQuery source** (schema fetch, profiling, import). With OpenAI + a `postgres` / `duckdb` source, skip straight to [section 3](#3-cli-installation) — no Google Cloud setup required.
 
 MockSQL uses Google application credentials for Vertex AI and BigQuery calls:
 
@@ -28,7 +30,7 @@ The account in use must have the following roles:
 |------|---------|
 | `roles/bigquery.dataViewer` | Read table schemas |
 | `roles/bigquery.user` | Run jobs / dry-run |
-| `roles/aiplatform.user` | Call Vertex AI models (Gemini) |
+| `roles/aiplatform.user` | Call Vertex AI models (Gemini only — drop it if you use OpenAI) |
 
 > **Enabling Gemini (one-time step per project)**
 > IAM roles are not enough: open the [Model Garden](https://console.cloud.google.com/vertex-ai/model-garden), search for a Gemini model and accept the terms of use. This is a one-time operation per GCP project and cannot be done via `gcloud`.
@@ -89,24 +91,31 @@ pip install mocksql[all]         # all connectors
 
 If you trigger a profiling/import step without the matching extra installed, MockSQL fails fast with the exact `pip install mocksql[…]` command to run. Since the default `dialect` is `bigquery`, profiling against BigQuery sources requires `mocksql[bigquery]`.
 
-### Environment variables
+### LLM provider — Gemini or OpenAI
 
-MockSQL reads its GCP configuration from environment variables. The priority is:
+MockSQL picks the LLM backend from the **model name**: `gemini*` → Vertex AI, `gpt-*` / `o<N>` (o3, o4-mini…) → OpenAI. Set `llm.model` in `mocksql.yml` and provide the matching credentials below. The `llm.provider` key only breaks ties for ambiguous names (custom models, proxies).
+
+Credentials and cloud projects come from **environment variables** — never from `mocksql.yml`, which only describes the project structure (paths, dialect, model). The priority is:
 
 ```
 system / CI variable  >  local .env file  >  error
 ```
 
-`mocksql.yml` describes the project structure (paths, dialect) — not the credentials or GCP projects, which change per environment.
+In local development, put them in a **gitignored** `.env` at your project root — MockSQL loads it automatically at startup (`load_dotenv()`). Add `.env` to your `.gitignore`:
 
-#### In local development
+```
+.env
+```
 
-Create a **gitignored** `.env` at your project root:
+<details open>
+<summary><b>Gemini via Vertex AI (default)</b></summary>
+
+Requires the Google Cloud setup from [sections 1–2](#1-google-cloud-authentication) (auth + `roles/aiplatform.user` + Model Garden terms).
 
 ```dotenv
 # .env — do not commit
 VERTEX_PROJECT=my-project-dev
-GOOGLE_CLOUD_LOCATION=us-central1
+GOOGLE_CLOUD_LOCATION=us-central1     # required for Vertex AI calls
 
 # Optional — default: VERTEX_PROJECT
 BQ_TEST_PROJECT=my-project-dev
@@ -115,22 +124,50 @@ BQ_TEST_PROJECT=my-project-dev
 # GOOGLE_APPLICATION_CREDENTIALS=/path/to/service_account.json
 ```
 
-MockSQL loads this file automatically at startup (`load_dotenv()`). Add `.env` to your `.gitignore`:
+```yaml
+# mocksql.yml
+llm:
+  model: gemini-2.5-flash   # or gemini-2.5-pro
+```
 
+MockSQL is tuned for **gemini-2.5-flash / pro**, whose native thinking mode is on by default — prefer them over `flash-lite`.
+
+</details>
+
+<details>
+<summary><b>OpenAI</b></summary>
+
+No Google Cloud setup is needed for the LLM — [sections 1–2](#1-google-cloud-authentication) only remain relevant if your **source warehouse** is BigQuery.
+
+```dotenv
+# .env — do not commit
+OPENAI_API_KEY=sk-...
 ```
-.env
+
+```yaml
+# mocksql.yml
+llm:
+  model: gpt-5-mini         # any gpt-* / o<N> model routes to OpenAI
 ```
+
+Reasoning models (`gpt-5*`, o-series) only accept the default temperature; the optional `llm.thinking_level` key (`low` / `medium` / `high`) is forwarded to them as `reasoning_effort`. Non-reasoning models (`gpt-4.1-mini`, `gpt-5-chat-latest`) behave like classic chat models.
+
+</details>
 
 #### In CI/CD (GitHub Actions, Cloud Build…)
 
 Inject the variables directly — they take priority over the local `.env`:
 
 ```yaml
-# GitHub Actions
+# GitHub Actions — Gemini
 env:
   VERTEX_PROJECT: my-project-preprod
   GOOGLE_CLOUD_LOCATION: us-central1
   BQ_TEST_PROJECT: my-project-preprod   # if different from VERTEX_PROJECT
+
+# GitHub Actions — OpenAI
+env:
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 ```
 
 ```yaml
@@ -142,7 +179,7 @@ env:
   - GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
-`GOOGLE_CLOUD_LOCATION` is required for Vertex AI calls. The DuckDB path is configured via `duckdb_path` in `mocksql.yml` (default: `data/mocksql.duckdb`).
+The DuckDB path is configured via `duckdb_path` in `mocksql.yml` (default: `data/mocksql.duckdb`).
 
 ### `mocksql init`
 
@@ -162,8 +199,7 @@ dialect: bigquery          # bigquery | postgres | duckdb
 models_path: ./models
 duckdb_path: data/mocksql.duckdb   # path to the local DuckDB database
 llm:
-  provider: vertexai       # vertexai | openai
-  model: gemini-2.0-flash  # override the default model (optional)
+  model: gemini-2.5-flash  # gemini* → Vertex AI · gpt-* / o<N> → OpenAI
   streaming: false
 schema_cache: .mocksql/schema_cache.json
 ```
@@ -184,8 +220,8 @@ The `dialect` describes the **source** SQL: it drives validation (dry-run) and o
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `provider` | `vertexai` | LLM backend (`vertexai` or `openai`) |
-| `model` | `gemini-2.0-flash-lite` | Takes priority over `DEFAULT_MODEL_NAME` |
+| `model` | `gemini-2.5-flash` | Takes priority over `DEFAULT_MODEL_NAME`. The name picks the backend: `gemini*` → Vertex AI, `gpt-*` / `o<N>` → OpenAI |
+| `provider` | `vertexai` | Only consulted for **ambiguous** model names (custom models, proxies) — the model name always wins |
 | `streaming` | `false` | Token-by-token streaming |
 
 ### `mocksql generate`
@@ -262,7 +298,7 @@ MockSQL ships two distinct wheels:
 pip install mocksql mocksql-ui
 ```
 
-Make sure the GCP environment variables are set (see [section 3](#3-cli-installation)) then:
+Make sure the LLM provider environment variables are set (see [section 3](#3-cli-installation)) then:
 
 ```bash
 mocksql ui                  # http://localhost:8080/static/
