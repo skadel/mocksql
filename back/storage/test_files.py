@@ -180,11 +180,59 @@ def read_test_doc(path: Path) -> Optional[Dict[str, Any]]:
     return merge_doc(definition, cache)
 
 
+def _case_identity(case: Dict[str, Any], position: int) -> str:
+    """Identité d'un cas pour le rapprochement inter-écritures : ``test_uid``
+    (prioritaire), sinon ``test_index`` (legacy), sinon la position."""
+    return str(case.get("test_uid") or case.get("test_index") or f"@{position}")
+
+
+def _carry_review_fields(doc: Dict[str, Any], previous: Dict[str, Any]) -> None:
+    """Reporte ``review`` / ``expect`` depuis la définition déjà sur disque quand le
+    doc entrant ne les porte pas.
+
+    La confirmation humaine appartient au FICHIER, pas à l'état client transitoire :
+    un ``PATCH /models/sql`` (auto-save front) ou un flux SSE qui remplace les
+    ``test_cases`` en bloc sans ces champs ne doit jamais effacer une confirmation.
+    """
+    prev_cases = {
+        _case_identity(c, i): c
+        for i, c in enumerate(previous.get("test_cases") or [])
+        if isinstance(c, dict)
+    }
+    if not prev_cases:
+        return
+    for i, case in enumerate(doc.get("test_cases") or []):
+        if not isinstance(case, dict):
+            continue
+        prev = prev_cases.get(_case_identity(case, i))
+        if not prev:
+            continue
+        if "review" not in case and isinstance(prev.get("review"), dict):
+            case["review"] = prev["review"]
+        if "expect" not in case and isinstance(prev.get("expect"), dict):
+            case["expect"] = prev["expect"]
+
+
 def write_test_doc(path: Path, doc: Dict[str, Any]) -> None:
     """Écrit la définition (commitée) et le cache gitignoré côte à côte.
 
     Le cache est supprimé s'il devient vide, pour ne pas laisser de fichier mort.
+    Toute écriture dual-write le contrat ``expect`` (spec validation-humaine, Phase 0) :
+    point de passage unique serveur + CLI. Le SQL de la définition déjà sur disque est
+    passé au sync pour la détection de dérive (SQL changé → contrats ``confirmed``
+    basculés ``stale``). Import paresseux — le chemin lecture seule (replay CI) ne
+    paie pas sqlglot.
     """
+    from build_query.expect_contract import sync_expect_on_doc
+
+    previous: Dict[str, Any] = {}
+    if path.exists():
+        try:
+            previous = json.loads(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            previous = {}
+    _carry_review_fields(doc, previous)
+    sync_expect_on_doc(doc, previous_sql=previous.get("sql"))
     definition, cache = split_doc(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

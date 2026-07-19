@@ -285,6 +285,7 @@ async def _run_one_case(
     con,
     precompiled_sql: str,
     setup_error: str | None = None,
+    sql_drifted: bool = False,
 ) -> dict:
     """Rejoue UN cas dans les tables déjà créées par modèle (cf. `_setup_model`).
 
@@ -299,6 +300,7 @@ async def _run_one_case(
     (éviter d'exécuter à vide, qui logue des erreurs `Failed to run query` trompeuses).
     """
     from build_query.assertion_eval import _evaluate_assertions
+    from build_query.expect_contract import compare_expect, rows_from_df
     from utils.examples import execute_queries, run_query_on_test_dataset
     from utils.insert_examples import insert_examples, replace_missing_with_null
 
@@ -313,6 +315,20 @@ async def _run_one_case(
     saved_assertions = [
         a for a in (test_case.get("assertion_results") or []) if a.get("sql")
     ]
+    # Contrat `expect` (spec validation-humaine) : comparé en OMBRE des assertions
+    # (Phase 0 — jamais bloquant tant que des assertions existent). Sans assertions,
+    # le contrat devient le check et détermine le statut du cas.
+    expect = (
+        test_case.get("expect") if isinstance(test_case.get("expect"), dict) else None
+    )
+    review = test_case.get("review") or {}
+    review_status = review.get("status") if isinstance(review, dict) else None
+    # Dérive détectée au replay (SQL disque ≠ snapshot) : un contrat confirmé ne vaut
+    # plus tel quel — rapporté `stale` SANS écrire (le replay est lecture seule ; la
+    # bascule persistée se fait à l'écriture, cf. sync_expect_on_doc).
+    if sql_drifted and review_status == "confirmed":
+        review_status = "stale"
+    meta["review"] = review_status
 
     if not data:
         return {
@@ -322,7 +338,7 @@ async def _run_one_case(
             "reason": "no data",
             "assertions": [],
         }
-    if not saved_assertions:
+    if not saved_assertions and expect is None:
         return {
             "index": test_index,
             **meta,
@@ -360,6 +376,21 @@ async def _run_one_case(
             sql, suffix, "cli", dialect, con, precompiled_sql=precompiled_sql
         )
 
+        expect_check = (
+            compare_expect(expect, rows_from_df(result_df)) if expect else None
+        )
+        if not saved_assertions:
+            # Cas sans assertions mais avec contrat : la comparaison de lignes EST le
+            # test (comportement cible Phase 2, atteint ici seulement si l'utilisateur
+            # a supprimé les assertions).
+            return {
+                "index": test_index,
+                **meta,
+                "status": "pass" if expect_check and expect_check["passed"] else "fail",
+                "assertions": [],
+                "expect_check": expect_check,
+            }
+
         remapped_assertions = [
             {
                 **a,
@@ -385,6 +416,7 @@ async def _run_one_case(
             **meta,
             "status": "pass" if all_passed else "fail",
             "assertions": assertion_results,
+            **({"expect_check": expect_check} if expect_check else {}),
         }
     except Exception as exc:
         return {
@@ -479,6 +511,12 @@ async def run_tests(
                 snapshot_sql=test_doc.get("sql", ""),
                 frozen=frozen,
             )
+            # Dérive : le SQL rejoué (disque) diffère du snapshot stocké → les contrats
+            # confirmés seront rapportés `stale` (re-confirmation attendue, cf. spec).
+            sql_drifted = (
+                sql_source == "disk"
+                and sql.strip() != (test_doc.get("sql") or "").strip()
+            )
             used_columns_raw: list[str] = test_doc.get("used_columns") or []
             used_columns_parsed: list[dict] = []
             for raw in used_columns_raw:
@@ -528,6 +566,7 @@ async def run_tests(
                     con=con,
                     precompiled_sql=precompiled_sql,
                     setup_error=setup_error,
+                    sql_drifted=sql_drifted,
                 )
                 # Attestation de parité warehouse (informatif, jamais bloquant) :
                 # verified / stale (empreinte périmée) / unverified (jamais audité).

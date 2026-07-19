@@ -120,6 +120,39 @@ async def run_validate(config_path: Path, model: str, test_uid: str) -> dict[str
     }
 
 
+# ── confirm ────────────────────────────────────────────────────────────────────
+
+
+def run_confirm(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
+    """Confirmation humaine du contrat ``expect`` d'un cas (spec validation-humaine).
+
+    Miroir CLI du endpoint ``POST /tests/confirm`` : gèle la sortie actuellement
+    observée (``results_json``, repli sur l'``expect`` stocké) et pose
+    ``review.status = "confirmed"`` / ``confirmed_by = "user"``. Déterministe, sans LLM.
+    """
+    from build_query.expect_contract import confirm_case
+
+    path, doc = load_doc(config_path, model)
+    tc = require_test_case(doc, test_uid)
+    try:
+        confirmed = confirm_case(tc, doc.get("sql") or "")
+    except ValueError as exc:
+        raise TestDocError(str(exc))
+    doc["test_cases"] = [
+        confirmed if c.get("test_uid") == test_uid else c
+        for c in doc.get("test_cases") or []
+    ]
+    save_doc(path, doc)
+    return {
+        "model": model,
+        "test_uid": test_uid,
+        "test_name": confirmed.get("test_name"),
+        "review": confirmed["review"],
+        "expect_rows": len(confirmed["expect"].get("rows") or []),
+        "expect_columns": confirmed["expect"].get("columns") or [],
+    }
+
+
 # ── suggest ────────────────────────────────────────────────────────────────────
 
 
