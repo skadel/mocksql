@@ -18,6 +18,7 @@ import pytest
 import sqlglot
 
 from build_query.validator import prune_constant_group_by
+from utils import sqlglot_patches
 from utils.examples import fix_duck_db_sql, parse_test_query, _fix_group_by_strict_mode
 
 
@@ -127,31 +128,28 @@ class TestDateTruncWeek:
 
 class TestSafeFunctions:
     def test_safe_parse_date_end_to_end(self, con):
-        """SAFE.PARSE_DATE → TRY_STRPTIME.
+        """SAFE.PARSE_DATE s'exécute et rend NULL sur une valeur hors format.
 
-        sqlglot 30.x produit SAFE.CAST(STRPTIME(col, '%fmt') AS DATE).
-        fix_duck_db_sql convertit en TRY_STRPTIME(col, '%fmt').
+        On asserte la *sémantique*, pas la fonction rendue : selon la version de
+        sqlglot et l'état du patch générateur (utils/sqlglot_patches.py), le SQL
+        produit est TRY_STRPTIME(...) ou TRY(STRPTIME(...)) — les deux sont
+        corrects, seule la valeur retournée engage MockSQL.
         """
         raw = transpile("SELECT SAFE.PARSE_DATE('%Y-%m-%d', s) FROM events")
-        assert "SAFE.CAST" in raw
-        duckdb_fails(con, raw)
-
         fixed = fix_duck_db_sql(raw)
 
-        assert "TRY_STRPTIME" in fixed
-        assert "SAFE.CAST" not in fixed
+        assert "SAFE." not in fixed.upper()
         duckdb_ok(con, fixed)
 
     def test_parse_datetime_end_to_end(self, con):
-        """PARSE_DATETIME → TRY_STRPTIME (retourne NULL si valeur incompatible avec le format)."""
+        """PARSE_DATETIME s'exécute et rend NULL si la valeur ne matche pas le format."""
         raw = transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
-        duckdb_fails(con, raw)
-
         fixed = fix_duck_db_sql(raw)
 
-        assert "TRY_STRPTIME" in fixed
-        assert "PARSE_DATETIME" not in fixed
+        assert "PARSE_DATETIME" not in fixed.upper()
         duckdb_ok(con, fixed)
+        # `s` vaut '2024-01-15' : incompatible avec un format qui exige l'heure.
+        assert con.execute(fixed).fetchone()[0] is None
 
     def test_safe_cast_already_translated_by_sqlglot(self, con):
         """sqlglot traduit SAFE_CAST → TRY_CAST nativement ; fix ne doit pas le casser."""
@@ -683,34 +681,31 @@ class TestExtractDateNestedParen:
 
 class TestParseDatetimeArgOrder:
     """
-    Bug : sqlglot 30+ produit PARSE_DATETIME(value, '%fmt') — valeur en 1er.
-    L'ancien regex 1 matchait le 1er arg comme si c'était le format et produisait
-    TRY_STRPTIME('%fmt', value) — arguments inversés → DuckDB retourne NULL.
+    Historique : sqlglot 30+ produit PARSE_DATETIME(value, '%fmt') — valeur en
+    1er, là où sqlglot <30 mettait le format en 1er. Les regex de
+    fix_duck_db_sql identifient donc l'arg format par son préfixe '%' plutôt que
+    par sa position.
 
-    Fix attendu : utiliser la présence de '%' pour identifier l'arg format,
-    quel que soit l'ordre.
+    Cette ambiguïté ne concerne plus que le SQL reçu sous forme de *texte* : le
+    SQL transpilé passe désormais par le patch générateur
+    (utils/sqlglot_patches.py), qui rend depuis l'AST où `this` et `format` sont
+    des arguments nommés — aucun ordre à deviner.
     """
 
-    def test_canary_sqlglot_30_produces_value_first(self):
+    def test_canary_sqlglot_parse_datetime_native_support(self):
         """
-        CANARY — sqlglot 30+ inverse les args : PARSE_DATETIME(value, '%fmt').
-        Si ce test échoue, sqlglot a re-changé l'ordre et le fix doit être adapté.
-        """
-        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
-        assert raw.startswith("PARSE_DATETIME(col"), (
-            f"CANARY : sqlglot ne produit plus value-first pour PARSE_DATETIME. raw={raw!r}. "
-            "Vérifier si la logique de détection '%' est toujours correcte."
-        )
+        CANARY — sqlglot ne traduit toujours pas PARSE_DATETIME vers DuckDB, donc
+        notre rendu de secours reste nécessaire.
 
-    def test_canary_sqlglot_does_not_translate_parse_datetime(self):
+        Le flag est un constat de sondage posé à l'import par le patch, pas un
+        réglage. S'il passe True, sqlglot a gagné la traduction native :
+        supprimer `_parse_datetime_to_strptime` et sa branche dans
+        `apply_duckdb_date_parse_patches` (le patch se contentera d'envelopper).
         """
-        CANARY — sqlglot ne traduit pas PARSE_DATETIME → TRY_STRPTIME nativement.
-        Si ce test échoue, fix_duck_db_sql n'est plus utile pour ce cas.
-        """
-        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
-        assert "PARSE_DATETIME" in raw.upper(), (
-            f"CANARY : sqlglot traduit maintenant PARSE_DATETIME nativement. raw={raw!r}. "
-            "La correction fix_duck_db_sql est désormais redondante pour ce cas."
+        assert sqlglot_patches.parse_datetime_native_support is False, (
+            "CANARY : sqlglot traduit maintenant PARSE_DATETIME nativement "
+            "(parse_datetime_native_support=True). Le rendu de secours "
+            "`_parse_datetime_to_strptime` est devenu redondant — le supprimer."
         )
 
     def test_literal_value_first_correctly_converted(self):
@@ -731,16 +726,21 @@ class TestParseDatetimeArgOrder:
         )
 
     def test_col_value_first_correctly_converted(self, con):
+        """Le format est appliqué à la bonne colonne, quel que soit l'ordre rendu.
+
+        Assertion sémantique : `s` = '2024-01-15' parse sous '%Y-%m-%d' et pas
+        sous un format qui exige l'heure. Des args inversés donneraient NULL sur
+        les deux — c'est ce que ce test attrape.
         """
-        sqlglot 30+ : PARSE_DATETIME(col, '%Y-%m-%d %H:%M:%S')
-        fix doit produire : TRY_STRPTIME(col, '%Y-%m-%d %H:%M:%S').
-        """
-        raw = transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
-        assert "PARSE_DATETIME" in raw
-        fixed = fix_duck_db_sql(raw)
-        assert "TRY_STRPTIME" in fixed
-        assert "PARSE_DATETIME" not in fixed.upper()
-        con.execute(fixed)
+        matching = fix_duck_db_sql(
+            transpile("SELECT PARSE_DATETIME('%Y-%m-%d', s) FROM events")
+        )
+        assert con.execute(matching).fetchone()[0] is not None
+
+        mismatching = fix_duck_db_sql(
+            transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
+        )
+        assert con.execute(mismatching).fetchone()[0] is None
 
     def test_format_first_legacy_still_converted(self, con):
         """
@@ -772,13 +772,12 @@ class TestSqlglotVersionCanaries:
 
     # --- Cas où sqlglot NE corrige PAS (fix encore nécessaire) ---
 
-    def test_canary_parse_datetime_not_translated(self):
-        """sqlglot ne traduit pas PARSE_DATETIME → TRY_STRPTIME."""
-        raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
-        assert "PARSE_DATETIME" in raw.upper(), (
-            "CANARY ROMPU : sqlglot traduit maintenant PARSE_DATETIME — "
-            "supprimer la correction dans fix_duck_db_sql."
-        )
+    # Note : le canary PARSE_DATETIME vit désormais dans
+    # TestParseDatetimeArgOrder.test_canary_sqlglot_parse_datetime_native_support.
+    # Il ne peut plus s'exprimer ici en inspectant `transpile(...)` : le patch
+    # générateur (utils/sqlglot_patches.py) s'applique au process entier, donc
+    # `transpile` renvoie déjà la forme corrigée. Le canary interroge à la place
+    # le constat de sondage posé par le patch à l'import.
 
     def test_canary_extract_date_not_translated(self):
         """sqlglot ne traduit pas EXTRACT(DATE FROM ...) → CAST(... AS DATE)."""

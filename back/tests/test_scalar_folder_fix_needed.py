@@ -147,37 +147,36 @@ class TestMissedFolds:
         assert "2024-01-15" in result
         assert "EXTRACT" not in result.upper()
 
-    def test_parse_datetime_fails_in_duckdb(self):
+    def test_parse_datetime_executable_without_fix(self):
         """
-        PARSE_DATETIME('%Y-%m-%d', '2024-01-15') :
-          sqlglot 30 inverse les args → PARSE_DATETIME('2024-01-15', '%Y-%m-%d')
-          DuckDB ne connaît pas PARSE_DATETIME → erreur → fold raté.
+        Le gap PARSE_DATETIME est désormais fermé en amont, au générateur.
+
+        Historiquement, `_duck(...)` rendait `PARSE_DATETIME('2024-01-15', ...)`
+        — une fonction absente du catalogue DuckDB → erreur → fold raté, et il
+        fallait passer par fix_duck_db_sql pour rattraper. Le patch générateur
+        (utils/sqlglot_patches.py) rend directement du DuckDB exécutable, donc
+        le fold n'a plus besoin du rattrapage textuel pour ce cas.
         """
         duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
 
-        # sqlglot 30+ met la valeur en premier, le format en second
-        assert duck_expr.startswith("PARSE_DATETIME('2024-01-15'")
-
-        with pytest.raises(duckdb.Error):
-            _eval_with_duckdb(duck_expr)
+        assert "PARSE_DATETIME" not in duck_expr.upper()
+        assert _eval_with_duckdb(duck_expr) is not None
 
     def test_parse_datetime_fix_duck_db_sql_correctly_ordered(self):
         """
-        Bug corrigé : fix_duck_db_sql détecte maintenant l'arg format via '%'.
-          entrée  : PARSE_DATETIME('2024-01-15', '%Y-%m-%d')   ← valeur 1er (sqlglot 30+)
-          sortie  : TRY_STRPTIME('2024-01-15', '%Y-%m-%d')     ← ordre correct
-          résultat DuckDB : timestamp non-NULL
+        Le format est appliqué à la bonne valeur, quel que soit l'ordre rendu.
 
-        Intégrer fix_duck_db_sql résout maintenant ce cas.
+        Un ordre d'arguments inversé (le bug historique de sqlglot 30) donnerait
+        NULL : c'est la valeur retournée qui l'atteste, pas le nom de la
+        fonction produite.
         """
         duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
         fixed_sql = fix_duck_db_sql(f"SELECT {duck_expr}")
         fixed_expr = fixed_sql[len("SELECT ") :]
 
-        assert "TRY_STRPTIME" in fixed_expr
         result = _eval_with_duckdb(fixed_expr)
         assert result is not None, (
-            f"TRY_STRPTIME a retourné NULL — args peut-être encore inversés : {fixed_expr!r}"
+            f"parsing retourné NULL — args peut-être inversés : {fixed_expr!r}"
         )
 
     def test_parse_datetime_expression_folded_with_fix(self):
