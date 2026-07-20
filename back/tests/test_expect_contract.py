@@ -46,6 +46,45 @@ def test_build_expect_falls_back_to_all_columns():
     assert expect["columns"] == ["order_id", "amount", "label"]
 
 
+def test_build_expect_explicit_columns_win():
+    # Colonnes porteuses fournies (coherence_check) → priment sur les assertions et sur
+    # « toutes ». Casse du résultat conservée, rapprochement insensible à la casse.
+    assertions = [{"expected_condition": "ROUND(AMOUNT, 2) >= 100", "sql": "x"}]
+    expect = build_expect(
+        _results_json(), assertions, "SELECT 1", columns=["ORDER_ID", "label"]
+    )
+    assert expect["columns"] == ["order_id", "label"]
+    assert expect["rows"] == [
+        {"order_id": 1, "label": "ok"},
+        {"order_id": 2, "label": "ko"},
+    ]
+
+
+def test_build_expect_explicit_columns_unknown_falls_back():
+    # Colonnes demandées absentes du résultat → repli sur toutes les colonnes.
+    expect = build_expect(_results_json(), None, "SELECT 1", columns=["ghost"])
+    assert expect["columns"] == ["order_id", "amount", "label"]
+
+
+def test_sync_preserves_chosen_columns_on_refresh():
+    # Un draft dont l'expect porte déjà un choix de colonnes (coherence_check) garde ce
+    # choix quand sync rafraîchit les lignes.
+    doc = _doc(
+        case_extra={
+            "review": {"status": "draft", "hint": "vérifie order_id=1"},
+            "expect": {
+                "columns": ["order_id"],
+                "rows": [{"order_id": 9}],
+                "ordered": True,
+            },
+        }
+    )
+    sync_expect_on_doc(doc)
+    case = doc["test_cases"][0]
+    assert case["expect"]["columns"] == ["order_id"]
+    assert case["expect"]["rows"] == [{"order_id": 1}, {"order_id": 2}]
+
+
 def test_build_expect_unparseable_results_is_none():
     assert build_expect("pas du json", [], "SELECT 1") is None
     assert build_expect(None, [], "SELECT 1") is None

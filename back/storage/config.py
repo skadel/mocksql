@@ -365,6 +365,23 @@ _LANGUAGE_NAMES = {
 _DEFAULT_LANGUAGE = "en"
 
 
+def is_coherence_check_enabled() -> bool:
+    """Active le ``coherence_check`` (spec validation-humaine §4 — le LLM PRÉPARE la revue :
+    hint + coherence + colonnes porteuses de ``expect`), en plus du pipeline d'assertions.
+
+    Réglage transitoire de Phase 2 : lu depuis ``coherence_check:`` dans mocksql.yml, repli
+    sur l'env ``MOCKSQL_COHERENCE_CHECK``. **Défaut OFF** — c'est un appel LLM supplémentaire
+    par génération non vide (coût/latence) et le signal reste à valider sur des tests neufs.
+    En Phase 3, le coherence_check remplacera la génération d'assertions (plus un ajout).
+    """
+    raw = load_config().get("coherence_check")
+    if raw is None:
+        raw = os.getenv("MOCKSQL_COHERENCE_CHECK")
+    if raw is None:
+        return False
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_language() -> str:
     """Code langue de sortie ('en' par défaut).
 

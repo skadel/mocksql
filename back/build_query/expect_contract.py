@@ -159,18 +159,34 @@ def _assertion_columns(
     return found
 
 
+def _resolve_columns(requested: List[str], available: List[str]) -> List[str]:
+    """Restreint ``requested`` aux colonnes réellement présentes (casse du résultat
+    conservée, rapprochement insensible à la casse), en préservant l'ordre demandé.
+    Aucune correspondance → [] (l'appelant retombe sur toutes les colonnes)."""
+    by_lower = {c.lower(): c for c in available}
+    out: List[str] = []
+    for c in requested:
+        match = by_lower.get(str(c).lower())
+        if match and match not in out:
+            out.append(match)
+    return out
+
+
 def build_expect(
     results_json: Any,
     assertions: Optional[List[Dict[str, Any]]],
     sql: str,
     dialect: Optional[str] = None,
+    columns: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Construit le contrat ``expect`` depuis la sortie observée.
 
-    ``columns`` : colonnes des assertions quand identifiables, sinon toutes les
-    colonnes du résultat. ``ordered`` : True ssi ORDER BY top-level dans le SQL.
-    ``rows`` vide est un contrat VALIDE (sortie vide attendue) ; ``results_json``
-    illisible → None (cas non exprimable en lignes).
+    ``columns`` : quand fourni explicitement (colonnes porteuses choisies par le
+    ``coherence_check``, spec §5), on s'y restreint ; sinon on retombe sur les colonnes
+    des assertions quand identifiables, sinon toutes les colonnes du résultat.
+    ``ordered`` : True ssi ORDER BY top-level dans le SQL. ``rows`` vide est un contrat
+    VALIDE (sortie vide attendue) ; ``results_json`` illisible → None (cas non
+    exprimable en lignes).
     """
     rows = rows_from_results_json(results_json)
     if rows is None:
@@ -180,10 +196,14 @@ def build_expect(
         for key in row:
             if key not in available:
                 available.append(key)
-    columns = _assertion_columns(assertions, available) or available
+    chosen = (
+        (_resolve_columns(columns, available) if columns else [])
+        or _assertion_columns(assertions, available)
+        or available
+    )
     return {
-        "columns": columns,
-        "rows": [_display_row(r, columns) for r in rows],
+        "columns": chosen,
+        "rows": [_display_row(r, chosen) for r in rows],
         "ordered": detect_ordered(sql, dialect),
     }
 
@@ -291,8 +311,16 @@ def sync_expect_on_doc(doc: Dict[str, Any], previous_sql: Optional[str] = None) 
                 continue
             if "results_json" not in case:
                 continue
+            # Colonnes déjà choisies (coherence_check, spec §5, ou édition humaine) :
+            # collantes au rafraîchissement d'un draft — on refresh les LIGNES sans
+            # perdre la sélection de colonnes porteuses.
+            prev = case.get("expect") if isinstance(case.get("expect"), dict) else None
+            prev_columns = prev.get("columns") if prev else None
             expect = build_expect(
-                case.get("results_json"), case.get("assertion_results"), sql
+                case.get("results_json"),
+                case.get("assertion_results"),
+                sql,
+                columns=prev_columns or None,
             )
             if expect is None:
                 continue

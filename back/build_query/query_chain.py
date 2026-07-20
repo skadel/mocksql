@@ -14,6 +14,7 @@ from build_query.description_proposal import (
     propose_description_node,
     reject_description,
 )
+from build_query.coherence_check import coherence_check
 from build_query.conversational_agent import conversational_agent
 from build_query.data_patcher import data_patcher_node
 from build_query.debug_node import debug_test_node
@@ -668,6 +669,7 @@ def build_query_graph():
     add_timed_node("executor", run_on_examples)
     add_timed_node("assertion_generator", generate_assertions)
     add_timed_node("assertion_corrector", correct_assertions)
+    add_timed_node("coherence_check", coherence_check)
     add_timed_node("test_evaluator", evaluate_tests)
     add_timed_node("bad_data_to_agent", _bad_data_to_agent)
     add_timed_node("bad_data_exhausted", _bad_data_exhausted)
@@ -759,7 +761,13 @@ def build_query_graph():
     builder.add_edge("generator", "executor")
     builder.add_edge("assertion_modifier", "executor")
     builder.add_conditional_edges("executor", route_executor)
-    builder.add_edge("assertion_generator", "test_evaluator")
+    # Phase 2 (spec validation-humaine §4) : sur une sortie NON vide, le coherence_check
+    # PRÉPARE la revue humaine (hint + coherence + colonnes porteuses de expect) entre la
+    # génération d'assertions (repli conservé) et l'évaluation. Additif et non bloquant :
+    # un warn ne déclenche aucune boucle, la boucle bad_data reste déterministe (0 ligne /
+    # tout-NULL) et suit le circuit empty_results → test_evaluator direct.
+    builder.add_edge("assertion_generator", "coherence_check")
+    builder.add_edge("coherence_check", "test_evaluator")
     builder.add_conditional_edges("test_evaluator", route_evaluator)
     builder.add_edge("bad_data_to_agent", "conversational_agent")
     builder.add_edge("bad_data_exhausted", "history_saver")

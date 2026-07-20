@@ -447,29 +447,45 @@ def _print_test_results(model_results: list) -> None:
         typer.echo("No tests found. Run `mocksql generate <model.sql>` first.")
         return
 
-    total = passed = failed = skipped = 0
+    total = passed = failed = skipped = unconfirmed_n = 0
 
     for mr in model_results:
         cases = mr["cases"]
         n_pass = sum(1 for c in cases if c["status"] == "pass")
         n_fail = sum(1 for c in cases if c["status"] in ("fail", "error"))
         n_skip = sum(1 for c in cases if c["status"] == "skip")
+        n_unconf = sum(1 for c in cases if c["status"] == "unconfirmed")
         total += len(cases)
         passed += n_pass
         failed += n_fail
         skipped += n_skip
+        unconfirmed_n += n_unconf
 
         icon = "✓" if n_fail == 0 else "✗"
-        skip_label = f", {n_skip} skipped" if n_skip else ""
+        extra = ", ".join(
+            part
+            for part in (
+                f"{n_skip} skipped" if n_skip else "",
+                f"{n_unconf} unconfirmed" if n_unconf else "",
+            )
+            if part
+        )
+        extra_label = f", {extra}" if extra else ""
         typer.echo(
-            f"\n  {icon} {mr['model']}  ({n_pass}/{len(cases)} passed{skip_label})"
+            f"\n  {icon} {mr['model']}  ({n_pass}/{len(cases)} passed{extra_label})"
         )
 
         for c in cases:
             status = c["status"]
-            label = {"pass": "PASS", "fail": "FAIL", "error": "ERR ", "skip": "SKIP"}[
-                status
-            ]
+            label = {
+                "pass": "PASS",
+                "fail": "FAIL",
+                "error": "ERR ",
+                "skip": "SKIP",
+                # Spec validation-humaine §7 : un cas non confirmé dont les lignes
+                # divergent du snapshot n'est PAS un échec — il attend une revue humaine.
+                "unconfirmed": "UNCF",
+            }[status]
             idx = c.get("index", "?")
             title = c.get("name") or f"Test {idx}"
             # Attestation de parité warehouse (cf. `mocksql parity`) — informatif,
@@ -486,26 +502,29 @@ def _print_test_results(model_results: list) -> None:
                 "stale": "  [stale — à re-confirmer]",
             }.get(c.get("review") or "", "")
             typer.echo(f"  [{label}] {title}{parity_badge}{review_badge}")
-            # Comparaison de lignes au contrat expect (shadow Phase 0) : signalée
-            # quand elle diverge du verdict assertions — c'est le diff de revue.
+            # Diff de lignes au contrat expect (Phase 2 : le contrat FAIT le verdict).
             ec = c.get("expect_check")
-            if ec and not ec.get("passed") and status == "pass":
-                hint = (
-                    " (mêmes lignes, ordre différent — ex-æquo possible)"
-                    if ec.get("order_only_mismatch")
-                    else ""
-                )
-                typer.echo(
-                    f"           expect: sortie ≠ contrat "
-                    f"({ec.get('expected_count')} attendue(s) / "
-                    f"{ec.get('actual_count')} obtenue(s)){hint}"
-                )
+            if ec and not ec.get("passed"):
+                if ec.get("order_only_mismatch"):
+                    # Mêmes lignes, ordre différent → ex-æquo (non-déterminisme). Pass,
+                    # mais on FLAGGE (spec §8 : rendre les données discriminantes, axe tie).
+                    typer.echo(
+                        "           non-déterminisme : mêmes lignes, ordre différent "
+                        "(ex-æquo sur la clé de tri — rendre les données discriminantes)"
+                    )
+                else:
+                    # Sortie ≠ contrat : régression (cas confirmé) ou à revoir (unconfirmed).
+                    typer.echo(
+                        f"           expect: sortie ≠ contrat "
+                        f"({ec.get('expected_count')} attendue(s) / "
+                        f"{ec.get('actual_count')} obtenue(s))"
+                    )
             # Description complète en sous-ligne quand elle apporte plus que le titre.
             desc = c.get("description")
             if desc and desc != title:
                 typer.echo(f"           {desc}")
 
-            if status in ("fail", "error"):
+            if status in ("fail", "error", "unconfirmed"):
                 if c.get("error"):
                     typer.echo(f"           error: {c['error']}")
                 if ec and not ec.get("passed"):
@@ -543,8 +562,16 @@ def _print_test_results(model_results: list) -> None:
                 typer.echo(f"           skipped: {c.get('reason', '')}")
 
     typer.echo(f"\n  {'─' * 52}")
-    skip_summary = f", {skipped} skipped" if skipped else ""
-    typer.echo(f"  Results: {passed}/{total} tests passed{skip_summary}")
+    summary = ", ".join(
+        part
+        for part in (
+            f"{skipped} skipped" if skipped else "",
+            f"{unconfirmed_n} unconfirmed" if unconfirmed_n else "",
+        )
+        if part
+    )
+    summary_suffix = f", {summary}" if summary else ""
+    typer.echo(f"  Results: {passed}/{total} tests passed{summary_suffix}")
     if failed:
         typer.echo(f"  {failed} test(s) FAILED — exit code 1")
 
@@ -934,6 +961,69 @@ def confirm(
     except TestDocError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
+
+
+export_app = typer.Typer(
+    name="export",
+    help="Export MockSQL tests to other formats (dbt unit tests).",
+    no_args_is_help=True,
+)
+app.add_typer(export_app, name="export")
+
+
+@export_app.command("dbt")
+def export_dbt_cmd(
+    target: list[str] = typer.Option(
+        [],
+        "--target",
+        "-t",
+        help="Model to export (repeatable, e.g. -t marts/orders). Default: --all.",
+    ),
+    all_models: bool = typer.Option(
+        False, "--all", help="Export every test that resolves to a dbt node."
+    ),
+    check: bool = typer.Option(
+        False,
+        "--check",
+        help="CI mode: compare rendered YAML to disk, exit 1 on drift. Writes nothing.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the YAML to stdout without writing."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Compile confirmed MockSQL tests into native dbt unit_tests YAML. No LLM calls.
+
+    Le contrat `expect` (lignes confirmées par un humain) EST le bloc `expect:` dbt :
+    export déterministe, sans replay ni entrepôt. Contrat unique replay ↔ export.
+    """
+    from cli.export_dbt import ExportError, run_export
+
+    try:
+        exit_code, exports = run_export(
+            config.resolve(),
+            targets=list(target) or None,
+            all_models=all_models,
+            check=check,
+            dry_run=dry_run,
+        )
+    except ExportError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+    for me in exports:
+        r = me.result
+        if me.action == "dry-run":
+            typer.echo(f"\n# ── {r.model} ({len(r.unit_tests)} test(s)) ──")
+            typer.echo(me.rendered)
+        else:
+            n = len(r.unit_tests)
+            detail = r.model_error or f"{n} test(s), {len(r.excluded)} exclu(s)"
+            typer.echo(f"  [{me.action}] {r.model} — {detail}")
+        for test_id, reason in r.excluded:
+            typer.echo(f"      exclu {test_id} : {reason}")
+
+    raise typer.Exit(exit_code)
 
 
 suggest_app = typer.Typer(

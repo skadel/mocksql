@@ -1,6 +1,8 @@
 # Spec — Validation humaine de l'output (« generate → execute → confirm »)
 
-> Statut : **Phase 0 validée (GO) + Phase 1 implémentée** — 2026-07-19. Voir §11.
+> Statut : **Phases 0+1+2 implémentées** — 2026-07-19. Phase 3 (destruction) GATÉE par
+> une validation du coherence_check sur des tests NEUFS (génération LLM live, cf. §11).
+> Voir §11.
 > Origine : étude comparative dbt 1.8 `unit_tests` / Rocky `[[test.given]]` (juillet 2026).
 
 ## 1. Constat et motivation
@@ -273,10 +275,39 @@ Les deux désaccords plaident **pour** la comparaison de lignes → **GO**.
   « Confirmer cette sortie » (+ « Corriger via le chat »), masqué quand le prompt
   de désync est affiché.
 
-### Reste (Phases 2-3, non engagées)
+### Phase 2 implémentée (2026-07-19)
 
-`coherence_check` + `review_hint`, bascule du replay sur les lignes (suppression du
-remapping d'assertions), export dbt branché sur `expect`, écran de diff riche pour
-`stale` (l'UI affiche le badge + la sortie courante ; le diff ligne-à-ligne est dans
-la CLI), suppression `assertion_generator`/`assertion_corrector`/gardes/taxonomie,
-mise à jour CLAUDE.md (valeur n°2 repositionnée).
+- **2.2 Replay sur les lignes** (`cli/test_runner.py:_run_one_case` + `_expect_verdict`) :
+  un cas qui porte un `expect` est jugé par la **comparaison de lignes** — plus de
+  `_remap_assertion_sql` (repli assertions seulement sans `expect`). `confirmed` = gate de
+  non-régression (`fail`) ; `draft`/`stale` = `unconfirmed` (jamais bloquant, hors exit code
+  sauf `--require-confirmed`) ; `order_only_mismatch` = ex-æquo non bloquant (spec §8).
+  **Preuve corpus spider2-snow** (`mocksql test --frozen`, zéro LLM) : **78/79 confirmed
+  pass**, drafts unconfirmed ; le seul « fail » (sf_bq263) est un contrat gelé AVANT le fix
+  UTC-tz → le replay attrape correctement la valeur tz-corrigée (système qui MARCHE).
+- **2.3 Export dbt** (`cli/export_dbt.py`, `mocksql export dbt`) : `expect` = bloc `expect:`
+  dbt, export déterministe zéro LLM sans replay (`given` = tous les parents du DAG via
+  `DbtProject.parent_relations`, fixture vide si non peuplé) ; gates confirmed/mort-né/
+  hors-DAG/non-sérialisable/incremental ; `--check`/`--dry-run`/`-t`/`--all`.
+- **2.1 coherence_check** (`build_query/coherence_check.py`) : nœud LLM léger qui PRÉPARE la
+  revue (`coherence` ok|warn, `review_hint` ancré, `key_columns` → `expect.columns`,
+  `non_deterministic`) — ne juge plus l'output. `build_expect(..., columns=)` explicite +
+  sync qui préserve les colonnes choisies. Wiring **additif** `assertion_generator →
+  coherence_check → test_evaluator`, **gaté OFF par défaut** (`is_coherence_check_enabled`,
+  `coherence_check:` yml / env `MOCKSQL_COHERENCE_CHECK`) pour ne pas régresser la latence
+  tant que le signal n'est pas validé. `warn` non bloquant (la boucle `bad_data` reste
+  déterministe). Tests LLM mockés.
+
+### Reste (Phase 3 — GATÉE, non engagée)
+
+Suppression `assertion_generator`/`assertion_corrector`/gardes anti-vacuité/pin de
+cardinalité/champ `scope`/`_remap_assertion_sql`, effondrement de la taxonomie
+`evaluation_feedback` (ne restent que `bad_data` + exécution en erreur), retrait
+`description_proposal`/résidu `accept_validation`, écran de diff riche `stale` (UI), mise à
+jour CLAUDE.md (valeur n°2 repositionnée + diagramme du graph).
+
+**Gate explicite** (contrainte produit « rien de destructif tant que le nouveau chemin n'est
+pas prouvé sur les NOUVEAUX tests ») : la destruction du pipeline d'assertions exige d'abord
+de **valider le coherence_check sur des tests neufs** — donc une génération LLM live
+(actuellement bloquée : facturation GCP coupée ; possible via OpenAI avec budget autorisé).
+Le corpus MIGRÉ est déjà prouvé (2.2), mais les tests NEUFS ne le sont pas encore.
