@@ -694,18 +694,21 @@ class TestParseDatetimeArgOrder:
 
     def test_canary_sqlglot_parse_datetime_native_support(self):
         """
-        CANARY — sqlglot ne traduit toujours pas PARSE_DATETIME vers DuckDB, donc
-        notre rendu de secours reste nécessaire.
+        CANARY — sqlglot traduit PARSE_DATETIME nativement vers DuckDB (STRPTIME).
 
-        Le flag est un constat de sondage posé à l'import par le patch, pas un
-        réglage. S'il passe True, sqlglot a gagné la traduction native :
-        supprimer `_parse_datetime_to_strptime` et sa branche dans
-        `apply_duckdb_date_parse_patches` (le patch se contentera d'envelopper).
+        Depuis 30.12, le rendu de secours a été supprimé : le patch générateur se
+        contente d'envelopper le rendu natif de sqlglot dans TRY(). Le flag est un
+        constat de sondage posé à l'import, pas un réglage. S'il repasse False,
+        sqlglot a régressé (il ne traduit plus PARSE_DATETIME) et
+        `_original_renderer` retomberait sur `PARSE_DATETIME(...)`, une fonction
+        que DuckDB ignore (erreur de binder, non rattrapée par TRY()) : il faudrait
+        rétablir un rendu de secours STRPTIME dans `apply_duckdb_date_parse_patches`.
         """
-        assert sqlglot_patches.parse_datetime_native_support is False, (
-            "CANARY : sqlglot traduit maintenant PARSE_DATETIME nativement "
-            "(parse_datetime_native_support=True). Le rendu de secours "
-            "`_parse_datetime_to_strptime` est devenu redondant — le supprimer."
+        assert sqlglot_patches.parse_datetime_native_support is True, (
+            "CANARY : sqlglot ne traduit plus PARSE_DATETIME nativement "
+            "(parse_datetime_native_support=False). `_original_renderer` va "
+            "produire un nom de fonction inconnu de DuckDB — rétablir un rendu de "
+            "secours STRPTIME dans utils/sqlglot_patches.py."
         )
 
     def test_literal_value_first_correctly_converted(self):

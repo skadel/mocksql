@@ -25,16 +25,19 @@ aurait produit de toute façon** — on hérite donc automatiquement de ses
 améliorations (le préfixe ``'1970 '`` de 30.12 corrige un vrai écart : DuckDB
 fait défaut à 1900 sur un format sans année, BigQuery à 1970).
 
-Deux cas dérogent à ce « on enveloppe l'existant » :
+Un seul cas déroge à ce « on enveloppe l'existant » :
 
-- ``ParseDatetime``, que sqlglot ≤ 30.11 ne traduit pas du tout — on fournit le
-  rendu. Le cas est détecté **par sondage** (on rend un nœud témoin et on
-  regarde le résultat), jamais par comparaison de numéro de version : au bump
-  où sqlglot ajoutera la traduction, le sondage la verra et on se contentera de
-  l'envelopper.
 - ``SafeFunc`` (préfixe BigQuery ``SAFE.``), rendu tel quel — ``SAFE.STRPTIME``
   n'existe pas côté DuckDB. Or ``SAFE.f(x)`` *signifie* « f(x), NULL si erreur »
   = exactement ``TRY(f(x))`` : on remplace le préfixe au lieu de l'envelopper.
+
+``ParseDatetime`` mérite une note : sqlglot ne le traduisait pas du tout jusqu'à
+30.11 (un rendu de secours ``STRPTIME`` était nécessaire) ; depuis 30.12 il le
+traduit nativement (``STRPTIME('1970 ' || col, …)``, le préfixe corrigeant
+l'écart d'année par défaut DuckDB↔BigQuery), et on se contente de l'envelopper
+comme les autres. Un sondage à l'import (``parse_datetime_native_support``) le
+vérifie : s'il repasse faux, sqlglot a régressé et ``_original_renderer``
+retomberait sur un nom de fonction que DuckDB ignore — un canary dédié l'annonce.
 
 Note sur le cache de dispatch
 -----------------------------
@@ -58,10 +61,12 @@ _TRY_WRAPPED_NODES = (exp.ParseDatetime, exp.StrToTime, exp.StrToDate, exp.SafeF
 
 _APPLIED_MARKER = "_mocksql_try_wrapped"
 
-# Renseigné par `apply_duckdb_date_parse_patches` : sqlglot traduisait-il
-# PARSE_DATETIME nativement au moment du patch ? Tant que c'est False, notre
-# rendu de secours (`_parse_datetime_to_strptime`) est nécessaire ; le jour où
-# sqlglot ajoute la traduction, ça passe True et le canary dédié le signale.
+# Renseigné par `apply_duckdb_date_parse_patches` : sqlglot traduit-il
+# PARSE_DATETIME nativement vers DuckDB ? Depuis 30.12 c'est True et on se
+# contente d'envelopper son rendu. Le flag reste comme **garde de régression** :
+# s'il repasse False, sqlglot a cessé de traduire et `_original_renderer`
+# retomberait sur `PARSE_DATETIME(...)`, une fonction que DuckDB ignore (erreur
+# de binder, non rattrapée par TRY()) — le canary dédié le signale.
 # C'est un *constat* de sondage, pas un réglage — ne pas l'écrire à la main.
 parse_datetime_native_support: bool | None = None
 
@@ -103,11 +108,6 @@ def _renders_natively(node_cls: type[exp.Expression], probe: str) -> bool:
     return node_cls.sql_names()[0].upper() not in _render_duckdb(probe).upper()
 
 
-def _parse_datetime_to_strptime(self: Generator, expression: exp.Expression) -> str:
-    """Rendu de secours pour sqlglot ≤ 30.11, qui ne traduit pas PARSE_DATETIME."""
-    return f"STRPTIME({self.sql(expression, 'this')}, {self.sql(expression, 'format')})"
-
-
 def _safe_prefix_to_try(self: Generator, expression: exp.Expression) -> str:
     """``SAFE.f(x)`` → ``f(x)``, l'enveloppe TRY() rétablissant la sémantique.
 
@@ -145,14 +145,14 @@ def apply_duckdb_date_parse_patches() -> None:
         if node_cls is exp.SafeFunc:
             inner = _safe_prefix_to_try
         elif node_cls is exp.ParseDatetime:
+            # Sondage de régression : sqlglot doit toujours traduire PARSE_DATETIME
+            # nativement (depuis 30.12), sinon `_original_renderer` retombe sur un
+            # nom que DuckDB ignore (cf. le canary dédié). On enveloppe le rendu
+            # natif comme les autres nœuds.
             parse_datetime_native_support = _renders_natively(
                 node_cls, "PARSE_DATETIME('%Y-%m-%d', col)"
             )
-            inner = (
-                _original_renderer(node_cls)
-                if parse_datetime_native_support
-                else _parse_datetime_to_strptime
-            )
+            inner = _original_renderer(node_cls)
         else:
             inner = _original_renderer(node_cls)
 
