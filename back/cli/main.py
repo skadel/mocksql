@@ -377,6 +377,13 @@ def test(
         help="CI gate: exit 1 if any executed test is not human-confirmed "
         "(review.status != confirmed).",
     ),
+    require_red: bool = typer.Option(
+        False,
+        "--require-red",
+        help="CI gate de repro (symétrique de --require-confirmed) : exit 1 si un test "
+        "exécuté n'est PAS rouge sur le SQL courant (statut hors unconfirmed/fail). Sert "
+        "à prouver, avant le fix, que le(s) test(s) de repro reproduisent bien le bug.",
+    ),
 ) -> None:
     """Re-run saved test cases against DuckDB. No LLM calls. Exits 1 if any test fails.
 
@@ -404,6 +411,18 @@ def test(
     ]
     if require_confirmed and unconfirmed:
         exit_code = 1
+
+    # Gate de repro (Phase 1) : exiger que chaque cas exécuté soit ROUGE sur le SQL
+    # courant. Un cas non rouge (`pass`, `repro_missing`, erreur…) → repro non établie.
+    if require_red:
+        not_red = _not_red_cases(model_results)
+        if not_red:
+            exit_code = 1
+            typer.echo(
+                "  [--require-red] repro non établie — cas non rouges : "
+                + ", ".join(f"{m}#{i}" for m, i in not_red),
+                err=True,
+            )
 
     if output_json:
         typer.echo(_json.dumps(model_results, indent=2, default=str))
@@ -461,6 +480,22 @@ def migrate_expect_cmd(
     )
 
 
+def _not_red_cases(model_results: list) -> list:
+    """Cas exécutés qui ne sont PAS rouges sur le SQL courant (gate ``--require-red``).
+
+    Rouge = le contrat ne passe pas sur le SQL courant → statut ``unconfirmed`` (draft
+    qui diverge) ou ``fail`` (régression confirmée). Tout le reste (``pass``,
+    ``repro_missing`` né vert, ``error``) signale que la repro n'est pas établie. ``skip``
+    (rien à exécuter) est exclu. Retourne la liste ``(model, index)`` des violations.
+    """
+    return [
+        (mr["model"], c.get("index"))
+        for mr in model_results
+        for c in mr["cases"]
+        if c["status"] not in ("unconfirmed", "fail", "skip")
+    ]
+
+
 def _print_test_results(model_results: list) -> None:
     import json as _json
 
@@ -473,7 +508,9 @@ def _print_test_results(model_results: list) -> None:
     for mr in model_results:
         cases = mr["cases"]
         n_pass = sum(1 for c in cases if c["status"] == "pass")
-        n_fail = sum(1 for c in cases if c["status"] in ("fail", "error"))
+        n_fail = sum(
+            1 for c in cases if c["status"] in ("fail", "error", "repro_missing")
+        )
         n_skip = sum(1 for c in cases if c["status"] == "skip")
         n_unconf = sum(1 for c in cases if c["status"] == "unconfirmed")
         total += len(cases)
@@ -506,6 +543,9 @@ def _print_test_results(model_results: list) -> None:
                 # Spec validation-humaine §7 : un cas non confirmé dont les lignes
                 # divergent du snapshot n'est PAS un échec — il attend une revue humaine.
                 "unconfirmed": "UNCF",
+                # Verrou repro (Phase 1) : cas marqué `intent=repro` mais né vert (contrat
+                # == sortie courante) → ne reproduit pas le bug. Bloquant (exit 1).
+                "repro_missing": "!RED",
             }[status]
             idx = c.get("index", "?")
             title = c.get("name") or f"Test {idx}"
@@ -523,6 +563,14 @@ def _print_test_results(model_results: list) -> None:
                 "stale": "  [stale — à re-confirmer]",
             }.get(c.get("review") or "", "")
             typer.echo(f"  [{label}] {title}{parity_badge}{review_badge}")
+            if status == "repro_missing":
+                # Le contrat `expect` PASSE déjà sur le SQL courant → pas de diff à montrer,
+                # d'où un message dédié (le bloc `expect_check` ne se déclenche pas).
+                typer.echo(
+                    "           né vert : le contrat `expect` correspond déjà à la sortie "
+                    "courante — ce test ne reproduit PAS le bug. Rends l'input "
+                    "discriminant sur l'axe du bug pour qu'il naisse ROUGE, puis re-teste."
+                )
             # Diff de lignes au contrat expect (Phase 2 : le contrat FAIT le verdict).
             ec = c.get("expect_check")
             if ec and not ec.get("passed"):
@@ -889,6 +937,34 @@ def confirm(
 
     try:
         _emit(run_confirm(config.resolve(), model, test_uid))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("mark-repro")
+def mark_repro(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the test to mark as a bug repro."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Mark a test as a bug reproduction. Deterministic, no LLM.
+
+    Verrou repro (Phase 1) : pose `review.intent = "repro"`. À appeler APRÈS avoir rendu
+    le contrat `expect` prescriptif (la sortie DÉSIRÉE, pas celle du SQL bugué). Dès lors,
+    `mocksql test` refuse un cas « né vert » (contrat == sortie courante) en `repro_missing`
+    (exit 1) : un test de repro DOIT naître rouge sur le SQL bugué, sinon il ne garde rien.
+    Miroir de `confirm` ; l'intent n'a plus d'effet une fois le test confirmé après le fix.
+    """
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_mark_repro
+
+    try:
+        _emit(run_mark_repro(config.resolve(), model, test_uid))
     except TestDocError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)

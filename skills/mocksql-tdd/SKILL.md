@@ -34,7 +34,7 @@ description against your instruction), note its `test_uid`.
 `expect.rows` were recorded from the current (buggy) SQL, so the test is green by
 construction. That is not the repro yet.
 
-## 2. Make the contract prescriptive (this creates the red)
+## 2. Make the contract prescriptive, then mark it a repro (this creates the red)
 
 Hand-edit the case's `expect` block in `.mocksql/tests/<model>.json` (the file is
 designed to be human-editable): replace the buggy value(s) with the DESIRED
@@ -49,31 +49,45 @@ behavior from the premise.
 - Do **not** run `mocksql confirm` now — confirm re-snapshots the CURRENT (buggy)
   output as the contract and would erase your edit.
 
-## 3. Verify RED — and that it is red for the right reason
+Then arm the repro gate:
+
+```bash
+mocksql mark-repro <model> --test-uid <test_uid>
+```
+
+This sets `review.intent = "repro"`. From now on, if the test is still *born green*
+(the `expect` contract matches the buggy output — i.e. your edit did not actually
+separate buggy from desired), `mocksql test` reports it as **`repro_missing`
+(exit 1)** instead of a silent pass. It is the tooled version of "red for the right
+reason": the gate refuses a test that does not reproduce the bug it claims to guard.
+
+## 3. Verify RED — the gate checks it for you
 
 ```bash
 mocksql test -m <model> --json
 ```
 
-Find your case by `test_uid`. A valid repro requires **both**:
+Find your case by `test_uid`. Two outcomes:
 
-1. `status` is `"unconfirmed"` and `expect_check.passed` is `false`. (The exit
-   code stays 0 for unconfirmed cases — read the JSON, not the exit code.)
-2. The diff differs ON THE PREMISE COLUMN: `expect_check.missing` (rows the
-   contract wants but the SQL did not produce) vs `expect_check.unexpected` (rows
-   the SQL produced outside the contract) — e.g. `missing` shows
-   `"signup_date": "2024-01-15"` while `unexpected` shows `"signup_date": null`.
+- **`status: "unconfirmed"`, `expect_check.passed: false`** → the repro holds. Sanity-
+  check that the diff differs ON THE PREMISE COLUMN: `expect_check.missing` (rows the
+  contract wants but the SQL did not produce) vs `expect_check.unexpected` (rows the
+  SQL produced outside the contract) — e.g. `missing` shows `"signup_date":
+  "2024-01-15"` while `unexpected` shows `"signup_date": null`. If instead the diff
+  is on ANOTHER column or `actual_count` is 0, the bench is wrong, not the SQL: fix
+  the input first (hand-edit the case's `data`, or `mocksql update-test <model> -u
+  <test_uid> -i "<what to change>"` — **caution:** update-test re-records the draft
+  `expect.rows` from the buggy output, so redo step 2 after), then re-check.
+- **`status: "repro_missing"` (exit 1)** → the bug does NOT reproduce on this
+  scenario: the contract still matches the current SQL output. The input is
+  degenerate on the bug's axis (e.g. one row where the bug needs several), or the
+  premise is wrong / the bug lives elsewhere. Make the input discriminant, or STOP
+  and report to the user — do **not** patch the SQL to chase a test that never went
+  red.
 
-Rule out the two false reds:
-
-- **Diff on another column, or `actual_count` is 0** → the test bench is wrong,
-  not the SQL. Fix the input data first: hand-edit the case's `data` block, or run
-  `mocksql update-test <model> -u <test_uid> -i "<what to change>"`.
-  **Caution:** `update-test` re-records the draft `expect.rows` from the buggy
-  output — redo step 2 afterwards. Then re-check red.
-- **`expect_check.passed` is `true`** → the bug does NOT reproduce: the SQL
-  already behaves as desired on this scenario. STOP and report this to the user
-  instead of patching — either the premise is wrong or the bug lives elsewhere.
+For CI at the repro stage (before the fix), gate on
+`mocksql test -m <model> --require-red`: exit 1 unless the case is red
+(`unconfirmed`/`fail`), catching a `repro_missing` or an accidental `pass`.
 
 ## 4. Fix the SQL
 
@@ -117,13 +131,16 @@ Output is an array of `{model, sql_source, cases[]}`. Each case:
 |---|---|
 | `test_uid` | stable id — use it for `update-test` / `confirm` |
 | `name`, `description` | test identity |
-| `status` | `pass` · `fail` (confirmed contract violated) · `unconfirmed` (draft contract diverges — your red) · `error` · `skip` |
+| `status` | `pass` · `fail` (confirmed contract violated) · `unconfirmed` (draft contract diverges — your red) · `repro_missing` (marked repro but born green — does not reproduce, exit 1) · `error` · `skip` |
 | `review` | `confirmed` · `stale` (SQL drifted since confirm) · `draft` |
+| `intent` | `repro` when the case was marked via `mocksql mark-repro` (else absent) |
 | `expect_check` | `{passed, expected_count, actual_count, missing[], unexpected[], ordered, order_only_mismatch}` |
 
-Exit code is 1 only if a CONFIRMED case fails on unchanged SQL (or, with
-`--require-confirmed`, if any executed case is not confirmed — this is the gate to
-use in CI, since an edited `.sql` turns a confirmed contract `stale`, not `fail`).
+Exit code is 1 if a CONFIRMED case fails on unchanged SQL, **or a `repro_missing`
+case** (marked repro but born green — the repro gate, always blocking). With
+`--require-confirmed` it also fails on any non-confirmed executed case (CI gate for
+the freeze stage); with `--require-red` it fails unless every executed case is red
+(CI gate for the repro stage, before the fix).
 
 `sql_source` is `disk` (read from the live `.sql`, the default), `frozen`
 (`--frozen`), or `snapshot-fallback` (the `.sql` was not found or unreadable, so

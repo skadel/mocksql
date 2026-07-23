@@ -177,6 +177,31 @@ def run_confirm(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
     }
 
 
+def run_mark_repro(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
+    """Marque un cas comme test de **reproduction de bug** (verrou repro, Phase 1).
+
+    Miroir déterministe de ``run_confirm`` mais qui NE confirme PAS : pose seulement
+    ``review.intent = "repro"`` sur le cas, sans replay ni LLM. Signale au replay
+    (``mocksql test``) que ce cas DOIT naître rouge sur le SQL courant tant qu'il n'est
+    pas confirmé — un cas *né vert* (contrat ``expect`` == sortie courante) marqué repro
+    devient ``repro_missing`` (exit 1), le verrou anti « test insensible au bug »
+    (cf. RAPPORT-repro-fitness). À appeler APRÈS l'édition prescriptive de ``expect``
+    (skill mocksql-tdd étape 2). Idempotent ; préserve ``review.status``.
+    """
+    path, doc = load_doc(config_path, model)
+    tc = require_test_case(doc, test_uid)
+    review = tc.get("review") if isinstance(tc.get("review"), dict) else {}
+    review["intent"] = "repro"
+    tc["review"] = review
+    save_doc(path, doc)
+    return {
+        "model": model,
+        "test_uid": test_uid,
+        "test_name": tc.get("test_name"),
+        "review": review,
+    }
+
+
 # ── suggest ────────────────────────────────────────────────────────────────────
 
 

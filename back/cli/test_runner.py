@@ -272,7 +272,11 @@ def _remap_assertion_sql(sql: str, data_keys: list[str], case_suffix: str) -> st
     return sql
 
 
-def _expect_verdict(expect_check: dict, review_status: str | None) -> str:
+def _expect_verdict(
+    expect_check: dict,
+    review_status: str | None,
+    review_intent: str | None = None,
+) -> str:
     """Verdict d'un cas depuis la comparaison de lignes au contrat ``expect`` (Phase 2).
 
     - lignes = contrat → ``pass`` ;
@@ -284,8 +288,20 @@ def _expect_verdict(expect_check: dict, review_status: str | None) -> str:
     - sinon, lignes ≠ contrat : ``fail`` si le contrat est ``confirmed`` (gate de
       non-régression), sinon ``unconfirmed`` (draft/stale/non confirmé — jamais bloquant,
       spec §3/§7).
+
+    **Verrou repro (Phase 1)** : un cas marqué ``review.intent == "repro"`` mais encore
+    non confirmé qui **PASSE** sur le SQL courant est *né vert* — ses données ne séparent
+    pas le comportement bugué du désiré (cf. RAPPORT-repro-fitness §2), donc il ne
+    reproduit PAS le bug qu'il prétend geler. On le refuse explicitement en
+    ``repro_missing`` (échec, exit 1) au lieu de le laisser passer silencieusement. Une
+    fois l'input rendu discriminant, le contrat ne passe plus → ``unconfirmed`` (rouge
+    établi) et le verrou s'éteint ; une fois ``confirmed`` (après fix), l'intent est
+    consommé et la sémantique normale reprend.
     """
-    if expect_check["passed"] or expect_check.get("order_only_mismatch"):
+    passed = expect_check["passed"] or expect_check.get("order_only_mismatch")
+    if review_intent == "repro" and review_status != "confirmed" and passed:
+        return "repro_missing"
+    if passed:
         return "pass"
     if review_status == "confirmed":
         return "fail"
@@ -351,12 +367,17 @@ async def _run_one_case(
     )
     review = test_case.get("review") or {}
     review_status = review.get("status") if isinstance(review, dict) else None
+    # Intention du cas (verrou repro, Phase 1) : `repro` = ce cas DOIT naître rouge sur
+    # le SQL courant (posée par `mocksql mark-repro`). Exposée dans le résultat pour le
+    # gate CI `--require-red` et l'affichage.
+    review_intent = review.get("intent") if isinstance(review, dict) else None
     # Dérive détectée au replay (SQL disque ≠ snapshot) : un contrat confirmé ne vaut
     # plus tel quel — rapporté `stale` SANS écrire (le replay est lecture seule ; la
     # bascule persistée se fait à l'écriture, cf. sync_expect_on_doc).
     if sql_drifted and review_status == "confirmed":
         review_status = "stale"
     meta["review"] = review_status
+    meta["intent"] = review_intent
 
     if not data:
         return {
@@ -418,7 +439,7 @@ async def _run_one_case(
             #     --require-confirmed). Cf. spec §3 (« rejouable mais rapporté non
             #     confirmé, pas un échec »).
             expect_check = compare_expect(expect, rows_from_df(result_df))
-            status = _expect_verdict(expect_check, review_status)
+            status = _expect_verdict(expect_check, review_status, review_intent)
             return {
                 "index": test_index,
                 **meta,
@@ -1032,7 +1053,9 @@ async def run_tests(
                 )
                 case_results.append(result)
 
-                if result["status"] in ("fail", "error"):
+                # `repro_missing` (verrou Phase 1) = échec bloquant par défaut : un test
+                # de repro né vert ne garde rien. Au même titre que fail/error → exit 1.
+                if result["status"] in ("fail", "error", "repro_missing"):
                     has_failures = True
                     if fail_fast:
                         model_results.append(
