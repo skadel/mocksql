@@ -14,6 +14,7 @@ champs JSON-encodés-en-string), si bien qu'aucun consommateur en aval n'a à ch
 """
 
 import json
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -213,6 +214,26 @@ def _carry_review_fields(doc: Dict[str, Any], previous: Dict[str, Any]) -> None:
             case["expect"] = prev["expect"]
 
 
+def _ensure_case_uids(doc: Dict[str, Any]) -> None:
+    """Assigne un ``test_uid`` court à tout cas qui n'en a pas.
+
+    Le ``test_uid`` est l'identité de ciblage de toute la boucle agent (update-test /
+    confirm / export) : un cas persisté sans uid est incibable (`test_uid: null` au
+    replay). Appelé APRÈS ``_carry_review_fields`` — le rapprochement legacy par
+    ``test_index`` des fichiers d'avant-uid doit se faire sur l'identité d'origine.
+    """
+    cases = [c for c in doc.get("test_cases") or [] if isinstance(c, dict)]
+    seen = {c.get("test_uid") for c in cases if c.get("test_uid")}
+    for case in cases:
+        if case.get("test_uid"):
+            continue
+        uid = uuid.uuid4().hex[:4]
+        while uid in seen:
+            uid = uuid.uuid4().hex[:4]
+        case["test_uid"] = uid
+        seen.add(uid)
+
+
 def write_test_doc(path: Path, doc: Dict[str, Any]) -> None:
     """Écrit la définition (commitée) et le cache gitignoré côte à côte.
 
@@ -232,7 +253,12 @@ def write_test_doc(path: Path, doc: Dict[str, Any]) -> None:
         except Exception:
             previous = {}
     _carry_review_fields(doc, previous)
-    sync_expect_on_doc(doc, previous_sql=previous.get("sql"))
+    sync_expect_on_doc(
+        doc,
+        previous_sql=previous.get("sql"),
+        previous_cases=previous.get("test_cases"),
+    )
+    _ensure_case_uids(doc)
     definition, cache = split_doc(doc)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(

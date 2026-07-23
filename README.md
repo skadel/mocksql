@@ -99,6 +99,27 @@ llm:
 
 Full recipe (compile profile, materializing parents, scratch DuckDB) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
 
+### Coding agents (Claude Code, Copilot, Cursor…)
+
+MockSQL is a **test oracle for coding agents**: reproduce a SQL bug as a red test
+replayed locally on DuckDB, fix the SQL, verify green, freeze it as a regression
+gate. A ready-to-install skill encodes the workflow →
+**[skills/mocksql-tdd/SKILL.md](skills/mocksql-tdd/SKILL.md)** · CLI reference →
+**[docs/agent-fix-loop.md](docs/agent-fix-loop.md)**
+
+---
+
+## Benchmarks
+
+MockSQL isn't a static analyzer, so its accuracy isn't a single all-`1.00` F1 table —
+it reports three honest, stratified measurements: **generation quality** (LLM-judge, up
+to **96.2%** valid on Spider), **replay fidelity** (deterministic, zero-LLM —
+**78/79** frozen replays on spider2-snow), and **parity** (DuckDB ↔ real warehouse).
+Numbers are stratified by corpus *and* generation model, with the caveats stated in the
+open.
+
+Full results, methodology, and caveats → **[docs/benchmarks.md](docs/benchmarks.md)**
+
 ---
 
 ## Project structure
@@ -113,6 +134,7 @@ docs/       # Documentation
   quickstart.md               # Full setup (GCP, IAM, CLI, Web UI)
   quickstart-dbt.md           # Testing a dbt-DuckDB project
   workflow-query-generation.md  # Flow frontend → backend → DuckDB
+  benchmarks.md               # Accuracy: generation quality, replay fidelity, parity
 ```
 
 ---

@@ -1,5 +1,5 @@
 """I/O partagée des fichiers de test pour les CLIs qui mutent un document de modèle
-(`mocksql assert`, `remove-test`, `validate`, `suggest`).
+(`remove-test`, `validate`, `confirm`, `suggest`).
 
 Chaque modèle a un document unique `.mocksql/tests/{model}.json` (définition commitée)
 + son cache sidecar gitignoré, fusionnés de façon transparente par `read_test_doc`.
@@ -12,8 +12,15 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from cli.assertions import find_test_case
 from storage.test_files import read_test_doc, write_test_doc
+
+
+def find_test_case(doc: dict[str, Any], test_uid: str) -> dict[str, Any] | None:
+    """Retourne le test_case dont le test_uid correspond, ou None."""
+    for tc in doc.get("test_cases", []):
+        if tc.get("test_uid") == test_uid:
+            return tc
+    return None
 
 
 class TestDocError(Exception):

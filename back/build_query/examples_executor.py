@@ -1715,6 +1715,131 @@ async def _run_join_predicate_breakdown(
     return lines
 
 
+def _classify_join_cardinality(
+    join_type: str, left_rows: int, right_rows: int, result_rows: int
+) -> str:
+    """Descripteur **factuel** de la transformation de cardinalité d'un JOIN, mesurée sur
+    les données synthétiques du cas (cf. docs/inspect-diagnostic.md §3). Il énonce ce que
+    les comptes **montrent**, il ne **juge pas** si c'est un défaut : ``inspect`` n'a aucun
+    référentiel de cardinalité *attendue* (un LEFT un-à-plusieurs *doit* faire grossir le
+    compte). L'oracle, c'est le contrat ``expect``, lu ailleurs (``_build_diagnosis``).
+
+    - ``empty`` : ``result_rows == 0`` — le JOIN ne produit rien ;
+    - ``fan_out`` : ``result_rows > left_rows`` — le côté droit multiplie les lignes ;
+    - ``shrinks`` : ``result_rows < left_rows`` — le JOIN réduit le nombre de lignes ;
+    - ``preserves`` : ``result_rows == left_rows`` — cardinalité inchangée.
+
+    ``join_type`` / ``right_rows`` restent rapportés dans la sonde comme **contexte**, mais
+    ne conditionnent plus le descripteur : il énonce un fait brut, l'interprétation (défaut
+    ou non) revient au lecteur — ou à ``expect``."""
+    if result_rows == 0:
+        return "empty"
+    if result_rows > left_rows:
+        return "fan_out"
+    if result_rows < left_rows:
+        return "shrinks"
+    return "preserves"
+
+
+async def _count_from(
+    with_prefix: str, from_sql: str, suffix: str, project: str, dialect: str, con
+) -> int:
+    """``COUNT(*)`` d'une clause FROM (avec le préfixe WITH des CTE amont) sur les tables
+    synthétiques déjà chargées. Brique des sondes de cardinalité de JOIN."""
+    df, _ = await run_query_on_test_dataset(
+        f"{with_prefix}SELECT COUNT(*) AS n FROM {from_sql}",
+        suffix,
+        project,
+        dialect,
+        con,
+    )
+    return int(df.iloc[0, 0]) if not df.empty else 0
+
+
+async def _run_join_count_probes(
+    ctes: list, suffix: str, project: str, dialect: str, con
+) -> list:
+    """Sonde de CARDINALITÉ join par join : lignes en entrée / du côté joint / en sortie.
+
+    Lentille orthogonale à ``_run_join_predicate_breakdown`` (qui dit *pourquoi vide*) :
+    ici on COMPTE, pour distinguer un JOIN qui sur-produit (doublons) d'un qui perd des
+    lignes. Dans une chaîne ``A JOIN B JOIN C``, la mesure est **incrémentale** — le
+    compte est attribué au JOIN précis (l'entrée du JOIN ``i`` = FROM + JOINs ``0..i-1``).
+
+    Chaque sonde = quelques ``SELECT COUNT(*)`` triviaux sur les données synthétiques,
+    exécutés en DuckDB local via ``run_query_on_test_dataset`` (mêmes tables suffixées que
+    l'executor). Retourne une liste de dicts JSON-safe (cf. docs/inspect-diagnostic.md §3).
+    """
+    probes: list = []
+    for idx, cte in enumerate(ctes):
+        try:
+            tree = sqlglot.parse_one(cte["code"], read=dialect)
+        except Exception:
+            continue
+        if not isinstance(tree, exp.Select):
+            continue
+        from_expr = get_from(tree)
+        joins = tree.args.get("joins") or []
+        if from_expr is None or not joins:
+            continue
+
+        preceding = [c for c in ctes[:idx] if c["name"] != "final_query"]
+        with_prefix = ""
+        if preceding:
+            with_parts = [
+                f"{quote_identifier(c['name'], dialect)} AS ({c['code']})"
+                for c in preceding
+            ]
+            with_prefix = "WITH " + ",\n".join(with_parts) + "\n"
+
+        left_label = from_expr.this.sql(dialect=dialect)
+        running = from_expr.this.sql(dialect=dialect)  # FROM + JOINs cumulés
+        for j_idx, join in enumerate(joins):
+            joined_src = join.this.sql(dialect=dialect)
+            join_sql = join.sql(dialect=dialect)
+            side = (join.args.get("side") or "").upper()
+            kind = (join.args.get("kind") or "").upper()
+            join_type = side or kind or "INNER"
+            on = join.args.get("on")
+            on_sql = on.sql(dialect=dialect) if on is not None else None
+            try:
+                left_rows = await _count_from(
+                    with_prefix, running, suffix, project, dialect, con
+                )
+                right_rows = await _count_from(
+                    with_prefix, joined_src, suffix, project, dialect, con
+                )
+                result_rows = await _count_from(
+                    with_prefix, f"{running} {join_sql}", suffix, project, dialect, con
+                )
+            except Exception as exc:
+                logger.debug(
+                    "[inspect] sonde join `%s` (join %d) : %s", cte["name"], j_idx, exc
+                )
+                running = f"{running} {join_sql}"
+                left_label = joined_src
+                continue
+            probes.append(
+                {
+                    "cte": cte["name"],
+                    "join_index": j_idx,
+                    "left": left_label,
+                    "right": joined_src,
+                    "join_type": join_type,
+                    "on": on_sql,
+                    "left_rows": left_rows,
+                    "right_rows": right_rows,
+                    "result_rows": result_rows,
+                    "verdict": _classify_join_cardinality(
+                        join_type, left_rows, right_rows, result_rows
+                    ),
+                }
+            )
+            running = f"{running} {join_sql}"
+            left_label = joined_src
+    return probes
+
+
 def _build_cte_probe_sql(ctes: list, upto: int, dialect: str) -> str:
     """Sonde du CTE-trace : ``WITH <cte_0..upto> SELECT * FROM <cte_upto>``.
 

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from cli.doc_io import TestDocError
+from cli.doc_io import TestDocError, find_test_case
 from cli.manage_cmd import (
     _resolve_suggestion,
     consume_suggestion_updates,
@@ -68,6 +68,19 @@ def _write_doc(tmp_path: Path, doc: dict, model: str = "orders") -> Path:
 
 def _read_saved(tmp_path: Path, model: str = "orders") -> dict:
     return read_test_doc(tmp_path / ".mocksql" / "tests" / f"{model}.json")
+
+
+# ── find_test_case (doc_io) ─────────────────────────────────────────────────
+
+
+def test_find_test_case_by_uid():
+    tc = find_test_case(_suite(), "bbbb")
+    assert tc is not None
+    assert tc["test_name"] == "nulls"
+
+
+def test_find_test_case_unknown_returns_none():
+    assert find_test_case(_suite(), "zzzz") is None
 
 
 # ── remove-test ────────────────────────────────────────────────────────────────

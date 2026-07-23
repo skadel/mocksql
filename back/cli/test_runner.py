@@ -306,8 +306,12 @@ async def _run_one_case(
     precompiled_sql: str,
     setup_error: str | None = None,
     sql_drifted: bool = False,
+    collect_rows: bool = False,
 ) -> dict:
     """Rejoue UN cas dans les tables déjà créées par modèle (cf. `_setup_model`).
+
+    `collect_rows` : expose la sortie observée sous `observed_rows` (et rejoue même un
+    cas sans expect ni assertions) — brique de `replay_case_rows` / replay-on-confirm.
 
     Les tables et le SQL transpilé sont partagés par tous les cas du modèle : ici on se
     contente de vider les tables, d'insérer les données du cas, d'exécuter le SQL
@@ -330,7 +334,11 @@ async def _run_one_case(
     test_name = (test_case.get("test_name") or "").strip()
     description = (test_case.get("unit_test_description") or "").strip()
     name = test_name or description or f"Test {test_index}"
-    meta = {"name": name, "description": description}
+    meta = {
+        "name": name,
+        "description": description,
+        "test_uid": test_case.get("test_uid"),
+    }
     data: dict = test_case.get("data") or {}
     saved_assertions = [
         a for a in (test_case.get("assertion_results") or []) if a.get("sql")
@@ -358,7 +366,7 @@ async def _run_one_case(
             "reason": "no data",
             "assertions": [],
         }
-    if not saved_assertions and expect is None:
+    if not saved_assertions and expect is None and not collect_rows:
         return {
             "index": test_index,
             **meta,
@@ -395,6 +403,9 @@ async def _run_one_case(
         result_df, _ = await run_query_on_test_dataset(
             sql, suffix, "cli", dialect, con, precompiled_sql=precompiled_sql
         )
+        observed_extra = (
+            {"observed_rows": rows_from_df(result_df)} if collect_rows else {}
+        )
 
         if expect is not None:
             # Phase 2 (spec validation-humaine §7) : le contrat `expect` est AUTORITAIRE.
@@ -414,6 +425,7 @@ async def _run_one_case(
                 "status": status,
                 "assertions": [],
                 "expect_check": expect_check,
+                **observed_extra,
             }
 
         # Repli legacy : un cas SANS contrat `expect` (jamais migré) garde le chemin
@@ -443,6 +455,7 @@ async def _run_one_case(
             **meta,
             "status": "pass" if all_passed else "fail",
             "assertions": assertion_results,
+            **observed_extra,
         }
     except Exception as exc:
         return {
@@ -475,6 +488,424 @@ async def _setup_model(
     duckdb_sql = await parse_test_query(sql, suffix, dialect)
     precompiled_sql = fix_duck_db_sql(duckdb_sql, dialect)
     return duckdb_schemas, precompiled_sql
+
+
+# ── Replay d'un cas isolé (replay-on-confirm) ────────────────────────────────
+
+
+async def replay_case_rows(
+    config_path: Path, model_name: str, test_uid: str
+) -> tuple[list[dict], str]:
+    """Rejoue UN cas contre le SQL DISQUE et retourne (lignes observées, sql rejoué).
+
+    Brique de `mocksql confirm` : dans la boucle agent, le `results_json` du cache
+    date du generate — la sortie « actuellement observée » d'un cas est celle du
+    replay disque, pas du cache. Déterministe, zéro LLM. Lève RuntimeError si le cas
+    est introuvable ou ne produit pas de sortie exploitable.
+    """
+    from utils.examples import DB_PATH, initialize_duckdb
+
+    cfg = _load_config(config_path)
+    dialect: str = cfg.get("dialect", "bigquery")
+    schema_cache = _load_schema_cache(
+        str(config_path.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json"))
+    )
+    test_file = config_path.parent / ".mocksql" / "tests" / f"{model_name}.json"
+    test_doc = _read_json(test_file) if test_file.exists() else None
+    if not test_doc:
+        raise RuntimeError(f"aucune suite de tests pour le modèle {model_name}")
+    case = next(
+        (c for c in test_doc.get("test_cases") or [] if c.get("test_uid") == test_uid),
+        None,
+    )
+    if case is None:
+        raise RuntimeError(f"test_uid {test_uid} introuvable dans {model_name}")
+
+    sql, _source = resolve_run_sql(
+        cfg=cfg,
+        config_path=config_path,
+        model_name=model_name,
+        snapshot_sql=test_doc.get("sql", ""),
+        frozen=False,
+    )
+    used_columns_raw: list[str] = test_doc.get("used_columns") or []
+    used_columns_parsed: list[dict] = []
+    for raw in used_columns_raw:
+        try:
+            used_columns_parsed.append(json.loads(raw))
+        except Exception:
+            pass
+    suffix = f"{uuid.uuid4().hex[:8]}_confirm"
+    with initialize_duckdb(DB_PATH) as con:
+        # `SchemaMissingError` (table absente du cache, fréquent sur clone frais) porte
+        # déjà un message actionnable `refresh-schemas` : on le convertit en RuntimeError
+        # pour que le call-site (`run_confirm`, qui n'attrape que RuntimeError) l'affiche
+        # proprement au lieu de laisser fuir une traceback.
+        try:
+            schemas = _resolve_model_schemas(used_columns_raw, schema_cache, [case])
+        except SchemaMissingError as exc:
+            raise RuntimeError(str(exc)) from exc
+        duckdb_schemas, precompiled_sql = await _setup_model(
+            schemas=schemas, sql=sql, dialect=dialect, suffix=suffix, con=con
+        )
+        result = await _run_one_case(
+            test_case=case,
+            sql=sql,
+            duckdb_schemas=duckdb_schemas,
+            used_columns_parsed=used_columns_parsed,
+            dialect=dialect,
+            suffix=suffix,
+            con=con,
+            precompiled_sql=precompiled_sql,
+            collect_rows=True,
+        )
+    if result.get("status") == "error":
+        raise RuntimeError(result.get("error") or "replay en erreur")
+    if "observed_rows" not in result:
+        raise RuntimeError(
+            f"cas non exécutable ({result.get('reason') or result.get('status')})"
+        )
+    return result["observed_rows"], sql
+
+
+# ── inspect : diagnostic déterministe d'un cas rouge (boucle TDD agent) ───────
+
+_OBSERVED_ROWS_CAP = 20
+
+
+def _cte_trace_to_list(cte_trace: dict) -> list[dict]:
+    """Transforme le ``cte_trace`` de l'executor (dict ordonné ``{name: {...}}``) en LISTE
+    ordonnée ``[{name, row_count, ...}]``.
+
+    L'ordre du pipeline est signifiant (la 1ʳᵉ CTE requise vide = suspect n°1) ; une
+    liste l'expose explicitement au parseur du skill. ``join_breakdown`` (décomposition
+    par prédicat de la CTE bloquante) est renommé ``blocking_predicates`` — la lentille
+    *pourquoi vide*.
+    """
+    out: list[dict] = []
+    for name, info in cte_trace.items():
+        if not isinstance(info, dict):
+            continue
+        entry: dict = {"name": name, "row_count": info.get("row_count")}
+        if "blocking" in info:
+            entry["blocking"] = info["blocking"]
+        for key in ("sample", "steps", "error"):
+            if info.get(key) is not None:
+                entry[key] = info[key]
+        if info.get("join_breakdown"):
+            entry["blocking_predicates"] = info["join_breakdown"]
+        out.append(entry)
+    return out
+
+
+def _build_diagnosis(
+    sql_source: str,
+    status: str,
+    cte_trace_list: list[dict],
+    join_probes: list[dict],
+    expect_check: dict | None,
+) -> dict:
+    """Cause probable résumée en un ``code`` déterministe, par priorité (première règle qui
+    matche gagne — cf. docs/inspect-diagnostic.md, table ``diagnosis.code``)."""
+    if sql_source == "snapshot-fallback":
+        return {
+            "code": "sql_source_fallback",
+            "suspect": None,
+            "detail": (
+                "Le `.sql` source n'a pas été lu — trace fondée sur le snapshot figé. "
+                "Un résultat vert refléterait l'ANCIEN snapshot, pas ton édition."
+            ),
+        }
+    if status == "error":
+        return {
+            "code": "error",
+            "suspect": None,
+            "detail": "Le rejeu a levé une erreur.",
+        }
+    if expect_check is not None and expect_check.get("passed"):
+        return {
+            "code": "consistent",
+            "suspect": None,
+            "detail": "La sortie observée satisfait le contrat `expect` (cas vert).",
+        }
+    blocking_empty = next(
+        (c for c in cte_trace_list if c.get("row_count") == 0 and c.get("blocking")),
+        None,
+    )
+    if blocking_empty:
+        return {
+            "code": "empty_upstream_cte",
+            "suspect": blocking_empty["name"],
+            "detail": (
+                f"La CTE requise `{blocking_empty['name']}` produit 0 ligne "
+                "(suspect n°1)."
+            ),
+        }
+    # L'ORACLE d'abord : quand le contrat `expect` a quelque chose à dire (diff de lignes),
+    # il MÈNE. Une sonde de cardinalité de JOIN n'énonce qu'un FAIT (`fan_out`/`shrinks`)
+    # sans savoir s'il est voulu — un LEFT un-à-plusieurs fan-out TOUJOURS. La laisser
+    # primer sur le diff épinglait des JOINs sains comme cause racine et enterrait le vrai
+    # écart de valeur. Le diff `expect`, lui, est ancré sur l'attendu du test.
+    if expect_check is not None and expect_check.get("order_only_mismatch"):
+        return {
+            "code": "nondeterministic_order",
+            "suspect": None,
+            "detail": (
+                "Mêmes lignes, ordre différent — ex-æquo sur la clé de tri "
+                "(sortie non-déterministe)."
+            ),
+        }
+    if expect_check is not None and not expect_check.get("passed"):
+        return {
+            "code": "expect_diff",
+            "suspect": None,
+            "detail": (
+                "La sortie diverge du contrat `expect` (voir `expect_check`). Les sondes "
+                "`join_probes` sont fournies comme ÉVIDENCE, pas comme cause épinglée."
+            ),
+        }
+    # Faute d'oracle (`expect` absent) : les faits structurels de cardinalité sont le seul
+    # signal — on les remonte alors, mais comme DESCRIPTION à confirmer, pas comme verdict.
+    fan = next((p for p in join_probes if p.get("verdict") == "fan_out"), None)
+    if fan:
+        sid = f"{fan['cte']}#{fan['join_index']}"
+        return {
+            "code": "join_fan_out",
+            "suspect": sid,
+            "detail": (
+                f"Sans contrat `expect` pour ancrer le diagnostic : le JOIN {sid} multiplie "
+                f"les lignes ({fan['left_rows']} → {fan['result_rows']}). Fait, pas verdict "
+                "— à confirmer contre l'intention du test."
+            ),
+        }
+    shrink = next((p for p in join_probes if p.get("verdict") == "shrinks"), None)
+    if shrink:
+        sid = f"{shrink['cte']}#{shrink['join_index']}"
+        return {
+            "code": "join_shrinks",
+            "suspect": sid,
+            "detail": (
+                f"Sans contrat `expect` pour ancrer le diagnostic : le JOIN {sid} réduit "
+                f"les lignes ({shrink['left_rows']} → {shrink['result_rows']}). Fait, pas "
+                "verdict — à confirmer contre l'intention du test."
+            ),
+        }
+    return {
+        "code": "consistent",
+        "suspect": None,
+        "detail": "Aucune anomalie structurelle détectée.",
+    }
+
+
+async def _inspect_llm_verdict(payload: dict) -> str:
+    """Verdict LLM **opt-in** (``--llm``) : une à deux phrases de cause racine à partir du
+    diagnostic DÉTERMINISTE déjà assemblé (trace CTE + sondes join + diff).
+
+    Jamais le défaut : ``inspect`` existe pour donner un signal déterministe et gratuit.
+    Aucune donnée réelle ni appel warehouse — le LLM ne voit que des comptes et des
+    lignes synthétiques. Défensif : renvoie un message d'erreur plutôt que de planter le
+    diagnostic si le LLM est indisponible.
+    """
+    try:
+        from storage.config import output_language_directive
+        from utils.llm_errors import normalize_llm_content
+        from utils.llm_factory import make_llm
+
+        diag = {
+            k: payload.get(k)
+            for k in (
+                "diagnosis",
+                "expect_check",
+                "cte_trace",
+                "join_probes",
+                "observed",
+                "sql_source",
+            )
+        }
+        prompt = (
+            output_language_directive()
+            + "\nTu es un assistant de debug SQL. Voici le diagnostic DÉTERMINISTE "
+            "(trace CTE, sondes de cardinalité de JOIN, diff de lignes) d'un test qui "
+            "échoue. En une à deux phrases, nomme la cause racine la plus probable et "
+            "l'action de correction. Ne réinvente pas les chiffres.\n\n"
+            + json.dumps(diag, ensure_ascii=False, default=str, indent=2)
+        )
+        llm = make_llm()
+        resp = await llm.ainvoke(prompt)
+        return normalize_llm_content(resp.content).strip()
+    except Exception as exc:
+        return f"[verdict LLM indisponible : {exc}]"
+
+
+async def inspect_case(
+    config_path: Path,
+    model_name: str,
+    test_uid: str,
+    *,
+    llm: bool = False,
+) -> dict:
+    """Diagnostic déterministe (zéro LLM par défaut) d'un cas rejoué contre le SQL DISQUE.
+
+    Trois lentilles (cf. docs/inspect-diagnostic.md) : (1) rejeu + ``sql_source`` (dont le
+    repli ``snapshot-fallback`` = garde-fou F4) + diff ``expect_check`` ; (2) trace CTE par
+    CTE (1ʳᵉ CTE requise vide = suspect n°1) ; (3) sondes de cardinalité join par join
+    (sur-production vs perte de lignes). ``diagnosis.code`` résume la cause.
+
+    ``llm=True`` (opt-in) ajoute un ``llm_verdict`` ; sinon il reste ``None`` (aucun appel
+    LLM). Lève ``RuntimeError`` si le modèle ou le ``test_uid`` est introuvable.
+    """
+    from build_query.examples_executor import (
+        _run_cte_trace,
+        _run_join_count_probes,
+        _run_join_predicate_breakdown,
+        _run_scalar_filter_breakdown,
+        _select_failing_cte,
+    )
+    from build_query.query_chain import _lightweight_query_decomposed
+    from utils.examples import DB_PATH, initialize_duckdb
+
+    cfg = _load_config(config_path)
+    dialect: str = cfg.get("dialect", "bigquery")
+    schema_cache = _load_schema_cache(
+        str(config_path.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json"))
+    )
+    test_file = config_path.parent / ".mocksql" / "tests" / f"{model_name}.json"
+    test_doc = _read_json(test_file) if test_file.exists() else None
+    if not test_doc:
+        raise RuntimeError(f"aucune suite de tests pour le modèle {model_name}")
+    case = next(
+        (c for c in test_doc.get("test_cases") or [] if c.get("test_uid") == test_uid),
+        None,
+    )
+    if case is None:
+        raise RuntimeError(f"test_uid {test_uid} introuvable dans {model_name}")
+
+    sql, sql_source = resolve_run_sql(
+        cfg=cfg,
+        config_path=config_path,
+        model_name=model_name,
+        snapshot_sql=test_doc.get("sql", ""),
+        frozen=False,
+    )
+    # Dérive : le SQL disque diffère du snapshot → un contrat confirmé est rapporté
+    # `stale`/`unconfirmed`, pas `fail` (même sémantique que `run_tests`). Inspect tourne
+    # justement APRÈS une édition du `.sql` : sans ça, tout modèle confirmé édité serait
+    # mislabellé `fail`.
+    sql_drifted = (
+        sql_source == "disk" and sql.strip() != (test_doc.get("sql") or "").strip()
+    )
+    used_columns_raw: list[str] = test_doc.get("used_columns") or []
+    used_columns_parsed: list[dict] = []
+    for raw in used_columns_raw:
+        try:
+            used_columns_parsed.append(json.loads(raw))
+        except Exception:
+            pass
+
+    suffix = f"{uuid.uuid4().hex[:8]}_inspect"
+    project = "cli"
+    cte_trace: dict = {}
+    join_probes: list = []
+    with initialize_duckdb(DB_PATH) as con:
+        # Schéma manquant = message actionnable `refresh-schemas`, pas une traceback :
+        # `inspect_cmd` n'attrape que RuntimeError, on convertit donc à la source.
+        try:
+            schemas = _resolve_model_schemas(used_columns_raw, schema_cache, [case])
+        except SchemaMissingError as exc:
+            raise RuntimeError(str(exc)) from exc
+        duckdb_schemas, precompiled_sql = await _setup_model(
+            schemas=schemas, sql=sql, dialect=dialect, suffix=suffix, con=con
+        )
+        # Rejeu du cas : status + expect_check + observed_rows. `_run_one_case` laisse les
+        # données du cas chargées dans `con` (delete+insert sans cleanup final) → les
+        # sondes ci-dessous tournent sur les MÊMES tables, sans réinsertion.
+        result = await _run_one_case(
+            test_case=case,
+            sql=sql,
+            duckdb_schemas=duckdb_schemas,
+            used_columns_parsed=used_columns_parsed,
+            dialect=dialect,
+            suffix=suffix,
+            con=con,
+            precompiled_sql=precompiled_sql,
+            sql_drifted=sql_drifted,
+            collect_rows=True,
+        )
+        if result.get("status") != "error":
+            ctes = json.loads(_lightweight_query_decomposed(sql, dialect) or "[]")
+            try:
+                cte_trace = await _run_cte_trace(ctes, suffix, project, dialect, con)
+                failing_cte = _select_failing_cte(ctes, cte_trace, dialect)
+                if failing_cte and cte_trace.get(failing_cte, {}).get("row_count") == 0:
+                    failing_idx = next(
+                        (i for i, c in enumerate(ctes) if c["name"] == failing_cte),
+                        None,
+                    )
+                    if failing_idx is not None:
+                        breakdown: list = []
+                        try:
+                            breakdown += await _run_join_predicate_breakdown(
+                                ctes, failing_idx, suffix, project, dialect, con
+                            )
+                            breakdown += await _run_scalar_filter_breakdown(
+                                ctes, failing_idx, suffix, project, dialect, con
+                            )
+                        except Exception:
+                            pass
+                        if breakdown:
+                            cte_trace[failing_cte]["join_breakdown"] = breakdown
+            except Exception:
+                cte_trace = {}
+            try:
+                join_probes = await _run_join_count_probes(
+                    ctes, suffix, project, dialect, con
+                )
+            except Exception:
+                join_probes = []
+
+    expect_check = result.get("expect_check")
+    observed_rows = result.get("observed_rows") or []
+    cte_trace_list = _cte_trace_to_list(cte_trace)
+    diagnosis = _build_diagnosis(
+        sql_source,
+        result.get("status", ""),
+        cte_trace_list,
+        join_probes,
+        expect_check,
+    )
+
+    sql_warning = None
+    if sql_source == "snapshot-fallback":
+        sql_warning = (
+            f"source .sql introuvable pour `{model_name}` — rejoué sur le snapshot "
+            "figé du JSON ; un résultat vert peut refléter l'ancien SQL, pas ton édition."
+        )
+
+    payload: dict = {
+        "model": model_name,
+        "test_uid": test_uid,
+        "test_name": case.get("test_name"),
+        "description": (case.get("unit_test_description") or "").strip() or None,
+        "sql_source": sql_source,
+        "sql_source_warning": sql_warning,
+        "status": result.get("status"),
+        "review": result.get("review"),
+        "diagnosis": diagnosis,
+        "expect_check": expect_check,
+        "observed": {
+            "row_count": len(observed_rows),
+            "truncated": len(observed_rows) > _OBSERVED_ROWS_CAP,
+            "rows": observed_rows[:_OBSERVED_ROWS_CAP],
+        },
+        "cte_trace": cte_trace_list,
+        "join_probes": join_probes,
+        "llm_verdict": None,
+    }
+    if result.get("status") == "error":
+        payload["error"] = result.get("error")
+    if llm:
+        payload["llm_verdict"] = await _inspect_llm_verdict(payload)
+    return payload
 
 
 # ── Main entrypoint ───────────────────────────────────────────────────────────
