@@ -214,16 +214,28 @@ def profile(
         "-o",
         help="Directory where profile JSON files will be written.",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Approuve sans demander les scans de profiling facturés (CI). "
+        "Équivaut à MOCKSQL_AUTO_APPROVE_DWH=1.",
+    ),
 ) -> None:
     """Run BigQuery profiling on a SQL model and save the profile JSON."""
     import asyncio
 
+    from build_query.warehouse_gate import WarehouseQueryDenied
     from cli.profile import run_profile
 
     config = config.resolve()
     if not output_dir.is_absolute():
         output_dir = (config.parent / output_dir).resolve()
-    asyncio.run(run_profile(model, config, output_dir))
+    try:
+        asyncio.run(run_profile(model, config, output_dir, auto_approve=yes))
+    except WarehouseQueryDenied as exc:
+        typer.echo(f"Abandonné — {exc}")
+        raise typer.Exit(2)
 
 
 @app.command()
@@ -259,6 +271,13 @@ def generate(
         help="Natural-language scenario for the test to add, e.g. "
         '"un client avec deux cartes → trajet dupliqué". Additive mode only.',
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Approuve sans demander les scans de profiling facturés (--profile, CI). "
+        "Équivaut à MOCKSQL_AUTO_APPROVE_DWH=1.",
+    ),
 ) -> None:
     """Parse a SQL model, fetch missing schemas, and generate test data.
 
@@ -281,6 +300,7 @@ def generate(
             profile=profile,
             overwrite=overwrite,
             instruction=instruction,
+            auto_approve=yes,
         )
     )
 
@@ -598,6 +618,13 @@ def parity(
         "--json",
         help="Output results as JSON (même convention que test --json).",
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Approuve sans demander les requêtes entrepôt facturées (CI). "
+        "Équivaut à MOCKSQL_AUTO_APPROVE_DWH=1.",
+    ),
 ) -> None:
     """Audit de parité DuckDB ↔ warehouse : rejoue les tests sauvegardés sur la
     warehouse (BigQuery / Snowflake) avec les MÊMES données synthétiques, compare.
@@ -612,13 +639,19 @@ def parity(
     import asyncio
     import json as _json
 
+    from build_query.warehouse_gate import WarehouseQueryDenied
     from cli.parity import ParityExecutionError, run_parity
 
     model_filters = [model] if model else None
     try:
         exit_code, model_results = asyncio.run(
-            run_parity(config.resolve(), model_filters, force_all=all_tests)
+            run_parity(
+                config.resolve(), model_filters, force_all=all_tests, auto_approve=yes
+            )
         )
+    except WarehouseQueryDenied as exc:
+        typer.echo(f"Abandonné — {exc}")
+        raise typer.Exit(2)
     except ParityExecutionError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(2)

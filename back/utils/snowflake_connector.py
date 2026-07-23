@@ -61,3 +61,32 @@ def run_sf_query(sql: str, dry: bool = False) -> list[dict]:
     target = f"EXPLAIN {sql}" if dry else sql
     cur.execute(target)
     return cur.fetchall()
+
+
+def explain_json(sql: str) -> dict:
+    """Estime le volume scanné via ``EXPLAIN USING JSON`` — opération métadonnées,
+    gratuite (aucune exécution warehouse, donc aucun crédit consommé).
+
+    Renvoie le bloc ``GlobalStats`` du plan (``bytesAssigned``,
+    ``partitionsAssigned``, ``partitionsTotal``) — un proxy de volume scanné.
+    ⚠️ Snowflake facture le **temps de warehouse** (crédits), pas les octets : ces
+    chiffres ne se convertissent JAMAIS en montant. Voir ``warehouse_gate``.
+    """
+    import json
+
+    _import_snowflake()  # message d'install clair si l'extra manque
+
+    conn = get_sf_connection()
+    # Curseur non-Dict : EXPLAIN USING JSON renvoie une unique colonne JSON.
+    cur = conn.cursor()
+    cur.execute(f"EXPLAIN USING JSON {sql}")
+    row = cur.fetchone()
+    if not row:
+        return {}
+    raw = row[0]
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    stats = data.get("GlobalStats", {}) if isinstance(data, dict) else {}
+    return stats if isinstance(stats, dict) else {}

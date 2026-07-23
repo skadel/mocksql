@@ -347,6 +347,28 @@ def get_profile_budget_tb() -> float | None:
     return budget if budget > 0 else None
 
 
+def get_bq_price_per_tib() -> float:
+    """Prix on-demand BigQuery en **USD par TiB** scanné (défaut 6,25 $/TiB, tarif
+    officiel Google on-demand).
+
+    Surchargeable via ``mocksql.yml`` (``bq_price_per_tib: 5.0``) ou l'env
+    ``BQ_PRICE_PER_TIB``. Sert au chokepoint coût (``build_query/warehouse_gate.py``)
+    pour convertir les octets estimés par le dry-run en montant affiché AVANT
+    exécution. Une valeur invalide ou <= 0 retombe sur le défaut.
+    """
+    cfg = load_config()
+    val = cfg.get("bq_price_per_tib")
+    if val is None:
+        val = os.getenv("BQ_PRICE_PER_TIB")
+    if val is None:
+        return 6.25
+    try:
+        price = float(val)
+    except (ValueError, TypeError):
+        return 6.25
+    return price if price > 0 else 6.25
+
+
 def get_preprocessor_fn() -> str | None:
     return load_config().get("preprocessor_fn")
 

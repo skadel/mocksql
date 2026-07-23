@@ -633,19 +633,34 @@ def _load_model_context(model_name: str, models_base: Path) -> str:
 
 
 def _run_profile_bq(
-    schemas: list[dict], sql: str, dialect: str, billing_project: str
+    schemas: list[dict],
+    sql: str,
+    dialect: str,
+    billing_project: str,
+    auto_approve: bool = False,
 ) -> dict:
     """Run BigQuery profiling queries and return a normalized profile dict."""
     from utils.optional_deps import import_bigquery
 
     from build_query.profile_checker import _to_profiler_schema
     from build_query.profiler import profile_joins_for_query, profile_schema
+    from build_query.warehouse_gate import GatedExecutor
 
     _bq = import_bigquery()
     client = _bq.Client(project=billing_project)
 
     def executor(bq_sql: str) -> list[dict]:
         return [dict(row) for row in client.query(bq_sql).result()]
+
+    # Chokepoint coût : scans de profiling facturés → estimation + confirmation
+    # (une fois pour tout le run) avant émission.
+    executor = GatedExecutor(
+        executor,
+        "bigquery",
+        billing_project=billing_project,
+        context="profiling",
+        auto_approve=auto_approve,
+    )
 
     schema_for_profiler = _to_profiler_schema(schemas)
     profile = profile_schema(schema_for_profiler, executor, dialect=dialect)
@@ -664,6 +679,7 @@ async def run_generate(
     instruction: str | None = None,
     update_uid: str | None = None,
     target_path: str | None = None,
+    auto_approve: bool = False,
 ) -> None:
     import typer
 
@@ -791,13 +807,21 @@ async def run_generate(
                 "Set it in your .env or shell environment."
             )
             raise typer.Exit(1)
+        from build_query.warehouse_gate import WarehouseQueryDenied
+
         typer.echo("Profiling tables on BigQuery (this may take a moment)...")
         try:
-            profile_data = _run_profile_bq(schemas, sql, dialect, billing_project)
+            profile_data = _run_profile_bq(
+                schemas, sql, dialect, billing_project, auto_approve=auto_approve
+            )
             typer.echo(
                 f"[OK] Profile complete ({len(profile_data.get('tables', {}))} table(s), "
                 f"{len(profile_data.get('joins', []))} join(s))."
             )
+        except WarehouseQueryDenied as exc:
+            # Le profil est un enrichissement optionnel : un refus n'interrompt pas
+            # la génération, on continue simplement sans profil.
+            typer.echo(f"[INFO] Profiling ignoré ({exc}). Génération sans profil.")
         except Exception as exc:
             typer.echo(f"[WARN] Profiling failed: {exc}. Continuing without profile.")
 
