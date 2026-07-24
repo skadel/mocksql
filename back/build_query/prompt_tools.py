@@ -249,6 +249,95 @@ def _format_partition_window(window: Optional[dict]) -> str:
     )
 
 
+def _short(name: str) -> str:
+    """Dernier segment d'un nom pointé (`p.d.orders` → `orders`), sinon le nom brut."""
+    return (name or "").split(".")[-1] or (name or "")
+
+
+def fanout_cards_from_probes(join_probes: Optional[list]) -> List[dict]:
+    """Sondes de jointure SYNTHÉTIQUES d'``inspect`` → cartes de fan-out normalisées.
+
+    Source **gratuite** (comptages DuckDB sur les données générées, zéro DWH) : chaque
+    sonde porte un ``verdict`` (``fan_out``/``shrinks``/``preserves``) et les comptes
+    ``left_rows``/``result_rows``. Voir ``examples_executor._run_join_count_probes``.
+    """
+    cards: List[dict] = []
+    for p in join_probes or []:
+        left = _short(p.get("left", ""))
+        right = _short(p.get("right", ""))
+        if not (left and right):
+            continue
+        lr, rr = p.get("left_rows"), p.get("result_rows")
+        detail = (
+            f"{lr} → {rr} lignes (synthétique)"
+            if lr is not None and rr is not None
+            else None
+        )
+        cards.append(
+            {
+                "left": left,
+                "right": right,
+                "join_type": p.get("join_type") or "INNER",
+                "is_fanout": p.get("verdict") == "fan_out",
+                "detail": detail,
+            }
+        )
+    return cards
+
+
+def fanout_cards_from_profile(profile: Optional[dict]) -> List[dict]:
+    """Jointures du PROFIL (cardinalités réelles) → cartes de fan-out normalisées.
+
+    Source mesurée sur l'entrepôt (nécessite un profiling gaté par ``warehouse_gate``) :
+    ``join_type_profiled`` + ``max_right_per_left_key``. Le detail réutilise
+    ``describe_join`` (phrase actionnable déjà écrite). Import paresseux de
+    ``describe_join`` : ``profiler`` importe ``prompt_tools`` → éviter le cycle.
+    """
+    from build_query.profiler import describe_join
+
+    cards: List[dict] = []
+    for j in (profile or {}).get("joins", []) or []:
+        lt, rt = j.get("left_table", ""), j.get("right_table", "")
+        if not (lt and rt):
+            continue
+        jt = j.get("join_type_profiled")
+        max_r = j.get("max_right_per_left_key") or 0
+        cards.append(
+            {
+                "left": _short(lt),
+                "right": _short(rt),
+                "join_type": "",  # le profil ne porte pas toujours le type SQL du join
+                "is_fanout": jt in ("one-to-many", "many-to-many") and max_r > 1,
+                "detail": describe_join(j),
+            }
+        )
+    return cards
+
+
+def format_fanout_map(cards: List[dict]) -> str:
+    """« Où est le fan-out » : bloc actionnable listant chaque jointure et signalant
+    explicitement celles qui sont un-à-plusieurs — l'axe où placer la multiplicité pour
+    rendre un doublon observable (test de repro, Phase 2), et où NE PAS en fabriquer par
+    erreur (anti-faux-bug). Vide si aucune carte exploitable."""
+    cards = [c for c in cards if c.get("left") and c.get("right")]
+    if not cards:
+        return ""
+    lines = [
+        "Carte de fan-out (cardinalité des jointures — où la multiplicité se produit) :"
+    ]
+    for c in cards:
+        jt = f" {c['join_type']}" if c.get("join_type") else ""
+        detail = f" — {c['detail']}" if c.get("detail") else ""
+        tag = (
+            "  ← FAN-OUT : plusieurs lignes droite par clé gauche ; c'est ICI que "
+            "≥2 lignes de même clé rendent un doublon observable"
+            if c.get("is_fanout")
+            else ""
+        )
+        lines.append(f"  - `{c['left']}` ⋈ `{c['right']}`{jt}{detail}{tag}")
+    return "\n".join(lines)
+
+
 def _format_profile_block(
     profile: Optional[dict],
     used_columns: list,
@@ -920,6 +1009,14 @@ def generate_data_prompt(
         if profile_block_str
         else ""
     )
+    # Carte « où est le fan-out » (Phase 1.5a) : localise les jointures un-à-plusieurs
+    # d'après les cardinalités RÉELLES du profil. Complète le garde-fou anti-fan-out
+    # (_build_fanout_hint_block) par une localisation POSITIVE : le générateur sait où la
+    # multiplicité vit légitimement → ne la fabrique pas au mauvais join (anti-faux-bug),
+    # et Phase 2 (repro-mode) saura sur quel join placer ≥2 lignes de même clé.
+    fanout_map_str = format_fanout_map(fanout_cards_from_profile(profile))
+    if fanout_map_str:
+        profile_block += f"\n{fanout_map_str}\n"
 
     # Leçons apprises de corrections passées (par table / jointure) — réinjectées
     # pour ne pas répéter une erreur déjà corrigée sur un autre test.
