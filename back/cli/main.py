@@ -988,6 +988,26 @@ def inspect_cmd(
         help="Opt-in: add an LLM root-cause verdict. Never the default — inspect is "
         "deterministic and free by design.",
     ),
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Opt-in : ajoute un waterfall de cardinalité join-par-join sur l'ENTREPÔT "
+        "RÉEL (COUNT/COUNT DISTINCT par frontière) pour localiser le fan-out en prod. "
+        "Chaque tir est estimé + confirmé (warehouse_gate) — coût entrepôt réel.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Avec --live : waterfall COMPLET (toutes les CTE jointes) au lieu de la "
+        "sonde cheap (dernière CTE seulement).",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Avec --live : approuve les requêtes entrepôt sans confirmation (CI). "
+        "Équivaut à MOCKSQL_AUTO_APPROVE_DWH=1.",
+    ),
 ) -> None:
     """Diagnose WHY a case is red — deterministic, no LLM by default.
 
@@ -995,14 +1015,29 @@ def inspect_cmd(
     LLM call: the `expect` row diff + `sql_source` (incl. the `snapshot-fallback`
     guard), a CTE-by-CTE trace (first empty required CTE = prime suspect), and
     join-by-join cardinality probes (over-production vs row loss). `diagnosis.code`
-    summarises the likely cause. See docs/inspect-diagnostic.md. Exit code always 0.
+    summarises the likely cause. See docs/inspect-diagnostic.md.
+
+    `--live` adds a real-warehouse cardinality waterfall (gated by warehouse_gate) that
+    localises the fan-out in production data — where the synthetic probes only see the
+    test's rows. Exit code always 0 (except a warehouse refusal → 2).
     """
     import asyncio
 
-    from cli.test_runner import inspect_case
+    from build_query.warehouse_gate import WarehouseQueryDenied
+    from cli.test_runner import inspect_case, inspect_live
 
     try:
         payload = asyncio.run(inspect_case(config.resolve(), model, test_uid, llm=llm))
+        if live:
+            live_payload = asyncio.run(
+                inspect_live(config.resolve(), model, full=full, auto_approve=yes)
+            )
+            payload["live_waterfall"] = live_payload.get("live_waterfall", [])
+            if live_payload.get("note"):
+                payload["live_note"] = live_payload["note"]
+    except WarehouseQueryDenied as exc:
+        typer.echo(f"Abandonné — {exc}")
+        raise typer.Exit(2)
     except RuntimeError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
@@ -1011,6 +1046,8 @@ def inspect_cmd(
         _emit(payload)
     else:
         _print_inspect(payload)
+        if live:
+            _print_live_waterfall(payload)
 
 
 def _print_inspect(payload: dict) -> None:
@@ -1062,6 +1099,49 @@ def _print_inspect(payload: dict) -> None:
             )
     if payload.get("llm_verdict"):
         typer.echo(f"  verdict LLM: {payload['llm_verdict']}")
+
+
+def _print_live_waterfall(payload: dict) -> None:
+    """Waterfall de cardinalité entrepôt (--live) : comptes réels par frontière de join,
+    ratio de fan-out, et côté non-unique (source mécanique de la multiplicité)."""
+    wf = payload.get("live_waterfall") or []
+    if not wf:
+        note = payload.get("live_note")
+        typer.echo(f"  waterfall entrepôt : {note or 'aucune donnée'}")
+        return
+    typer.echo("  waterfall entrepôt (cardinalités RÉELLES) :")
+    for target in wf:
+        typer.echo(f"    [{target['cte']}]")
+        for p in target["probes"]:
+            if p.get("boundary") == "pre_agg":
+                # Signature COUNT vs COUNT DISTINCT à l'entrée du GROUP BY.
+                ar = p.get("agg_fanout_ratio")
+                sig = (
+                    f" ×{ar}  ← {p.get('rows')} ligne(s) pour "
+                    f"{p.get('distinct_rows')} clé(s) DISTINCT : un COUNT non-distinct "
+                    "compterait chaque clé plusieurs fois"
+                    if ar is not None and ar > 1
+                    else ""
+                )
+                verdict = f" — {p['verdict']}" if p.get("verdict") else ""
+                typer.echo(
+                    f"      {p.get('label', '?'):<32} {p.get('rows')} ligne(s)"
+                    f"{verdict}{sig}"
+                )
+                continue
+            ratio = (
+                f" ×{p['fanout_ratio']}" if p.get("fanout_ratio") is not None else ""
+            )
+            verdict = f" — {p['verdict']}" if p.get("verdict") else ""
+            nonuniq = ""
+            if p.get("right_non_unique"):
+                nonuniq = (
+                    f"  ← côté droit NON-UNIQUE sur {p.get('right_key', 'la clé')} "
+                    f"({p.get('right_distinct')}/{p.get('right_rows')}) : source du fan-out"
+                )
+            typer.echo(
+                f"      {p.get('label', '?'):<32} {p.get('rows')} ligne(s){ratio}{verdict}{nonuniq}"
+            )
 
 
 export_app = typer.Typer(

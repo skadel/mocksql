@@ -929,6 +929,120 @@ async def inspect_case(
     return payload
 
 
+# ── inspect --live : waterfall de cardinalité sur l'entrepôt RÉEL (gaté) ──────
+
+
+def _scalar(rows: list, key: str) -> int:
+    """Lit un scalaire de comptage d'une ligne (``[{"n": 90}]``), robuste à la casse
+    des clés (Snowflake DictCursor → MAJUSCULES). Repli sur la 1ʳᵉ colonne."""
+    if not rows:
+        return 0
+    row = rows[0]
+    if isinstance(row, dict):
+        for k in (key, key.upper(), key.lower()):
+            if k in row:
+                v = row[k]
+                return int(v) if v is not None else 0
+        vals = list(row.values())
+        return int(vals[0]) if vals and vals[0] is not None else 0
+    # tuple/list row (curseur non-Dict)
+    try:
+        return int(row[0])
+    except (TypeError, ValueError, IndexError):
+        return 0
+
+
+async def inspect_live(
+    config_path: Path,
+    model_name: str,
+    *,
+    full: bool = False,
+    auto_approve: bool = False,
+    prompt_fn=None,
+    warehouse_executor=None,
+) -> dict:
+    """Waterfall de cardinalité join-par-join sur l'ENTREPÔT RÉEL (BQ/SF), gaté.
+
+    Décompose le SQL disque en préfixes (``build_live_probes``) et tire, par frontière,
+    ``COUNT(*)`` [+ ``COUNT(DISTINCT clé_droite)``] sur les VRAIES tables — révèle où le
+    fan-out se produit en prod (« orders filtrés = 90 → ⋈ order_items = 340 ×3,8 »). Chaque
+    tir passe par ``warehouse_gate`` (estimé + confirmé UNE fois pour tout le run). Tiered :
+    ``full=False`` sonde la dernière CTE jointe (cheap), ``full=True`` le waterfall complet.
+
+    ``warehouse_executor`` (fn ``sql -> list[dict]``) est injectable pour les tests ;
+    par défaut le connecteur parité réel. Lève ``WarehouseQueryDenied`` sur refus (aucune
+    requête facturée émise après le refus), ``RuntimeError`` si le SQL est introuvable.
+    """
+    import os
+
+    from build_query.live_probes import build_live_probes, classify_waterfall
+    from build_query.query_chain import _lightweight_query_decomposed
+    from build_query.warehouse_gate import GatedExecutor
+
+    cfg = _load_config(config_path)
+    dialect: str = cfg.get("dialect", "bigquery")
+    sql, sql_source = resolve_run_sql(
+        cfg=cfg,
+        config_path=config_path,
+        model_name=model_name,
+        snapshot_sql="",
+        frozen=False,
+    )
+    if not sql or not sql.strip():
+        raise RuntimeError(f"SQL introuvable pour le modèle `{model_name}`")
+
+    ctes = json.loads(_lightweight_query_decomposed(sql, dialect) or "[]")
+    targets = build_live_probes(ctes, dialect, full=full)
+    base = {
+        "model": model_name,
+        "dialect": dialect,
+        "sql_source": sql_source,
+        "full": full,
+    }
+    if not targets:
+        return {**base, "live_waterfall": [], "note": "aucune jointure à sonder"}
+
+    if warehouse_executor is None:
+        from cli.parity import _execute_on_warehouse
+
+        def warehouse_executor(q: str, _d=dialect):  # noqa: ANN001
+            return _execute_on_warehouse(q, _d)
+
+    billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
+    gated = GatedExecutor(
+        warehouse_executor,
+        dialect,
+        billing_project=billing_project,
+        context=f"inspect --live · {model_name}",
+        auto_approve=auto_approve,
+        prompt_fn=prompt_fn,
+    )
+
+    waterfall: list = []
+    for target in targets:
+        annotated: list = []
+        for probe in target["probes"]:
+            resolved = dict(probe)
+            res = gated(probe["count_sql"])
+            resolved["rows"] = _scalar(res, "n")
+            # Pré-agrégat : une seule requête mesure n ET d (COUNT vs COUNT DISTINCT).
+            if probe.get("boundary") == "pre_agg":
+                resolved["distinct_rows"] = _scalar(res, "d")
+            if probe.get("right_distinct_sql"):
+                rd = gated(probe["right_distinct_sql"])
+                resolved["right_rows"] = _scalar(rd, "n")
+                resolved["right_distinct"] = _scalar(rd, "d")
+            # Le SQL est déjà porté par le probe ; on ne le ré-expose pas (bruit).
+            resolved.pop("count_sql", None)
+            resolved.pop("right_distinct_sql", None)
+            annotated.append(resolved)
+        waterfall.append(
+            {"cte": target["cte"], "probes": classify_waterfall(annotated)}
+        )
+
+    return {**base, "live_waterfall": waterfall}
+
+
 # ── Main entrypoint ───────────────────────────────────────────────────────────
 
 
