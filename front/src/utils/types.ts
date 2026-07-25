@@ -54,6 +54,7 @@ export interface ProfileRequest {
   expected_joins?: Array<{ left_table: string; right_table: string }>;
   partition_limit?: number;
   billing_tb?: number;
+  approval_token: string;
   profileStatus?: 'complete' | 'partial' | 'failed';
   profileErrors?: Array<{ query_index: number; error: string }>;
   // Tables/relations différées car leur scan estimé dépasse le budget. Alimentent

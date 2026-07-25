@@ -205,7 +205,7 @@ class TestImportMissingTables:
 
 
 class TestAutoProfileGate:
-    async def test_rejects_scan_without_explicit_cost_approval(self, client):
+    async def test_rejects_scan_without_sql_bound_approval(self, client):
         resp = await client.post(
             "/api/auto-profile",
             json={
@@ -218,3 +218,21 @@ class TestAutoProfileGate:
 
         assert resp.status_code == 403
         assert "not approved" in resp.json()["detail"]
+
+    async def test_rejects_different_sql_with_valid_approval(self, client):
+        from build_query.warehouse_gate import issue_approval_token
+
+        token = issue_approval_token(["SELECT 1"], session="s1", project="p1")
+        resp = await client.post(
+            "/api/auto-profile",
+            json={
+                "profile_sql": "SELECT secret FROM arbitrary_table",
+                "profile_queries": ["SELECT secret FROM arbitrary_table"],
+                "project": "p1",
+                "session": "s1",
+                "approval_token": token,
+            },
+        )
+
+        assert resp.status_code == 403
+        assert "this SQL batch" in resp.json()["detail"]

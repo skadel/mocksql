@@ -81,6 +81,49 @@ class TestEstimate:
         assert est.is_billed is False
 
 
+class TestApprovalToken:
+    def test_is_bound_to_exact_ordered_sql_batch(self):
+        token = wg.issue_approval_token(
+            ["SELECT 1", "SELECT 2"], session="s1", project="p1"
+        )
+
+        assert wg.verify_approval_token(
+            token, ["SELECT 1", "SELECT 2"], session="s1", project="p1"
+        )
+        assert not wg.verify_approval_token(
+            token, ["SELECT 2", "SELECT 1"], session="s1", project="p1"
+        )
+        assert not wg.verify_approval_token(
+            token, ["SELECT 1", "SELECT 3"], session="s1", project="p1"
+        )
+
+    def test_is_bound_to_session_and_project(self):
+        token = wg.issue_approval_token(["SELECT 1"], session="s1", project="p1")
+
+        assert not wg.verify_approval_token(
+            token, ["SELECT 1"], session="other", project="p1"
+        )
+        assert not wg.verify_approval_token(
+            token, ["SELECT 1"], session="s1", project="other"
+        )
+
+    def test_rejects_expired_or_tampered_token(self):
+        with patch.object(wg.time, "time", return_value=100):
+            token = wg.issue_approval_token(["SELECT 1"], session="s1", project="p1")
+        with patch.object(
+            wg.time, "time", return_value=100 + wg._APPROVAL_TTL_SECONDS + 1
+        ):
+            assert not wg.verify_approval_token(
+                token, ["SELECT 1"], session="s1", project="p1"
+            )
+        assert not wg.verify_approval_token(
+            token[:-1] + ("A" if token[-1] != "A" else "B"),
+            ["SELECT 1"],
+            session="s1",
+            project="p1",
+        )
+
+
 class TestConfirm:
     def _billed(self):
         return CostEstimate(

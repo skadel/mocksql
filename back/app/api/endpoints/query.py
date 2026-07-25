@@ -340,6 +340,14 @@ async def build_profile_request_route(body: BuildProfileRequestBody):
     billing_tb = request.get("profile_billing_tb")
     if billing_tb is not None:
         profile_request["billing_tb"] = billing_tb
+    from build_query.warehouse_gate import issue_approval_token
+
+    executable_queries = profile_request["profile_queries"] or [
+        profile_request["profile_query"]
+    ]
+    profile_request["approval_token"] = issue_approval_token(
+        executable_queries, session=body.session, project=body.project
+    )
 
     return {"profile_request": profile_request}
 
@@ -367,16 +375,27 @@ class AutoProfileRequest(BaseModel):
     partition_limit: int = 3
     # Set only after the UI displayed the dry-run estimate and the user launched
     # profiling. Prevents callers from bypassing the warehouse cost gate.
-    cost_approved: bool = False
+    approval_token: str = ""
 
 
 @router.post("/auto-profile")
 async def auto_profile_route(body: AutoProfileRequest):
 
-    if not body.cost_approved:
+    from build_query.warehouse_gate import verify_approval_token
+
+    executable_queries = body.profile_queries or [body.profile_sql]
+    if not verify_approval_token(
+        body.approval_token,
+        executable_queries,
+        session=body.session,
+        project=body.project,
+    ):
         raise HTTPException(
             status_code=403,
-            detail="Warehouse scan not approved: estimate and confirm profiling first.",
+            detail=(
+                "Warehouse scan not approved for this SQL batch: "
+                "estimate and confirm profiling first."
+            ),
         )
 
     from utils.optional_deps import import_bigquery

@@ -512,8 +512,8 @@ export interface AutoProfileParams {
   // Partition window the profile SQL was built with (echoed from the profile
   // request). Lets the backend record the scanned window, not a default of 3.
   partition_limit?: number;
-  // Must only be sent after the estimated scan was displayed and accepted.
-  cost_approved: true;
+  // Signed by /build-profile-request and bound to this exact ordered SQL batch.
+  approval_token: string;
 }
 
 export interface AutoProfileResponse {

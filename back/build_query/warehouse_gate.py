@@ -23,7 +23,13 @@ bloquante, qui rend l'appel explicite (utile face au hang Snowflake live).
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 import os
+import secrets
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
@@ -33,10 +39,80 @@ from utils.snowflake_connector import explain_json
 
 _BYTES_PER_TIB = 2**40
 _LOCAL_DIALECTS = {"duckdb", "postgres"}
+_APPROVAL_SECRET = (
+    os.getenv("MOCKSQL_WAREHOUSE_APPROVAL_SECRET", "").encode()
+    or secrets.token_bytes(32)
+)
+_APPROVAL_TTL_SECONDS = 15 * 60
 
 # Méthodes d'estimation qui ne correspondent à AUCun scan facturé : le gate ne
 # demande jamais de confirmation pour elles.
 _UNBILLED_METHODS = {"local", "metadata"}
+
+
+def _approval_payload(
+    queries: Iterable[str], *, session: str, project: str, expires_at: int
+) -> bytes:
+    query_hashes = [hashlib.sha256(query.encode()).hexdigest() for query in queries]
+    return json.dumps(
+        {
+            "expires_at": expires_at,
+            "project": project,
+            "query_hashes": query_hashes,
+            "session": session,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+
+
+def issue_approval_token(
+    queries: Iterable[str], *, session: str, project: str
+) -> str:
+    """Sign a short-lived approval for one exact, ordered SQL batch."""
+    payload = _approval_payload(
+        queries,
+        session=session,
+        project=project,
+        expires_at=int(time.time()) + _APPROVAL_TTL_SECONDS,
+    )
+    signature = hmac.new(_APPROVAL_SECRET, payload, hashlib.sha256).digest()
+    return (
+        base64.urlsafe_b64encode(payload).decode().rstrip("=")
+        + "."
+        + base64.urlsafe_b64encode(signature).decode().rstrip("=")
+    )
+
+
+def verify_approval_token(
+    token: str, queries: Iterable[str], *, session: str, project: str
+) -> bool:
+    """Validate signature, expiry, caller scope, and exact ordered SQL."""
+    try:
+        encoded_payload, encoded_signature = token.split(".", 1)
+        payload = base64.urlsafe_b64decode(
+            encoded_payload + "=" * (-len(encoded_payload) % 4)
+        )
+        signature = base64.urlsafe_b64decode(
+            encoded_signature + "=" * (-len(encoded_signature) % 4)
+        )
+        expected_signature = hmac.new(
+            _APPROVAL_SECRET, payload, hashlib.sha256
+        ).digest()
+        if not hmac.compare_digest(signature, expected_signature):
+            return False
+        decoded = json.loads(payload)
+        if decoded["expires_at"] < int(time.time()):
+            return False
+        expected_payload = _approval_payload(
+            queries,
+            session=session,
+            project=project,
+            expires_at=decoded["expires_at"],
+        )
+        return hmac.compare_digest(payload, expected_payload)
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return False
 
 
 class WarehouseQueryDenied(BaseException):
