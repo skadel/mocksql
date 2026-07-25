@@ -10,7 +10,9 @@ import utils.logger  # noqa: F401 — registers DIAG level (15)
 logger = logging.getLogger(__name__)
 
 
-async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
+async def run_profile(
+    model: Path, config: Path, output_dir: Path, auto_approve: bool = False
+) -> None:
     import typer
 
     from models.env_variables import validate_required_env
@@ -129,6 +131,20 @@ async def run_profile(model: Path, config: Path, output_dir: Path) -> None:
                 "[profile] → %d row(s): %s", len(rows), json.dumps(rows, default=str)
             )
             return rows
+
+        # Chokepoint coût : chaque requête de profiling BigQuery est un scan facturé
+        # (lecture des vraies lignes pour min/max, top_values…). On estime + confirme
+        # (pour chaque requête) avant d'émettre. Trino reste hors gate (profiling
+        # gratuit — pas de facturation au scan).
+        from build_query.warehouse_gate import GatedExecutor
+
+        executor = GatedExecutor(
+            executor,
+            "bigquery",
+            billing_project=billing_project,
+            context="profiling",
+            auto_approve=auto_approve,
+        )
 
     schema_for_profiler = _to_profiler_schema(schemas)
     logger.diag(

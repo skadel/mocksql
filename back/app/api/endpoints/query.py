@@ -340,6 +340,14 @@ async def build_profile_request_route(body: BuildProfileRequestBody):
     billing_tb = request.get("profile_billing_tb")
     if billing_tb is not None:
         profile_request["billing_tb"] = billing_tb
+    from build_query.warehouse_gate import issue_approval_token
+
+    executable_queries = profile_request["profile_queries"] or [
+        profile_request["profile_query"]
+    ]
+    profile_request["approval_token"] = issue_approval_token(
+        executable_queries, session=body.session, project=body.project
+    )
 
     return {"profile_request": profile_request}
 
@@ -365,12 +373,33 @@ class AutoProfileRequest(BaseModel):
     # The partition window the profile SQL was built with (echoed from
     # /build-profile-request). Defaults to 3 to match the build-side default.
     partition_limit: int = 3
+    # Set only after the UI displayed the dry-run estimate and the user launched
+    # profiling. Prevents callers from bypassing the warehouse cost gate.
+    approval_token: str = ""
 
 
 @router.post("/auto-profile")
 async def auto_profile_route(body: AutoProfileRequest):
 
+    from build_query.warehouse_gate import verify_approval_token
+
+    executable_queries = body.profile_queries or [body.profile_sql]
+    if not verify_approval_token(
+        body.approval_token,
+        executable_queries,
+        session=body.session,
+        project=body.project,
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Warehouse scan not approved for this SQL batch: "
+                "estimate and confirm profiling first."
+            ),
+        )
+
     from utils.optional_deps import import_bigquery
+    from build_query.warehouse_gate import GatedExecutor
     from build_query.profile_checker import (
         _normalize_profile,
         _load_model_profile,
@@ -385,8 +414,19 @@ async def auto_profile_route(body: AutoProfileRequest):
     billing_project = BQ_TEST_PROJECT
     client = _bq.Client(project=billing_project)
 
+    def _execute_query(sql: str) -> list:
+        return list(client.query(sql).result())
+
+    gated_executor = GatedExecutor(
+        _execute_query,
+        "bigquery",
+        billing_project=billing_project,
+        context="auto-profiling UI",
+        auto_approve=True,
+    )
+
     async def _run_query(sql: str) -> list:
-        return await asyncio.to_thread(lambda: list(client.query(sql).result()))
+        return await asyncio.to_thread(gated_executor, sql)
 
     raw_rows: list = []
     errors: list = []

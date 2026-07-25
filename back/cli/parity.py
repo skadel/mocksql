@@ -674,6 +674,7 @@ async def run_parity(
     config_path: Path,
     model_filters: list[str] | None = None,
     force_all: bool = False,
+    auto_approve: bool = False,
 ) -> tuple[int, list[dict]]:
     """Audit de parité sur les tests sauvegardés.
 
@@ -723,6 +724,21 @@ async def run_parity(
         return 0, []
     test_files = sorted(
         f for f in tests_root.rglob("*.json") if not _UUID_RE.match(f.stem)
+    )
+
+    # Chokepoint coût : parity rejoue la requête sur la warehouse (données inline →
+    # ~0 octet sur BigQuery, donc gratuit ; mais Snowflake facture le temps de
+    # warehouse). Un seul GatedExecutor partagé pour tout le run → au plus UNE
+    # confirmation (mémoïsée), refus → WarehouseQueryDenied propage et abandonne.
+    from build_query.warehouse_gate import GatedExecutor, WarehouseQueryDenied
+
+    billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
+    warehouse_gate = GatedExecutor(
+        lambda q: _execute_on_warehouse(q, dialect),
+        dialect,
+        billing_project=billing_project,
+        context="parity",
+        auto_approve=auto_approve,
     )
 
     session_prefix = uuid.uuid4().hex[:8]
@@ -835,7 +851,11 @@ async def run_parity(
                         schemas=schemas,
                         case_data=tc.get("data") or {},
                     )
-                    warehouse_rows = _execute_on_warehouse(mocked_sql, dialect)
+                    warehouse_rows = warehouse_gate(mocked_sql)
+                except WarehouseQueryDenied:
+                    # Refus explicite de l'utilisateur : abandon propre du run entier
+                    # (pas un échec de test — remonte au command handler).
+                    raise
                 except ParityExecutionError as exc:
                     has_error = True
                     case_results.append({**base, "state": "error", "detail": str(exc)})

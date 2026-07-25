@@ -29,6 +29,15 @@ from cli.parity import (
 from cli.test_runner import SchemaMissingError
 
 
+@pytest.fixture(autouse=True)
+def _auto_approve_dwh(monkeypatch):
+    """Ces tests simulent la warehouse (``monkeypatch _execute_on_warehouse``) : le
+    chokepoint coût (``warehouse_gate``) est hors sujet ici — il a ses propres tests
+    (``test_warehouse_gate.py``). On pré-approuve pour découpler du dry-run réel que
+    ``estimate()`` émettrait sinon vers BigQuery/Snowflake."""
+    monkeypatch.setenv("MOCKSQL_AUTO_APPROVE_DWH", "1")
+
+
 # ── Empreinte ─────────────────────────────────────────────────────────────────
 
 

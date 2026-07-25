@@ -483,45 +483,6 @@ const ChatComponent: React.FC = () => {
     [currentModelId, modelName, dispatch, t]
   );
 
-  // -------- Profilage budgété (best-effort) : construit la requête de profiling
-  // sous le budget donné, exécute les requêtes qui tiennent sous le budget, et
-  // mémorise les tables différées pour proposer "Compléter le profil".
-  // budget=null => aucun budget (on profile tout). Ne lève jamais.
-  const runBudgetedProfiling = useCallback(async (args: {
-    sessionId: string; sql: string; usedColumns: any[]; missingColumns: any[]; budget: number | null;
-  }) => {
-    const { sessionId, sql, usedColumns, missingColumns, budget } = args;
-    setIsAutoProfileRunning(true);
-    try {
-      const { profile_request } = await buildProfileRequestApi({
-        sql, project: '', dialect: DIALECT, session: sessionId,
-        missing_columns: missingColumns,
-        budget_tb: budget ?? undefined,
-      });
-      if (profile_request.profile_queries && profile_request.profile_queries.length) {
-        const result = await autoProfileApi({
-          profile_sql: profile_request.profile_query,
-          profile_queries: profile_request.profile_queries,
-          project: '', session: sessionId,
-          partition_limit: profile_request.partition_limit,
-        });
-        if (result.profile_status !== 'complete') {
-          setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
-        }
-      }
-      if (profile_request.deferred && profile_request.deferred.length) {
-        setPartialProfile({
-          deferred: profile_request.deferred,
-          budget: profile_request.budget_tb ?? budget,
-          sql, usedColumns, sessionId,
-        });
-      } else {
-        setPartialProfile(null);
-      }
-    } catch { /* profilage best-effort */ }
-    setIsAutoProfileRunning(false);
-  }, []);
-
   // -------- "Compléter le profil" : reprofile les tables différées SANS budget
   // (l'utilisateur accepte explicitement le scan complet). Les colonnes différées
   // sont toujours "manquantes" dans le profil → check-profile les redonne.
@@ -542,6 +503,7 @@ const ChatComponent: React.FC = () => {
             profile_queries: profile_request.profile_queries,
             project: '', session: pp.sessionId,
             partition_limit: profile_request.partition_limit,
+            approval_token: profile_request.approval_token,
           });
           if (result.profile_status !== 'complete') {
             setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
@@ -615,6 +577,7 @@ const ChatComponent: React.FC = () => {
         // friction) ; sinon on demande la valeur dans le popup (défaut 0.3 To).
         const configBudget = profileResult.profile_budget_tb ?? null;
         const missingCols = profileResult.missing_columns;
+        let resolvedReq: import('../../../api/query').BuildProfileRequestResult['profile_request'] | null = null;
         setTestsTarget(1);
         setPendingAutoProfile({
           profileRequest: null,
@@ -622,11 +585,50 @@ const ChatComponent: React.FC = () => {
           step: 'count',
           nUsedCols: countUsedColumns(usedColumns),
           configBudget,
-          // One-click : profilage budgété (best-effort) PUIS génération, sans
-          // étape intermédiaire ni clic manuel sur « Lancer le profiling ».
           onConfirm: async (n) => {
             const budget = configBudget ?? budgetTargetRef.current ?? null;
-            await runBudgetedProfiling({ sessionId, sql, usedColumns, missingColumns: missingCols, budget });
+            if (!resolvedReq) {
+              setIsAutoProfileRunning(true);
+              try {
+                const built = await buildProfileRequestApi({
+                  sql, project: '', dialect: DIALECT, session: sessionId,
+                  missing_columns: missingCols, budget_tb: budget ?? undefined,
+                });
+                resolvedReq = built.profile_request;
+                setPendingAutoProfile((prev) => prev ? {
+                  ...prev, step: 'profiling', profileRequest: built.profile_request,
+                } : prev);
+              } finally {
+                setIsAutoProfileRunning(false);
+              }
+              return;
+            }
+            setIsAutoProfileRunning(true);
+            try {
+              if (resolvedReq.profile_queries?.length) {
+                const result = await autoProfileApi({
+                  profile_sql: resolvedReq.profile_query,
+                  profile_queries: resolvedReq.profile_queries,
+                  project: '', session: sessionId,
+                  partition_limit: resolvedReq.partition_limit,
+                  approval_token: resolvedReq.approval_token,
+                });
+                if (result.profile_status !== 'complete') {
+                  setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
+                }
+              }
+              if (resolvedReq.deferred?.length) {
+                setPartialProfile({
+                  deferred: resolvedReq.deferred,
+                  budget: resolvedReq.budget_tb ?? budget,
+                  sql, usedColumns, sessionId,
+                });
+              } else {
+                setPartialProfile(null);
+              }
+            } finally {
+              setIsAutoProfileRunning(false);
+            }
             setPendingAutoProfile(null);
             doStream(n);
           },
@@ -1003,7 +1005,7 @@ const ChatComponent: React.FC = () => {
             if (!req) return;
             setIsAutoProfileRunning(true);
             try {
-              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: currentModelId, partition_limit: req.partition_limit });
+              const result = await autoProfileApi({ profile_sql: req.profile_query, profile_queries: req.profile_queries, project: '', session: currentModelId, partition_limit: req.partition_limit, approval_token: req.approval_token });
               if (result.profile_status !== 'complete') {
                 setAutoProfileWarning({ status: result.profile_status, errors: result.errors ?? [] });
               }
@@ -1052,10 +1054,37 @@ const ChatComponent: React.FC = () => {
       }
       if (!result.missing_columns?.length) return;
       const { profile_request } = await buildProfileRequestApi({ sql: sqlQuery, project: '', dialect: DIALECT, session: currentModelId, missing_columns: result.missing_columns });
-      const refreshResult = await autoProfileApi({ profile_sql: profile_request.profile_query, profile_queries: profile_request.profile_queries, project: '', session: currentModelId, partition_limit: profile_request.partition_limit });
-      if (refreshResult.profile_status !== 'complete') {
-        setAutoProfileWarning({ status: refreshResult.profile_status, errors: refreshResult.errors ?? [] });
-      }
+      setIsAutoProfileRunning(false);
+      setPendingAutoProfile({
+        profileRequest: profile_request,
+        needsProfiling: true,
+        step: 'profiling',
+        onConfirm: async () => {
+          setIsAutoProfileRunning(true);
+          try {
+            const refreshResult = await autoProfileApi({
+              profile_sql: profile_request.profile_query,
+              profile_queries: profile_request.profile_queries,
+              project: '',
+              session: currentModelId,
+              partition_limit: profile_request.partition_limit,
+              approval_token: profile_request.approval_token,
+            });
+            if (refreshResult.profile_status !== 'complete') {
+              setAutoProfileWarning({ status: refreshResult.profile_status, errors: refreshResult.errors ?? [] });
+            }
+          } catch (e) {
+            console.error('[handleRefreshProfile.confirm]', e);
+            dispatch(setError('Erreur lors du rafraîchissement du profil.'));
+          } finally {
+            setIsAutoProfileRunning(false);
+            setPendingAutoProfile(null);
+            getProfileMetaApi().then((m) => setProfiledAt(m.profiled_at)).catch(() => {});
+          }
+        },
+        onSkip: async () => setPendingAutoProfile(null),
+        onCancel: () => setPendingAutoProfile(null),
+      });
     } catch (e) {
       console.error('[handleRefreshProfile]', e);
       dispatch(setError('Erreur lors du rafraîchissement du profil.'));
