@@ -126,14 +126,38 @@ async def run_validate(config_path: Path, model: str, test_uid: str) -> dict[str
 def run_confirm(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
     """Confirmation humaine du contrat ``expect`` d'un cas (spec validation-humaine).
 
-    Miroir CLI du endpoint ``POST /tests/confirm`` : gèle la sortie actuellement
-    observée (``results_json``, repli sur l'``expect`` stocké) et pose
-    ``review.status = "confirmed"`` / ``confirmed_by = "user"``. Déterministe, sans LLM.
+    Miroir CLI du endpoint ``POST /tests/confirm``, avec une différence de flux :
+    côté serveur l'UI vient de ré-exécuter (``results_json`` frais) ; côté CLI le
+    replay est lecture seule et le cache date du generate. On REJOUE donc le cas
+    contre le SQL disque (replay-on-confirm, déterministe, zéro LLM), on gèle CETTE
+    sortie, et on aligne le snapshot ``sql`` du doc — sinon le gate naît périmé
+    (contrat gelé sur une sortie obsolète + bascule ``stale`` immédiate au replay).
+
+    L'alignement du snapshot passe par une écriture SÉPARÉE, avant la confirmation :
+    ``sync_expect_on_doc`` y bascule ``stale`` les autres contrats confirmés (leur
+    confirmation valait pour l'ancien SQL — dérive légitime) sans toucher celui
+    qu'on confirme juste après.
     """
+    import asyncio
+
     from build_query.expect_contract import confirm_case
+    from cli.test_runner import replay_case_rows
 
     path, doc = load_doc(config_path, model)
+    require_test_case(doc, test_uid)
+    try:
+        rows, replayed_sql = asyncio.run(replay_case_rows(config_path, model, test_uid))
+    except RuntimeError as exc:
+        raise TestDocError(f"Replay impossible avant confirmation : {exc}")
+
+    if (doc.get("sql") or "").strip() != replayed_sql.strip():
+        doc["sql"] = replayed_sql
+        save_doc(path, doc)
+        path, doc = load_doc(config_path, model)
+
     tc = require_test_case(doc, test_uid)
+    # La sortie « actuellement observée » = le replay disque, pas le cache du generate.
+    tc["results_json"] = json.dumps(rows, ensure_ascii=False, default=str)
     try:
         confirmed = confirm_case(tc, doc.get("sql") or "")
     except ValueError as exc:
@@ -150,6 +174,31 @@ def run_confirm(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
         "review": confirmed["review"],
         "expect_rows": len(confirmed["expect"].get("rows") or []),
         "expect_columns": confirmed["expect"].get("columns") or [],
+    }
+
+
+def run_mark_repro(config_path: Path, model: str, test_uid: str) -> dict[str, Any]:
+    """Marque un cas comme test de **reproduction de bug** (verrou repro, Phase 1).
+
+    Miroir déterministe de ``run_confirm`` mais qui NE confirme PAS : pose seulement
+    ``review.intent = "repro"`` sur le cas, sans replay ni LLM. Signale au replay
+    (``mocksql test``) que ce cas DOIT naître rouge sur le SQL courant tant qu'il n'est
+    pas confirmé — un cas *né vert* (contrat ``expect`` == sortie courante) marqué repro
+    devient ``repro_missing`` (exit 1), le verrou anti « test insensible au bug »
+    (cf. RAPPORT-repro-fitness). À appeler APRÈS l'édition prescriptive de ``expect``
+    (skill mocksql-tdd étape 2). Idempotent ; préserve ``review.status``.
+    """
+    path, doc = load_doc(config_path, model)
+    tc = require_test_case(doc, test_uid)
+    review = tc.get("review") if isinstance(tc.get("review"), dict) else {}
+    review["intent"] = "repro"
+    tc["review"] = review
+    save_doc(path, doc)
+    return {
+        "model": model,
+        "test_uid": test_uid,
+        "test_name": tc.get("test_name"),
+        "review": review,
     }
 
 

@@ -1,6 +1,6 @@
 """Régression : `mocksql generate` est ADDITIF par défaut — il n'écrase jamais les
-tests existants ni leurs assertions-specs (posées via `mocksql assert`). Seul
-`--overwrite` reconstruit la suite de zéro.
+tests existants ni leurs champs porteurs (contrat `expect`, assertions legacy à
+`assertion_uid`). Seul `--overwrite` reconstruit la suite de zéro.
 
 Sans cette garantie, relancer `generate` (ou ajouter un cas ciblé) détruirait la
 cible rouge d'une boucle de fix en cours.

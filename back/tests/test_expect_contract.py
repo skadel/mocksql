@@ -211,6 +211,55 @@ def test_sync_skips_deadborn_and_missing_results():
     assert "expect" not in doc2["test_cases"][0]
 
 
+def test_sync_preserves_prescriptive_expect_when_output_unchanged():
+    """Boucle repro : un ``expect.rows`` rendu PRESCRIPTIF à la main (≠ sortie observée)
+    ne doit pas être re-snapshotté quand une AUTRE écriture du doc survient (confirmer un
+    autre cas, ``generate -i``…) tant que la sortie du cas n'a pas bougé — sinon la cible
+    rouge éditée est silencieusement détruite (perte de donnée)."""
+    prescriptive = {
+        "columns": ["order_id", "amount", "label"],
+        "rows": [{"order_id": 1, "amount": 999.0, "label": "voulu"}],  # ≠ results_json
+        "ordered": True,
+    }
+    doc = _doc(
+        case_extra={
+            "test_uid": "aaaa",
+            "review": {"status": "draft"},
+            "expect": prescriptive,
+        }
+    )
+    # La sortie observée (results_json) est INCHANGÉE par rapport au disque.
+    previous_cases = [dict(doc["test_cases"][0])]
+    sync_expect_on_doc(doc, previous_sql=doc["sql"], previous_cases=previous_cases)
+    assert doc["test_cases"][0]["expect"] == prescriptive
+
+
+def test_sync_refreshes_draft_expect_when_output_changed():
+    """Contrepartie : si la sortie observée a changé (data éditée via update-test), le
+    draft EST re-snapshotté sur la nouvelle sortie (comportement historique conservé)."""
+    doc = _doc(
+        case_extra={
+            "test_uid": "aaaa",
+            "review": {"status": "draft"},
+            "expect": {
+                "columns": ["order_id"],
+                "rows": [{"order_id": 9}],
+                "ordered": True,
+            },
+        }
+    )
+    # Sortie précédente différente → results_json a bougé → refresh légitime.
+    previous_cases = [
+        {
+            "test_uid": "aaaa",
+            "test_index": 0,
+            "results_json": json.dumps([{"order_id": 7, "amount": 1.0, "label": "x"}]),
+        }
+    ]
+    sync_expect_on_doc(doc, previous_sql=doc["sql"], previous_cases=previous_cases)
+    assert doc["test_cases"][0]["expect"]["rows"] == [{"order_id": 1}, {"order_id": 2}]
+
+
 def test_write_test_doc_puts_expect_in_committed_definition(tmp_path):
     from storage.test_files import write_test_doc
 
@@ -344,12 +393,57 @@ def test_compare_order_only_mismatch_flag():
 
 
 def test_run_confirm_cli(tmp_path):
+    """`mocksql confirm` = replay-on-confirm : le cas est rejoué contre le SQL disque
+    et c'est CETTE sortie qui est gelée — le `results_json` du cache (potentiellement
+    figé au generate) est ignoré. Un cas sans données n'est pas confirmable."""
     from cli.manage_cmd import run_confirm
     from storage.test_files import read_test_doc, write_test_doc
 
+    sql = (
+        "SELECT payment, SUM(amount) AS total FROM `p.d.t` "
+        "GROUP BY payment ORDER BY payment"
+    )
+    (tmp_path / "models").mkdir()
+    (tmp_path / "models" / "orders.sql").write_text(sql, encoding="utf-8")
+    (tmp_path / "mocksql.yml").write_text(
+        "dialect: bigquery\nmodels_path: models\n", encoding="utf-8"
+    )
+    (tmp_path / ".mocksql").mkdir()
+    (tmp_path / ".mocksql" / "schema_cache.json").write_text(
+        json.dumps(
+            {
+                "tables": [
+                    {
+                        "table_name": "p.d.t",
+                        "columns": [
+                            {
+                                "name": "payment",
+                                "type": "STRING",
+                                "bq_ddl_type": "STRING",
+                            },
+                            {
+                                "name": "amount",
+                                "type": "FLOAT64",
+                                "bq_ddl_type": "FLOAT64",
+                            },
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     path = tmp_path / ".mocksql" / "tests" / "orders.json"
     doc = {
-        "sql": "SELECT 1",
+        "sql": sql,
+        "used_columns": [
+            {
+                "project": "p",
+                "database": "d",
+                "table": "t",
+                "used_columns": ["payment", "amount"],
+            }
+        ],
         "test_cases": [
             {
                 "test_uid": "aaaa",
@@ -357,7 +451,14 @@ def test_run_confirm_cli(tmp_path):
                 "test_name": "nominal",
                 "status": "complete",
                 "verdict": "Bon",
-                "results_json": _results_json(),
+                "data": {
+                    "d_t": [
+                        {"payment": "cb", "amount": 10.0},
+                        {"payment": "paypal", "amount": 5.0},
+                    ]
+                },
+                # Cache périmé (autre sortie) : le gel doit venir du replay, pas de lui.
+                "results_json": json.dumps([{"payment": "x", "total": 0.0}]),
                 "assertion_results": [],
             }
         ],
@@ -368,6 +469,10 @@ def test_run_confirm_cli(tmp_path):
     assert result["expect_rows"] == 2
     saved = read_test_doc(path)
     assert saved["test_cases"][0]["review"]["confirmed_by"] == "user"
+    assert saved["test_cases"][0]["expect"]["rows"] == [
+        {"payment": "cb", "total": 10.0},
+        {"payment": "paypal", "total": 5.0},
+    ]
 
 
 # ── migrate_case (§5) ─────────────────────────────────────────────────────────

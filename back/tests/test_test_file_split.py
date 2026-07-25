@@ -51,6 +51,23 @@ def _doc() -> dict:
     }
 
 
+def test_write_backfills_missing_test_uid(tmp_path: Path):
+    """Un cas généré côté CLI naît sans test_uid — l'écriture doit lui en assigner un,
+    sinon `mocksql test --json` rapporte `test_uid: null` et update-test/confirm sont
+    incibables (la boucle agent TDD cible exclusivement par uid)."""
+    path = tmp_path / "model.json"
+    doc = _doc()
+    doc["test_cases"][0].pop("test_uid", None)
+    write_test_doc(path, doc)
+    saved = read_test_doc(path)
+    uid = saved["test_cases"][0].get("test_uid")
+    assert uid
+
+    # Idempotent : une réécriture ne réassigne pas l'uid.
+    write_test_doc(path, saved)
+    assert read_test_doc(path)["test_cases"][0]["test_uid"] == uid
+
+
 def test_definition_file_is_clean_and_readable(tmp_path: Path):
     tests_dir = tmp_path / ".mocksql" / "tests"
     path = tests_dir / "demo" / "payment_summary.json"

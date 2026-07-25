@@ -305,3 +305,22 @@ mocksql ui                  # http://localhost:8080/static/
 mocksql ui --port 4000
 mocksql ui --no-browser
 ```
+
+---
+
+## 5. Coding agents — TDD bug-fix loop
+
+MockSQL doubles as a **test oracle for coding agents** (Claude Code, GitHub
+Copilot, Cursor…): the agent reproduces a SQL bug as a *red* test replayed
+locally on DuckDB, fixes the SQL, verifies *green*, then freezes the test as a
+regression gate — no LLM calls in the replay path, nothing billed on the
+warehouse.
+
+A ready-to-install skill encodes the whole workflow (qualified red, false-red
+detection, JSON contract): **[skills/mocksql-tdd/SKILL.md](../skills/mocksql-tdd/SKILL.md)**.
+
+- **Claude Code** — copy it to `.claude/skills/mocksql-tdd/SKILL.md` in your project.
+- **GitHub Copilot** — paste it into `.github/instructions/mocksql-tdd.instructions.md`.
+- Any other agent that can run a shell can follow the file as-is.
+
+Full CLI reference for the loop → **[docs/agent-fix-loop.md](agent-fix-loop.md)**.

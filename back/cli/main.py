@@ -262,7 +262,8 @@ def generate(
         False,
         "--overwrite",
         help="Rebuild the whole suite from scratch (DESTRUCTIVE: drops existing tests "
-        "and assert specs). Default is additive — generate only ever adds a test.",
+        "and confirmed expect contracts). Default is additive — generate only ever "
+        "adds a test.",
     ),
     instruction: str = typer.Option(
         None,
@@ -282,8 +283,8 @@ def generate(
     """Parse a SQL model, fetch missing schemas, and generate test data.
 
     Additive by default: if a suite already exists, generate ADDS a test (targeted
-    by -i/--instruction) and preserves existing tests + assert specs. Use --overwrite
-    to rebuild the full suite from scratch.
+    by -i/--instruction) and preserves existing tests + expect contracts. Use
+    --overwrite to rebuild the full suite from scratch.
     """
     import asyncio
 
@@ -320,11 +321,11 @@ def update_test(
     config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
     output_dir: Path = typer.Option(Path(".mocksql/tests"), "--output", "-o"),
 ) -> None:
-    """Modify an existing test via the LLM (add/edit data). Preserves assert specs.
+    """Modify an existing test via the LLM (add/edit data).
 
     Unlike `generate` (which only ADDS a test), update-test targets one existing test
-    by test_uid and lets the agent change its data, then re-runs it. Spec assertions
-    (added via `mocksql assert`) are carried over untouched.
+    by test_uid and lets the agent change its data, then re-runs it. Legacy spec
+    assertions (carrying an assertion_uid) are carried over untouched.
     """
     import asyncio
 
@@ -376,6 +377,13 @@ def test(
         help="CI gate: exit 1 if any executed test is not human-confirmed "
         "(review.status != confirmed).",
     ),
+    require_red: bool = typer.Option(
+        False,
+        "--require-red",
+        help="CI gate de repro (symétrique de --require-confirmed) : exit 1 si un test "
+        "exécuté n'est PAS rouge sur le SQL courant (statut hors unconfirmed/fail). Sert "
+        "à prouver, avant le fix, que le(s) test(s) de repro reproduisent bien le bug.",
+    ),
 ) -> None:
     """Re-run saved test cases against DuckDB. No LLM calls. Exits 1 if any test fails.
 
@@ -403,6 +411,18 @@ def test(
     ]
     if require_confirmed and unconfirmed:
         exit_code = 1
+
+    # Gate de repro (Phase 1) : exiger que chaque cas exécuté soit ROUGE sur le SQL
+    # courant. Un cas non rouge (`pass`, `repro_missing`, erreur…) → repro non établie.
+    if require_red:
+        not_red = _not_red_cases(model_results)
+        if not_red:
+            exit_code = 1
+            typer.echo(
+                "  [--require-red] repro non établie — cas non rouges : "
+                + ", ".join(f"{m}#{i}" for m, i in not_red),
+                err=True,
+            )
 
     if output_json:
         typer.echo(_json.dumps(model_results, indent=2, default=str))
@@ -460,6 +480,22 @@ def migrate_expect_cmd(
     )
 
 
+def _not_red_cases(model_results: list) -> list:
+    """Cas exécutés qui ne sont PAS rouges sur le SQL courant (gate ``--require-red``).
+
+    Rouge = le contrat ne passe pas sur le SQL courant → statut ``unconfirmed`` (draft
+    qui diverge) ou ``fail`` (régression confirmée). Tout le reste (``pass``,
+    ``repro_missing`` né vert, ``error``) signale que la repro n'est pas établie. ``skip``
+    (rien à exécuter) est exclu. Retourne la liste ``(model, index)`` des violations.
+    """
+    return [
+        (mr["model"], c.get("index"))
+        for mr in model_results
+        for c in mr["cases"]
+        if c["status"] not in ("unconfirmed", "fail", "skip")
+    ]
+
+
 def _print_test_results(model_results: list) -> None:
     import json as _json
 
@@ -472,7 +508,9 @@ def _print_test_results(model_results: list) -> None:
     for mr in model_results:
         cases = mr["cases"]
         n_pass = sum(1 for c in cases if c["status"] == "pass")
-        n_fail = sum(1 for c in cases if c["status"] in ("fail", "error"))
+        n_fail = sum(
+            1 for c in cases if c["status"] in ("fail", "error", "repro_missing")
+        )
         n_skip = sum(1 for c in cases if c["status"] == "skip")
         n_unconf = sum(1 for c in cases if c["status"] == "unconfirmed")
         total += len(cases)
@@ -505,6 +543,9 @@ def _print_test_results(model_results: list) -> None:
                 # Spec validation-humaine §7 : un cas non confirmé dont les lignes
                 # divergent du snapshot n'est PAS un échec — il attend une revue humaine.
                 "unconfirmed": "UNCF",
+                # Verrou repro (Phase 1) : cas marqué `intent=repro` mais né vert (contrat
+                # == sortie courante) → ne reproduit pas le bug. Bloquant (exit 1).
+                "repro_missing": "!RED",
             }[status]
             idx = c.get("index", "?")
             title = c.get("name") or f"Test {idx}"
@@ -522,6 +563,14 @@ def _print_test_results(model_results: list) -> None:
                 "stale": "  [stale — à re-confirmer]",
             }.get(c.get("review") or "", "")
             typer.echo(f"  [{label}] {title}{parity_badge}{review_badge}")
+            if status == "repro_missing":
+                # Le contrat `expect` PASSE déjà sur le SQL courant → pas de diff à montrer,
+                # d'où un message dédié (le bloc `expect_check` ne se déclenche pas).
+                typer.echo(
+                    "           né vert : le contrat `expect` correspond déjà à la sortie "
+                    "courante — ce test ne reproduit PAS le bug. Rends l'input "
+                    "discriminant sur l'axe du bug pour qu'il naisse ROUGE, puis re-teste."
+                )
             # Diff de lignes au contrat expect (Phase 2 : le contrat FAIT le verdict).
             ec = c.get("expect_check")
             if ec and not ec.get("passed"):
@@ -807,113 +856,10 @@ def _print_check_results(results: list[dict]) -> None:
             )
 
 
-assert_app = typer.Typer(
-    name="assert",
-    help="Manage assertions (specs) on a test case — list/add/update/remove.",
-    no_args_is_help=True,
-)
-app.add_typer(assert_app, name="assert")
-
-
 def _emit(payload: dict) -> None:
     import json as _json
 
     typer.echo(_json.dumps(payload, indent=2, ensure_ascii=False, default=str))
-
-
-@assert_app.command("list")
-def assert_list(
-    model: str = typer.Argument(
-        ..., help="Model name (e.g. orders, demo/payment_summary)."
-    ),
-    test_uid: str = typer.Option(..., "--test-uid", "-u", help="Target test_uid."),
-    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
-) -> None:
-    """List assertions on a test case (backfills short assertion_uids)."""
-    from cli.assert_cmd import AssertError, run_list
-
-    try:
-        _emit(run_list(config.resolve(), model, test_uid))
-    except AssertError as exc:
-        typer.echo(f"[ERROR] {exc}", err=True)
-        raise typer.Exit(1)
-
-
-@assert_app.command("add")
-def assert_add(
-    model: str = typer.Argument(...),
-    test_uid: str = typer.Option(..., "--test-uid", "-u"),
-    description: str = typer.Option(..., "--description", "-d", help="Human spec."),
-    sql: str = typer.Option(
-        ...,
-        "--sql",
-        "-s",
-        help="dbt-style assertion SQL: SELECT the FAILING rows (0 rows = pass). "
-        "Use __result__ as the model output table.",
-    ),
-    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
-) -> None:
-    """Add a spec assertion and re-run it against the live .sql to confirm red/green."""
-    import asyncio
-
-    from cli.assert_cmd import AssertError, run_add
-
-    try:
-        result = asyncio.run(
-            run_add(config.resolve(), model, test_uid, description, sql)
-        )
-        _emit(result)
-    except AssertError as exc:
-        typer.echo(f"[ERROR] {exc}", err=True)
-        raise typer.Exit(1)
-
-
-@assert_app.command("update")
-def assert_update(
-    model: str = typer.Argument(...),
-    test_uid: str = typer.Option(..., "--test-uid", "-u"),
-    assertion_uid: str = typer.Option(..., "--assertion-id", "-a"),
-    description: str = typer.Option(None, "--description", "-d"),
-    sql: str = typer.Option(None, "--sql", "-s"),
-    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
-) -> None:
-    """Edit an existing assertion and re-run it against the live .sql."""
-    import asyncio
-
-    from cli.assert_cmd import AssertError, run_update
-
-    if description is None and sql is None:
-        typer.echo(
-            "[ERROR] Rien à modifier : passe --description et/ou --sql.", err=True
-        )
-        raise typer.Exit(1)
-    try:
-        result = asyncio.run(
-            run_update(
-                config.resolve(), model, test_uid, assertion_uid, description, sql
-            )
-        )
-        _emit(result)
-    except AssertError as exc:
-        typer.echo(f"[ERROR] {exc}", err=True)
-        raise typer.Exit(1)
-
-
-@assert_app.command("remove")
-def assert_remove(
-    model: str = typer.Argument(...),
-    test_uid: str = typer.Option(..., "--test-uid", "-u"),
-    assertion_uid: str = typer.Option(..., "--assertion-id", "-a"),
-    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
-) -> None:
-    """Remove an assertion from a test case."""
-    from cli.assert_cmd import AssertError, run_remove
-
-    try:
-        _emit(run_remove(config.resolve(), model, test_uid, assertion_uid))
-    except AssertError as exc:
-        typer.echo(f"[ERROR] {exc}", err=True)
-        raise typer.Exit(1)
 
 
 @app.command("remove-test")
@@ -929,7 +875,7 @@ def remove_test(
     """Remove a test case from the suite. Deterministic, no LLM.
 
     Équivalent CLI de la suppression via le chat (delete_test_node) : retire le cas
-    du fichier .mocksql/tests/{model}.json, assertions-specs comprises.
+    du fichier .mocksql/tests/{model}.json, contrat `expect` compris.
     """
     from cli.doc_io import TestDocError
     from cli.manage_cmd import run_remove_test
@@ -994,6 +940,208 @@ def confirm(
     except TestDocError as exc:
         typer.echo(f"[ERROR] {exc}", err=True)
         raise typer.Exit(1)
+
+
+@app.command("mark-repro")
+def mark_repro(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the test to mark as a bug repro."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+) -> None:
+    """Mark a test as a bug reproduction. Deterministic, no LLM.
+
+    Verrou repro (Phase 1) : pose `review.intent = "repro"`. À appeler APRÈS avoir rendu
+    le contrat `expect` prescriptif (la sortie DÉSIRÉE, pas celle du SQL bugué). Dès lors,
+    `mocksql test` refuse un cas « né vert » (contrat == sortie courante) en `repro_missing`
+    (exit 1) : un test de repro DOIT naître rouge sur le SQL bugué, sinon il ne garde rien.
+    Miroir de `confirm` ; l'intent n'a plus d'effet une fois le test confirmé après le fix.
+    """
+    from cli.doc_io import TestDocError
+    from cli.manage_cmd import run_mark_repro
+
+    try:
+        _emit(run_mark_repro(config.resolve(), model, test_uid))
+    except TestDocError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("inspect")
+def inspect_cmd(
+    model: str = typer.Argument(
+        ..., help="Model name (e.g. orders, demo/payment_summary)."
+    ),
+    test_uid: str = typer.Option(
+        ..., "--test-uid", "-u", help="test_uid of the case to diagnose."
+    ),
+    config: Path = typer.Option(Path("mocksql.yml"), "--config", "-c"),
+    output_json: bool = typer.Option(
+        False, "--json", help="Output the diagnostic as JSON (recommended for agents)."
+    ),
+    llm: bool = typer.Option(
+        False,
+        "--llm",
+        help="Opt-in: add an LLM root-cause verdict. Never the default — inspect is "
+        "deterministic and free by design.",
+    ),
+    live: bool = typer.Option(
+        False,
+        "--live",
+        help="Opt-in : ajoute un waterfall de cardinalité join-par-join sur l'ENTREPÔT "
+        "RÉEL (COUNT/COUNT DISTINCT par frontière) pour localiser le fan-out en prod. "
+        "Chaque tir est estimé + confirmé (warehouse_gate) — coût entrepôt réel.",
+    ),
+    full: bool = typer.Option(
+        False,
+        "--full",
+        help="Avec --live : waterfall COMPLET (toutes les CTE jointes) au lieu de la "
+        "sonde cheap (dernière CTE seulement).",
+    ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Avec --live : approuve les requêtes entrepôt sans confirmation (CI). "
+        "Équivaut à MOCKSQL_AUTO_APPROVE_DWH=1.",
+    ),
+) -> None:
+    """Diagnose WHY a case is red — deterministic, no LLM by default.
+
+    Replays one saved case against the disk SQL on local DuckDB and reports, without any
+    LLM call: the `expect` row diff + `sql_source` (incl. the `snapshot-fallback`
+    guard), a CTE-by-CTE trace (first empty required CTE = prime suspect), and
+    join-by-join cardinality probes (over-production vs row loss). `diagnosis.code`
+    summarises the likely cause. See docs/inspect-diagnostic.md.
+
+    `--live` adds a real-warehouse cardinality waterfall (gated by warehouse_gate) that
+    localises the fan-out in production data — where the synthetic probes only see the
+    test's rows. Exit code always 0 (except a warehouse refusal → 2).
+    """
+    import asyncio
+
+    from build_query.warehouse_gate import WarehouseQueryDenied
+    from cli.test_runner import inspect_case, inspect_live
+
+    try:
+        payload = asyncio.run(inspect_case(config.resolve(), model, test_uid, llm=llm))
+        if live:
+            live_payload = asyncio.run(
+                inspect_live(config.resolve(), model, full=full, auto_approve=yes)
+            )
+            payload["live_waterfall"] = live_payload.get("live_waterfall", [])
+            if live_payload.get("note"):
+                payload["live_note"] = live_payload["note"]
+    except WarehouseQueryDenied as exc:
+        typer.echo(f"Abandonné — {exc}")
+        raise typer.Exit(2)
+    except RuntimeError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1)
+
+    if output_json:
+        _emit(payload)
+    else:
+        _print_inspect(payload)
+        if live:
+            _print_live_waterfall(payload)
+
+
+def _print_inspect(payload: dict) -> None:
+    d = payload["diagnosis"]
+    typer.echo(
+        f"\n{payload['model']} · {payload.get('test_name') or payload['test_uid']}"
+    )
+    typer.echo(f"  source SQL : {payload['sql_source']}")
+    if payload.get("sql_source_warning"):
+        typer.echo(f"  [WARN] {payload['sql_source_warning']}", err=True)
+    typer.echo(
+        f"  statut     : {payload.get('status')}  (review: {payload.get('review')})"
+    )
+    suspect = f" → {d['suspect']}" if d.get("suspect") else ""
+    typer.echo(f"  diagnostic : {d['code']}{suspect}")
+    typer.echo(f"               {d['detail']}")
+    ec = payload.get("expect_check")
+    if ec:
+        typer.echo(
+            f"  diff expect: {ec['actual_count']} ligne(s) obs. vs "
+            f"{ec['expected_count']} attendue(s) — manquantes "
+            f"{len(ec.get('missing') or [])}, en trop {len(ec.get('unexpected') or [])}"
+        )
+    trace = payload.get("cte_trace") or []
+    if trace:
+        typer.echo("  trace CTE :")
+        for c in trace:
+            flag = ""
+            if c.get("row_count") == 0:
+                flag = (
+                    " ← VIDE (bloquante)"
+                    if c.get("blocking")
+                    else " ← vide (optionnelle)"
+                )
+            typer.echo(f"    {c['name']:<28} {c.get('row_count')} ligne(s){flag}")
+    # On masque les JOINs qui `preserves` (cardinalité inchangée = rien à signaler) et on
+    # remonte `empty` / `fan_out` / `shrinks`. NB : ce sont des FAITS de cardinalité, pas
+    # des verdicts — l'oracle reste le diff `expect` (cf. `_build_diagnosis`).
+    flagged = [
+        p for p in (payload.get("join_probes") or []) if p.get("verdict") != "preserves"
+    ]
+    if flagged:
+        typer.echo("  sondes JOIN :")
+        for p in flagged:
+            typer.echo(
+                f"    {p['cte']}#{p['join_index']} {p['join_type']}: "
+                f"{p['left_rows']}→{p['result_rows']} (droite {p['right_rows']}) "
+                f"— {p['verdict']}"
+            )
+    if payload.get("llm_verdict"):
+        typer.echo(f"  verdict LLM: {payload['llm_verdict']}")
+
+
+def _print_live_waterfall(payload: dict) -> None:
+    """Waterfall de cardinalité entrepôt (--live) : comptes réels par frontière de join,
+    ratio de fan-out, et côté non-unique (source mécanique de la multiplicité)."""
+    wf = payload.get("live_waterfall") or []
+    if not wf:
+        note = payload.get("live_note")
+        typer.echo(f"  waterfall entrepôt : {note or 'aucune donnée'}")
+        return
+    typer.echo("  waterfall entrepôt (cardinalités RÉELLES) :")
+    for target in wf:
+        typer.echo(f"    [{target['cte']}]")
+        for p in target["probes"]:
+            if p.get("boundary") == "pre_agg":
+                # Signature COUNT vs COUNT DISTINCT à l'entrée du GROUP BY.
+                ar = p.get("agg_fanout_ratio")
+                sig = (
+                    f" ×{ar}  ← {p.get('rows')} ligne(s) pour "
+                    f"{p.get('distinct_rows')} clé(s) DISTINCT : un COUNT non-distinct "
+                    "compterait chaque clé plusieurs fois"
+                    if ar is not None and ar > 1
+                    else ""
+                )
+                verdict = f" — {p['verdict']}" if p.get("verdict") else ""
+                typer.echo(
+                    f"      {p.get('label', '?'):<32} {p.get('rows')} ligne(s)"
+                    f"{verdict}{sig}"
+                )
+                continue
+            ratio = (
+                f" ×{p['fanout_ratio']}" if p.get("fanout_ratio") is not None else ""
+            )
+            verdict = f" — {p['verdict']}" if p.get("verdict") else ""
+            nonuniq = ""
+            if p.get("right_non_unique"):
+                nonuniq = (
+                    f"  ← côté droit NON-UNIQUE sur {p.get('right_key', 'la clé')} "
+                    f"({p.get('right_distinct')}/{p.get('right_rows')}) : source du fan-out"
+                )
+            typer.echo(
+                f"      {p.get('label', '?'):<32} {p.get('rows')} ligne(s){ratio}{verdict}{nonuniq}"
+            )
 
 
 export_app = typer.Typer(

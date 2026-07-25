@@ -274,7 +274,11 @@ def compare_expect(
 # ── Dual-write à la persistance ───────────────────────────────────────────────
 
 
-def sync_expect_on_doc(doc: Dict[str, Any], previous_sql: Optional[str] = None) -> None:
+def sync_expect_on_doc(
+    doc: Dict[str, Any],
+    previous_sql: Optional[str] = None,
+    previous_cases: Optional[List[Dict[str, Any]]] = None,
+) -> None:
     """Dual-write du contrat sur un doc de test au moment de sa persistance.
 
     Pour chaque cas portant une sortie observée (``results_json``) : rafraîchit
@@ -287,8 +291,15 @@ def sync_expect_on_doc(doc: Dict[str, Any], previous_sql: Optional[str] = None) 
     entrant, les contrats ``confirmed`` basculent en ``stale`` — le SQL a changé, la
     confirmation ne vaut plus, le prochain replay montrera le diff ancien contrat vs
     nouvelle sortie (écran de détection de régression). Best-effort : ne lève jamais.
+
+    ``previous_cases`` (les cas déjà sur disque) : gardent la trace de la sortie
+    observée précédente. Un ``expect`` draft n'est re-snapshotté QUE si la sortie
+    (``results_json``) du cas a effectivement changé. Sans ce garde-fou, TOUTE écriture
+    du doc (confirmer un AUTRE cas, ``generate -i``, ``update-test``) re-snapshottait en
+    bloc les drafts depuis leur cache inchangé — écrasant une cible ``expect.rows``
+    rendue PRESCRIPTIVE à la main dans la boucle repro (perte de donnée silencieuse).
     """
-    from storage.test_files import is_deadborn_case
+    from storage.test_files import _case_identity, is_deadborn_case
 
     sql = doc.get("sql") or ""
     sql_changed = (
@@ -297,7 +308,12 @@ def sync_expect_on_doc(doc: Dict[str, Any], previous_sql: Optional[str] = None) 
         and previous_sql.strip() != ""
         and previous_sql.strip() != sql.strip()
     )
-    for case in doc.get("test_cases") or []:
+    prev_by_identity: Dict[str, Dict[str, Any]] = {
+        _case_identity(c, i): c
+        for i, c in enumerate(previous_cases or [])
+        if isinstance(c, dict)
+    }
+    for i, case in enumerate(doc.get("test_cases") or []):
         if not isinstance(case, dict):
             continue
         try:
@@ -310,6 +326,17 @@ def sync_expect_on_doc(doc: Dict[str, Any], previous_sql: Optional[str] = None) 
             if is_deadborn_case(case):
                 continue
             if "results_json" not in case:
+                continue
+            # Sortie inchangée + `expect` déjà présent → on ne re-snapshotte PAS : soit le
+            # contrat est déjà en phase avec la sortie (rebuild identique = no-op), soit il
+            # a été rendu prescriptif à la main (boucle repro) et le re-snapshot depuis le
+            # cache périmé le détruirait. On ne refresh que quand la sortie a bougé (data
+            # éditée via update-test) ou qu'aucun contrat n'existe encore (born-green).
+            prev_case = prev_by_identity.get(_case_identity(case, i))
+            results_unchanged = prev_case is not None and prev_case.get(
+                "results_json"
+            ) == case.get("results_json")
+            if results_unchanged and isinstance(case.get("expect"), dict):
                 continue
             # Colonnes déjà choisies (coherence_check, spec §5, ou édition humaine) :
             # collantes au rafraîchissement d'un draft — on refresh les LIGNES sans
