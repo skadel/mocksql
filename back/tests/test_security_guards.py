@@ -47,6 +47,17 @@ def test_safe_join_accepts_nested_relative(tmp_path):
     assert p == tmp_path / "finance" / "revenue.json"
 
 
+def test_safe_join_appends_suffix_without_replacing_model_version(tmp_path):
+    from utils.path_guard import safe_join
+
+    v1 = safe_join(tmp_path, "finance/foo.v1", suffix=".json")
+    v2 = safe_join(tmp_path, "finance/foo.v2", suffix=".json")
+
+    assert v1 == tmp_path / "finance" / "foo.v1.json"
+    assert v2 == tmp_path / "finance" / "foo.v2.json"
+    assert v1 != v2
+
+
 def test_safe_join_rejects_parent_escape(tmp_path):
     from utils.path_guard import safe_join
 

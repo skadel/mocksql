@@ -28,7 +28,11 @@ def safe_join(root: Path, *parts: str, suffix: str = "") -> Optional[Path]:
     try:
         candidate = base.joinpath(*parts)
         if suffix:
-            candidate = candidate.with_suffix(suffix)
+            # ``suffix`` est une extension à ajouter au model_id, pas à remplacer.
+            # Un model_id peut légitimement contenir un point (``foo.v1``) :
+            # Path.with_suffix(".json") ferait alors collision avec ``foo.v2`` en
+            # ramenant les deux chemins à ``foo.json``.
+            candidate = candidate.parent / f"{candidate.name}{suffix}"
         resolved = candidate.resolve()
     except (ValueError, OSError):
         return None
