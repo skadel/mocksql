@@ -41,7 +41,7 @@ import { SqlHistoryEntry } from '../../../utils/types';
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import SqlEditor from '../../../shared/SqlEditor';
-import { patchModelTests, applyAssertions } from '../../../api/messages';
+import { patchModelTests, applyAssertions, confirmTestApi } from '../../../api/messages';
 import { useAppDispatch, useAppSelector } from '../../../app/hooks';
 import { relativeDate } from '../../../utils/dates';
 import { COVERAGE_AXES, computeCoverage } from '../../../utils/coverage';
@@ -1252,6 +1252,7 @@ interface TestCardProps {
   onCorrectTest?: () => void;
   onApplyDescription?: () => void;
   onRejectDescription?: () => void;
+  onConfirmTest?: () => void;
   onUpload?: (data: Record<string, any[]>) => void;
 }
 
@@ -1263,12 +1264,18 @@ function TestCard({
   onStartEdit, onSaveEdit, onEditDescription,
   onDelete, onToggleCollapse, onToggleComments,
   onAddComment, onDeleteComment,
-  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onUpload,
+  onSelectForModification, onEditAssertions, onApplyAssertions, onRerunTest, onValidateTest, onCorrectTest, onApplyDescription, onRejectDescription, onConfirmTest, onUpload,
 }: TestCardProps) {
   const { t } = useTranslation();
   const { verdict, label, fg, bg, border, text: vText } = getVerdictInfo(test);
   // Verdict LLM pas encore rendu : ne pas afficher le badge optimiste basé sur l'exécution.
   const awaitingEval = isAwaitingEvaluation(test, isLoading);
+  // Statut de revue humaine (spec validation-humaine) : draft = jamais confirmé ;
+  // confirmed = contrat gelé (par l'utilisateur, ou hérité du verdict LLM en
+  // migration) ; stale = SQL modifié depuis la confirmation → re-confirmer.
+  const reviewStatus: string | undefined = test.review?.status;
+  const confirmedByLegacy = test.review?.confirmed_by === 'verdict-llm-legacy';
+  const hasDesyncPrompt = test.reason_type === 'needs_validation' || test.reason_type === 'bad_description' || test.reason_type === 'bad_input_description';
   const tags: string[] = test.tags ?? [];
   const description = editedDescription ?? test.unit_test_description ?? '';
   const testKey = `${idx}`;
@@ -1329,6 +1336,27 @@ function TestCard({
             const tc = tagStyle(tg);
             return <Chip key={tg} label={tg} size="small" sx={{ fontSize: 10.5, height: 20, bgcolor: tc.bg, color: tc.fg, border: 'none' }} />;
           })}
+          {/* Badge de revue humaine — `confirmed` par l'utilisateur reste discret ;
+              le badge legacy signale un test jamais confirmé par un humain (anti
+              rubber-stamping, spec §8). */}
+          {reviewStatus === 'draft' && !awaitingEval && test.status !== 'pending' && (
+            <Chip data-testid={`review-badge-${idx + 1}`} label="À confirmer" size="small"
+              sx={{ fontSize: 10.5, height: 20, bgcolor: AMBER_BG, color: '#8a5c00', border: '1px solid #e8d5a0' }} />
+          )}
+          {reviewStatus === 'stale' && (
+            <Tooltip title="Le SQL a changé depuis la confirmation — vérifie la sortie puis re-confirme.">
+              <Chip data-testid={`review-badge-${idx + 1}`} label="SQL modifié — à re-confirmer" size="small"
+                sx={{ fontSize: 10.5, height: 20, bgcolor: '#fdecea', color: '#b3402f', border: '1px solid #f0c4bc' }} />
+            </Tooltip>
+          )}
+          {reviewStatus === 'confirmed' && (
+            <Tooltip title={confirmedByLegacy
+              ? 'Contrat hérité du verdict IA (migration) — jamais confirmé par un humain.'
+              : `Sortie confirmée${test.review?.confirmed_at ? ` (${relativeDate(test.review.confirmed_at, t)})` : ''}.`}>
+              <Chip data-testid={`review-badge-${idx + 1}`} label={confirmedByLegacy ? 'Confirmé (IA)' : 'Confirmé'} size="small"
+                sx={{ fontSize: 10.5, height: 20, bgcolor: confirmedByLegacy ? '#eef1f7' : GREEN_BG, color: confirmedByLegacy ? '#50609d' : GREEN, border: 'none' }} />
+            </Tooltip>
+          )}
           <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5, ml: 'auto' }}>
             <Tooltip title="Replier ce test">
               <MutedIconButton size="small" data-testid={`collapse-test-${idx + 1}`} onClick={onToggleCollapse}>
@@ -1386,6 +1414,42 @@ function TestCard({
           </Box>
         )}
       </Box>
+
+      {/* Revue humaine (spec validation-humaine, Phase 1) : un test naît « à
+          confirmer » — la confirmation gèle la sortie observée comme contrat de
+          non-régression (`expect`). Masqué quand le prompt de désync ci-dessous est
+          affiché (une seule décision à la fois sur la carte). */}
+      {onConfirmTest && !hasDesyncPrompt && !awaitingEval && test.status && test.status !== 'pending'
+        && (reviewStatus === 'draft' || reviewStatus === 'stale') && (
+        <Box sx={{ px: 2, pb: 1.5, display: 'flex', flexDirection: 'column', gap: 0.75 }}>
+          <Typography sx={{ fontSize: 12.5, color: reviewStatus === 'stale' ? '#b3402f' : '#8a5c00', lineHeight: 1.4 }}>
+            {reviewStatus === 'stale'
+              ? 'Le SQL a changé depuis ta confirmation — vérifie la sortie ci-dessous, puis re-confirme (ou corrige via le chat si ce n\'est pas le comportement voulu).'
+              : 'Vérifie la sortie ci-dessous : confirmer gèle ces lignes comme contrat de non-régression.'}
+          </Typography>
+          <Box sx={{ display: 'flex', gap: 0.75, flexWrap: 'wrap' }}>
+            <Button
+              variant="contained"
+              size="small"
+              data-testid={`confirm-test-${idx + 1}`}
+              startIcon={<CheckCircleIcon sx={{ fontSize: 14 }} />}
+              onClick={onConfirmTest}
+              sx={{ fontSize: 12, boxShadow: 'none', bgcolor: '#23a26d', '&:hover': { boxShadow: 'none', bgcolor: '#1c8459' } }}
+            >
+              {reviewStatus === 'stale' ? 'Re-confirmer cette sortie' : 'Confirmer cette sortie'}
+            </Button>
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<AutoAwesomeIcon sx={{ fontSize: 14 }} />}
+              onClick={onSelectForModification}
+              sx={{ fontSize: 12, borderColor: BORDER, color: BODY, '&:hover': { borderColor: TEAL, bgcolor: TEAL_SUBTLE } }}
+            >
+              Corriger via le chat
+            </Button>
+          </Box>
+        </Box>
+      )}
 
       {/* Validation prompt — désync description↔réel (données valides) : l'utilisateur tranche.
           needs_validation = écart de cardinalité ; bad_description = écart de valeur concrète ;
@@ -2036,6 +2100,24 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
     );
   };
 
+  // Confirmation humaine : le backend gèle le contrat dans le fichier (aucun LLM) ;
+  // on reflète review/expect en local sans re-push des test_results (le fichier est
+  // déjà à jour côté serveur — un PATCH redondant serait du churn).
+  const handleConfirmTest = async (idx: number) => {
+    const test = testResults[idx];
+    if (!currentModelId || !test) return;
+    try {
+      const res = await confirmTestApi(currentModelId, test.test_uid, test.test_index);
+      dispatch(setTestResults(
+        testResults.map((tr: any, i: number) =>
+          i === idx ? { ...tr, review: res.review, expect: res.expect } : tr,
+        ),
+      ));
+    } catch (e) {
+      console.error('[confirmTest]', e);
+    }
+  };
+
   const handleSaveEdit = (idx: number) => {
     const newDesc = editedDescriptions[idx];
     setEditingIndex(null);
@@ -2265,6 +2347,7 @@ const TestsPanel: React.FC<TestsPanelProps> = ({
                   onRerunTest={onRerunTest ? () => onRerunTest(idx) : undefined}
                   onValidateTest={onValidateTest ? () => onValidateTest(idx) : undefined}
                   onCorrectTest={onCorrectTest ? () => onCorrectTest(idx) : undefined}
+                  onConfirmTest={() => handleConfirmTest(idx)}
                   onApplyDescription={onApplyDescription ? () => onApplyDescription(idx) : undefined}
                   onRejectDescription={onRejectDescription ? () => onRejectDescription(idx) : undefined}
                   onUpload={onUpload}

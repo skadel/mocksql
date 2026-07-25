@@ -82,6 +82,44 @@ class DbtProject:
         node = self.find_node(model_name)
         return self.compiled_sql(node) if node else None
 
+    def parent_relations(self, node: dict) -> dict:
+        """Relations physiques amont d'un modèle → jinja ``ref()``/``source()``.
+
+        Lit ``depends_on.nodes`` du nœud et, pour chaque parent (modèle ou source),
+        sa ``relation_name`` normalisée (quotes/backticks strippés, minuscule) → l'appel
+        jinja dbt correspondant. Sert à l'export dbt (``mocksql export dbt``) pour câbler
+        chaque table peuplée d'un cas sur son ``ref``/``source`` et lister TOUS les
+        parents dans le bloc ``given`` (dbt exige que tous les inputs du modèle y figurent).
+
+        Clé = relation physique normalisée (``db.dataset.table`` minuscule sans quotes) ;
+        les parents éphémères/sans ``relation_name`` sont ignorés (ils exigeraient
+        ``format: sql``, hors périmètre v1).
+        """
+        manifest = self.manifest
+        nodes = manifest.get("nodes", {})
+        sources = manifest.get("sources", {})
+        out: dict = {}
+        for parent_id in node.get("depends_on", {}).get("nodes", []):
+            if parent_id in nodes:
+                p = nodes[parent_id]
+                jinja = f"ref('{p.get('name')}')"
+            elif parent_id in sources:
+                p = sources[parent_id]
+                jinja = f"source('{p.get('source_name')}', '{p.get('name')}')"
+            else:
+                continue
+            rel = p.get("relation_name")
+            if not rel:
+                continue
+            out[_normalize_relation(rel)] = jinja
+        return out
+
+
+def _normalize_relation(relation: str) -> str:
+    """``"db"."schema"."table"`` / `` `db`.`schema`.`table` `` → ``db.schema.table``
+    minuscule, quotes et backticks strippés — clé stable, insensible à la casse."""
+    return relation.replace('"', "").replace("`", "").strip().lower()
+
 
 @lru_cache(maxsize=8)
 def _load_manifest(manifest_path: str) -> dict:

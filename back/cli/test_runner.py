@@ -272,6 +272,26 @@ def _remap_assertion_sql(sql: str, data_keys: list[str], case_suffix: str) -> st
     return sql
 
 
+def _expect_verdict(expect_check: dict, review_status: str | None) -> str:
+    """Verdict d'un cas depuis la comparaison de lignes au contrat ``expect`` (Phase 2).
+
+    - lignes = contrat → ``pass`` ;
+    - ``order_only_mismatch`` (mêmes lignes, ordre différent) → ``pass`` : c'est un ex-æquo
+      sur la clé de tri, donc du **non-déterminisme**, pas une régression. Spec §8 : on
+      FLAGGE (le CLI affiche l'avertissement), on ne bloque pas — la parade produit est de
+      rendre les données discriminantes (axe ``tie``). Un vrai changement d'ordre
+      déterministe passe forcément par une dérive SQL → ``stale``, pas par ce chemin ;
+    - sinon, lignes ≠ contrat : ``fail`` si le contrat est ``confirmed`` (gate de
+      non-régression), sinon ``unconfirmed`` (draft/stale/non confirmé — jamais bloquant,
+      spec §3/§7).
+    """
+    if expect_check["passed"] or expect_check.get("order_only_mismatch"):
+        return "pass"
+    if review_status == "confirmed":
+        return "fail"
+    return "unconfirmed"
+
+
 # ── Single test-case execution ────────────────────────────────────────────────
 
 
@@ -285,6 +305,7 @@ async def _run_one_case(
     con,
     precompiled_sql: str,
     setup_error: str | None = None,
+    sql_drifted: bool = False,
 ) -> dict:
     """Rejoue UN cas dans les tables déjà créées par modèle (cf. `_setup_model`).
 
@@ -299,6 +320,7 @@ async def _run_one_case(
     (éviter d'exécuter à vide, qui logue des erreurs `Failed to run query` trompeuses).
     """
     from build_query.assertion_eval import _evaluate_assertions
+    from build_query.expect_contract import compare_expect, rows_from_df
     from utils.examples import execute_queries, run_query_on_test_dataset
     from utils.insert_examples import insert_examples, replace_missing_with_null
 
@@ -313,6 +335,20 @@ async def _run_one_case(
     saved_assertions = [
         a for a in (test_case.get("assertion_results") or []) if a.get("sql")
     ]
+    # Contrat `expect` (spec validation-humaine) : comparé en OMBRE des assertions
+    # (Phase 0 — jamais bloquant tant que des assertions existent). Sans assertions,
+    # le contrat devient le check et détermine le statut du cas.
+    expect = (
+        test_case.get("expect") if isinstance(test_case.get("expect"), dict) else None
+    )
+    review = test_case.get("review") or {}
+    review_status = review.get("status") if isinstance(review, dict) else None
+    # Dérive détectée au replay (SQL disque ≠ snapshot) : un contrat confirmé ne vaut
+    # plus tel quel — rapporté `stale` SANS écrire (le replay est lecture seule ; la
+    # bascule persistée se fait à l'écriture, cf. sync_expect_on_doc).
+    if sql_drifted and review_status == "confirmed":
+        review_status = "stale"
+    meta["review"] = review_status
 
     if not data:
         return {
@@ -322,7 +358,7 @@ async def _run_one_case(
             "reason": "no data",
             "assertions": [],
         }
-    if not saved_assertions:
+    if not saved_assertions and expect is None:
         return {
             "index": test_index,
             **meta,
@@ -360,6 +396,28 @@ async def _run_one_case(
             sql, suffix, "cli", dialect, con, precompiled_sql=precompiled_sql
         )
 
+        if expect is not None:
+            # Phase 2 (spec validation-humaine §7) : le contrat `expect` est AUTORITAIRE.
+            # La comparaison de lignes (multiset | ordonnée, zéro LLM) fait le verdict —
+            # les assertions ne sont plus rejouées (fin de `_remap_assertion_sql` pour ces
+            # cas). Le statut de revue module le sens de l'échec :
+            #   - confirmed → contrat gelé par un humain = gate de non-régression (fail).
+            #   - draft / stale / non confirmé → jamais un échec bloquant : `unconfirmed`
+            #     (rapporté avec diff, hors exit code par défaut ; gaté par
+            #     --require-confirmed). Cf. spec §3 (« rejouable mais rapporté non
+            #     confirmé, pas un échec »).
+            expect_check = compare_expect(expect, rows_from_df(result_df))
+            status = _expect_verdict(expect_check, review_status)
+            return {
+                "index": test_index,
+                **meta,
+                "status": status,
+                "assertions": [],
+                "expect_check": expect_check,
+            }
+
+        # Repli legacy : un cas SANS contrat `expect` (jamais migré) garde le chemin
+        # assertions — remapping des noms de tables + évaluation dbt-style.
         remapped_assertions = [
             {
                 **a,
@@ -479,6 +537,12 @@ async def run_tests(
                 snapshot_sql=test_doc.get("sql", ""),
                 frozen=frozen,
             )
+            # Dérive : le SQL rejoué (disque) diffère du snapshot stocké → les contrats
+            # confirmés seront rapportés `stale` (re-confirmation attendue, cf. spec).
+            sql_drifted = (
+                sql_source == "disk"
+                and sql.strip() != (test_doc.get("sql") or "").strip()
+            )
             used_columns_raw: list[str] = test_doc.get("used_columns") or []
             used_columns_parsed: list[dict] = []
             for raw in used_columns_raw:
@@ -528,6 +592,7 @@ async def run_tests(
                     con=con,
                     precompiled_sql=precompiled_sql,
                     setup_error=setup_error,
+                    sql_drifted=sql_drifted,
                 )
                 # Attestation de parité warehouse (informatif, jamais bloquant) :
                 # verified / stale (empreinte périmée) / unverified (jamais audité).

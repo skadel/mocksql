@@ -237,6 +237,60 @@ async def delete_model_route(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ConfirmTestRequest(BaseModel):
+    session_id: str
+    test_uid: str | None = None
+    test_index: int | str | None = None
+    model_name: str | None = None
+
+
+@router.post("/tests/confirm")
+async def confirm_test_route(body: ConfirmTestRequest):
+    """Confirmation humaine d'un test (spec validation-humaine, Phase 1).
+
+    Généralise ``accept_validation`` : gèle la sortie actuellement observée comme
+    contrat ``expect`` et passe ``review.status = "confirmed"`` (``confirmed_by:
+    user``). Déterministe, zéro LLM — pas besoin du graph. Ciblage par ``test_uid``
+    (prioritaire) ou ``test_index`` (legacy sans uid).
+    """
+    from build_query.expect_contract import confirm_case
+    from storage.test_repository import update_test
+
+    test = get_test(body.session_id, body.model_name)
+    if not test:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    def _matches(case: dict) -> bool:
+        if body.test_uid:
+            return case.get("test_uid") == body.test_uid
+        if body.test_index is not None:
+            return str(case.get("test_index")) == str(body.test_index)
+        return False
+
+    cases = test.get("test_cases") or []
+    target = next((c for c in cases if _matches(c)), None)
+    if target is None:
+        raise HTTPException(
+            status_code=404, detail="Test case not found (test_uid/test_index)"
+        )
+    try:
+        confirmed = confirm_case(target, test.get("sql") or "")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    updated_cases = [confirmed if c is target else c for c in cases]
+    update_test(
+        body.session_id, {"test_cases": updated_cases}, model_name=test["model_name"]
+    )
+    return {
+        "ok": True,
+        "test_uid": confirmed.get("test_uid"),
+        "test_index": confirmed.get("test_index"),
+        "review": confirmed["review"],
+        "expect": confirmed["expect"],
+    }
+
+
 @router.delete("/tests/{session_id}")
 async def delete_test_route(session_id: str, model_name: str):
     try:

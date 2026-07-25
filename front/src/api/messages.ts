@@ -11,6 +11,27 @@ export async function dismissSuggestionApi(sessionId: string, suggestion: string
 }
 
 
+/** Confirmation humaine d'un test (spec validation-humaine) : gèle la sortie
+ *  observée comme contrat `expect` et passe `review.status` à `confirmed`.
+ *  Déterministe côté backend (aucun appel LLM). */
+export async function confirmTestApi(
+  sessionId: string,
+  testUid?: string,
+  testIndex?: number | string,
+): Promise<{ ok: boolean; test_uid?: string; test_index?: number | string; review: any; expect: any }> {
+  const token = localStorage.getItem('jwt') || '';
+  const res = await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/tests/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+    body: JSON.stringify({ session_id: sessionId, test_uid: testUid, test_index: testIndex }),
+  });
+  if (!res.ok) {
+    throw new Error(`La confirmation du test a échoué (${res.status})`);
+  }
+  return res.json();
+}
+
+
 export async function clearHistoryApi(sessionId: string): Promise<void> {
   const token = localStorage.getItem('jwt') || '';
   await fetch(`${import.meta.env.VITE_BACKEND_URL}/api/clearHistory`, {
