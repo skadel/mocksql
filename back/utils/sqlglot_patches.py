@@ -1,15 +1,11 @@
-"""Patches du générateur DuckDB de sqlglot — parsing de dates tolérant aux erreurs.
+"""Patch du générateur DuckDB de sqlglot pour les fonctions ``SAFE.PARSE_*``.
 
 Pourquoi
 --------
-Les données de test sont synthétiques (générées par LLM) : elles ont
-constamment des décalages de format par rapport à ce qu'attend un
-``PARSE_DATETIME('%Y-%m-%d %H:%M:%S', col)``. BigQuery rend NULL dans ce cas.
-DuckDB, lui, lève ``InvalidInputException`` — ce qui fait tomber le test entier
-au lieu de laisser sortir un NULL que le verdict peut pointer.
-
-On enveloppe donc tout parsing de date dans ``TRY(...)`` (DuckDB ≥ 1.2), qui
-convertit n'importe quelle erreur *runtime* en NULL.
+BigQuery distingue les fonctions strictes ``PARSE_*`` (erreur sur une valeur
+malformée) de leurs variantes ``SAFE.PARSE_*`` (NULL sur erreur). DuckDB doit
+conserver cette distinction pour qu'un test local ne masque pas une erreur de
+production. Seul le nœud ``SafeFunc`` est donc enveloppé dans ``TRY(...)``.
 
 Pourquoi au niveau du générateur, et pas en regex sur le SQL rendu
 ------------------------------------------------------------------
@@ -19,17 +15,10 @@ Le SQL rendu par sqlglot change à chaque bump — 30.11 rend
 silencieusement court-circuitée par l'autre : le fix ne s'applique plus, et
 personne ne le voit tant qu'une donnée mal formatée n'arrive pas en prod.
 
-Le *type de nœud* AST (``ParseDatetime``, ``StrToTime``, …) est stable là où le
-texte ne l'est pas. On s'y accroche, et on enveloppe le rendu **que sqlglot
-aurait produit de toute façon** — on hérite donc automatiquement de ses
-améliorations (le préfixe ``'1970 '`` de 30.12 corrige un vrai écart : DuckDB
-fait défaut à 1900 sur un format sans année, BigQuery à 1970).
-
-Un seul cas déroge à ce « on enveloppe l'existant » :
-
-- ``SafeFunc`` (préfixe BigQuery ``SAFE.``), rendu tel quel — ``SAFE.STRPTIME``
-  n'existe pas côté DuckDB. Or ``SAFE.f(x)`` *signifie* « f(x), NULL si erreur »
-  = exactement ``TRY(f(x))`` : on remplace le préfixe au lieu de l'envelopper.
+Le type de nœud AST ``SafeFunc`` est stable là où le texte rendu ne l'est pas.
+Son préfixe ``SAFE.`` n'existe pas côté DuckDB ; ``SAFE.f(x)`` signifie
+exactement ``TRY(f(x))``. Les nœuds stricts restent rendus tels quels par
+sqlglot.
 
 ``ParseDatetime`` mérite une note : sqlglot ne le traduisait pas du tout jusqu'à
 30.11 (un rendu de secours ``STRPTIME`` était nécessaire) ; depuis 30.12 il le
@@ -51,13 +40,14 @@ démarrage plutôt que de rendre du SQL fragile en silence.
 
 from __future__ import annotations
 
+import duckdb
+
 from sqlglot import exp, generator, parse_one
 from sqlglot.dialects.duckdb import DuckDB
 from sqlglot.generator import Generator
 
-# Nœuds de parsing de date/heure : tout ce qui peut lever sur une valeur dont le
-# format ne colle pas.
-_TRY_WRAPPED_NODES = (exp.ParseDatetime, exp.StrToTime, exp.StrToDate, exp.SafeFunc)
+# Seules les fonctions explicitement SAFE sont tolérantes aux erreurs.
+_TRY_WRAPPED_NODES = (exp.SafeFunc,)
 
 _APPLIED_MARKER = "_mocksql_try_wrapped"
 
@@ -70,12 +60,15 @@ _APPLIED_MARKER = "_mocksql_try_wrapped"
 # C'est un *constat* de sondage, pas un réglage — ne pas l'écrire à la main.
 parse_datetime_native_support: bool | None = None
 
-# Sondes : (expression BigQuery, doit-on retrouver TRY( dans le rendu DuckDB).
+# Sondes autonomes exécutées au chargement. Les strictes utilisent une valeur
+# valide ; les SAFE une valeur invalide et doivent retourner NULL.
 _SELF_CHECK_PROBES = (
-    "PARSE_DATETIME('%Y-%m-%d', col)",
-    "PARSE_TIMESTAMP('%Y-%m-%d', col)",
-    "PARSE_DATE('%Y-%m-%d', col)",
-    "SAFE.PARSE_TIMESTAMP('%Y-%m-%d', col)",
+    ("PARSE_DATE('%Y-%m-%d', '2024-01-15')", False),
+    ("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')", False),
+    ("PARSE_TIMESTAMP('%Y-%m-%d', '2024-01-15')", False),
+    ("SAFE.PARSE_DATE('%Y-%m-%d', 'invalid')", True),
+    ("SAFE.PARSE_DATETIME('%Y-%m-%d', 'invalid')", True),
+    ("SAFE.PARSE_TIMESTAMP('%Y-%m-%d', 'invalid')", True),
 )
 
 
@@ -118,6 +111,18 @@ def _safe_prefix_to_try(self: Generator, expression: exp.Expression) -> str:
     return self.sql(expression, "this")
 
 
+def _assert_duckdb_probe_executable(probe: str, rendered: str) -> tuple:
+    """Refuse un rendu que DuckDB ne peut pas réellement préparer/exécuter."""
+    try:
+        result = duckdb.connect(":memory:").execute(f"SELECT {rendered}").fetchone()
+    except duckdb.Error as exc:
+        raise RuntimeError(
+            "Patch sqlglot→DuckDB inexécutable : "
+            f"{probe} rend {rendered!r}, refusé par DuckDB : {exc}"
+        ) from exc
+    return result
+
+
 def _invalidate_dispatch_cache() -> None:
     """Force la reconstruction du dispatch précalculé (sqlglot 30+).
 
@@ -142,19 +147,7 @@ def apply_duckdb_date_parse_patches() -> None:
         if getattr(existing, _APPLIED_MARKER, False):
             continue
 
-        if node_cls is exp.SafeFunc:
-            inner = _safe_prefix_to_try
-        elif node_cls is exp.ParseDatetime:
-            # Sondage de régression : sqlglot doit toujours traduire PARSE_DATETIME
-            # nativement (depuis 30.12), sinon `_original_renderer` retombe sur un
-            # nom que DuckDB ignore (cf. le canary dédié). On enveloppe le rendu
-            # natif comme les autres nœuds.
-            parse_datetime_native_support = _renders_natively(
-                node_cls, "PARSE_DATETIME('%Y-%m-%d', col)"
-            )
-            inner = _original_renderer(node_cls)
-        else:
-            inner = _original_renderer(node_cls)
+        inner = _safe_prefix_to_try
 
         def wrapped(self, expression, _inner=inner):
             rendered = _inner(self, expression)
@@ -167,12 +160,23 @@ def apply_duckdb_date_parse_patches() -> None:
 
     _invalidate_dispatch_cache()
 
-    for probe in _SELF_CHECK_PROBES:
+    parse_datetime_native_support = _renders_natively(
+        exp.ParseDatetime, "PARSE_DATETIME('%Y-%m-%d', col)"
+    )
+
+    for probe, should_be_safe in _SELF_CHECK_PROBES:
         rendered = _render_duckdb(probe)
-        if "TRY(" not in rendered.upper():
+        has_try = "TRY(" in rendered.upper() or "TRY_STRPTIME" in rendered.upper()
+        if has_try != should_be_safe:
             raise RuntimeError(
                 "Patch sqlglot→DuckDB inopérant : "
-                f"{probe} rend {rendered!r}, sans TRY(). "
+                f"{probe} rend {rendered!r}, sémantique TRY incorrecte. "
                 "sqlglot a probablement changé sa résolution de rendu "
                 "(cf. generator._DISPATCH_CACHE). Voir utils/sqlglot_patches.py."
+            )
+        result = _assert_duckdb_probe_executable(probe, rendered)
+        if should_be_safe and result[0] is not None:
+            raise RuntimeError(
+                "Patch sqlglot→DuckDB inopérant : "
+                f"{probe} rend {rendered!r}, mais la valeur invalide ne produit pas NULL."
             )

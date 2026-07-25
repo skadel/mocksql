@@ -141,14 +141,44 @@ class TestSafeFunctions:
         assert "SAFE." not in fixed.upper()
         duckdb_ok(con, fixed)
 
-    def test_parse_datetime_end_to_end(self, con):
-        """PARSE_DATETIME s'exécute et rend NULL si la valeur ne matche pas le format."""
+    def test_parse_datetime_strict_raises_on_malformed_value(self, con):
+        """PARSE_DATETIME strict conserve l'erreur que BigQuery lèverait."""
         raw = transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
         fixed = fix_duck_db_sql(raw)
 
         assert "PARSE_DATETIME" not in fixed.upper()
-        duckdb_ok(con, fixed)
-        # `s` vaut '2024-01-15' : incompatible avec un format qui exige l'heure.
+        assert "TRY(" not in fixed.upper()
+        assert "TRY_STRPTIME" not in fixed.upper()
+        duckdb_fails(con, fixed)
+
+    @pytest.mark.parametrize(
+        "function_name",
+        ["PARSE_DATE", "PARSE_DATETIME", "PARSE_TIMESTAMP"],
+    )
+    def test_all_strict_parse_variants_raise_on_malformed_value(
+        self, con, function_name
+    ):
+        raw = transpile(
+            f"SELECT {function_name}('%Y-%m-%d %H:%M:%S', s) FROM events"
+        )
+        fixed = fix_duck_db_sql(raw)
+
+        assert "TRY(" not in fixed.upper()
+        assert "TRY_STRPTIME" not in fixed.upper()
+        duckdb_fails(con, fixed)
+
+    @pytest.mark.parametrize(
+        "function_name",
+        ["PARSE_DATE", "PARSE_DATETIME", "PARSE_TIMESTAMP"],
+    )
+    def test_all_safe_parse_variants_return_null_on_malformed_value(
+        self, con, function_name
+    ):
+        raw = transpile(
+            f"SELECT SAFE.{function_name}('%Y-%m-%d %H:%M:%S', s) FROM events"
+        )
+        fixed = fix_duck_db_sql(raw)
+
         assert con.execute(fixed).fetchone()[0] is None
 
     def test_safe_cast_already_translated_by_sqlglot(self, con):
@@ -711,21 +741,29 @@ class TestParseDatetimeArgOrder:
             "secours STRPTIME dans utils/sqlglot_patches.py."
         )
 
+    def test_import_guard_rejects_binder_invalid_rendering(self):
+        """Présence de TRY ne suffit pas : la sonde doit être exécutable par DuckDB."""
+        with pytest.raises(RuntimeError, match="inexécutable"):
+            sqlglot_patches._assert_duckdb_probe_executable(
+                "PARSE_DATETIME('%Y-%m-%d', '2024-01-15')",
+                "TRY(PARSE_DATETIME('2024-01-15', '%Y-%m-%d'))",
+            )
+
     def test_literal_value_first_correctly_converted(self):
         """
         sqlglot 30+ : PARSE_DATETIME('2024-01-15', '%Y-%m-%d')
-        fix doit produire : TRY_STRPTIME('2024-01-15', '%Y-%m-%d')
+        fix doit produire : STRPTIME('2024-01-15', '%Y-%m-%d')
         résultat attendu  : timestamp non-NULL.
         """
         raw_scalar = "PARSE_DATETIME('2024-01-15', '%Y-%m-%d')"
         fixed = fix_duck_db_sql(f"SELECT {raw_scalar}")
         fixed_expr = fixed[len("SELECT ") :]
-        assert "TRY_STRPTIME" in fixed_expr, (
-            f"fix n'a pas produit TRY_STRPTIME : {fixed_expr!r}"
+        assert "STRPTIME" in fixed_expr and "TRY_STRPTIME" not in fixed_expr, (
+            f"fix n'a pas produit STRPTIME strict : {fixed_expr!r}"
         )
         result = duckdb.connect().execute(fixed).fetchone()[0]
         assert result is not None, (
-            "TRY_STRPTIME a retourné NULL — args probablement inversés"
+            "STRPTIME a retourné NULL — args probablement inversés"
         )
 
     def test_col_value_first_correctly_converted(self, con):
@@ -743,7 +781,7 @@ class TestParseDatetimeArgOrder:
         mismatching = fix_duck_db_sql(
             transpile("SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events")
         )
-        assert con.execute(mismatching).fetchone()[0] is None
+        duckdb_fails(con, mismatching)
 
     def test_format_first_legacy_still_converted(self, con):
         """
@@ -754,8 +792,9 @@ class TestParseDatetimeArgOrder:
             "SELECT PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s) FROM events"
         )
         fixed = fix_duck_db_sql(legacy_format_first)
-        assert "TRY_STRPTIME(s, '%Y-%m-%d %H:%M:%S')" in fixed
-        con.execute(fixed)
+        assert "STRPTIME(s, '%Y-%m-%d %H:%M:%S')" in fixed
+        assert "TRY_STRPTIME" not in fixed
+        duckdb_fails(con, fixed)
 
 
 # ===========================================================================

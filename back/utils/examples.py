@@ -842,7 +842,7 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         # === SAFE.PARSE_DATE / SAFE.PARSE_TIMESTAMP ===
         # sqlglot <30 : SAFE.PARSE_DATE('%fmt', col)
         # sqlglot 30+ : SAFE.CAST(STRPTIME(col, '%fmt') AS DATE)
-        # DuckDB attend : TRY_STRPTIME(col, '%fmt')
+        # DuckDB attend : STRPTIME(col, '%fmt') — PARSE_DATETIME est strict.
 
         s = re.sub(
             r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(\s*([^,]+?)\s*,\s*'([^']+)'\s*\)\s*AS\s+\w+\s*\)",
@@ -876,9 +876,9 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         def _fix_parse_datetime(m):
             a1, a2 = m.group(1).strip(), m.group(2).strip()
             if a1.startswith("'%"):  # format en 1er (sqlglot <30)
-                return f"TRY_STRPTIME({a2}, {a1})"
+                return f"STRPTIME({a2}, {a1})"
             elif a2.startswith("'%"):  # valeur en 1er (sqlglot 30+)
-                return f"TRY_STRPTIME({a1}, {a2})"
+                return f"STRPTIME({a1}, {a2})"
             return m.group(0)  # indéterminable, laisser tel quel
 
         s = re.sub(

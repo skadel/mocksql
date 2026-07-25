@@ -3,9 +3,8 @@ Sémantique runtime du parsing de dates BigQuery → DuckDB.
 
 Ces tests n'assertent **jamais** le SQL rendu par sqlglot : ils exécutent la
 requête dans DuckDB et assertent la *valeur*. C'est le contrat qui compte pour
-MockSQL — les données synthétiques du LLM ont constamment des décalages de
-format, et un parsing incompatible doit rendre NULL, pas faire tomber le test
-entier.
+MockSQL : les fonctions PARSE_* strictes doivent lever comme en production,
+tandis que les variantes SAFE.PARSE_* doivent rendre NULL.
 
 Le SQL rendu, lui, change à chaque bump de sqlglot (30.11 → 30.12 a fait passer
 PARSE_DATETIME de `PARSE_DATETIME(col, fmt)` à `STRPTIME('1970 ' || col, fmt)`).
@@ -35,32 +34,33 @@ def con():
 
 
 # ---------------------------------------------------------------------------
-# Valeur incompatible avec le format → NULL (jamais de raise)
+# Valeur incompatible : erreur stricte, NULL pour SAFE
 # ---------------------------------------------------------------------------
 
 
-class TestIncompatibleValueYieldsNull:
-    """Une valeur qui ne matche pas le format doit rendre NULL.
-
-    C'est la garantie qui permet à un test MockSQL de rester lisible : une
-    colonne mal formatée sort NULL et le verdict le pointe, au lieu d'une
-    InvalidInputException qui masque tout le reste du test.
-    """
+class TestIncompatibleValuePreservesBigQuerySemantics:
+    """Le replay local ne doit jamais masquer une erreur de production."""
 
     def test_parse_datetime_incompatible(self, con):
-        assert _run(con, "PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s)") is None
+        with pytest.raises(duckdb.Error):
+            _run(con, "PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s)")
 
     def test_parse_timestamp_incompatible(self, con):
-        assert _run(con, "PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', s)") is None
+        with pytest.raises(duckdb.Error):
+            _run(con, "PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', s)")
 
     def test_parse_date_incompatible(self, con):
-        assert _run(con, "PARSE_DATE('%Y-%m-%d', s)") is None
+        with pytest.raises(duckdb.Error):
+            _run(con, "PARSE_DATE('%Y-%m-%d', s)")
 
     def test_safe_parse_date_incompatible(self, con):
         assert _run(con, "SAFE.PARSE_DATE('%Y-%m-%d', s)") is None
 
     def test_safe_parse_timestamp_incompatible(self, con):
         assert _run(con, "SAFE.PARSE_TIMESTAMP('%Y-%m-%d %H:%M:%S', s)") is None
+
+    def test_safe_parse_datetime_incompatible(self, con):
+        assert _run(con, "SAFE.PARSE_DATETIME('%Y-%m-%d %H:%M:%S', s)") is None
 
 
 # ---------------------------------------------------------------------------
@@ -69,7 +69,7 @@ class TestIncompatibleValueYieldsNull:
 
 
 class TestValidValueStillParses:
-    """Le TRY ne doit pas avaler les cas nominaux."""
+    """Le patch SAFE ne doit pas affecter les cas stricts nominaux."""
 
     def test_parse_datetime_valid(self, con):
         assert (
