@@ -154,6 +154,40 @@ def test_refusal_raises_denied_and_emits_nothing(tmp_path):
     assert emitted == []  # le refus intervient AVANT tout tir facturé
 
 
+def test_full_estimates_every_probe_before_first_execution(tmp_path):
+    sql = (
+        "WITH agg AS (SELECT k FROM `p.d.a` x JOIN `p.d.b` y ON x.k = y.k)\n"
+        "SELECT * FROM agg JOIN `p.d.c` z ON agg.k = z.k"
+    )
+    config = _project(tmp_path, sql=sql)
+    events = []
+    billed = CostEstimate(dialect="bigquery", method="bq_dry_run", cost=1.0)
+
+    def estimate_spy(*args, **kwargs):
+        events.append("estimate")
+        return billed
+
+    def execute_spy(query):
+        events.append("execute")
+        return _mock_warehouse()(query)
+
+    with patch("build_query.warehouse_gate.estimate", side_effect=estimate_spy):
+        asyncio.run(
+            inspect_live(
+                config,
+                "orders",
+                full=True,
+                prompt_fn=lambda _q: True,
+                warehouse_executor=execute_spy,
+            )
+        )
+
+    first_execution = events.index("execute")
+    assert first_execution > 1
+    assert "estimate" not in events[first_execution:]
+    assert events[:first_execution] == ["estimate"] * first_execution
+
+
 def test_missing_sql_raises(tmp_path):
     (tmp_path / "mocksql.yml").write_text(
         "dialect: bigquery\nmodels_path: models\n", encoding="utf-8"

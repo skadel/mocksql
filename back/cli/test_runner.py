@@ -43,6 +43,22 @@ def _read_json(p: Path) -> dict | None:
     return read_test_doc(p)
 
 
+def _parse_used_columns(used_columns: list) -> list[dict]:
+    """Normalise les formes objet JSON et chaîne JSON de ``used_columns``."""
+    parsed: list[dict] = []
+    for raw in used_columns or []:
+        if isinstance(raw, dict):
+            parsed.append(raw)
+        elif isinstance(raw, str):
+            try:
+                value = json.loads(raw)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(value, dict):
+                parsed.append(value)
+    return parsed
+
+
 # ── Source SQL resolution ─────────────────────────────────────────────────────
 
 
@@ -90,7 +106,9 @@ def resolve_run_sql(
 # ── Schema resolution ─────────────────────────────────────────────────────────
 
 
-def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[dict]:
+def _schemas_from_cache(
+    used_columns_raw: list[str | dict], cache: list[dict]
+) -> list[dict]:
     """Schémas COMPLETS des tables du cache référencées par `used_columns`.
 
     On identifie les tables via `used_columns` (une entrée par table), mais on renvoie le
@@ -112,11 +130,7 @@ def _schemas_from_cache(used_columns_raw: list[str], cache: list[dict]) -> list[
 
     result: list[dict] = []
     seen: set[str] = set()
-    for raw in used_columns_raw:
-        try:
-            u = json.loads(raw)
-        except Exception:
-            continue
+    for u in _parse_used_columns(used_columns_raw):
         project = u.get("project", "")
         database = u.get("database", "")
         table = u.get("table", "")
@@ -150,17 +164,15 @@ def _flatten_table_key(name: str) -> str:
     return base.lower()
 
 
-def _full_refs_from_used_columns(used_columns_raw: list[str]) -> dict[str, str]:
+def _full_refs_from_used_columns(
+    used_columns_raw: list[str | dict],
+) -> dict[str, str]:
     """Mappe la clé de table aplatie → réf BQ complète (`project.dataset.table`),
     reconstruite depuis les `used_columns` sauvegardés. Sert à afficher une commande
     `refresh-schemas -t …` actionnable quand un schéma manque.
     """
     refs: dict[str, str] = {}
-    for raw in used_columns_raw:
-        try:
-            u = json.loads(raw)
-        except Exception:
-            continue
+    for u in _parse_used_columns(used_columns_raw):
         project = u.get("project", "")
         database = u.get("database", "")
         table = u.get("table", "")
@@ -550,12 +562,7 @@ async def replay_case_rows(
         frozen=False,
     )
     used_columns_raw: list[str] = test_doc.get("used_columns") or []
-    used_columns_parsed: list[dict] = []
-    for raw in used_columns_raw:
-        try:
-            used_columns_parsed.append(json.loads(raw))
-        except Exception:
-            pass
+    used_columns_parsed = _parse_used_columns(used_columns_raw)
     suffix = f"{uuid.uuid4().hex[:8]}_confirm"
     with initialize_duckdb(DB_PATH) as con:
         # `SchemaMissingError` (table absente du cache, fréquent sur clone frais) porte
@@ -670,10 +677,11 @@ def _build_diagnosis(
     if expect_check is not None and expect_check.get("order_only_mismatch"):
         return {
             "code": "nondeterministic_order",
+            "severity": "warning",
             "suspect": None,
             "detail": (
                 "Mêmes lignes, ordre différent — ex-æquo sur la clé de tri "
-                "(sortie non-déterministe)."
+                "(sortie non-déterministe, test non bloquant conservé en `pass`)."
             ),
         }
     if expect_check is not None and not expect_check.get("passed"):
@@ -816,12 +824,7 @@ async def inspect_case(
         sql_source == "disk" and sql.strip() != (test_doc.get("sql") or "").strip()
     )
     used_columns_raw: list[str] = test_doc.get("used_columns") or []
-    used_columns_parsed: list[dict] = []
-    for raw in used_columns_raw:
-        try:
-            used_columns_parsed.append(json.loads(raw))
-        except Exception:
-            pass
+    used_columns_parsed = _parse_used_columns(used_columns_raw)
 
     suffix = f"{uuid.uuid4().hex[:8]}_inspect"
     project = "cli"
@@ -977,7 +980,7 @@ async def inspect_live(
 
     from build_query.live_probes import build_live_probes, classify_waterfall
     from build_query.query_chain import _lightweight_query_decomposed
-    from build_query.warehouse_gate import GatedExecutor
+    from build_query.warehouse_gate import confirm_or_raise, estimate
 
     cfg = _load_config(config_path)
     dialect: str = cfg.get("dialect", "bigquery")
@@ -1009,11 +1012,27 @@ async def inspect_live(
             return _execute_on_warehouse(q, _d)
 
     billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
-    gated = GatedExecutor(
-        warehouse_executor,
-        dialect,
-        billing_project=billing_project,
-        context=f"inspect --live · {model_name}",
+    probe_sql: list[str] = []
+    for target in targets:
+        for probe in target["probes"]:
+            probe_sql.append(probe["count_sql"])
+            if probe.get("right_distinct_sql"):
+                probe_sql.append(probe["right_distinct_sql"])
+
+    context = f"inspect --live · {model_name}"
+    estimates = [
+        estimate(
+            query,
+            dialect,
+            billing_project=billing_project,
+            context=context,
+        )
+        for query in probe_sql
+    ]
+    # Le consentement porte sur le coût cumulé du waterfall complet : toutes les
+    # estimations doivent précéder le premier tir facturé.
+    confirm_or_raise(
+        estimates,
         auto_approve=auto_approve,
         prompt_fn=prompt_fn,
     )
@@ -1023,13 +1042,13 @@ async def inspect_live(
         annotated: list = []
         for probe in target["probes"]:
             resolved = dict(probe)
-            res = gated(probe["count_sql"])
+            res = warehouse_executor(probe["count_sql"])
             resolved["rows"] = _scalar(res, "n")
             # Pré-agrégat : une seule requête mesure n ET d (COUNT vs COUNT DISTINCT).
             if probe.get("boundary") == "pre_agg":
                 resolved["distinct_rows"] = _scalar(res, "d")
             if probe.get("right_distinct_sql"):
-                rd = gated(probe["right_distinct_sql"])
+                rd = warehouse_executor(probe["right_distinct_sql"])
                 resolved["right_rows"] = _scalar(rd, "n")
                 resolved["right_distinct"] = _scalar(rd, "d")
             # Le SQL est déjà porté par le probe ; on ne le ré-expose pas (bruit).
@@ -1110,12 +1129,7 @@ async def run_tests(
                 and sql.strip() != (test_doc.get("sql") or "").strip()
             )
             used_columns_raw: list[str] = test_doc.get("used_columns") or []
-            used_columns_parsed: list[dict] = []
-            for raw in used_columns_raw:
-                try:
-                    used_columns_parsed.append(json.loads(raw))
-                except Exception:
-                    pass
+            used_columns_parsed = _parse_used_columns(used_columns_raw)
 
             test_cases: list[dict] = test_doc.get("test_cases") or []
             case_results: list[dict] = []

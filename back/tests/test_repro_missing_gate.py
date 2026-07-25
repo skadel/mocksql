@@ -240,6 +240,37 @@ def test_mark_repro_preserves_existing_status(tmp_path):
     assert saved["review"]["intent"] == "repro"
 
 
+def test_mark_repro_preserves_prescriptive_expect_when_results_are_cached(tmp_path):
+    """Une mutation de review ne re-snapshotte jamais expect depuis le sidecar."""
+    from cli.manage_cmd import run_mark_repro
+    from storage.test_files import read_test_doc, write_test_doc
+
+    path = tmp_path / ".mocksql" / "tests" / "orders.json"
+    observed = [{"amount": 10}]
+    write_test_doc(
+        path,
+        {
+            "sql": "SELECT 1",
+            "test_cases": [
+                {
+                    "test_uid": "aaaa",
+                    "test_index": "0",
+                    "results_json": json.dumps(observed),
+                }
+            ],
+        },
+    )
+    definition = json.loads(path.read_text(encoding="utf-8"))
+    definition["test_cases"][0]["expect"]["rows"] = [{"amount": 99}]
+    path.write_text(json.dumps(definition), encoding="utf-8")
+
+    run_mark_repro(tmp_path / "mocksql.yml", "orders", "aaaa")
+
+    saved = read_test_doc(path)["test_cases"][0]
+    assert saved["expect"]["rows"] == [{"amount": 99}]
+    assert saved["review"]["intent"] == "repro"
+
+
 def test_mark_repro_unknown_uid_raises(tmp_path):
     from cli.doc_io import TestDocError
     from cli.manage_cmd import run_mark_repro

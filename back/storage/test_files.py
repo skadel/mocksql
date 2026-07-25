@@ -248,10 +248,10 @@ def write_test_doc(path: Path, doc: Dict[str, Any]) -> None:
 
     previous: Dict[str, Any] = {}
     if path.exists():
-        try:
-            previous = json.loads(path.read_text(encoding="utf-8")) or {}
-        except Exception:
-            previous = {}
+        # Comparer au document précédent complet, cache runtime inclus. Une écriture
+        # purement métadonnée (p. ex. ``mark-repro``) ne doit pas prendre le
+        # ``results_json`` du sidecar pour une nouvelle sortie et re-snapshotter expect.
+        previous = read_test_doc(path) or {}
     _carry_review_fields(doc, previous)
     sync_expect_on_doc(
         doc,

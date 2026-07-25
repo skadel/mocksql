@@ -15,7 +15,7 @@ Le champ `diagnosis.code` résume la cause probable par priorité déterministe.
 import asyncio
 import json
 
-from cli.test_runner import inspect_case
+from cli.test_runner import _build_diagnosis, _parse_used_columns, inspect_case
 
 
 # ── Scaffolding projet (mêmes conventions que test_replay_expect_contract) ────
@@ -59,6 +59,23 @@ def _inspect(config_path, uid):
 
 def _cte(trace, name):
     return next(c for c in trace if c["name"] == name)
+
+
+def test_used_columns_parser_accepts_normally_persisted_objects():
+    assert _parse_used_columns(_UC_ORDERS) == _UC_ORDERS
+
+
+def test_order_only_mismatch_is_an_explicit_non_blocking_warning():
+    diagnosis = _build_diagnosis(
+        "disk",
+        "pass",
+        [],
+        [],
+        {"passed": False, "order_only_mismatch": True},
+    )
+    assert diagnosis["code"] == "nondeterministic_order"
+    assert diagnosis["severity"] == "warning"
+    assert "pass" in diagnosis["detail"]
 
 
 # ── 1. CTE amont vide → suspect n°1 ──────────────────────────────────────────
