@@ -214,6 +214,73 @@ def test_inspect_join_fan_out_without_expect(tmp_path):
     assert out["diagnosis"]["suspect"] == "j#0"
 
 
+def test_inspect_chained_join_labels_second_probe_with_cumulative_left(tmp_path):
+    sql = (
+        "SELECT o.id\n"
+        "FROM `p.d.orders3` o\n"
+        "JOIN `p.d.payments3` p ON o.id = p.order_id\n"
+        "JOIN `p.d.adjustments` a ON p.id = a.payment_id"
+    )
+    schemas = [
+        {
+            "table_name": "p.d.orders3",
+            "columns": [{"name": "id", "type": "INT64", "bq_ddl_type": "INT64"}],
+        },
+        {
+            "table_name": "p.d.payments3",
+            "columns": [
+                {"name": "id", "type": "INT64", "bq_ddl_type": "INT64"},
+                {"name": "order_id", "type": "INT64", "bq_ddl_type": "INT64"},
+            ],
+        },
+        {
+            "table_name": "p.d.adjustments",
+            "columns": [
+                {"name": "payment_id", "type": "INT64", "bq_ddl_type": "INT64"}
+            ],
+        },
+    ]
+    used_columns = [
+        {"project": "p", "database": "d", "table": "orders3", "used_columns": ["id"]},
+        {
+            "project": "p",
+            "database": "d",
+            "table": "payments3",
+            "used_columns": ["id", "order_id"],
+        },
+        {
+            "project": "p",
+            "database": "d",
+            "table": "adjustments",
+            "used_columns": ["payment_id"],
+        },
+    ]
+    cfg = _write_project(
+        tmp_path,
+        sql=sql,
+        schemas=schemas,
+        used_columns=used_columns,
+        cases=[
+            _case(
+                "chain",
+                {
+                    "d_orders3": [{"id": 1}],
+                    "d_payments3": [{"id": 10, "order_id": 1}],
+                    "d_adjustments": [{"payment_id": 10}, {"payment_id": 10}],
+                },
+            )
+        ],
+    )
+
+    out = _inspect(cfg, "chain")
+
+    second = next(p for p in out["join_probes"] if p["join_index"] == 1)
+    assert second["left_rows"] == 1
+    assert second["result_rows"] == 2
+    assert "orders3" in second["left"]
+    assert "payments3" in second["left"]
+
+
 def test_inspect_expect_diff_outranks_incidental_fan_out(tmp_path):
     # Point #1 : un JOIN un-à-plusieurs SAIN fan-out (1 → 2), mais la vraie cause du rouge
     # est un écart de VALEUR (total attendu ≠ observé). Le diagnostic doit s'ancrer sur

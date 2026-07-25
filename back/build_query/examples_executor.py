@@ -1817,7 +1817,7 @@ async def _run_join_count_probes(
                     "[inspect] sonde join `%s` (join %d) : %s", cte["name"], j_idx, exc
                 )
                 running = f"{running} {join_sql}"
-                left_label = joined_src
+                left_label = running
                 continue
             probes.append(
                 {
@@ -1836,7 +1836,7 @@ async def _run_join_count_probes(
                 }
             )
             running = f"{running} {join_sql}"
-            left_label = joined_src
+            left_label = running
     return probes
 
 
