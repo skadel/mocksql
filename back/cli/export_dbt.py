@@ -54,10 +54,10 @@ def _slug(name: str) -> str:
     return slug or "test"
 
 
-def _uid8(test_uid: Optional[str]) -> str:
-    """8 premiers hex du ``test_uid`` (tirets retirés) → suffixe stable/unique par modèle."""
+def _uid8(test_uid: Optional[str], fallback: Optional[str] = None) -> str:
+    """8 premiers hex du ``test_uid`` (tirets retirés), ou suffixe legacy fourni."""
     hexed = re.sub(r"[^0-9a-fA-F]", "", str(test_uid or ""))
-    return (hexed[:8] or "00000000").lower()
+    return (hexed[:8] or fallback or "00000000").lower()
 
 
 def _unserializable_value(rows: List[Dict[str, Any]]) -> Optional[Tuple[str, str]]:
@@ -97,7 +97,10 @@ def _case_id(case: Dict[str, Any]) -> str:
 
 
 def export_case(
-    case: Dict[str, Any], node_name: str, parent_index: Dict[str, str]
+    case: Dict[str, Any],
+    node_name: str,
+    parent_index: Dict[str, str],
+    legacy_suffix: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     """Compile UN cas en unit test dbt, ou ``(None, raison d'exclusion)``.
 
@@ -142,7 +145,8 @@ def export_case(
     ]
 
     name = (
-        f"mocksql__{_slug(case.get('test_name') or '')}__{_uid8(case.get('test_uid'))}"
+        f"mocksql__{_slug(case.get('test_name') or '')}__"
+        f"{_uid8(case.get('test_uid'), legacy_suffix)}"
     )
     unit_test: Dict[str, Any] = {
         "name": name,
@@ -179,8 +183,11 @@ def export_doc(doc: Dict[str, Any], model_name: str, project) -> ExportResult:
     cases = sorted(
         doc.get("test_cases") or [], key=lambda c: str(c.get("test_uid") or "")
     )
-    for case in cases:
-        unit_test, reason = export_case(case, node.get("name"), parent_index)
+    for position, case in enumerate(cases, start=1):
+        legacy_suffix = f"legacy{position:04d}" if not case.get("test_uid") else None
+        unit_test, reason = export_case(
+            case, node.get("name"), parent_index, legacy_suffix=legacy_suffix
+        )
         if unit_test is not None:
             result.unit_tests.append(unit_test)
         else:
@@ -306,6 +313,7 @@ def run_export(
         test_file = tests_root / f"{model_name}.json"
         doc = read_test_doc(test_file)
         if not doc:
+            exit_code = 1
             exports.append(
                 ModelExport(
                     result=ExportResult(
@@ -318,6 +326,8 @@ def run_export(
 
         result = export_doc(doc, model_name, project)
         if result.model_error or not result.unit_tests:
+            if result.model_error:
+                exit_code = 1
             exports.append(
                 ModelExport(
                     result=result,
@@ -360,7 +370,7 @@ def run_export(
             ModelExport(result=result, rendered=rendered, path=out_path, action=action)
         )
 
-    # Aucun cas exportable au total (et pas déjà en dérive) → exit 1 (spec §3).
-    if total_unit_tests == 0 and not check:
+    # Aucun cas exportable est toujours un échec, y compris en mode --check.
+    if total_unit_tests == 0:
         exit_code = 1
     return exit_code, exports

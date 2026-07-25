@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
 import sqlglot
@@ -65,15 +66,18 @@ def _canon_value(value: Any) -> Tuple[Any, ...]:
     """Forme canonique d'une valeur pour la comparaison.
 
     - bool AVANT numérique (bool est un sous-type d'int en Python) ;
-    - int/float unifiés en 12 chiffres significatifs (10 vs 10.0, bruit float) ;
+    - int exacts ; float arrondis à 12 chiffres significatifs, puis unifiés via Decimal
+      (10 vs 10.0) sans convertir les grands identifiants entiers en float ;
     - dict/list (colonnes JSON) canonisés par sérialisation triée.
     """
     if value is None:
         return ("z",)
     if isinstance(value, bool):
         return ("b", value)
-    if isinstance(value, (int, float)):
-        return ("n", f"{float(value):.12g}")
+    if isinstance(value, int):
+        return ("n", Decimal(value))
+    if isinstance(value, float):
+        return ("n", Decimal(f"{value:.12g}"))
     if isinstance(value, (dict, list)):
         return ("j", json.dumps(value, sort_keys=True, ensure_ascii=False, default=str))
     return ("s", str(value))
@@ -346,8 +350,15 @@ def confirm_case(
 
     expect = None
     if not is_deadborn_case(case) and "results_json" in case:
+        stored_expect = (
+            case.get("expect") if isinstance(case.get("expect"), dict) else None
+        )
         expect = build_expect(
-            case.get("results_json"), case.get("assertion_results"), sql, dialect
+            case.get("results_json"),
+            case.get("assertion_results"),
+            sql,
+            dialect,
+            columns=stored_expect.get("columns") if stored_expect else None,
         )
     if expect is None and isinstance(case.get("expect"), dict):
         expect = case["expect"]

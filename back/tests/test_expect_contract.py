@@ -148,6 +148,16 @@ def test_compare_normalizes_int_float_but_not_bool():
     assert compare_expect(expect_bool, [{"v": 1}])["passed"] is False
 
 
+def test_compare_keeps_large_integer_ids_exact():
+    expect = {
+        "columns": ["customer_id"],
+        "rows": [{"customer_id": 1234567890123}],
+        "ordered": False,
+    }
+
+    assert compare_expect(expect, [{"customer_id": 1234567890124}])["passed"] is False
+
+
 def test_compare_case_insensitive_columns():
     expect = {"columns": ["Amount"], "rows": [{"Amount": 5.0}], "ordered": False}
     assert compare_expect(expect, [{"AMOUNT": 5.0}])["passed"] is True
@@ -246,6 +256,27 @@ def test_confirm_case_freezes_current_output_as_user_contract():
     assert confirmed["review"]["confirmed_by"] == "user"
     # Pure : le cas d'origine n'est pas muté.
     assert case["review"]["status"] == "stale"
+
+
+def test_confirm_case_preserves_explicit_expect_columns():
+    from build_query.expect_contract import confirm_case
+
+    case = {
+        "test_uid": "aaaa",
+        "results_json": json.dumps([{"business_key": 1, "debug_value": "ignored"}]),
+        "assertion_results": [],
+        "expect": {
+            "columns": ["business_key"],
+            "rows": [{"business_key": 0}],
+            "ordered": False,
+        },
+        "review": {"status": "draft"},
+    }
+
+    confirmed = confirm_case(case, "SELECT business_key, debug_value FROM result")
+
+    assert confirmed["expect"]["columns"] == ["business_key"]
+    assert confirmed["expect"]["rows"] == [{"business_key": 1}]
 
 
 def test_confirm_case_falls_back_to_stored_expect_without_results():

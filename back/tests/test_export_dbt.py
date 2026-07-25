@@ -267,6 +267,29 @@ def test_cases_sorted_by_uid_deterministically(tmp_path):
     ]
 
 
+def test_legacy_cases_without_uid_get_distinct_names(tmp_path):
+    project = _project(tmp_path)
+    cases = [
+        _confirmed_case(
+            None,
+            data={"staging_stg_customers": STG_ROWS},
+            expect_rows=[{"customer_id": customer_id}],
+            expect_columns=["customer_id"],
+            name="Cas legacy",
+        )
+        for customer_id in (1, 2)
+    ]
+
+    result = export_doc({"test_cases": cases}, "marts/orders", project)
+
+    names = [unit_test["name"] for unit_test in result.unit_tests]
+    assert names == [
+        "mocksql__cas_legacy__legacy0001",
+        "mocksql__cas_legacy__legacy0002",
+    ]
+    assert len(names) == len(set(names))
+
+
 # ── run_export bout-en-bout (--dry-run / write / --check) ────────────────────
 
 
@@ -332,6 +355,31 @@ def test_run_export_check_detects_drift(tmp_path):
 
     code, exports = run_export(cfg, targets=["marts/orders"], check=True)
     assert code == 1 and exports[0].action == "drift"
+
+
+def test_run_export_check_fails_when_no_case_is_exportable(tmp_path):
+    cfg = _write_project_fs(tmp_path)
+    test_file = tmp_path / ".mocksql" / "tests" / "marts" / "orders.json"
+    doc = json.loads(test_file.read_text(encoding="utf-8"))
+    doc["test_cases"][0]["review"] = {"status": "draft"}
+    test_file.write_text(json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+
+    code, exports = run_export(cfg, targets=["marts/orders"], check=True)
+
+    assert code == 1
+    assert exports[0].action == "skipped"
+
+
+def test_run_export_invalid_target_is_not_masked_by_valid_target(tmp_path):
+    cfg = _write_project_fs(tmp_path)
+
+    code, exports = run_export(
+        cfg, targets=["marts/orders", "marts/unknown"], dry_run=True
+    )
+
+    assert code == 1
+    assert [export.action for export in exports] == ["dry-run", "skipped"]
+    assert exports[1].result.model_error == "aucun test sauvegardé"
 
 
 def test_run_export_dry_run_writes_nothing(tmp_path):
