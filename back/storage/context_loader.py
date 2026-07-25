@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from storage.config import get_models_path
+from utils.path_guard import safe_join
 
 
 def load_model_context(model_name: str) -> str:
@@ -18,6 +19,11 @@ def load_model_context(model_name: str) -> str:
 
     models_path = get_models_path()
     parts = Path(model_name).parts  # e.g. ("finance", "revenue")
+
+    # Garde traversal : `model_name` vient de l'appelant HTTP — un `../` ne doit pas
+    # aspirer un `.md` hors de models_path (audit sécu 2026-07).
+    if safe_join(models_path, model_name, suffix=".md") is None:
+        return ""
 
     fragments: list[str] = []
 

@@ -14,6 +14,20 @@ def validate_bq_ref(ref: str) -> bool:
     return len(parts) >= 2 and all(_BQ_IDENT_RE.match(p) for p in parts)
 
 
+def _require_bq_component(value: str, label: str) -> str:
+    """Refuse tout composant destiné à la ligne de commande `bq` (projet, dataset,
+    table, billing_project) qui contient autre chose qu'un identifiant BigQuery.
+
+    Le wrapper `bq` est un `.cmd` sous Windows → ses arguments sont re-parsés par
+    cmd.exe même sans ``shell=True`` (classe « BatBadBut »). La validation stricte
+    au point de construction de la commande est donc le vrai garde-fou anti-injection,
+    en complément de ``validate_bq_ref`` côté API (défense en profondeur, audit 2026-07).
+    """
+    if not isinstance(value, str) or not _BQ_IDENT_RE.match(value):
+        raise ValueError(f"Invalid BigQuery {label} (illegal characters): {value!r}")
+    return value
+
+
 def parse_ref(ref: str, billing_project: str) -> tuple[str, str, str]:
     parts = ref.split(".")
     if len(parts) == 2:
@@ -179,8 +193,24 @@ def _is_auth_error(exc: Exception) -> bool:
 async def _run_bq_cli(
     cmd: list[str], billing_project: str, timeout: int = _CLI_TIMEOUT
 ) -> str:
-    """Run a bq CLI command and return stdout, raising on auth errors or non-zero exit."""
+    """Run a bq CLI command and return stdout, raising on auth errors or non-zero exit.
+
+    L'exécutable (``cmd[0]``) est résolu explicitement via ``shutil.which`` et lancé
+    sans ``shell=True`` : plus aucune interprétation de la ligne par cmd.exe/sh, donc
+    les métacaractères d'un argument ne peuvent plus enchaîner une commande (audit
+    sécu 2026-07). Les composants (projet/dataset/table) sont par ailleurs validés
+    par l'appelant (``_require_bq_component``).
+    """
+    import shutil
     import subprocess
+
+    resolved = shutil.which(cmd[0])
+    if not resolved:
+        raise RuntimeError(
+            f"'{cmd[0]}' introuvable dans le PATH — installer le Google Cloud SDK "
+            "(bq) ou utiliser l'API BigQuery."
+        )
+    argv = [resolved, *cmd[1:]]
 
     extra: dict = {}
     if os.name == "nt":
@@ -189,11 +219,11 @@ async def _run_bq_cli(
     env["CLOUDSDK_CORE_DISABLE_PROMPTS"] = "1"
     try:
         result = await asyncio.to_thread(
-            lambda c=cmd: subprocess.run(
+            lambda c=argv: subprocess.run(  # noqa: S603 exe résolu (shutil.which), composants validés
                 c,
                 capture_output=True,
                 text=True,
-                shell=True,
+                shell=False,
                 stdin=subprocess.DEVNULL,
                 timeout=timeout,
                 env=env,
@@ -219,6 +249,10 @@ async def _fetch_table_via_cli(
     ``bq show --schema`` so that timePartitioning info is available.
     """
     proj, dataset, table = parse_ref(ref, billing_project)
+    _require_bq_component(billing_project, "billing_project")
+    _require_bq_component(proj, "project")
+    _require_bq_component(dataset, "dataset")
+    _require_bq_component(table, "table")
     bq_ref = f"{proj}:{dataset}.{table}"
     cmd = [
         "bq",
@@ -276,6 +310,10 @@ async def _fetch_partition_values_cli(
 ) -> tuple[list[str], bool]:
     """Fetch the last *limit* partition IDs via ``bq query`` on INFORMATION_SCHEMA."""
     proj, dataset, table = parse_ref(ref, billing_project)
+    _require_bq_component(billing_project, "billing_project")
+    _require_bq_component(proj, "project")
+    _require_bq_component(dataset, "dataset")
+    _require_bq_component(table, "table")
     sql = (
         f"SELECT partition_id "
         f"FROM `{proj}.{dataset}.INFORMATION_SCHEMA.PARTITIONS` "

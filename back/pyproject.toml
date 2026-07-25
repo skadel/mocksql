@@ -80,6 +80,24 @@ pytest-asyncio = "^1.4.0"
 pytest-mock = "^3.15.1"
 httpx = "^0.28.1"
 
+[tool.ruff.lint]
+# Défauts ruff (E4/E7/E9 + F) + flake8-bandit (S) pour la sécurité. Les règles S
+# à fort bruit et inhérentes au domaine (asserts de tests, SQL en f-string au cœur
+# d'un outil de test SQL) sont désactivées ; on garde le signal utile : subprocess,
+# bind-all-interfaces, etc. Audit sécu 2026-07.
+select = ["E4", "E7", "E9", "F", "S"]
+ignore = [
+    "S101",  # assert — omniprésent et légitime (tests + gardes internes)
+    "S608",  # SQL en f-string — construction interne de requêtes DuckDB (par design)
+    "S110",  # try/except/pass — nettoyages best-effort assumés
+    "S112",  # try/except/continue — idem
+    "S311",  # random non-crypto — génération de données de test, pas de la crypto
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Les tests utilisent assert + subprocess + données factices → S non pertinent.
+"tests/**" = ["S"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
