@@ -365,12 +365,22 @@ class AutoProfileRequest(BaseModel):
     # The partition window the profile SQL was built with (echoed from
     # /build-profile-request). Defaults to 3 to match the build-side default.
     partition_limit: int = 3
+    # Set only after the UI displayed the dry-run estimate and the user launched
+    # profiling. Prevents callers from bypassing the warehouse cost gate.
+    cost_approved: bool = False
 
 
 @router.post("/auto-profile")
 async def auto_profile_route(body: AutoProfileRequest):
 
+    if not body.cost_approved:
+        raise HTTPException(
+            status_code=403,
+            detail="Warehouse scan not approved: estimate and confirm profiling first.",
+        )
+
     from utils.optional_deps import import_bigquery
+    from build_query.warehouse_gate import GatedExecutor
     from build_query.profile_checker import (
         _normalize_profile,
         _load_model_profile,
@@ -385,8 +395,19 @@ async def auto_profile_route(body: AutoProfileRequest):
     billing_project = BQ_TEST_PROJECT
     client = _bq.Client(project=billing_project)
 
+    def _execute_query(sql: str) -> list:
+        return list(client.query(sql).result())
+
+    gated_executor = GatedExecutor(
+        _execute_query,
+        "bigquery",
+        billing_project=billing_project,
+        context="auto-profiling UI",
+        auto_approve=True,
+    )
+
     async def _run_query(sql: str) -> list:
-        return await asyncio.to_thread(lambda: list(client.query(sql).result()))
+        return await asyncio.to_thread(gated_executor, sql)
 
     raw_rows: list = []
     errors: list = []

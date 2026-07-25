@@ -192,7 +192,7 @@ class TestRunGated:
 
 
 class TestGatedExecutor:
-    def test_prompts_once_then_runs_all(self):
+    def test_estimates_and_prompts_each_query(self):
         seen, prompts = [], []
         inner = lambda sql: seen.append(sql) or [{"n": 1}]  # noqa: E731
         with patch.object(
@@ -209,7 +209,26 @@ class TestGatedExecutor:
             ex("Q2")
             ex("Q3")
         assert seen == ["Q1", "Q2", "Q3"]
-        assert len(prompts) == 1  # confirmé une seule fois pour tout le run
+        assert len(prompts) == 3
+
+    def test_yes_still_estimates_and_displays_each_query(self):
+        seen, echoes = [], []
+        inner = lambda sql: seen.append(sql) or []  # noqa: E731
+        with patch.object(
+            wg,
+            "estimate",
+            side_effect=lambda sql, dialect, **k: CostEstimate(
+                dialect="bigquery", method="bq_dry_run", cost=0.5, context=sql
+            ),
+        ) as estimate_mock:
+            ex = wg.GatedExecutor(
+                inner, "bigquery", auto_approve=True, echo_fn=echoes.append
+            )
+            ex("Q1")
+            ex("Q2")
+        assert estimate_mock.call_count == 2
+        assert seen == ["Q1", "Q2"]
+        assert len([line for line in echoes if "~0.5000" in line]) == 2
 
     def test_refusal_stops_before_any_query(self):
         seen = []

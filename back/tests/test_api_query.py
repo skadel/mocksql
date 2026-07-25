@@ -202,3 +202,19 @@ class TestImportMissingTables:
         assert resp.status_code == 422
         data = resp.json()
         assert data["detail"]["needs_manual_config"] is True
+
+
+class TestAutoProfileGate:
+    async def test_rejects_scan_without_explicit_cost_approval(self, client):
+        resp = await client.post(
+            "/api/auto-profile",
+            json={
+                "profile_sql": "SELECT 1",
+                "profile_queries": ["SELECT 1"],
+                "project": "p1",
+                "session": "s1",
+            },
+        )
+
+        assert resp.status_code == 403
+        assert "not approved" in resp.json()["detail"]

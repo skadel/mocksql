@@ -134,7 +134,7 @@ async def run_profile(
 
         # Chokepoint coût : chaque requête de profiling BigQuery est un scan facturé
         # (lecture des vraies lignes pour min/max, top_values…). On estime + confirme
-        # (une fois pour tout le run) avant d'émettre. Trino reste hors gate (profiling
+        # (pour chaque requête) avant d'émettre. Trino reste hors gate (profiling
         # gratuit — pas de facturation au scan).
         from build_query.warehouse_gate import GatedExecutor
 

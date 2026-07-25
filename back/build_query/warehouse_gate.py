@@ -338,10 +338,9 @@ class GatedExecutor:
 
     Le profiling génère ses requêtes à la volée (``profile_schema`` appelle
     l'executor N fois) : on ne connaît pas la liste complète d'avance. Ce wrapper
-    estime chaque requête JUSQU'À la première confirmation, puis, une fois le run
-    approuvé, exécute directement sans ré-estimer — ré-estimer chaque requête pour une
-    ligne de transparence coûtait un aller-retour warehouse par requête (dry-run
-    BigQuery / EXPLAIN Snowflake). Un refus lève ``WarehouseQueryDenied`` avant
+    estime et autorise donc chaque requête séparément : l'approbation d'une première
+    requête ne peut pas couvrir silencieusement une requête suivante plus coûteuse.
+    Un refus lève ``WarehouseQueryDenied`` avant
     d'appeler l'executor interne — aucune requête facturée émise. Sur BigQuery, le
     client (donc l'authentification) est réutilisé pour tous les dry-runs du run.
     """
@@ -363,12 +362,9 @@ class GatedExecutor:
         self._context = context
         self._prompt_fn = prompt_fn
         self._echo_fn = echo_fn or _default_echo
-        # Pré-approuvé (--yes / env) : l'utilisateur a dit « ne me demande pas ».
-        # On l'honore PLEINEMENT en n'émettant même pas l'estimation (pas de dry-run
-        # inutile en CI, et découple les tests qui simulent la warehouse). Après une
-        # confirmation *interactive*, on n'estime plus non plus (cf. __call__).
+        # --yes / env supprime uniquement le prompt. L'estimation et son affichage
+        # restent obligatoires pour conserver la transparence du coût.
         self._preapproved = auto_approve or auto_approve_from_env()
-        self._confirmed = False
         # Client BigQuery réutilisé pour tous les dry-runs du run (construit à la 1ʳᵉ
         # estimation). Un run de profiling émet des dizaines de requêtes : en reconstruire
         # un — et se ré-authentifier — à chaque estimation était un coût réseau inutile.
@@ -389,12 +385,6 @@ class GatedExecutor:
         return self._bq_client
 
     def __call__(self, sql: str):
-        # Une fois le run pré-approuvé OU confirmé, on n'estime plus : ré-estimer chaque
-        # requête juste pour une ligne de transparence coûtait un aller-retour warehouse
-        # par requête (dry-run BigQuery / EXPLAIN Snowflake). La confirmation unique vaut
-        # pour tout le run.
-        if self._preapproved or self._confirmed:
-            return self._inner(sql)
         est = estimate(
             sql,
             self._dialect,
@@ -405,6 +395,10 @@ class GatedExecutor:
         if not est.is_billed:
             return self._inner(sql)
         # Peut lever WarehouseQueryDenied → l'executor interne n'est pas appelé.
-        confirm_or_raise(est, prompt_fn=self._prompt_fn, echo_fn=self._echo_fn)
-        self._confirmed = True
+        confirm_or_raise(
+            est,
+            auto_approve=self._preapproved,
+            prompt_fn=self._prompt_fn,
+            echo_fn=self._echo_fn,
+        )
         return self._inner(sql)

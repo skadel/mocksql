@@ -653,7 +653,7 @@ def _run_profile_bq(
         return [dict(row) for row in client.query(bq_sql).result()]
 
     # Chokepoint coût : scans de profiling facturés → estimation + confirmation
-    # (une fois pour tout le run) avant émission.
+    # (pour chaque requête) avant émission.
     executor = GatedExecutor(
         executor,
         "bigquery",
