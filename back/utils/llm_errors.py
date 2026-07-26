@@ -40,11 +40,44 @@ def loads_lenient_json(raw: str) -> Any:
 
 
 def is_vertex_permission_error(exc: Exception) -> bool:
-    err_str = str(exc)
-    return "PERMISSION_DENIED" in err_str or "BILLING_DISABLED" in err_str
+    return classify_vertex_access_error(exc) is not None
 
 
-def format_vertex_permission_message(model_name: str) -> str:
+def classify_vertex_access_error(exc: Exception) -> str | None:
+    """Return a stable, credential-safe category for common Vertex failures."""
+    error = str(exc).upper()
+    if "DEFAULTCREDENTIALSERROR" in error or "APPLICATION DEFAULT CREDENTIALS" in error:
+        return "adc_missing"
+    if (
+        "VERTEX AI API HAS NOT BEEN USED" in error
+        or "AIPLATFORM.GOOGLEAPIS.COM" in error
+    ):
+        return "api_disabled"
+    if "PERMISSION_DENIED" in error or "BILLING_DISABLED" in error:
+        if "AIPLATFORM.USER" in error:
+            return "iam_role_missing"
+        if (
+            "PUBLISHER MODEL" in error
+            or "GENERATIVE LANGUAGE" in error
+            or "MODEL" in error
+        ):
+            return "model_access_denied"
+        return "permission_denied"
+    return None
+
+
+def format_vertex_permission_message(
+    model_name: str, exc: Exception | None = None
+) -> str:
+    category = classify_vertex_access_error(exc) if exc else None
+    guidance = {
+        "adc_missing": "Configurez les Application Default Credentials avec `gcloud auth application-default login` ou GOOGLE_APPLICATION_CREDENTIALS.",
+        "api_disabled": "Activez l'API Vertex AI (`aiplatform.googleapis.com`) pour le projet Vertex.",
+        "iam_role_missing": "Accordez le rôle `roles/aiplatform.user` au compte qui exécute MockSQL.",
+        "model_access_denied": "Vérifiez que Gemini et ce modèle sont autorisés pour le projet, la région et l'organisation.",
+    }
+    if category in guidance:
+        return f"Erreur d'accès Vertex AI ({category}) pour « {model_name} ».\n• {guidance[category]}"
     return (
         f"Erreur d'accès au modèle LLM (PERMISSION_DENIED).\n"
         f"• Vérifiez que le modèle « {model_name} » est accessible dans votre organisation.\n"

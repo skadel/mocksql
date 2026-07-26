@@ -36,6 +36,10 @@ _REQUIRED: list[tuple[str, str]] = [
 
 
 def validate_required_env() -> None:
+    # OpenAI does not use Vertex. The OpenAI factory validates OPENAI_API_KEY
+    # and returns a provider-specific error if it is absent.
+    if os.getenv("OPENAI_API_KEY") or os.getenv("OPEN_API_KEY"):
+        return
     missing = [
         f"  • {name}  — {desc}" for name, desc in _REQUIRED if not os.getenv(name)
     ]
@@ -81,6 +85,36 @@ SNOWFLAKE_WAREHOUSE = os.getenv("SNOWFLAKE_WAREHOUSE", "")
 SNOWFLAKE_DATABASE = os.getenv("SNOWFLAKE_DATABASE", "")
 SNOWFLAKE_SCHEMA_NAME = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
 SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE", "")
+
+
+def validate_snowflake_env() -> None:
+    """Fail early with the exact Snowflake connection settings to provide."""
+    required = {
+        "SNOWFLAKE_ACCOUNT": "identifiant de compte (ex. ORG-ACCOUNT)",
+        "SNOWFLAKE_USER": "utilisateur Snowflake",
+        "SNOWFLAKE_PASSWORD": "mot de passe ou secret d'authentification",
+        "SNOWFLAKE_WAREHOUSE": "warehouse utilisé pour lire INFORMATION_SCHEMA",
+        "SNOWFLAKE_DATABASE": "base de données source",
+    }
+    missing = [
+        f"  • {name} — {description}"
+        for name, description in required.items()
+        if not os.getenv(name)
+    ]
+    if missing:
+        raise RuntimeError(
+            "Configuration Snowflake incomplète. Définissez dans votre .env ou shell :\n"
+            + "\n".join(missing)
+            + "\n\nExemple :\n"
+            + "  SNOWFLAKE_ACCOUNT=org-account\n"
+            + "  SNOWFLAKE_USER=mocksql\n"
+            + "  SNOWFLAKE_PASSWORD=…\n"
+            + "  SNOWFLAKE_WAREHOUSE=COMPUTE_WH\n"
+            + "  SNOWFLAKE_DATABASE=ANALYTICS\n"
+            + "  # SNOWFLAKE_SCHEMA=PUBLIC et SNOWFLAKE_ROLE=… sont optionnels.\n"
+            + "Installez aussi le connecteur : pip install mocksql[snowflake]"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Trino (source optionnelle)
