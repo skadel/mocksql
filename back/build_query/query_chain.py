@@ -393,6 +393,8 @@ async def _handle_other(state: QueryState):
         result = await chain.ainvoke({"descriptions": descriptions})
     except Exception as exc:
         if is_vertex_permission_error(exc):
+            # Keep this single-argument call compatible with integrations that
+            # replace the formatter (including existing API/UI tests).
             error_msg = format_vertex_permission_message(get_llm_model())
             return {
                 "messages": [
