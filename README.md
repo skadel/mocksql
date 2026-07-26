@@ -1,140 +1,85 @@
-
-
 # MockSQL
 
-[![Backend CI](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml/badge.svg)](https://github.com/skadel/mocksql/actions/workflows/backend-ci.yml)
-[![Frontend CI](https://github.com/skadel/mocksql/actions/workflows/frontend-ci.yml/badge.svg)](https://github.com/skadel/mocksql/actions/workflows/frontend-ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/mocksql)](https://pypi.org/project/mocksql/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**A native unit-testing layer for data engineers.** MockSQL takes a `.sql` file, automatically generates test data via LLM, runs it locally on DuckDB (zero cost on BigQuery), assigns an argued verdict to each test, and suggests the edge cases you haven't covered.
+MockSQL generates SQL unit-test fixtures with an LLM, evaluates them on local
+DuckDB, and stores replayable tests. It is released under the **MIT** license.
+Generated test data is never executed on BigQuery, Snowflake, or another source
+warehouse.
 
-https://github.com/user-attachments/assets/ce95cacb-c245-432a-8e4b-6ffc76507980
-
-<p align="center"><em>Full flow: pick a <code>.sql</code> model → MockSQL generates the input data, runs the query locally on DuckDB, and returns an argued verdict per test — plus suggestions for the edge cases you haven't covered.</em></p>
-
-MockSQL never hands raw SQL to the LLM. It first parses the query with **SQLGlot** to extract the used columns, filters, and JOINs — then feeds those constraints to the LLM as structured context. The generated data is then executed on **DuckDB**: if a CTE returns 0 rows, MockSQL identifies which one and automatically re-runs generation until it gets non-empty results. Once the tests are generated, a **contextual chat** lets you refine, add, or edit them directly in natural language — anchored to a specific test or to the whole model.
-
-Existing SQL mocking libraries ask you to **write the test data by hand**. MockSQL takes the opposite approach:
-
-| | SQL mocking libraries | MockSQL |
-|---|---|---|
-| Test data | Written manually | **Auto-generated** by LLM |
-| Coverage | No detection | **6 axes** (NULL, empty, ties…) + suggestions |
-| Test quality | No evaluation | **LLM verdict** (good / weak / incorrect) |
-| Interface | Python library | **Dedicated UI** (GenerateView → TestsView) |
-| SQL engine | One connector per DB | **Unified DuckDB** — no BigQuery cost |
-
-MockSQL comes in two modes:
-- **CLI** (`mocksql`) — standalone use directly on your local `.sql` files
-- **Web Hub** — full interface with history, verdicts, coverage, and collaboration
-
----
-
-## Quick start
-
-Whatever your warehouse, MockSQL generates data with an LLM and runs every test locally on **DuckDB** — zero warehouse cost. The base install runs entirely on DuckDB; the source-warehouse connectors are heavy (`pyarrow`, `grpc`, …) and only needed to **profile/import** real tables, so they ship as optional extras (`mocksql[bigquery]`, `mocksql[snowflake]`, `mocksql[all]`). Run an import without the matching extra and MockSQL fails fast with the exact command.
-
-Data generation always uses an LLM (Gemini via Vertex AI by default), so set `VERTEX_PROJECT` in every setup below. Pick your source:
-
-### BigQuery
+## Install and initialize
 
 ```bash
-pip install mocksql[bigquery]
-gcloud auth application-default login         # GCP auth for schema import + Gemini
-export VERTEX_PROJECT=<your-gcp-project>
-
-mocksql init                                  # dialect: bigquery (the default)
-mocksql generate models/orders.sql
+pip install mocksql                 # CLI and local DuckDB execution
+pip install mocksql[bigquery]       # BigQuery schema import/profiling
+mocksql init
 ```
 
-Full GCP/IAM setup (roles, service accounts, CI) → **[docs/quickstart.md](docs/quickstart.md)**
-
-### Snowflake
-
-```bash
-pip install mocksql[snowflake]
-mocksql init                                  # choose dialect: snowflake
-```
-
-Put credentials in a **gitignored** `.env` at your project root:
+`mocksql init` supports `--dialect`, `--models-path`, `--llm-provider`,
+`--path`, `--force`, and `--non-interactive`. The LLM provider determines its
+credentials:
 
 ```dotenv
-VERTEX_PROJECT=<your-gcp-project>             # LLM (Gemini via Vertex AI)
-SNOWFLAKE_ACCOUNT=<account_identifier>        # ORG-ACCOUNT, or <locator>.<region>.<cloud>
-SNOWFLAKE_USER=<user>
-SNOWFLAKE_PASSWORD=<password>
-SNOWFLAKE_WAREHOUSE=<warehouse>
-SNOWFLAKE_DATABASE=<database>
-# SNOWFLAKE_ROLE=<role>                        # optional (required on some accounts)
+# Vertex AI / Gemini
+VERTEX_PROJECT=my-gcp-project
+GOOGLE_CLOUD_LOCATION=us-central1
+
+# Or OpenAI
+OPENAI_API_KEY=sk-...
 ```
+
+For a BigQuery source also set `BQ_TEST_PROJECT` (or rely on its
+`VERTEX_PROJECT` fallback) and authenticate with Application Default Credentials
+or `GOOGLE_APPLICATION_CREDENTIALS`.
 
 ```bash
 mocksql generate models/orders.sql
+mocksql test --model orders
 ```
 
-MockSQL imports the table schemas from Snowflake (`INFORMATION_SCHEMA`), generates data, and runs the tests on DuckDB. Snowflake idioms (`IFF`, `TO_TIMESTAMP_NTZ`, `TO_CHAR`, `LISTAGG`, `NUMBER(p,s)`…) are transpiled automatically.
+See [docs/quickstart.md](docs/quickstart.md) for credentials, cache behavior,
+and BigQuery Sandbox/billing details.
 
-### dbt
+## Connector status
 
-A dbt model isn't flat SQL (Jinja: `{{ ref }}`, macros). MockSQL reads the **compiled** SQL via a `dbt:` block in `mocksql.yml`, then imports schemas and runs on DuckDB like any other model:
+| Source dialect | CLI generation | Notes |
+|---|---|---|
+| BigQuery | Supported | Imports missing schemas with `mocksql[bigquery]`; `--profile` issues real BigQuery queries. |
+| DuckDB | Cache-only | Local test execution works; prepare `schema_cache` before generation. |
+| PostgreSQL | Cache-only | Validation is available, but this generation flow does not import Postgres schemas. |
+| Snowflake | Supported with an explicit schema refresh | Validation/transpilation work; run `mocksql refresh-schemas --table database.schema.table` before generation. |
+| Trino | Partial | Validation and `refresh-schemas` support exist; generation still requires cached schemas. |
 
-```bash
-pip install mocksql[bigquery]                 # or [snowflake] — match your dbt target
-cd my_dbt_project
-dbt compile                                   # Jinja → flat SQL with real table names
-dbt run --select +my_mart                     # (marts only) materialize parent models
-mocksql generate models/marts/my_mart.sql --config mocksql.yml
-```
+## dbt status
 
-```yaml
-# mocksql.yml — set the dbt block + the dialect of your dbt target
-dialect: bigquery        # bigquery | snowflake | duckdb (must match your dbt target)
-models_path: ./models
-dbt:
-  project_dir: .         # folder containing dbt_project.yml
-llm:
-  provider: vertexai
-```
+MockSQL resolves dbt models through `manifest.json` and reads their compiled SQL
+from `target/compiled/`. It never treats the dbt manifest as a schema source.
 
-Full recipe (compile profile, materializing parents, scratch DuckDB) → **[docs/quickstart-dbt.md](docs/quickstart-dbt.md)**
+- dbt-BigQuery: supported, including BigQuery schema import.
+- dbt-DuckDB: supported when `schema_cache` has been prepared.
+- dbt-Snowflake: supported after explicitly refreshing the referenced schemas
+  into `schema_cache`; compiled-SQL resolution and validation work.
 
----
+Full setup: [docs/quickstart-dbt.md](docs/quickstart-dbt.md).
 
-## Project structure
+## Development
 
-```
-back/       # FastAPI + LangGraph + CLI
-  cli/      # mocksql CLI (main.py, generate.py)
-  ui/       # mocksql-ui package (server + React assets)
-front/      # React 18 + TypeScript + Redux (Web Hub)
-examples/   # Example MockSQL projects
-docs/       # Documentation
-  quickstart.md               # Full setup (GCP, IAM, CLI, Web UI)
-  quickstart-dbt.md           # Testing a dbt-DuckDB project
-  workflow-query-generation.md  # Flow frontend → backend → DuckDB
-```
-
----
-
-## Contributing
-
-```bash
-make check-all   # back (style + tests) + front (vitest) — full validation
-```
-
-Backend only:
+The package metadata is in [back/pyproject.toml](back/pyproject.toml): version
+`0.2.1`, Python `>=3.11,<3.14`, and MIT license.
 
 ```bash
 cd back
-make style    # lint + format check + dead code (vulture)
-make format   # auto-format and auto-fix
-make test     # pytest
-make check    # style + test
+poetry run mocksql --help
+make check
 ```
 
-Pre-commit hook (recommended):
+### Snowflake schema import
 
-```bash
-pip install pre-commit && pre-commit install
-```
+With `dialect: snowflake` and `mocksql[snowflake]`, both `mocksql generate` and
+`mocksql refresh-schemas` read schemas from Snowflake `INFORMATION_SCHEMA`. They
+require `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`,
+`SNOWFLAKE_WAREHOUSE`, and `SNOWFLAKE_DATABASE`; they never require or call
+BigQuery. Snowflake profiling is not available yet: `generate --profile` reports
+that limitation and continues without profiling rather than falling back to
+BigQuery.

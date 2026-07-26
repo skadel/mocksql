@@ -434,7 +434,7 @@ def output_language_directive() -> str:
     )
 
 
-def get_dbt_project():
+def get_dbt_project(config_path: Path | None = None):
     """Retourne un `DbtProject` si un bloc `dbt:` est configuré dans mocksql.yml, sinon None.
 
     Config attendue :
@@ -445,12 +445,24 @@ def get_dbt_project():
     Quand un projet dbt est configuré, MockSQL lit le SQL **compilé** (refs résolus,
     macros rendues) et infère les schémas amont depuis le manifest — sans entrepôt.
     """
-    cfg = load_config().get("dbt")
+    # ``load_config()`` is intentionally CWD/base-dir scoped for the server and
+    # legacy CLI calls.  A CLI command receiving ``--config`` must however not
+    # silently switch back to that global configuration when resolving dbt.
+    # Read that exact file here so both the dbt block and relative paths share
+    # the same source of truth.
+    if config_path is None:
+        cfg = load_config().get("dbt")
+        config_dir = _base_dir()
+    else:
+        config_path = config_path.resolve()
+        with open(config_path, encoding="utf-8") as f:
+            cfg = (yaml.safe_load(f) or {}).get("dbt")
+        config_dir = config_path.parent
     if not cfg or not cfg.get("project_dir"):
         return None
     from storage.dbt_manifest import DbtProject
 
-    project_dir = (_base_dir() / cfg["project_dir"]).resolve()
+    project_dir = (config_dir / cfg["project_dir"]).resolve()
     return DbtProject(project_dir, cfg.get("target_path", "target"))
 
 

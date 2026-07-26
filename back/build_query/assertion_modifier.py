@@ -69,7 +69,7 @@ async def modify_assertions(state: QueryState):
         updated_fields = json.loads(content.strip())
     except Exception as exc:
         if is_vertex_permission_error(exc):
-            error_msg = format_vertex_permission_message(get_llm_model())
+            error_msg = format_vertex_permission_message(get_llm_model(), exc)
             return {
                 "messages": [
                     AIMessage(

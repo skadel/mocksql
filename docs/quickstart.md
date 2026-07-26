@@ -1,307 +1,127 @@
 # Quickstart
 
-## Prerequisites
+MockSQL generates fixtures with an LLM and executes every generated test locally
+on DuckDB. Source warehouses are used only for the capabilities listed below;
+they do not run the generated synthetic data.
 
-- Python 3.11+
-- [Google Cloud SDK](https://cloud.google.com/sdk/docs/install) — only for Gemini (Vertex AI) and/or BigQuery sources
-- Poetry (`pip install poetry`) — for development from source
-- Node.js 18+ — only to build the frontend
+## Requirements
 
----
-
-## 1. Google Cloud authentication
-
-> **Using OpenAI as LLM?** Sections 1–2 are only needed for Gemini (Vertex AI) and/or a **BigQuery source** (schema fetch, profiling, import). With OpenAI + a `postgres` / `duckdb` source, skip straight to [section 3](#3-cli-installation) — no Google Cloud setup required.
-
-MockSQL uses Google application credentials for Vertex AI and BigQuery calls:
-
-```bash
-gcloud auth application-default login
-gcloud config set project <PROJECT_ID>
-```
-
----
-
-## 2. IAM permissions
-
-The account in use must have the following roles:
-
-| Role | Purpose |
-|------|---------|
-| `roles/bigquery.dataViewer` | Read table schemas |
-| `roles/bigquery.user` | Run jobs / dry-run |
-| `roles/aiplatform.user` | Call Vertex AI models (Gemini only — drop it if you use OpenAI) |
-
-> **Enabling Gemini (one-time step per project)**
-> IAM roles are not enough: open the [Model Garden](https://console.cloud.google.com/vertex-ai/model-garden), search for a Gemini model and accept the terms of use. This is a one-time operation per GCP project and cannot be done via `gcloud`.
-
-### Option A — User account (local development)
-
-```bash
-for ROLE in roles/bigquery.dataViewer roles/bigquery.user roles/aiplatform.user; do
-  gcloud projects add-iam-policy-binding <PROJECT_ID> \
-    --member='user:<your-email@domain.com>' \
-    --role="${ROLE}"
-done
-```
-
-### Option B — Service account (CI/CD, Cloud Run)
-
-```bash
-SA_EMAIL="mocksql-sa@<PROJECT_ID>.iam.gserviceaccount.com"
-
-gcloud iam service-accounts create mocksql-sa \
-  --project=<PROJECT_ID> \
-  --display-name="MockSQL service account"
-
-for ROLE in roles/bigquery.dataViewer roles/bigquery.user roles/aiplatform.user; do
-  gcloud projects add-iam-policy-binding <PROJECT_ID> \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="${ROLE}"
-done
-
-gcloud iam service-accounts keys create ~/keys/mocksql-sa.json \
-  --iam-account="${SA_EMAIL}"
-```
-
-Locally, in the `.env` at your project root (see next section):
-```dotenv
-GOOGLE_APPLICATION_CREDENTIALS=/path/to/mocksql-sa.json
-```
-
-In CI/CD, inject `GOOGLE_APPLICATION_CREDENTIALS` as a secret environment variable.
-
-> **Common error**: `Forbidden: Access Denied: bigquery.jobs.create` → the `bigquery.user` role is missing.
-
----
-
-## 3. CLI installation
+- Python `>=3.11,<3.14`
+- `pip install mocksql`
+- An LLM credential: Vertex AI/Gemini or OpenAI
+- `mocksql[bigquery]` only when MockSQL must import or profile BigQuery tables
 
 ```bash
 pip install mocksql
+pip install mocksql[bigquery]       # optional BigQuery connector
+mocksql --help
 ```
 
-The base install is intentionally lightweight: data generation and execution run entirely on **DuckDB**, with no warehouse client. The source-warehouse connectors are heavy (`pyarrow`, `grpc`, …) and only needed to **profile or import** real tables, so they ship as optional extras:
+The package is version `0.2.1` and licensed under MIT; see
+[back/pyproject.toml](../back/pyproject.toml).
 
-```bash
-pip install mocksql[bigquery]    # + profiling/import from BigQuery
-pip install mocksql[snowflake]   # + profiling/import from Snowflake
-pip install mocksql[all]         # all connectors
-```
-
-If you trigger a profiling/import step without the matching extra installed, MockSQL fails fast with the exact `pip install mocksql[…]` command to run. Since the default `dialect` is `bigquery`, profiling against BigQuery sources requires `mocksql[bigquery]`.
-
-### LLM provider — Gemini or OpenAI
-
-MockSQL picks the LLM backend from the **model name**: `gemini*` → Vertex AI, `gpt-*` / `o<N>` (o3, o4-mini…) → OpenAI. Set `llm.model` in `mocksql.yml` and provide the matching credentials below. The `llm.provider` key only breaks ties for ambiguous names (custom models, proxies).
-
-Credentials and cloud projects come from **environment variables** — never from `mocksql.yml`, which only describes the project structure (paths, dialect, model). The priority is:
-
-```
-system / CI variable  >  local .env file  >  error
-```
-
-In local development, put them in a **gitignored** `.env` at your project root — MockSQL loads it automatically at startup (`load_dotenv()`). Add `.env` to your `.gitignore`:
-
-```
-.env
-```
-
-<details open>
-<summary><b>Gemini via Vertex AI (default)</b></summary>
-
-Requires the Google Cloud setup from [sections 1–2](#1-google-cloud-authentication) (auth + `roles/aiplatform.user` + Model Garden terms).
-
-```dotenv
-# .env — do not commit
-VERTEX_PROJECT=my-project-dev
-GOOGLE_CLOUD_LOCATION=us-central1     # required for Vertex AI calls
-
-# Optional — default: VERTEX_PROJECT
-BQ_TEST_PROJECT=my-project-dev
-
-# Optional: explicit service account (otherwise: Application Default Credentials)
-# GOOGLE_APPLICATION_CREDENTIALS=/path/to/service_account.json
-```
-
-```yaml
-# mocksql.yml
-llm:
-  model: gemini-2.5-flash   # or gemini-2.5-pro
-```
-
-MockSQL is tuned for **gemini-2.5-flash / pro**, whose native thinking mode is on by default — prefer them over `flash-lite`.
-
-</details>
-
-<details>
-<summary><b>OpenAI</b></summary>
-
-No Google Cloud setup is needed for the LLM — [sections 1–2](#1-google-cloud-authentication) only remain relevant if your **source warehouse** is BigQuery.
-
-```dotenv
-# .env — do not commit
-OPENAI_API_KEY=sk-...
-```
-
-```yaml
-# mocksql.yml
-llm:
-  model: gpt-5-mini         # any gpt-* / o<N> model routes to OpenAI
-```
-
-Reasoning models (`gpt-5*`, o-series) only accept the default temperature; the optional `llm.thinking_level` key (`low` / `medium` / `high`) is forwarded to them as `reasoning_effort`. Non-reasoning models (`gpt-4.1-mini`, `gpt-5-chat-latest`) behave like classic chat models.
-
-</details>
-
-#### In CI/CD (GitHub Actions, Cloud Build…)
-
-Inject the variables directly — they take priority over the local `.env`:
-
-```yaml
-# GitHub Actions — Gemini
-env:
-  VERTEX_PROJECT: my-project-preprod
-  GOOGLE_CLOUD_LOCATION: us-central1
-  BQ_TEST_PROJECT: my-project-preprod   # if different from VERTEX_PROJECT
-
-# GitHub Actions — OpenAI
-env:
-  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-```
-
-```yaml
-# Cloud Build
-substitutions:
-  _VERTEX_PROJECT: my-project-prod
-env:
-  - VERTEX_PROJECT=$_VERTEX_PROJECT
-  - GOOGLE_CLOUD_LOCATION=us-central1
-```
-
-The DuckDB path is configured via `duckdb_path` in `mocksql.yml` (default: `data/mocksql.duckdb`).
-
-### `mocksql init`
-
-Initializes a project and generates `mocksql.yml`:
+## Initialize a project
 
 ```bash
 mocksql init
-# or in a subfolder
 mocksql init --path ./my_project
+mocksql init --dialect bigquery --llm-provider openai --non-interactive
 ```
 
-Example generated `mocksql.yml`:
+The documented CLI options are the options exposed by `mocksql init --help`:
+`--path/-p`, `--dialect`, `--models-path`, `--llm-provider`,
+`--test-dataset` (deprecated compatibility option; tests still run locally),
+`--langchain-api-key`, `--force`, and `--non-interactive`.
 
-```yaml
-version: "2"
-dialect: bigquery          # bigquery | postgres | duckdb
-models_path: ./models
-duckdb_path: data/mocksql.duckdb   # path to the local DuckDB database
-llm:
-  model: gemini-2.5-flash  # gemini* → Vertex AI · gpt-* / o<N> → OpenAI
-  streaming: false
-schema_cache: .mocksql/schema_cache.json
+`mocksql init` creates `mocksql.yml`, `.mocksql/schema_cache.json` on first
+schema import, and a local DuckDB file under `.mocksql/data/`.
+
+### LLM credentials
+
+Use exactly one provider configuration.
+
+```dotenv
+# Gemini through Vertex AI
+VERTEX_PROJECT=my-gcp-project
+GOOGLE_CLOUD_LOCATION=us-central1
 ```
 
-#### Supported dialects
+```dotenv
+# OpenAI
+OPENAI_API_KEY=sk-...
+```
 
-The `dialect` describes the **source** SQL: it drives validation (dry-run) and optimization. Test execution **always happens on DuckDB locally**.
+Set `llm.provider: vertexai` or `llm.provider: openai` in `mocksql.yml`.
+Model names also route automatically: `gemini*` goes to Vertex AI; `gpt-*` and
+`o<N>*` go to OpenAI. OpenAI does not need Vertex credentials unless the source
+is BigQuery.
 
-| Dialect | Source | Validation (dry-run) | Schema |
-|---------|--------|----------------------|--------|
-| `bigquery` | BigQuery | BigQuery dry-run | fetch BigQuery → cache |
-| `postgres` | PostgreSQL | Postgres dry-run | fetch Postgres → cache |
-| `duckdb` | DuckDB / dbt-DuckDB | local DuckDB dry-run | pre-filled cache (see [quickstart-dbt.md](quickstart-dbt.md)) |
+## Source connector status
 
-> In `dialect: duckdb`, MockSQL queries no remote source: the schema cache must be pre-filled (bootstrapped from a DuckDB database). This is the mode used for **dbt-DuckDB** projects — see **[quickstart-dbt.md](quickstart-dbt.md)**.
+| Dialect | Validation | Schema handling in `mocksql generate` |
+|---|---|---|
+| `bigquery` | BigQuery dry-run | Imports cache misses from BigQuery with `mocksql[bigquery]` |
+| `postgres` | Postgres validation | Use a prepared `schema_cache`; no Postgres import in this flow |
+| `duckdb` | Local DuckDB validation | Use a prepared `schema_cache`; no DuckDB import command in this flow |
+| `snowflake` | Snowflake `EXPLAIN` validation | Refresh schemas explicitly, then generate from `schema_cache` |
+| `trino` | Trino validation | Use a prepared cache for generation; `refresh-schemas` has Trino support |
 
-**`llm` keys**:
+`mocksql generate` needs schemas. It reads them from `schema_cache` first, then
+automatically imports only BigQuery cache misses. It never guesses column types
+from generated rows. `mocksql refresh-schemas` refreshes BigQuery schemas by
+by default; Snowflake and Trino each have explicit branches. It is not a DuckDB
+schema importer.
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `model` | `gemini-2.5-flash` | Takes priority over `DEFAULT_MODEL_NAME`. The name picks the backend: `gemini*` → Vertex AI, `gpt-*` / `o<N>` → OpenAI |
-| `provider` | `vertexai` | Only consulted for **ambiguous** model names (custom models, proxies) — the model name always wins |
-| `streaming` | `false` | Token-by-token streaming |
+For Snowflake, install `mocksql[snowflake]`, set the Snowflake environment
+variables, then populate the cache explicitly, for example:
 
-### `mocksql generate`
+```bash
+mocksql refresh-schemas --table DATABASE.SCHEMA.ORDERS
+mocksql generate models/orders.sql
+```
+
+## BigQuery credentials, Sandbox, and cost
+
+For BigQuery schema import, configure an execution project and credentials:
+
+```dotenv
+BQ_TEST_PROJECT=my-billing-project  # falls back to VERTEX_PROJECT
+# GOOGLE_APPLICATION_CREDENTIALS=/absolute/path/service-account.json
+```
+
+Application Default Credentials (`gcloud auth application-default login`) are
+also supported. Typical permissions are `roles/bigquery.dataViewer` for metadata
+and `roles/bigquery.user` to create BigQuery jobs; Gemini additionally needs
+`roles/aiplatform.user`.
+
+BigQuery dry-runs validate a query and return an estimated `total_bytes_processed`.
+They do not read table data and MockSQL uses them to validate/estimate work. A
+BigQuery Sandbox can run dry-runs, read metadata, and run real queries within
+its free-tier quotas and feature limits; it does not require a billing account.
+`mocksql generate --profile` is a real query over source tables, so it consumes
+that quota and needs a billing-enabled project once Sandbox/free-tier limits or
+required capabilities are exceeded. Dry-run estimates are not charges, nor a
+promise that a later real profiling query is free. `profile_budget_tb` limits
+which estimated profiling queries are run; it does not make a query free.
+
+## Generate and replay
 
 ```bash
 mocksql generate models/orders.sql
-# with options
-mocksql generate models/orders.sql --config mocksql.yml --output .mocksql/tests
+mocksql generate models/orders.sql --instruction "customer with no orders"
+mocksql generate models/orders.sql --overwrite
+mocksql test --model orders
+mocksql test --json
+mocksql test --frozen
 ```
 
-Schemas are cached in `.mocksql/schema_cache.json` — subsequent runs no longer query BigQuery.
+`generate` is additive by default. `--overwrite` rebuilds the suite. `test`
+uses the live SQL file by default and makes no LLM or warehouse calls; `--frozen`
+uses the SQL snapshot saved with the test.
 
-**Outputs** in `.mocksql/tests/`:
-- `<model>_data.json` — test data (input tables)
-- `<model>_results.json` — DuckDB execution results
+## dbt
 
-### SQL preprocessor (variables and templates)
-
-If your `.sql` files contain non-parsable variables (`@start_date`, `{{ ds }}`, dbt macros…):
-
-```yaml
-# mocksql.yml
-preprocessor_fn: "preprocessors:replace_vars"   # module:function, relative to mocksql.yml
-```
-
-`preprocessors.py` next to `mocksql.yml`:
-
-```python
-import re
-
-def replace_vars(sql: str) -> str:
-    defaults = {"start_date": "'2024-01-01'", "end_date": "'2024-12-31'"}
-    return re.sub(r"@(\w+)", lambda m: defaults.get(m.group(1), "NULL"), sql)
-```
-
-### Profiling budget (auto-profiling)
-
-Profiling real tables runs a BigQuery dry-run to estimate the scan, then queries
-each table. To make the "click Generate and walk away" flow fully hands-off, set a
-**scan budget** (in TB): tables whose estimated scan fits under the budget are
-profiled automatically; tables above it are **deferred** (the profile is marked
-partial and a *"Compléter le profil"* button lets you profile them on demand).
-
-```yaml
-# mocksql.yml
-profile_budget_tb: 0.3   # auto-profile under 0.3 TB; defer larger tables
-```
-
-Also settable via the `PROFILE_BUDGET_TB` env var. When **unset**, the UI asks for a
-budget before profiling (default 0.3 TB, remembered per browser). Set it to a value
-≤ 0 / leave it out to keep the historical behaviour (no budget — profile everything).
-Only applies to BigQuery (DuckDB/Postgres profiling is free, so no budget is needed).
-
-### Full example
-
-```bash
-mocksql generate examples/jaffle_shop/models/orders.sql \
-  --config examples/jaffle_shop/mocksql.yml
-```
-
----
-
-## 4. Web UI
-
-MockSQL ships two distinct wheels:
-
-| Package | Contents |
-|---------|----------|
-| `mocksql` | CLI only |
-| `mocksql-ui` | CLI + web server + React assets |
-
-```bash
-# CLI + UI
-pip install mocksql mocksql-ui
-```
-
-Make sure the LLM provider environment variables are set (see [section 3](#3-cli-installation)) then:
-
-```bash
-mocksql ui                  # http://localhost:8080/static/
-mocksql ui --port 4000
-mocksql ui --no-browser
-```
+For dbt, run `dbt compile` first and configure the `dbt:` block. MockSQL reads
+the compiled SQL, not raw Jinja, and uses the same schema-cache/BigQuery-import
+rules described above. See [quickstart-dbt.md](quickstart-dbt.md) for the exact
+dbt-BigQuery, dbt-DuckDB, and dbt-Snowflake status.

@@ -32,6 +32,9 @@ def _import_snowflake():
 
 
 def get_sf_connection() -> snowflake.connector.SnowflakeConnection:
+    from models.env_variables import validate_snowflake_env
+
+    validate_snowflake_env()
     snowflake_connector = _import_snowflake()
 
     global _sf_conn
