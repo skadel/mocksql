@@ -1,4 +1,14 @@
-# MockSQL — Backend
+# MockSQL
+
+MockSQL generates SQL unit-test fixtures with an LLM, runs them locally on
+DuckDB, evaluates their quality, and saves replayable tests for CI. Install the
+CLI with `pip install mocksql`; install `mocksql[bigquery]`,
+`mocksql[snowflake]`, or `mocksql[all]` when a source connector is needed.
+
+Generated tests never execute against the source warehouse. See the
+[project README](../README.md) for user setup and connector guidance.
+
+## Development
 
 > Pour l'installation, la configuration GCP et le CLI, voir le [README racine](../README.md).
 
@@ -6,7 +16,6 @@
 
 ---
 
-## Développement local
 
 ```bash
 python -m venv .venv
@@ -40,22 +49,14 @@ poetry run mypy build_query/ app/
 
 ## Packaging
 
-MockSQL produit deux wheels :
-
-| Wheel | Contenu |
-|-------|---------|
-| `mocksql-*.whl` | CLI + LangGraph core (sans UI) |
-| `mocksql_ui-*.whl` | Serveur web + assets React bundlés |
-
 ```bash
-make build-cli   # CLI uniquement
-make build-ui    # CLI + UI (Node.js 18+ requis pour le build React)
+poetry build --output dist
 ```
 
-Les wheels sont générés dans `dist/`.
+This produces the `mocksql` wheel and source distribution in `dist/`.
 
 ---
 
-## Licence
+## License
 
-Propriétaire — © 2025 Adel Skhiri. Contact : [skhiriadel92@gmail.com](mailto:skhiriadel92@gmail.com)
+MockSQL is released under the [MIT License](../LICENSE).

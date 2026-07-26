@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "mocksql"
-version = "0.2.0"
-description = "SQL unit test data generator for Analytics Engineers — SQLGlot extracts constraints, LLM generates fixtures, DuckDB validates with automatic retry on empty results"
+version = "0.2.1"
+description = "Generate, evaluate, and replay SQL unit tests locally with LLM-created fixtures and DuckDB."
 authors = ["Adel Skhiri <skhiriadel92@gmail.com>"]
 license = "MIT"
 readme = "README.md"
@@ -33,7 +33,9 @@ include = [
 
 [tool.poetry.dependencies]
 python = ">=3.11,<3.14"
-typer = {extras = ["all"], version = "^0.26.7"}
+# Typer 0.26 no longer exposes an ``all`` extra. Depending on it makes pip
+# emit a warning during every installation.
+typer = "^0.26.7"
 uvicorn = "^0.49.0"
 langchain = "^1.3.10"
 langchain-classic = "1.0.8"

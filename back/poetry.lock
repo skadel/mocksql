@@ -3873,4 +3873,4 @@ trino = ["trino"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "4cd28bc782e17d2f869a9fa233b0a6dd7d484f0395408430e242f0a94c6edd23"
+content-hash = "42886f2f5cbaee1a99523c438f50957c329a55406a4508916d16f837b89375d1"

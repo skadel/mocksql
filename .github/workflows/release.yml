@@ -109,10 +109,30 @@ jobs:
           name: python-dist
           path: back/dist/
 
+  validate-python-package:
+    name: Validate PyPI package (${{ matrix.python-version }})
+    needs: build-python
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+      - name: Install the built artifact in empty virtual environments
+        run: python back/scripts/validate_distribution.py --dist dist
+
   # ── Publish to PyPI ────────────────────────────────────────────────────────
   publish-pypi:
     name: Publish to PyPI
-    needs: build-python
+    needs: [build-python, validate-python-package]
     runs-on: ubuntu-latest
     environment:
       name: pypi
