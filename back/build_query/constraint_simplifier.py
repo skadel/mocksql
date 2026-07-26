@@ -1353,7 +1353,7 @@ def _extract_from_condition_recursive(
     """Walk *cond* recursively, collecting constraints from ALL branches (AND + OR).
 
     OR branches are not expanded — all constraints from any branch are accumulated
-    into the same lists.  This is conservative for Faker pre-fill: every column
+    into the same lists. This is conservative for generation: every column
     mentioned in any OR branch is marked as constrained.
     """
     if isinstance(cond, (exp.And, exp.Or, exp.Paren)):

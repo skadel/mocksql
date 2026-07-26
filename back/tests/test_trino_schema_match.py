@@ -12,7 +12,6 @@ et la requête échoue avec « Table ... does not exist ».
 import unittest
 
 from build_query.examples_executor import filter_schemas_by_used_columns
-from utils.faker_fill import generate_faker_rows
 
 
 # schema_cache : casse d'origine BigQuery (mixte), noms 3 parties.
@@ -81,33 +80,6 @@ class TestFilterSchemasCaseInsensitive(unittest.TestCase):
         filtered = filter_schemas_by_used_columns(SCHEMAS, bq_used)
         self.assertEqual(len(filtered), 1)
         self.assertTrue(filtered[0]["table_name"].endswith("banques"))
-
-
-class TestFakerFillCaseInsensitive(unittest.TestCase):
-    def test_trino_numeric_column_gets_numeric_value(self):
-        """faker_cols est en minuscules (Trino) mais le nom de table du schéma garde
-        la casse d'origine. Sans normalisation, la résolution de type échoue → toutes
-        les colonnes retombent sur STRING → un mot Faker ('help') est injecté dans une
-        colonne numérique → 'could not convert string to float' au CAST DuckDB."""
-        schema = [
-            {
-                "table_name": "pipetalk-493612.MARKETING_GR_source_ref_bpce.coface",
-                "columns": [
-                    {"name": "mtcaht", "type": "NUMERIC", "bq_ddl_type": "NUMERIC"},
-                    {"name": "liensc", "type": "STRING", "bq_ddl_type": "STRING"},
-                ],
-            }
-        ]
-        # Clé faker en minuscules (produite par la qualification Trino).
-        faker_cols = {"marketing_gr_source_ref_bpce_coface": {"mtcaht", "liensc"}}
-
-        rows = generate_faker_rows(schema, faker_cols, filled_data={}, profile=None)
-        out = rows["marketing_gr_source_ref_bpce_coface"]
-        self.assertTrue(out, "aucune ligne générée")
-        # La colonne numérique doit recevoir un nombre, pas un mot.
-        self.assertIsInstance(out[0]["mtcaht"], (int, float))
-        # La colonne texte reste une chaîne.
-        self.assertIsInstance(out[0]["liensc"], str)
 
 
 if __name__ == "__main__":

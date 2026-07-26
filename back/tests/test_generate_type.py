@@ -308,7 +308,7 @@ class TestFunctions(unittest.TestCase):
         used_columns en minuscules, alors que le schema_cache garde la casse
         d'origine de l'entrepôt. Le match database/table doit être insensible à
         la casse — sinon filtered_schema se vide, le modèle de génération n'a
-        aucune table, et le LLM ne produit aucune donnée (seul Faker survit)."""
+        aucune table, et le LLM ne produit aucune donnée."""
         schema = [
             {
                 "table_name": "pipetalk-493612.MONETIQUE_Dataset_Porteur.DS_RCOMP_DASHBOARD_RESEAU",
@@ -334,7 +334,7 @@ class TestFunctions(unittest.TestCase):
         # La table doit être retrouvée malgré la différence de casse…
         self.assertEqual(len(filtered), 1)
         # …et la clé émise doit suivre la casse de used_columns (source de vérité du
-        # pipeline : faker_cols + executor utilisent f"{db}_{table}" issu de used_columns).
+        # pipeline : le générateur et l'executor utilisent f"{db}_{table}" issu de used_columns).
         self.assertEqual(
             filtered[0]["table_name"],
             "monetique_dataset_porteur_ds_rcomp_dashboard_reseau",

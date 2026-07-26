@@ -23,7 +23,6 @@ from utils.examples import (
     create_pydantic_models,
     filter_columns,
 )
-from utils.faker_fill import generate_faker_rows
 from utils.llm_factory import make_llm
 from storage.config import (
     get_language,
@@ -359,7 +358,8 @@ def _branch_to_dict(result) -> dict:
     all_constraints = [c for cs in result.source_columns.values() for c in cs]
     filters = _format_filter_constraints(all_constraints)
     # Bare columns: referenced in WHERE/JOIN ON/QUALIFY inside complex expressions
-    # (e.g. UPPER(col) * 2) — no extractable constraint, but must not be Faker-filled.
+    # (e.g. UPPER(col) * 2) — no extractable constraint, but surfaced to the LLM as a
+    # bare-column hint so it knows the column participates in the filter.
     bare = [_col_str_join(col) for col, cs in result.source_columns.items() if not cs]
     d: dict = {}
     if joins:
@@ -506,50 +506,6 @@ async def _aprepare_generation_constraints(
     return await asyncio.to_thread(
         _prepare_generation_constraints, sql, schema, dialect
     )
-
-
-def _strip_unconstrained_from_sql(
-    sql: str, excluded_col_names: list[str], dialect: str = "bigquery"
-) -> str:
-    """Remove unconstrained columns from SELECT lists in SQL (LLM context only)."""
-    if not sql or not excluded_col_names:
-        return sql
-
-    excluded_pairs: set[tuple[str, str]] = set()
-    for entry in excluded_col_names:
-        if "." in entry:
-            tbl, col = entry.rsplit(".", 1)
-            excluded_pairs.add((tbl.lower(), col.lower()))
-
-    if not excluded_pairs:
-        return sql
-
-    try:
-        import sqlglot.expressions as exp
-        from sqlglot import parse_one
-
-        tree = parse_one(sql, dialect=dialect)
-
-        for select in tree.find_all(exp.Select):
-            new_exprs = []
-            for expr in select.expressions:
-                col_node = expr.this if isinstance(expr, exp.Alias) else expr
-                if not isinstance(col_node, exp.Column):
-                    new_exprs.append(expr)
-                    continue
-                col_name = col_node.name.lower()
-                table_qualifier = (col_node.table or "").lower().split(".")[-1]
-                should_exclude = any(
-                    col == col_name and (not table_qualifier or table_qualifier == tbl)
-                    for tbl, col in excluded_pairs
-                )
-                if not should_exclude:
-                    new_exprs.append(expr)
-            select.set("expressions", new_exprs)
-
-        return tree.sql(dialect=dialect)
-    except Exception:
-        return sql
 
 
 def _extract_constraints_per_cte(query_decomposed: list, dialect: str) -> dict:
@@ -1196,35 +1152,6 @@ async def generate_examples_(
 
     filtered_schema = filter_columns(schema, used_columns)
 
-    # Compute Faker-eligible columns only when constraint extraction fully succeeded
-    # and all ColumnRefs resolved to known base tables (no silent lineage failure).
-    # UNNEST queries are skipped: array-of-struct constraints are not reliably captured.
-    # Faker is also disabled on retry (empty_results) — inconsistent data may have been
-    # caused by Faker-filled values conflicting with LLM-generated values.
-    base_tables = {entry["table"].lower() for entry in used_columns}
-    faker_cols: dict[str, set[str]] = {}
-    _has_unnest = "unnest" in optimized_sql.lower()
-    _is_retry = state.get("status") == "empty_results"
-    logger.debug(
-        "[generator] _has_unnest=%s  _is_retry=%s  sim_result=%s",
-        _has_unnest,
-        _is_retry,
-        sim_result is not None,
-    )
-    if (
-        sim_result is not None
-        and not _has_unnest
-        and not _is_retry
-        and _all_refs_resolved(sim_result, base_tables)
-    ):
-        faker_cols = _compute_faker_columns(
-            sim_result, used_columns, base_tables, sql=optimized_sql, dialect=dialect
-        )
-
-    logger.debug(
-        "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
-    )
-
     # Precompute constraints per column
     table_to_uc = {}
     for entry in used_columns:
@@ -1281,19 +1208,14 @@ async def generate_examples_(
                         f"Anti-join (NOT IN) avec {other.table}.{other.column}"
                     )
 
-    # Build LLM schema with Faker-eligible columns removed and constraint hints injected
+    # Build LLM schema with constraint hints injected. Every used column is kept — the
+    # LLM fills them all, so values stay coherent with the scenario description.
     llm_filtered_schema = []
-    excluded_col_names: list[str] = []
     for table_entry in filtered_schema:
         uc_key = table_entry["table_name"]
         new_columns = []
         for c in table_entry["columns"]:
             col_name = c["name"].lower()
-            # Skip if Faker will fill this
-            if faker_cols and uc_key in faker_cols and col_name in faker_cols[uc_key]:
-                excluded_col_names.append(f"{uc_key}.{col_name}")
-                continue
-
             c_copy = dict(c)
             hints = col_hints.get((uc_key, col_name))
             if hints:
@@ -1326,14 +1248,6 @@ async def generate_examples_(
 
         if new_columns:
             llm_filtered_schema.append({**table_entry, "columns": new_columns})
-
-    if faker_cols:
-        logger.debug(
-            "[generator] Faker pre-fill: %d col(s) across %d table(s) removed from LLM schema — %s",
-            sum(len(cols) for cols in faker_cols.values()),
-            len(faker_cols),
-            excluded_col_names,
-        )
 
     # Modèle recommandé (flash/pro) : le thinking natif porte le raisonnement →
     # le champ in-schema n'est qu'une justification brève. Sinon, fallback sur un
@@ -1399,7 +1313,6 @@ async def generate_examples_(
             used_columns,
             format_instructions,
             constraints_hint=constraints,
-            excluded_columns=excluded_col_names,
             eval_history=eval_history,
             native_thinking=native_thinking,
             join_recipes_block=join_recipes_block,
@@ -1422,9 +1335,6 @@ async def generate_examples_(
     logger.diag(
         "[generator] constraints_hint:\n%s",
         constraints or "(vide — sous-requêtes corrélées non capturées ?)",
-    )
-    logger.diag(
-        "[generator] faker_cols: %s", {k: list(v) for k, v in faker_cols.items()}
     )
     try:
         formatted_msgs = prompt.format_messages()
@@ -1461,21 +1371,6 @@ async def generate_examples_(
             table_name,
             len(rows) if isinstance(rows, list) else "?",
         )
-
-    # Merge Faker-generated values into LLM output
-    if faker_cols:
-        faker_data = generate_faker_rows(
-            schema, faker_cols, filled_data, profile=state.get("profile")
-        )
-        for uc_key, faker_rows in faker_data.items():
-            llm_rows = filled_data.get(uc_key) or []
-            if llm_rows:
-                filled_data[uc_key] = [
-                    {**(row or {}), **faker_row}
-                    for row, faker_row in zip(llm_rows, faker_rows)
-                ]
-            else:
-                filled_data[uc_key] = faker_rows
 
     # Fix 4 — pin déterministe date→epoch : le LLM ne calcule pas fiablement un epoch
     # (sf_bq093). Quand le SQL compare une date à une colonne epoch (directive
@@ -1675,7 +1570,6 @@ async def create_appropriate_prompt(
     used_columns,
     format_instructions,
     constraints_hint: str = "",
-    excluded_columns: list[str] | None = None,
     eval_history: list | None = None,
     native_thinking: bool = False,
     join_recipes_block: str = "",
@@ -1685,7 +1579,6 @@ async def create_appropriate_prompt(
     sql = state.get("optimized_sql", "")
     dialect = state.get("dialect", "bigquery")
     profile = state.get("profile")
-    stripped_sql = _strip_unconstrained_from_sql(sql, excluded_columns or [], dialect)
     model_context = state.get("model_context") or ""
     if not existing_tests:
         return generate_data_prompt(
@@ -1694,7 +1587,7 @@ async def create_appropriate_prompt(
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=stripped_sql,
+            sql=sql,
             profile=profile,
             model_context=model_context,
             eval_history=eval_history,
@@ -1744,7 +1637,7 @@ async def create_appropriate_prompt(
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=stripped_sql,
+            sql=sql,
             user_instruction=state["input"],
             profile=profile,
             model_context=model_context,
@@ -1767,7 +1660,7 @@ async def create_appropriate_prompt(
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=stripped_sql,
+            sql=sql,
             profile=profile,
             model_context=model_context,
             trace_hint=trace_hint,
@@ -1790,7 +1683,7 @@ async def create_appropriate_prompt(
             format_instructions,
             used_columns,
             constraints_hint=constraints_hint,
-            sql=stripped_sql,
+            sql=sql,
             profile=profile,
             model_context=model_context,
             eval_history=eval_history,
@@ -1801,101 +1694,6 @@ async def create_appropriate_prompt(
         )
     else:
         return None
-
-
-def _all_refs_resolved(sim_result, base_tables: set[str]) -> bool:
-    """Return True iff every ColumnRef in sim_result maps to a known base table.
-
-    A ColumnRef whose table is NOT in base_tables indicates that lineage resolution
-    silently fell back to an unresolved CTE alias — in that case Faker must not be
-    activated because we cannot tell which base-table columns are constrained.
-    """
-    all_refs = (
-        list(sim_result.source_columns.keys())
-        + list(sim_result.derived_columns.keys())
-        + [ref for eq_class in sim_result.equivalence_classes for ref in eq_class]
-    )
-    # is_identity=False refs are DELIBERATELY CTE-qualified (predicate on a derived
-    # column, never remapped to its base column) — not a silent fallback. Their base
-    # source columns are excluded from Faker via FilterConstraint.source_columns.
-    return all(ref.table.lower() in base_tables for ref in all_refs if ref.is_identity)
-
-
-def _compute_faker_columns(
-    sim_result,
-    used_columns: list,
-    base_tables: set[str],
-    sql: str = "",
-    dialect: str = "bigquery",
-) -> dict[str, set[str]]:
-    """Return {uc_key: {col_names}} for columns safe to Faker-fill.
-
-    Only called when sim_result is not None and _all_refs_resolved() is True.
-    uc_key matches the table_name produced by filter_columns() (database_table).
-    """
-    constrained: set[tuple[str, str]] = set()
-    for ref in sim_result.source_columns:
-        constrained.add((ref.table.lower(), ref.column.lower()))
-    for ref in sim_result.derived_columns:
-        constrained.add((ref.table.lower(), ref.column.lower()))
-    for eq_class in sim_result.equivalence_classes:
-        for ref in eq_class:
-            constrained.add((ref.table.lower(), ref.column.lower()))
-    # Base columns feeding a constraint kept in CTE form (is_identity=False):
-    # the constraint key doesn't name them, but Faker must not fill them blindly —
-    # the LLM has to pick their values so the derived expression satisfies the filter.
-    for f in sim_result.filters:
-        for src in f.source_columns:
-            constrained.add((src.table.lower(), src.column.lower()))
-
-    # Two classes of columns the SQL text reveals but the simplifier's constraint
-    # extraction misses — both must stay LLM-controlled, never Faker-filled:
-    #   • GROUP BY keys: need repeated values across rows — Faker would assign a
-    #     unique value per row, destroying the aggregation structure (STDDEV=0,
-    #     wrong counts, etc.).
-    #   • Aggregate-argument *measures* (SUM/AVG/COUNT/MIN/MAX/STDDEV…): the test
-    #     scenario pins these to specific values (e.g. "100 then 150 cases").
-    #     Faker fills them with arbitrary values disconnected from the
-    #     description → description↔data desync (bad_input_description). The
-    #     measure is the point of the test, not an incidental filler column.
-    if sql:
-        try:
-            import sqlglot
-            import sqlglot.expressions as exp
-
-            pinned_cols: set[str] = set()
-            for statement in sqlglot.parse(sql, dialect=dialect):
-                if statement is None:
-                    continue
-                for node in statement.walk():
-                    if isinstance(node, (exp.Group, exp.AggFunc)):
-                        for col in node.find_all(exp.Column):
-                            pinned_cols.add(col.name.lower())
-            for table in base_tables:
-                for col in pinned_cols:
-                    constrained.add((table, col))
-        except Exception:
-            pass
-
-    # If the simplifier found no constraints at all (e.g. filters inside an anonymous
-    # subquery that it can't propagate), don't Faker-fill anything — the LLM sees the
-    # full SQL and will respect the WHERE clause on its own.
-    if not constrained:
-        logger.debug(
-            "[faker] source_columns empty — skipping Faker fill, delegating to LLM"
-        )
-        return {}
-
-    faker_cols: dict[str, set[str]] = {}
-    for entry in used_columns:
-        db = entry.get("database", "")
-        table = entry["table"]
-        uc_key = f"{db}_{table}" if db else table
-        table_lower = table.lower()
-        for col in entry["used_columns"]:
-            if (table_lower, col.lower()) not in constrained:
-                faker_cols.setdefault(uc_key, set()).add(col.lower())
-    return faker_cols
 
 
 async def create_combined_model(used_columns, schemas):

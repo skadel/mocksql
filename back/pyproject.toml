@@ -47,8 +47,6 @@ sqlglot = {version = "^30.11.0", extras = ["c"]}
 pandas = "^3.0.3"
 langgraph = "^1.2.6"
 langchain-google-genai = "^4.2.5"
-faker = "^40.23.0"
-
 # sécurité et hashing
 bcrypt = "^5.0.0"
 

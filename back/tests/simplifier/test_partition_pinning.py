@@ -7,10 +7,10 @@ Pattern BigQuery omniprésent :
                             WHERE partition_date <= <date>)
 
 Avant le fix, `_dispatch_pred` ignorait silencieusement tout prédicat
-`col = (SELECT …)` : la colonne paraissait « non contrainte », sortait du
-schéma Pydantic du générateur (le LLM ne pouvait pas la produire) et partait
-en remplissage aléatoire via le sparse_filler — la CTE filtrée devenait vide
-et la requête retournait 0 ligne (cf. examples/spider_complexified/models/c1.sql).
+`col = (SELECT …)` : la colonne paraissait « non contrainte » et ne recevait
+aucun indice explicite dans le prompt de génération — la CTE filtrée devenait
+vide et la requête retournait 0 ligne
+(cf. examples/spider_complexified/models/c1.sql).
 
 Comportement attendu :
   1. La colonne externe ET la colonne interne du MAX sont marquées contraintes
@@ -39,8 +39,10 @@ def _tbl_match(ref, name: str) -> bool:
 
 
 def _constrained(result) -> set[tuple[str, str]]:
-    """Réplique le calcul du set `constrained` de _compute_faker_columns :
-    toute colonne absente de ce set est remplie aléatoirement par le sparse_filler."""
+    """Colonnes que le simplifier considère contraintes (source_columns / derived /
+    equivalence / filters). Ces colonnes reçoivent un indice de contrainte dans le
+    prompt du générateur — le LLM doit produire une valeur qui les satisfait (ex. une
+    colonne de partition = MAX(...))."""
     out: set[tuple[str, str]] = set()
     for ref in result.source_columns:
         out.add((ref.table.lower(), ref.column.lower()))
