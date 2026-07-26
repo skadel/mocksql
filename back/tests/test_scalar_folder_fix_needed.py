@@ -147,43 +147,10 @@ class TestMissedFolds:
         assert "2024-01-15" in result
         assert "EXTRACT" not in result.upper()
 
-    def test_parse_datetime_fails_in_duckdb(self):
-        """
-        PARSE_DATETIME('%Y-%m-%d', '2024-01-15') :
-          sqlglot 30 inverse les args → PARSE_DATETIME('2024-01-15', '%Y-%m-%d')
-          DuckDB ne connaît pas PARSE_DATETIME → erreur → fold raté.
-        """
-        duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
-
-        # sqlglot 30+ met la valeur en premier, le format en second
-        assert duck_expr.startswith("PARSE_DATETIME('2024-01-15'")
-
-        with pytest.raises(duckdb.Error):
-            _eval_with_duckdb(duck_expr)
-
-    def test_parse_datetime_fix_duck_db_sql_correctly_ordered(self):
-        """
-        Bug corrigé : fix_duck_db_sql détecte maintenant l'arg format via '%'.
-          entrée  : PARSE_DATETIME('2024-01-15', '%Y-%m-%d')   ← valeur 1er (sqlglot 30+)
-          sortie  : TRY_STRPTIME('2024-01-15', '%Y-%m-%d')     ← ordre correct
-          résultat DuckDB : timestamp non-NULL
-
-        Intégrer fix_duck_db_sql résout maintenant ce cas.
-        """
-        duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
-        fixed_sql = fix_duck_db_sql(f"SELECT {duck_expr}")
-        fixed_expr = fixed_sql[len("SELECT ") :]
-
-        assert "TRY_STRPTIME" in fixed_expr
-        result = _eval_with_duckdb(fixed_expr)
-        assert result is not None, (
-            f"TRY_STRPTIME a retourné NULL — args peut-être encore inversés : {fixed_expr!r}"
-        )
-
     def test_parse_datetime_expression_folded_with_fix(self):
         """
-        Avec fix_duck_db_sql intégré, PARSE_DATETIME('%Y-%m-%d', '2024-01-15')
-        est replié en la valeur timestamp correspondante.
+        PARSE_DATETIME('%Y-%m-%d', '2024-01-15') est replié en valeur timestamp
+        avec la traduction STRPTIME native de sqlglot 30.12+.
         """
         sql = "SELECT PARSE_DATETIME('%Y-%m-%d', '2024-01-15') AS dt FROM t"
         result = _fold(sql)
@@ -222,6 +189,15 @@ class TestAlreadyHandledBySqlglot:
         assert "TRY_CAST" in duck_expr.upper()
         result = _eval_with_duckdb(duck_expr)
         assert result == 123
+
+    def test_parse_datetime_pipeline_produces_strptime(self):
+        """Le pipeline produit un STRPTIME valide avec sqlglot 30.11 ou 30.12+."""
+        duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
+        fixed_expr = fix_duck_db_sql(f"SELECT {duck_expr}")[len("SELECT ") :]
+        assert "STRPTIME" in fixed_expr.upper()
+        assert "PARSE_DATETIME" not in fixed_expr.upper()
+        assert "TRY_STRPTIME" not in fixed_expr.upper()
+        assert _eval_with_duckdb(fixed_expr) is not None
 
     def test_date_diff_already_transpiled(self):
         """

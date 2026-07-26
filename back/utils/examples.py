@@ -45,8 +45,8 @@ def filter_columns(schemas, used_columns):
         # dialectes (Trino…) met les identifiants de used_columns en minuscules,
         # alors que le schema_cache conserve la casse d'origine de l'entrepôt
         # (BigQuery). Sans .lower() des deux côtés, aucune table ne matche → le
-        # schéma de génération se vide, le LLM ne produit aucune donnée, et seul
-        # Faker survit (tables de fait manquantes → Catalog Error à l'exécution).
+        # schéma de génération se vide, le LLM ne produit aucune donnée, puis les
+        # tables de fait manquent à l'exécution (Catalog Error).
         used_table_entry = next(
             (
                 item
@@ -59,8 +59,8 @@ def filter_columns(schemas, used_columns):
 
         if used_table_entry:
             # Nom de table final aligné sur la casse de used_columns (source de
-            # vérité du pipeline : faker_cols et l'executor construisent tous la
-            # clé f"{db}_{table}" à partir de used_columns). En BigQuery la casse
+            # vérité du pipeline : le générateur et l'executor construisent tous
+            # deux la clé f"{db}_{table}" à partir de used_columns). En BigQuery la casse
             # coïncide avec le schéma → sortie inchangée ; en Trino elle suit
             # used_columns (minuscules) → cohérence des clés en aval.
             db_key = used_table_entry.get("database") or db_name_from_schema
@@ -839,10 +839,10 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         # DATE_TRUNC('WEEK', ...) sans jour spécifié
         s = re.sub(r"DATE_TRUNC\('WEEK',", "DATE_TRUNC('week',", s, flags=re.IGNORECASE)
 
-        # === SAFE.PARSE_DATE / SAFE.PARSE_TIMESTAMP ===
+        # === SAFE.PARSE_DATE / SAFE.PARSE_DATETIME / SAFE.PARSE_TIMESTAMP ===
         # sqlglot <30 : SAFE.PARSE_DATE('%fmt', col)
         # sqlglot 30+ : SAFE.CAST(STRPTIME(col, '%fmt') AS DATE)
-        # DuckDB attend : TRY_STRPTIME(col, '%fmt')
+        # ou SAFE.STRPTIME(col, '%fmt'). DuckDB attend une variante tolérante.
 
         s = re.sub(
             r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(\s*([^,]+?)\s*,\s*'([^']+)'\s*\)\s*AS\s+\w+\s*\)",
@@ -868,7 +868,7 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         # === PARSE_DATETIME ===
         # sqlglot <30 : PARSE_DATETIME('%fmt', col)  — format first
         # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first (ou littéral first)
-        # DuckDB attend : TRY_STRPTIME(col, '%fmt')
+        # DuckDB attend : STRPTIME(col, '%fmt') — la fonction est stricte.
         #
         # Stratégie : l'arg format est identifié par son préfixe '%'.
         # Cela couvre les deux ordres sans dépendre de la version de sqlglot.
@@ -876,14 +876,24 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         def _fix_parse_datetime(m):
             a1, a2 = m.group(1).strip(), m.group(2).strip()
             if a1.startswith("'%"):  # format en 1er (sqlglot <30)
-                return f"TRY_STRPTIME({a2}, {a1})"
+                return f"STRPTIME({a2}, {a1})"
             elif a2.startswith("'%"):  # valeur en 1er (sqlglot 30+)
-                return f"TRY_STRPTIME({a1}, {a2})"
+                return f"STRPTIME({a1}, {a2})"
             return m.group(0)  # indéterminable, laisser tel quel
 
         s = re.sub(
             r"PARSE_DATETIME\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)",
             _fix_parse_datetime,
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # À appliquer APRÈS PARSE_DATETIME : avec sqlglot 30.11, le rendu
+        # SAFE.PARSE_DATETIME est d'abord transformé ci-dessus en SAFE.STRPTIME.
+        # Avec 30.12+, SAFE.STRPTIME est produit directement.
+        s = re.sub(
+            r"SAFE\.STRPTIME\s*\(",
+            "TRY_STRPTIME(",
             s,
             flags=re.IGNORECASE,
         )

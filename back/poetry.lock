@@ -716,24 +716,6 @@ files = [
 all = ["adbc-driver-manager", "fsspec", "ipython", "numpy", "pandas", "pyarrow"]
 
 [[package]]
-name = "faker"
-version = "40.23.0"
-description = "Faker is a Python package that generates fake data for you."
-optional = false
-python-versions = ">=3.10"
-groups = ["main"]
-files = [
-    {file = "faker-40.23.0-py3-none-any.whl", hash = "sha256:775922453e54afa42eaf60eac478fa3a969357f224d09a8022b93e3ad88f18ae"},
-    {file = "faker-40.23.0.tar.gz", hash = "sha256:f135e563f1f95f19346bb680bc2e43570bc43b7893e566023746f51f32c69dfc"},
-]
-
-[package.dependencies]
-tzdata = {version = "*", markers = "platform_system == \"Windows\""}
-
-[package.extras]
-tzdata = ["tzdata"]
-
-[[package]]
 name = "fastapi"
 version = "0.138.0"
 description = "FastAPI framework, high performance, easy to learn, fast to code, ready for production"
@@ -3434,7 +3416,7 @@ description = "Provider of IANA time zone data"
 optional = false
 python-versions = ">=2"
 groups = ["main"]
-markers = "sys_platform == \"win32\" or sys_platform == \"emscripten\" or platform_system == \"Windows\""
+markers = "sys_platform == \"win32\" or sys_platform == \"emscripten\" or (extra == \"trino\" or extra == \"all\") and platform_system == \"Windows\""
 files = [
     {file = "tzdata-2026.1-py2.py3-none-any.whl", hash = "sha256:4b1d2be7ac37ceafd7327b961aa3a54e467efbdb563a23655fbfe0d39cfc42a9"},
     {file = "tzdata-2026.1.tar.gz", hash = "sha256:67658a1903c75917309e753fdc349ac0efd8c27db7a0cb406a25be4840f87f98"},
@@ -3891,4 +3873,4 @@ trino = ["trino"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "4e166d17acceb2025c3d9423376c67387cf589630965f90925bef8772c0d9cdb"
+content-hash = "4cd28bc782e17d2f869a9fa233b0a6dd7d484f0395408430e242f0a94c6edd23"
