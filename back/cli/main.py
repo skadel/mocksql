@@ -103,11 +103,36 @@ def init(
         "-p",
         help="Directory where mocksql.yml will be created.",
     ),
+    dialect: str | None = typer.Option(
+        None, "--dialect", help="SQL dialect; skips the interactive prompt."
+    ),
+    models_path: str | None = typer.Option(
+        None, "--models-path", help="SQL models folder; skips the interactive prompt."
+    ),
+    llm_provider: str | None = typer.Option(
+        None, "--llm-provider", help="LLM provider; skips the interactive prompt."
+    ),
+    test_dataset: str | None = typer.Option(
+        None,
+        "--test-dataset",
+        help="Deprecated and ignored; generated tests always run in local DuckDB.",
+    ),
+    langchain_api_key: str | None = typer.Option(
+        None, "--langchain-api-key", help="Optional LangSmith API key."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Overwrite an existing mocksql.yml without prompting."
+    ),
+    non_interactive: bool = typer.Option(
+        False,
+        "--non-interactive",
+        help="Use supplied values or defaults and never prompt.",
+    ),
 ) -> None:
     """Initialize a MockSQL project and generate mocksql.yml."""
     config_path = path / CONFIG_FILE
 
-    if config_path.exists():
+    if config_path.exists() and not force:
         overwrite = typer.confirm(
             f"{CONFIG_FILE} already exists. Overwrite?", default=False
         )
@@ -115,9 +140,10 @@ def init(
             typer.echo("Aborted.")
             raise typer.Exit()
 
-    dialect = typer.prompt(
-        f"SQL dialect ({'/'.join(DIALECTS)})",
-        default="bigquery",
+    dialect = dialect or (
+        "bigquery"
+        if non_interactive
+        else typer.prompt(f"SQL dialect ({'/'.join(DIALECTS)})", default="bigquery")
     )
     while dialect not in DIALECTS:
         typer.echo(f"Invalid dialect. Choose from: {', '.join(DIALECTS)}")
@@ -125,11 +151,16 @@ def init(
             f"SQL dialect ({'/'.join(DIALECTS)})", default="bigquery"
         )
 
-    models_path = _prompt_models_path(path)
+    models_path = models_path or (
+        "./models" if non_interactive else _prompt_models_path(path)
+    )
 
-    llm_provider = typer.prompt(
-        f"LLM provider ({'/'.join(LLM_PROVIDERS)})",
-        default="vertexai",
+    llm_provider = llm_provider or (
+        "vertexai"
+        if non_interactive
+        else typer.prompt(
+            f"LLM provider ({'/'.join(LLM_PROVIDERS)}),", default="vertexai"
+        )
     )
     while llm_provider not in LLM_PROVIDERS:
         typer.echo(f"Invalid provider. Choose from: {', '.join(LLM_PROVIDERS)}")
@@ -137,13 +168,15 @@ def init(
             f"LLM provider ({'/'.join(LLM_PROVIDERS)})", default="vertexai"
         )
 
-    test_dataset = typer.prompt(
-        "BigQuery test dataset (where temp tables are created during validation)",
-        default="test_dataset",
-    )
+    # Kept as a deprecated non-interactive compatibility option. MockSQL runs
+    # generated tests in local DuckDB and does not create a BigQuery test dataset.
+    if test_dataset:
+        typer.echo("[WARN] --test-dataset is ignored; tests run locally on DuckDB.")
 
-    langchain_api_key = (
-        typer.prompt(
+    langchain_api_key = langchain_api_key or (
+        None
+        if non_interactive
+        else typer.prompt(
             "LangSmith API key (LANGCHAIN_API_KEY, optional — press Enter to skip)",
             default="",
         ).strip()
@@ -161,7 +194,6 @@ def init(
             "provider": llm_provider,
         },
         "schema_cache": ".mocksql/schema_cache.json",
-        "test_dataset": test_dataset,
         "langchain_tracing": bool(langchain_api_key),
     }
 
@@ -190,13 +222,23 @@ def init(
     asyncio.run(init_db_main())
     typer.echo(f"[DB] Database ready at {duckdb_path}")
 
-    typer.echo(
-        "\nRequired environment variables (env var or .env file at project root):\n"
-        "  VERTEX_PROJECT=<gcp-project>          # Vertex AI / LLM\n"
-        "  GOOGLE_CLOUD_LOCATION=us-central1\n"
-        "  BQ_TEST_PROJECT=<gcp-project>         # optional, defaults to VERTEX_PROJECT\n"
-        "\nNext step: mocksql generate <your_model.sql>"
-    )
+    typer.echo("\nRequired environment variables (shell or .env at the project root):")
+    if llm_provider == "openai":
+        typer.echo("  OPENAI_API_KEY=<key>                 # OpenAI LLM")
+    else:
+        typer.echo("  VERTEX_PROJECT=<gcp-project>         # Vertex AI / Gemini")
+        typer.echo("  GOOGLE_CLOUD_LOCATION=us-central1")
+    if dialect == "bigquery":
+        typer.echo(
+            "  BQ_TEST_PROJECT=<gcp-project>        # BigQuery schema import/jobs"
+        )
+        typer.echo("  GOOGLE_APPLICATION_CREDENTIALS=<service-account.json>  # or ADC")
+    else:
+        typer.echo(
+            "  `mocksql generate` does not import schemas for this dialect; "
+            "populate schema_cache first."
+        )
+    typer.echo("\nNext step: mocksql generate <your_model.sql>")
 
 
 @app.command()
@@ -401,7 +443,8 @@ def _print_test_results(model_results: list) -> None:
         failed += n_fail
         skipped += n_skip
 
-        icon = "✓" if n_fail == 0 else "✗"
+        # ASCII keeps the summary readable in legacy Windows code pages.
+        icon = "[OK]" if n_fail == 0 else "[FAIL]"
         skip_label = f", {n_skip} skipped" if n_skip else ""
         typer.echo(
             f"\n  {icon} {mr['model']}  ({n_pass}/{len(cases)} passed{skip_label})"
@@ -417,8 +460,8 @@ def _print_test_results(model_results: list) -> None:
             # Attestation de parité warehouse (cf. `mocksql parity`) — informatif,
             # jamais bloquant. `unverified` reste silencieux (pas de bruit).
             parity_badge = {
-                "verified": "  [parité ✓]",
-                "stale": "  [parité périmée]",
+                "verified": "  [parity verified]",
+                "stale": "  [parity stale]",
             }.get(c.get("parity", ""), "")
             typer.echo(f"  [{label}] {title}{parity_badge}")
             # Description complète en sous-ligne quand elle apporte plus que le titre.
@@ -932,7 +975,7 @@ def refresh_schemas(
         [],
         "--table",
         "-t",
-        help="Re-import only these tables (project.dataset.table). Default: all cached BQ tables.",
+        help="Re-import only these tables. Use project.dataset.table (BigQuery) or database.schema.table (Snowflake).",
     ),
     from_tests: bool = typer.Option(
         False,
@@ -941,10 +984,9 @@ def refresh_schemas(
         "even those not yet cached. Ce que `mocksql test` exige.",
     ),
 ) -> None:
-    """Re-import schemas from BigQuery to pick up partition info on existing tables."""
+    """Re-import cached schemas from the warehouse selected by ``dialect``."""
 
     async def _run() -> None:
-        from models.env_variables import validate_required_env
         from build_query.schema_fetcher import fetch_tables_schema, validate_bq_ref
         from cli.generate import (
             load_config,
@@ -954,16 +996,54 @@ def refresh_schemas(
         )
         from utils.schema_utils import generate_tables_and_columns_from_project_schema
 
-        validate_required_env()
-
         cfg = load_config(config)
         dialect = cfg.get("dialect", "bigquery")
+        if dialect != "snowflake":
+            from models.env_variables import validate_required_env
+
+            validate_required_env()
         cache_path = str(
             config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
         )
         cached = load_schema_cache(cache_path)
 
-        if dialect == "trino":
+        if dialect == "snowflake":
+            from build_query.schema_fetcher import fetch_tables_schema_snowflake
+            from models.env_variables import validate_snowflake_env
+
+            try:
+                validate_snowflake_env()
+            except RuntimeError as exc:
+                typer.echo(f"[ERROR] {exc}", err=True)
+                raise typer.Exit(1)
+
+            if tables:
+                refs = list(tables)
+            elif from_tests:
+                from cli.test_runner import collect_test_table_refs
+
+                refs = collect_test_table_refs(config.parent / ".mocksql" / "tests")
+                if not refs:
+                    typer.echo(
+                        "No tables referenced by saved tests in .mocksql/tests/."
+                    )
+                    raise typer.Exit()
+            else:
+                refs = [
+                    t["table_name"]
+                    for t in cached
+                    if isinstance(t, dict) and t.get("table_name")
+                ]
+            if not refs:
+                typer.echo(
+                    "No Snowflake tables to import. Pass --table database.schema.table "
+                    "(or schema.table), or run `mocksql generate` first."
+                )
+                raise typer.Exit()
+            typer.echo(f"Re-importing {len(refs)} table(s) from Snowflake...")
+            schema_rows, failed = await fetch_tables_schema_snowflake(refs)
+            partitions = {}
+        elif dialect == "trino":
             from build_query.schema_fetcher import fetch_tables_schema_trino
 
             if tables:
@@ -1046,7 +1126,12 @@ def refresh_schemas(
         if failed:
             typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
         if not schema_rows:
-            typer.echo("[ERROR] No data returned from BigQuery.", err=True)
+            source_label = (
+                "Snowflake"
+                if dialect == "snowflake"
+                else ("Trino" if dialect == "trino" else "BigQuery")
+            )
+            typer.echo(f"[ERROR] No data returned from {source_label}.", err=True)
             raise typer.Exit(1)
 
         new_tables = generate_tables_and_columns_from_project_schema(

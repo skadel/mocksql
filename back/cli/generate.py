@@ -32,6 +32,16 @@ from utils.sql_code import (
 logger = logging.getLogger(__name__)
 
 
+def cache_miss_message(dialect: str) -> str:
+    """Explain schema-cache misses without selecting an unrelated connector."""
+    if dialect in {"duckdb", "postgres", "postgresql"}:
+        return (
+            f"[ERROR] {dialect} generation is cache-only: missing schemas must be "
+            "prepared in schema_cache before running `mocksql generate`."
+        )
+    return "[ERROR] No schema importer is available for this dialect."
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -63,6 +73,36 @@ def read_sql(
     )
     clean = extract_select_statement(sql, dialect)
     return clean if clean is not None else sql
+
+
+def resolve_model_sql(
+    model: Path, config: Path, cfg: dict, dbt_project: Any = None
+) -> tuple[str, str, bool]:
+    """Return the model identifier and SQL chosen for a CLI generation.
+
+    dbt models always use their compiled SQL; ordinary files retain the existing
+    preprocessor-aware source read path. Keeping this selection isolated makes
+    the ``--config``/dbt boundary deterministic and directly testable.
+    """
+    dialect = cfg.get("dialect", "bigquery")
+    models_path_str = cfg.get("models_path", "./models")
+    models_base = (config.parent / models_path_str).resolve()
+    try:
+        model_name = model.resolve().relative_to(models_base).with_suffix("").as_posix()
+    except ValueError:
+        model_name = model.stem
+
+    is_dbt_model = bool(dbt_project and dbt_project.is_dbt_model(model_name))
+
+    if is_dbt_model:
+        compiled = dbt_project.compiled_sql_for_model(model_name)
+        return model_name, extract_select_statement(compiled, dialect) or compiled, True
+
+    return (
+        model_name,
+        read_sql(model, cfg.get("preprocessor_fn"), config.parent, dialect),
+        False,
+    )
 
 
 # ── State builder ─────────────────────────────────────────────────────────────
@@ -688,27 +728,18 @@ async def run_generate(
     cache_path = str(
         config.parent / cfg.get("schema_cache", ".mocksql/schema_cache.json")
     )
-    preprocessor_fn = cfg.get("preprocessor_fn")
 
-    # dbt connector : si un bloc `dbt:` est configuré, MockSQL lit le SQL **compilé**
-    # (refs résolus, macros rendues) et infère les schémas amont depuis le manifest —
-    # sans jamais interroger l'entrepôt.
-    dbt_project = storage_config.get_dbt_project()
-    models_path_str = cfg.get("models_path", "./models")
-    models_base = (config.parent / models_path_str).resolve()
-    try:
-        model_name = model.resolve().relative_to(models_base).with_suffix("").as_posix()
-    except ValueError:
-        model_name = model.stem
+    # dbt connector: read compiled SQL (resolved refs, rendered macros). The
+    # manifest is not a schema source; resolution below uses the schema cache
+    # and the selected warehouse-import path.
+    dbt_project = storage_config.get_dbt_project(config)
+    model_name, sql, is_dbt_model = resolve_model_sql(model, config, cfg, dbt_project)
+    models_base = (config.parent / cfg.get("models_path", "./models")).resolve()
 
     # Step 1 — read SQL (DECLARE/SET preambles are stripped inside read_sql)
     typer.echo(f"Reading {model}...")
-    if dbt_project and dbt_project.is_dbt_model(model_name):
+    if is_dbt_model:
         typer.echo(f"[dbt] SQL compilé depuis le manifest pour '{model_name}'.")
-        compiled = dbt_project.compiled_sql_for_model(model_name)
-        sql = extract_select_statement(compiled, dialect) or compiled
-    else:
-        sql = read_sql(model, preprocessor_fn, config.parent, dialect)
 
     # Step 1.5 — fail fast if the query requires generating too many rows
     from build_query.constraint_simplifier import (
@@ -731,7 +762,14 @@ async def run_generate(
         ref_names = [".".join(p for p in [r.catalog, r.db, r.name] if p) for r in refs]
         typer.echo(f"Found {len(refs)} source table(s): {ref_names}")
 
-    billing_project = os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
+    # BigQuery is a source connector, not a default for every SQL dialect.
+    # Keep its resolution local to the BigQuery branch so a Snowflake run never
+    # requires nor accidentally uses BQ_TEST_PROJECT.
+    billing_project = (
+        os.getenv("BQ_TEST_PROJECT") or os.getenv("VERTEX_PROJECT")
+        if dialect == "bigquery"
+        else None
+    )
 
     # Step 3 — resolve schemas via cache local + fetch BigQuery des manquants.
     # En mode dbt, le SQL est déjà compilé (refs résolus en noms réels) ; la résolution
@@ -741,24 +779,42 @@ async def run_generate(
 
     if missing:
         typer.echo(f"Fetching schema for: {missing}")
-        if not billing_project:
-            typer.echo(
-                "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
-                "Set it in your .env or shell environment."
-            )
+        if dialect == "snowflake":
+            from build_query.schema_fetcher import fetch_tables_schema_snowflake
+            from models.env_variables import validate_snowflake_env
+
+            try:
+                validate_snowflake_env()
+            except RuntimeError as exc:
+                typer.echo(f"[ERROR] {exc}", err=True)
+                raise typer.Exit(1)
+            schema_rows, failed = await fetch_tables_schema_snowflake(missing)
+            partitions = {}
+        elif dialect == "bigquery":
+            if not billing_project:
+                typer.echo(
+                    "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
+                    "Set it in your .env or shell environment."
+                )
+                raise typer.Exit(1)
+
+            unqualified = [r for r in missing if not validate_bq_ref(r)]
+            if unqualified:
+                typer.echo(
+                    f"[WARN] Unqualified table refs (need project.dataset.table): {unqualified}"
+                )
+
+            to_fetch = [r for r in missing if validate_bq_ref(r)]
+            schema_rows, failed, partitions = [], [], {}
+            if to_fetch:
+                schema_rows, failed, partitions = await fetch_tables_schema(
+                    to_fetch, billing_project
+                )
+        else:
+            typer.echo(cache_miss_message(dialect), err=True)
             raise typer.Exit(1)
 
-        unqualified = [r for r in missing if not validate_bq_ref(r)]
-        if unqualified:
-            typer.echo(
-                f"[WARN] Unqualified table refs (need project.dataset.table): {unqualified}"
-            )
-
-        to_fetch = [r for r in missing if validate_bq_ref(r)]
-        if to_fetch:
-            schema_rows, failed, partitions = await fetch_tables_schema(
-                to_fetch, billing_project
-            )
+        if schema_rows or failed:
             if failed:
                 typer.echo(f"[WARN] Could not fetch: {[f['table'] for f in failed]}")
             if schema_rows:
@@ -785,21 +841,30 @@ async def run_generate(
     # Step 3.5 — profile (optional)
     profile_data: dict | None = None
     if profile:
-        if not billing_project:
+        if dialect == "snowflake":
+            # Profiling is a separate feature and must never silently fall
+            # through to BigQuery for a Snowflake source.
+            typer.echo(
+                "[WARN] --profile is not yet supported for Snowflake; continuing without profiling."
+            )
+        elif not billing_project:
             typer.echo(
                 "[ERROR] --profile requires BQ_TEST_PROJECT. "
                 "Set it in your .env or shell environment."
             )
             raise typer.Exit(1)
-        typer.echo("Profiling tables on BigQuery (this may take a moment)...")
-        try:
-            profile_data = _run_profile_bq(schemas, sql, dialect, billing_project)
-            typer.echo(
-                f"[OK] Profile complete ({len(profile_data.get('tables', {}))} table(s), "
-                f"{len(profile_data.get('joins', []))} join(s))."
-            )
-        except Exception as exc:
-            typer.echo(f"[WARN] Profiling failed: {exc}. Continuing without profile.")
+        else:
+            typer.echo("Profiling tables on BigQuery (this may take a moment)...")
+            try:
+                profile_data = _run_profile_bq(schemas, sql, dialect, billing_project)
+                typer.echo(
+                    f"[OK] Profile complete ({len(profile_data.get('tables', {}))} table(s), "
+                    f"{len(profile_data.get('joins', []))} join(s))."
+                )
+            except Exception as exc:
+                typer.echo(
+                    f"[WARN] Profiling failed: {exc}. Continuing without profile."
+                )
 
     # Step 4 — build state + inject schemas into in-memory cache
     # (model_name / models_base déjà calculés en amont pour la résolution dbt)

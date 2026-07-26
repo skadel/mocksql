@@ -932,7 +932,7 @@ async def generate_examples(state: QueryState):
         }
     except Exception as exc:
         if is_vertex_permission_error(exc):
-            error_msg = format_vertex_permission_message(get_llm_model())
+            error_msg = format_vertex_permission_message(get_llm_model(), exc)
             return {
                 "messages": [
                     AIMessage(
