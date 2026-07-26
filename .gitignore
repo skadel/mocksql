@@ -100,6 +100,11 @@ back/data/
 .claude/settings.json
 .claude/settings.local.json
 
+# Local AI/editor configuration and linked working trees
+.codex/
+.mcp.json
+.worktrees/
+
 ################################## Docs stratégiques (privé)
 docs/vision-produit.md
 vision.md
