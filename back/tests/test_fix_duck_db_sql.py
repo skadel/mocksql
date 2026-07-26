@@ -161,9 +161,7 @@ class TestSafeFunctions:
     def test_all_strict_parse_variants_raise_on_malformed_value(
         self, con, function_name
     ):
-        raw = transpile(
-            f"SELECT {function_name}('%Y-%m-%d %H:%M:%S', s) FROM events"
-        )
+        raw = transpile(f"SELECT {function_name}('%Y-%m-%d %H:%M:%S', s) FROM events")
         fixed = fix_duck_db_sql(raw)
 
         assert "TRY_STRPTIME" not in fixed.upper()
@@ -721,14 +719,14 @@ class TestParseDatetimeArgOrder:
     quel que soit l'ordre.
     """
 
-    def test_canary_sqlglot_translates_parse_datetime_natively(self):
-        """sqlglot 30.12+ traduit PARSE_DATETIME en STRPTIME strict."""
+    def test_parse_datetime_pipeline_is_strict_across_sqlglot_versions(self):
+        """Le rendu 30.11 ou 30.12+ finit toujours en STRPTIME strict."""
         raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
-        assert "STRPTIME" in raw.upper() and "PARSE_DATETIME" not in raw.upper(), (
-            f"CANARY : sqlglot ne traduit plus PARSE_DATETIME nativement. raw={raw!r}. "
-            "Le fallback texte de fix_duck_db_sql doit alors être réévalué."
+        fixed = fix_duck_db_sql(raw)
+        assert "STRPTIME" in fixed.upper() and "PARSE_DATETIME" not in fixed.upper(), (
+            f"Le pipeline ne traduit plus PARSE_DATETIME. raw={raw!r}, fixed={fixed!r}."
         )
-        assert "TRY_STRPTIME" not in raw.upper()
+        assert "TRY_STRPTIME" not in fixed.upper()
 
     def test_literal_value_first_correctly_converted(self):
         """
@@ -790,12 +788,13 @@ class TestSqlglotVersionCanaries:
 
     # --- Cas où sqlglot NE corrige PAS (fix encore nécessaire) ---
 
-    def test_canary_parse_datetime_translated_strictly(self):
-        """sqlglot traduit PARSE_DATETIME en STRPTIME sans tolérer les erreurs."""
+    def test_canary_parse_datetime_pipeline_remains_strict(self):
+        """Alerte si le pipeline PARSE_DATETIME devient tolérant aux erreurs."""
         raw = transpile("PARSE_DATETIME('%Y-%m-%d', col)")
-        assert "STRPTIME" in raw.upper() and "TRY_STRPTIME" not in raw.upper(), (
-            "CANARY ROMPU : la traduction native de PARSE_DATETIME n'est plus stricte — "
-            "réévaluer fix_duck_db_sql."
+        fixed = fix_duck_db_sql(raw)
+        assert "STRPTIME" in fixed.upper() and "TRY_STRPTIME" not in fixed.upper(), (
+            "CANARY ROMPU : le pipeline PARSE_DATETIME n'est plus strict — "
+            f"raw={raw!r}, fixed={fixed!r}."
         )
 
     def test_canary_extract_date_not_translated(self):

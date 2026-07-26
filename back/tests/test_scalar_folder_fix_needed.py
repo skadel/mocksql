@@ -190,13 +190,14 @@ class TestAlreadyHandledBySqlglot:
         result = _eval_with_duckdb(duck_expr)
         assert result == 123
 
-    def test_parse_datetime_already_transpiled_to_strptime(self):
-        """sqlglot 30.12+ produit un STRPTIME DuckDB valide et strict."""
+    def test_parse_datetime_pipeline_produces_strptime(self):
+        """Le pipeline produit un STRPTIME valide avec sqlglot 30.11 ou 30.12+."""
         duck_expr = _duck("PARSE_DATETIME('%Y-%m-%d', '2024-01-15')")
-        assert "STRPTIME" in duck_expr.upper()
-        assert "PARSE_DATETIME" not in duck_expr.upper()
-        assert "TRY_STRPTIME" not in duck_expr.upper()
-        assert _eval_with_duckdb(duck_expr) is not None
+        fixed_expr = fix_duck_db_sql(f"SELECT {duck_expr}")[len("SELECT ") :]
+        assert "STRPTIME" in fixed_expr.upper()
+        assert "PARSE_DATETIME" not in fixed_expr.upper()
+        assert "TRY_STRPTIME" not in fixed_expr.upper()
+        assert _eval_with_duckdb(fixed_expr) is not None
 
     def test_date_diff_already_transpiled(self):
         """

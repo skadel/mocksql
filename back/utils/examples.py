@@ -865,13 +865,6 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
             flags=re.IGNORECASE,
         )
 
-        s = re.sub(
-            r"SAFE\.STRPTIME\s*\(",
-            "TRY_STRPTIME(",
-            s,
-            flags=re.IGNORECASE,
-        )
-
         # === PARSE_DATETIME ===
         # sqlglot <30 : PARSE_DATETIME('%fmt', col)  — format first
         # sqlglot 30+ : PARSE_DATETIME(col, '%fmt')  — col first (ou littéral first)
@@ -891,6 +884,16 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         s = re.sub(
             r"PARSE_DATETIME\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)",
             _fix_parse_datetime,
+            s,
+            flags=re.IGNORECASE,
+        )
+
+        # À appliquer APRÈS PARSE_DATETIME : avec sqlglot 30.11, le rendu
+        # SAFE.PARSE_DATETIME est d'abord transformé ci-dessus en SAFE.STRPTIME.
+        # Avec 30.12+, SAFE.STRPTIME est produit directement.
+        s = re.sub(
+            r"SAFE\.STRPTIME\s*\(",
+            "TRY_STRPTIME(",
             s,
             flags=re.IGNORECASE,
         )
