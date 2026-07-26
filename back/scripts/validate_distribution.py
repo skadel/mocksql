@@ -18,11 +18,18 @@ from email.parser import BytesParser
 from pathlib import Path
 
 
-def run(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str], cwd: Path, *, capture_output: bool = False
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     return subprocess.run(  # noqa: S603 -- commands are assembled from CI-controlled paths
-        command, cwd=cwd, env=env, text=True, check=True
+        command,
+        cwd=cwd,
+        env=env,
+        text=True,
+        check=True,
+        capture_output=capture_output,
     )
 
 
@@ -111,7 +118,7 @@ def assert_installed_candidate(
         "print(json.dumps({'version': d.version, 'direct_url': "
         "d.read_text('direct_url.json')}))"
     )
-    result = run([str(python), "-c", probe], cwd)
+    result = run([str(python), "-c", probe], cwd, capture_output=True)
     import json
 
     installed = json.loads(result.stdout)
