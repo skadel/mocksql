@@ -3,7 +3,7 @@
 MockSQL reads a dbt model's **compiled SQL**. It does not compile dbt itself and
 does not derive schemas from `manifest.json`: the manifest identifies the model;
 `target/compiled/` supplies the rendered SQL; schemas come from MockSQL's schema
-cache or, for BigQuery, from BigQuery.
+cache or the automatic BigQuery/Snowflake cache-miss importer.
 
 ## Support matrix
 
@@ -11,7 +11,7 @@ cache or, for BigQuery, from BigQuery.
 |---|---|---|
 | dbt-BigQuery | Supported | Automatic BigQuery import for cache misses, or `schema_cache` |
 | dbt-DuckDB | Supported with a prepared cache | `schema_cache` only; no DuckDB schema-import command exists yet |
-| dbt-Snowflake | Supported with an explicit schema refresh | Refresh into `schema_cache`, then generate |
+| dbt-Snowflake | Supported | Automatic Snowflake import for cache misses, or `schema_cache` |
 
 All generated cases are executed locally in DuckDB. The warehouse is never used
 to execute the synthetic test data.
@@ -65,9 +65,10 @@ pip install mocksql[bigquery]
 mocksql generate models/marts/sales.sql --config mocksql.yml
 ```
 
-Set a BigQuery job project (`BQ_TEST_PROJECT`, or `VERTEX_PROJECT` as its
-fallback) and Google application credentials. On a cache miss, MockSQL fetches
-the referenced table schema and saves it in `.mocksql/schema_cache.json`.
+Set an explicit BigQuery job project (`BQ_TEST_PROJECT`) and Google application
+credentials. A `VERTEX_PROJECT` fallback exists, but do not use it when cost
+isolation matters. On a cache miss, MockSQL fetches the referenced table schema
+and saves it in `.mocksql/schema_cache.json`.
 
 ### dbt-DuckDB
 
@@ -78,25 +79,46 @@ in the CLI generation path.
 
 ### dbt-Snowflake
 
-Install `mocksql[snowflake]`, configure the Snowflake connection variables, and
-refresh each required relation into the cache before generation:
+Install `mocksql[snowflake]` and configure:
+
+```dotenv
+SNOWFLAKE_ACCOUNT=org-account
+SNOWFLAKE_USER=mocksql
+SNOWFLAKE_PASSWORD=...
+SNOWFLAKE_WAREHOUSE=COMPUTE_WH
+SNOWFLAKE_DATABASE=ANALYTICS
+# SNOWFLAKE_SCHEMA=PUBLIC          # optional
+# SNOWFLAKE_ROLE=ANALYST           # optional
+```
+
+`SNOWFLAKE_DATABASE` is required by the current CLI connection validation even
+when compiled SQL uses fully qualified relations. Then generate directly:
 
 ```bash
-mocksql refresh-schemas --table DATABASE.SCHEMA.PARENT_MODEL
 mocksql generate models/marts/sales.sql --config mocksql.yml
 ```
 
-The dbt connector still supplies only compiled SQL; `refresh-schemas` is the
-schema source. This manual step is required because `generate` auto-imports
-cache misses only for BigQuery.
+On a cache miss, `generate` imports the compiled SQL's Snowflake relations
+automatically. `refresh-schemas` remains recommended when CI should preload the
+cache or when a warehouse schema changed:
+
+```bash
+mocksql refresh-schemas --table DATABASE.SCHEMA.PARENT_MODEL
+```
 
 ## BigQuery Sandbox and billing
 
-BigQuery dry-runs validate SQL and estimate bytes processed; they do not scan
-table data. Schema metadata reads are also distinct from profiling. The sandbox
-can therefore be enough to compile/dry-run, read metadata, and run queries
-within the Sandbox free-tier quotas and feature limits. MockSQL profiling is a
-real query over the source tables: it consumes that quota and needs a
-billing-enabled BigQuery project once those limits or required capabilities are
-exceeded. Set `BQ_TEST_PROJECT` explicitly for any BigQuery job; dry-runs are
-estimates and are not a guarantee that later profiling is free.
+BigQuery dry-runs validate SQL and estimate bytes without executing or charging
+for the query. Plain table metadata reads do not scan source rows; however,
+MockSQL can issue a real `INFORMATION_SCHEMA.PARTITIONS` query for partition
+discovery, and BigQuery applies a 10 MB minimum on-demand processing amount to
+each `INFORMATION_SCHEMA` query. `--profile` runs real source-table queries.
+
+Use an explicit isolated `BQ_TEST_PROJECT`; do not rely on `VERTEX_PROJECT` when
+cost isolation matters. A Sandbox project has no billing account and currently
+includes 10 GiB active storage plus 1 TiB query processing per month, subject to
+Sandbox limits. Omit `--profile` and keep the schema cache warm when the goal is
+zero source-query spend. ADC can be set up with
+`gcloud auth application-default login`; use `roles/bigquery.metadataViewer`
+(or `roles/bigquery.dataViewer` for profiling) plus
+`roles/bigquery.jobUser` on the job project.

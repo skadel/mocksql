@@ -46,14 +46,26 @@ def is_vertex_permission_error(exc: Exception) -> bool:
 def classify_vertex_access_error(exc: Exception) -> str | None:
     """Return a stable, credential-safe category for common Vertex failures."""
     error = str(exc).upper()
-    if "DEFAULTCREDENTIALSERROR" in error or "APPLICATION DEFAULT CREDENTIALS" in error:
+    if (
+        "DEFAULTCREDENTIALSERROR" in error
+        or "APPLICATION DEFAULT CREDENTIALS" in error
+        or "COULD NOT AUTOMATICALLY DETERMINE CREDENTIALS" in error
+    ):
         return "adc_missing"
+    if "VERTEX_PROJECT" in error or "PROJECT ID" in error and "MISSING" in error:
+        return "project_missing"
     if (
         "VERTEX AI API HAS NOT BEEN USED" in error
+        or "SERVICE_DISABLED" in error
         or "AIPLATFORM.GOOGLEAPIS.COM" in error
     ):
         return "api_disabled"
-    if "PERMISSION_DENIED" in error or "BILLING_DISABLED" in error:
+    if (
+        "PERMISSION_DENIED" in error
+        or "BILLING_DISABLED" in error
+        or "FORBIDDEN" in error
+        or "403" in error
+    ):
         if "AIPLATFORM.USER" in error:
             return "iam_role_missing"
         if (
@@ -70,16 +82,28 @@ def format_vertex_permission_message(
     model_name: str, exc: Exception | None = None
 ) -> str:
     category = classify_vertex_access_error(exc) if exc else None
-    guidance = {
-        "adc_missing": "Configurez les Application Default Credentials avec `gcloud auth application-default login` ou GOOGLE_APPLICATION_CREDENTIALS.",
-        "api_disabled": "Activez l'API Vertex AI (`aiplatform.googleapis.com`) pour le projet Vertex.",
-        "iam_role_missing": "Accordez le rôle `roles/aiplatform.user` au compte qui exécute MockSQL.",
-        "model_access_denied": "Vérifiez que Gemini et ce modèle sont autorisés pour le projet, la région et l'organisation.",
+    probable_causes = {
+        "adc_missing": "credentials ADC absents/expirés ou service account mal configuré",
+        "project_missing": "`VERTEX_PROJECT` absent ou incorrect",
+        "api_disabled": "API Vertex AI désactivée sur le projet",
+        "iam_role_missing": "rôle IAM `roles/aiplatform.user` manquant",
+        "model_access_denied": "modèle Gemini indisponible pour ce projet, cette région ou cette organisation",
+        "permission_denied": "credentials, projet, API ou rôle IAM incorrects",
     }
-    if category in guidance:
-        return f"Erreur d'accès Vertex AI ({category}) pour « {model_name} ».\n• {guidance[category]}"
+    probable = probable_causes.get(
+        category, "credentials, projet, API ou rôle IAM incorrects"
+    )
     return (
-        f"Erreur d'accès au modèle LLM (PERMISSION_DENIED).\n"
-        f"• Vérifiez que le modèle « {model_name} » est accessible dans votre organisation.\n"
-        f"• Vérifiez vos permissions IAM sur Vertex AI (rôle minimum requis : AI Platform Developer)."
+        f"Appel Vertex AI refusé pour « {model_name} »"
+        f"{f' ({category})' if category else ''}.\n"
+        f"Cause probable : {probable}.\n"
+        "Actions :\n"
+        "• Vérifiez `VERTEX_PROJECT` et la région `GOOGLE_CLOUD_LOCATION`.\n"
+        "• Configurez les Application Default Credentials (ADC) avec "
+        "`gcloud auth application-default login`, ou un service account via "
+        "`GOOGLE_APPLICATION_CREDENTIALS`.\n"
+        "• Activez l'API Vertex AI : `gcloud services enable aiplatform.googleapis.com "
+        '--project="$VERTEX_PROJECT"`.\n'
+        "• Accordez `roles/aiplatform.user` au compte qui exécute MockSQL.\n"
+        "Alternative : définissez `llm.provider: openai` et `OPENAI_API_KEY`."
     )

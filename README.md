@@ -13,6 +13,8 @@ warehouse.
 ```bash
 pip install mocksql                 # CLI and local DuckDB execution
 pip install mocksql[bigquery]       # BigQuery schema import/profiling
+pip install mocksql[snowflake]      # Snowflake schema import/validation
+pip install mocksql[all]            # BigQuery + Snowflake + Trino
 mocksql init
 ```
 
@@ -29,9 +31,10 @@ GOOGLE_CLOUD_LOCATION=us-central1
 OPENAI_API_KEY=sk-...
 ```
 
-For a BigQuery source also set `BQ_TEST_PROJECT` (or rely on its
-`VERTEX_PROJECT` fallback) and authenticate with Application Default Credentials
-or `GOOGLE_APPLICATION_CREDENTIALS`.
+For a BigQuery source, set `BQ_TEST_PROJECT` explicitly and authenticate with
+Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS`. A
+`VERTEX_PROJECT` fallback exists for compatibility, but should not be used when
+cost isolation matters.
 
 ```bash
 mocksql generate models/orders.sql
@@ -48,7 +51,7 @@ and BigQuery Sandbox/billing details.
 | BigQuery | Supported | Imports missing schemas with `mocksql[bigquery]`; `--profile` issues real BigQuery queries. |
 | DuckDB | Cache-only | Local test execution works; prepare `schema_cache` before generation. |
 | PostgreSQL | Cache-only | Validation is available, but this generation flow does not import Postgres schemas. |
-| Snowflake | Supported with an explicit schema refresh | Validation/transpilation work; run `mocksql refresh-schemas --table database.schema.table` before generation. |
+| Snowflake | Supported | Imports cache misses automatically with `mocksql[snowflake]`; `refresh-schemas` preloads or refreshes the cache. |
 | Trino | Partial | Validation and `refresh-schemas` support exist; generation still requires cached schemas. |
 
 ## dbt status
@@ -58,8 +61,8 @@ from `target/compiled/`. It never treats the dbt manifest as a schema source.
 
 - dbt-BigQuery: supported, including BigQuery schema import.
 - dbt-DuckDB: supported when `schema_cache` has been prepared.
-- dbt-Snowflake: supported after explicitly refreshing the referenced schemas
-  into `schema_cache`; compiled-SQL resolution and validation work.
+- dbt-Snowflake: supported; cache misses in compiled SQL are imported
+  automatically, and `refresh-schemas` is available for an explicit preload.
 
 Full setup: [docs/quickstart-dbt.md](docs/quickstart-dbt.md).
 
@@ -80,6 +83,9 @@ With `dialect: snowflake` and `mocksql[snowflake]`, both `mocksql generate` and
 `mocksql refresh-schemas` read schemas from Snowflake `INFORMATION_SCHEMA`. They
 require `SNOWFLAKE_ACCOUNT`, `SNOWFLAKE_USER`, `SNOWFLAKE_PASSWORD`,
 `SNOWFLAKE_WAREHOUSE`, and `SNOWFLAKE_DATABASE`; they never require or call
-BigQuery. Snowflake profiling is not available yet: `generate --profile` reports
-that limitation and continues without profiling rather than falling back to
-BigQuery.
+BigQuery. `SNOWFLAKE_DATABASE` is currently required by the CLI connection even
+when every SQL relation is fully qualified. `generate` imports cache misses
+automatically; use `refresh-schemas --table DATABASE.SCHEMA.TABLE` to preload or
+force-refresh schemas. Snowflake profiling is not available yet:
+`generate --profile` reports that limitation and continues without profiling
+rather than falling back to BigQuery.
