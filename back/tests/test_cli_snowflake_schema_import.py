@@ -51,6 +51,58 @@ def test_snowflake_configuration_error_lists_missing_settings(
     assert "pip install mocksql[snowflake]" in str(exc.value)
 
 
+def test_snowflake_database_is_optional_for_fully_qualified_refs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from models.env_variables import validate_snowflake_env
+
+    _snowflake_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_DATABASE")
+
+    validate_snowflake_env(["ANALYTICS.PUBLIC.ORDERS"])
+
+
+def test_snowflake_database_is_required_for_two_part_refs(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from models.env_variables import validate_snowflake_env
+
+    _snowflake_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_DATABASE")
+
+    with pytest.raises(RuntimeError, match="SNOWFLAKE_DATABASE"):
+        validate_snowflake_env(["PUBLIC.ORDERS"])
+
+
+def test_snowflake_connection_omits_empty_database_and_schema(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import utils.snowflake_connector as connector
+
+    _snowflake_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_DATABASE")
+    monkeypatch.setattr(connector, "SNOWFLAKE_DATABASE", "")
+    monkeypatch.setattr(connector, "_sf_conn", None)
+    captured = {}
+
+    class Connection:
+        def is_closed(self):
+            return False
+
+    class FakeConnector:
+        @staticmethod
+        def connect(**kwargs):
+            captured.update(kwargs)
+            return Connection()
+
+    monkeypatch.setattr(connector, "_import_snowflake", lambda: FakeConnector)
+
+    connector.get_sf_connection()
+
+    assert "database" not in captured
+    assert "schema" not in captured
+
+
 @pytest.mark.asyncio
 async def test_generate_fetches_missing_snowflake_schema_without_bigquery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -59,6 +111,7 @@ async def test_generate_fetches_missing_snowflake_schema_without_bigquery(
     from cli import generate
 
     _snowflake_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_DATABASE")
     config = tmp_path / "mocksql.yml"
     config.write_text("dialect: snowflake\nmodels_path: ./models\n", encoding="utf-8")
     model = tmp_path / "models" / "orders.sql"
@@ -108,6 +161,7 @@ def test_refresh_schemas_fetches_snowflake_without_bigquery(
     from cli.generate import save_schema_cache
 
     _snowflake_env(monkeypatch)
+    monkeypatch.delenv("SNOWFLAKE_DATABASE")
     config = tmp_path / "mocksql.yml"
     config.write_text("dialect: snowflake\n", encoding="utf-8")
     save_schema_cache(

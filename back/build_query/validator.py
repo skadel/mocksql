@@ -290,7 +290,16 @@ async def compile_query(sql_code, project, dialect):
             await dk.close()
 
     elif dialect == "snowflake":
+        from models.env_variables import validate_snowflake_env
         from utils.snowflake_connector import run_sf_query
+        from utils.sql_code import extract_real_table_refs
+
+        tables = extract_real_table_refs(sql_code, "snowflake")
+        refs = [
+            ".".join(part for part in (table.catalog, table.db, table.name) if part)
+            for table in tables
+        ]
+        validate_snowflake_env(refs)
 
         async with atimed("validate: dry-run Snowflake"):
             await asyncio.to_thread(run_sf_query, sql_code, True)

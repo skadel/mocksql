@@ -824,7 +824,7 @@ async def run_generate(
 
             require_source_connector(dialect)
             try:
-                validate_snowflake_env()
+                validate_snowflake_env(missing)
             except RuntimeError as exc:
                 typer.echo(f"[ERROR] {exc}", err=True)
                 raise typer.Exit(1)

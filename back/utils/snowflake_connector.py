@@ -37,9 +37,10 @@ def get_sf_connection() -> snowflake.connector.SnowflakeConnection:
             "user": SNOWFLAKE_USER,
             "password": SNOWFLAKE_PASSWORD,
             "warehouse": SNOWFLAKE_WAREHOUSE,
-            "database": SNOWFLAKE_DATABASE,
-            "schema": SNOWFLAKE_SCHEMA_NAME,
         }
+        if SNOWFLAKE_DATABASE:
+            kwargs["database"] = SNOWFLAKE_DATABASE
+            kwargs["schema"] = SNOWFLAKE_SCHEMA_NAME
         # Le rôle est requis sur certains comptes (ex. comptes partagés type Spider2
         # qui imposent role=PARTICIPANT). Optionnel : omis si non défini.
         if SNOWFLAKE_ROLE:
