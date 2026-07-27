@@ -19,6 +19,99 @@ def test_suffix_applied():
     assert strip_qualifiers_with_scope(query, "bigquery", suffix="tmp") == expected
 
 
+def test_suffix_applied_to_unqualified_physical_table():
+    query = "SELECT * FROM orders"
+    expected = "SELECT * FROM orders_tmp"
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_same_name_cte_only_suffixes_physical_table_in_cte_body():
+    query = "WITH orders AS (SELECT id FROM orders) SELECT * FROM orders"
+    expected = "WITH orders AS (SELECT id FROM orders_tmp) SELECT * FROM orders"
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_unqualified_table_qualifier_is_preserved_as_alias():
+    query = "SELECT orders.id FROM orders"
+    expected = "SELECT orders.id FROM orders_tmp AS orders"
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_unpivot_on_cte_is_not_mistaken_for_physical_table():
+    query = (
+        "WITH orders AS (SELECT id, a, b FROM orders) "
+        "SELECT * FROM orders UNPIVOT(value FOR key IN (a, b))"
+    )
+    expected = (
+        "WITH orders AS (SELECT id, a, b FROM orders_tmp) "
+        "SELECT * FROM orders UNPIVOT(value FOR key IN (a, b))"
+    )
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_pivot_on_cte_is_not_mistaken_for_physical_table():
+    query = (
+        "WITH orders AS (SELECT category, amount FROM orders) "
+        "SELECT * FROM orders PIVOT(SUM(amount) FOR category IN ('a'))"
+    )
+    expected = (
+        "WITH orders AS (SELECT category, amount FROM orders_tmp) "
+        "SELECT * FROM orders PIVOT(SUM(amount) FOR category IN ('a'))"
+    )
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_chained_ctes_with_pivot_only_suffix_physical_source():
+    query = (
+        "WITH src AS (SELECT category, amount FROM orders), "
+        "pivoted AS ("
+        "SELECT * FROM src PIVOT(SUM(amount) FOR category IN ('a'))"
+        ") SELECT * FROM pivoted"
+    )
+    expected = (
+        "WITH src AS (SELECT category, amount FROM orders_tmp), "
+        "pivoted AS ("
+        "SELECT * FROM src PIVOT(SUM(amount) FOR category IN ('a'))"
+        ") SELECT * FROM pivoted"
+    )
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_chained_ctes_with_unpivot_only_suffix_physical_source():
+    query = (
+        "WITH src AS (SELECT id, a, b FROM orders), "
+        "unpivoted AS ("
+        "SELECT * FROM src UNPIVOT(value FOR key IN (a, b))"
+        ") SELECT * FROM unpivoted"
+    )
+    expected = (
+        "WITH src AS (SELECT id, a, b FROM orders_tmp), "
+        "unpivoted AS ("
+        "SELECT * FROM src UNPIVOT(value FOR key IN (a, b))"
+        ") SELECT * FROM unpivoted"
+    )
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_recursive_cte_reference_is_not_suffixed():
+    query = (
+        "WITH RECURSIVE nums(n) AS ("
+        "SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 3"
+        ") SELECT * FROM nums"
+    )
+    expected = (
+        "WITH RECURSIVE nums(n) AS ("
+        "SELECT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 3"
+        ") SELECT * FROM nums"
+    )
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == expected
+
+
+def test_table_function_is_not_suffixed():
+    query = "SELECT * FROM READ_CSV('orders.csv')"
+    assert strip_qualifiers_with_scope(query, "duckdb", suffix="tmp") == query
+
+
 def test_multiple_tables_and_aliases():
     query = (
         "SELECT a.col, b.col FROM `proj1`.`ds1`.`tbl1` a JOIN ds2.tbl2 b ON a.id = b.id"

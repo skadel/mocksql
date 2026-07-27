@@ -29,15 +29,9 @@ def filter_columns(schemas, used_columns):
     for table in schemas:
         parts = table["table_name"].split(".")
 
-        # Assurer qu'il y a au moins 2 parties (projet.database.table ou database.table) pour extraire correctement
-        if len(parts) < 2:
-            logger.warning(
-                "Skipping table '%s' due to unexpected format.", table["table_name"]
-            )
-            continue  # Saute cette table si le format n'est pas comme attendu
-
-        # Extraire le nom de la base de données et le nom de la table de la structure 'schemas'
-        db_name_from_schema = parts[-2]
+        # DuckDB caches legitimately use unqualified names (for example ``orders``).
+        # Their matching used_columns entry likewise has an empty database.
+        db_name_from_schema = parts[-2] if len(parts) >= 2 else ""
         table_name_from_schema = parts[-1]
 
         # Rechercher dans used_columns en comparant base de données + table.
@@ -65,7 +59,7 @@ def filter_columns(schemas, used_columns):
             # used_columns (minuscules) → cohérence des clés en aval.
             db_key = used_table_entry.get("database") or db_name_from_schema
             tbl_key = used_table_entry.get("table") or table_name_from_schema
-            qualified_under_name = f"{db_key}_{tbl_key}"
+            qualified_under_name = f"{db_key}_{tbl_key}" if db_key else tbl_key
 
             used_cols = {uc.lower() for uc in used_table_entry["used_columns"]}
             used_ids = {
@@ -2360,8 +2354,9 @@ def strip_qualifiers_with_scope(
     sql_query: str, dialect: str, suffix: str = None
 ) -> str:
     """
-    Enlève systématiquement les qualifiers project.dataset
-    de toutes les tables, en utilisant traverse_scope + find_all_in_scope.
+    Enlève les qualifiers project.dataset des tables physiques et leur applique
+    le suffixe de fixture. Pour DuckDB, les tables physiques non qualifiées sont
+    également suffixées ; les CTEs et fonctions de table restent inchangées.
     """
 
     # 1. Parser la requête en AST (dialecte BigQuery pour gérer les backticks)
@@ -2391,39 +2386,57 @@ def strip_qualifiers_with_scope(
         # (DuckDB/BigQuery sont insensibles à la casse).
         tables_being_renamed: set[tuple] = set()
 
-        # 3. Récupérer toutes les tables dans ce scope
-        for table in find_all_in_scope(scope.expression, exp.Table):
-            if table.db and table.db != "":
-                db = table.db
-                original = table.this.name
-                existing_alias = table.alias
-                if suffix:
-                    new_name = (
-                        f"{db}_{original}_{suffix.replace('-', '_')}"
-                        if db
-                        else f"{original}_{suffix.replace('-', '_')}"
-                    )
-                else:
-                    new_name = original
+        # 3. Résoudre les sources du scope avant de toucher aux nœuds Table.
+        for table, resolved_source in scope.selected_sources.values():
+            # A CTE reference is syntactically an exp.Table too. The resolved
+            # source is a Scope, however, including for PIVOT/UNPIVOT wrappers.
+            if not isinstance(table, exp.Table) or not isinstance(
+                resolved_source, exp.Table
+            ):
+                continue
+            # Table-valued functions can also be wrapped in a Table source, but
+            # their ``this`` is not an Identifier and must never be suffixed.
+            if not isinstance(table.this, exp.Identifier):
+                continue
+
+            db = table.db
+            if not db and dialect != "duckdb":
+                # Unqualified warehouse tables may rely on a configured search
+                # path/default schema. The cache-only unqualified-table contract
+                # introduced here is specific to local DuckDB projects.
+                continue
+            original = table.this.name
+            existing_alias = table.alias
+            if suffix:
+                safe_suffix = suffix.replace("-", "_")
+                new_name = (
+                    f"{db}_{original}_{safe_suffix}"
+                    if db
+                    else f"{original}_{safe_suffix}"
+                )
+            else:
+                new_name = original
+            if db:
                 tables_being_renamed.add((db.lower(), original.lower()))
-                # 5. Supprimer project et dataset, et renommer la table
-                table.set("catalog", None)
-                table.set("db", None)
-                table.set("this", exp.to_identifier(new_name))
-                # Quand la table est réellement renommée (suffix fourni) et que des
-                # colonnes du scope utilisent le nom court original comme qualificateur
-                # (ex: objects.col), forcer un alias explicite pour que DuckDB puisse
-                # les résoudre.  On ne touche pas les tables qui ont déjà un alias
-                # explicite (l'utilisateur a écrit FROM ... AS alias).
-                if (
-                    not existing_alias
-                    and new_name != original
-                    and original.lower() in col_table_names
-                ):
-                    table.set(
-                        "alias",
-                        exp.TableAlias(this=exp.to_identifier(original)),
-                    )
+
+            # 5. Supprimer project et dataset, et renommer la table.
+            table.set("catalog", None)
+            table.set("db", None)
+            table.set("this", exp.to_identifier(new_name))
+            # Quand la table est réellement renommée (suffix fourni) et que des
+            # colonnes du scope utilisent le nom court original comme qualificateur
+            # (ex: objects.col), forcer un alias explicite pour que DuckDB puisse
+            # les résoudre. On ne touche pas les tables qui ont déjà un alias
+            # explicite (l'utilisateur a écrit FROM ... AS alias).
+            if (
+                not existing_alias
+                and new_name != original
+                and original.lower() in col_table_names
+            ):
+                table.set(
+                    "alias",
+                    exp.TableAlias(this=exp.to_identifier(original)),
+                )
 
         # 6. Supprimer catalog/db des colonnes qui référencent une table renommée.
         # Sans ça, une colonne qualifiée `project.dataset.table`.col reste avec ses

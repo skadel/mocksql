@@ -1,3 +1,10 @@
+---
+name: deploy
+description: Validate, version, tag, and release MockSQL. Use when asked to deploy, publish a release, create a release tag, or run the release pipeline.
+---
+
+# Deploy MockSQL
+
 Lance le pipeline de release : lint, format, tests frontend, bump de version patch, tag git et push.
 
 ## Étapes

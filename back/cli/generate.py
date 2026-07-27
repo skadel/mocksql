@@ -875,6 +875,19 @@ async def run_generate(
 
     state = build_initial_state(sql, dialect, schemas, project_id, session_id)
 
+    # A schema cache match alone is insufficient: the generation prompt and the
+    # local DuckDB fixture both require at least one concrete source column. Do
+    # not route an empty state to the executor, which otherwise completes without
+    # invoking the configured LLM and leaves the user with a misleading warning.
+    if not state["used_columns"]:
+        typer.echo(
+            "[ERROR] No usable source columns could be derived from the SQL and "
+            "schema cache. Check that each referenced table has cached columns "
+            "and refresh the schema cache before generating.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Garde-fou : colonnes du SQL absentes du schéma en cache → schéma périmé.
     # On échoue tôt (avant l'appel LLM) avec la commande de refresh ciblée.
     schema_gaps = find_used_columns_missing_from_schema(state["used_columns"], schemas)
