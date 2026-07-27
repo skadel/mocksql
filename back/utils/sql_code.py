@@ -626,8 +626,9 @@ def extract_used_columns_from_sql(
     """Extrait les colonnes réellement référencées dans sql et retourne la liste JSON-encodée.
 
     Utilise sqlglot qualify_tables + qualify_columns pour résoudre les alias, puis
-    get_all_columns_with_sources pour ne conserver que les colonnes des vraies tables
-    (celles avec un database, donc pas les CTEs).
+    get_all_columns_with_sources pour ne conserver que les colonnes des vraies tables.
+    Une table DuckDB non qualifiée n'a pas de ``database`` : elle est reconnue en
+    la rapprochant du schéma connu, plutôt que d'être confondue avec une CTE.
     """
     mapping: dict[str, dict] = {}
     for tbl in schemas:
@@ -656,17 +657,34 @@ def extract_used_columns_from_sql(
     parsed = qualify_tables(parsed)
     parsed = qualify_columns(parsed, schema, infer_schema=True)
 
-    result = []
+    known_tables = set(mapping)
+    real_tables = {
+        (f"{table.db}.{table.name}".lower() if table.db else table.name.lower())
+        for table in extract_real_table_refs(sql, dialect)
+    }
+    result_by_table: dict[tuple[str, str, str], set[str]] = {}
     for entry in get_all_columns_with_sources(parsed, schema_mapping=mapping):
-        if not entry.get("database"):
-            continue  # CTE ou ref non résolue
+        database = entry.get("database") or ""
+        table = entry.get("table") or ""
+        table_key = f"{database}.{table}".lower() if database else table.lower()
+        # Une référence de CTE peut ressortir comme une Table sans database,
+        # notamment sous PIVOT/UNPIVOT. Elle doit à la fois correspondre au cache
+        # et avoir été résolue comme vraie table physique dans le SQL original.
+        if table_key not in known_tables or table_key not in real_tables:
+            continue
+        project = entry.get("project") or ""
+        key = (project, database, table)
+        result_by_table.setdefault(key, set()).update(entry["used_columns"])
+
+    result = []
+    for (project, database, table), used_columns in sorted(result_by_table.items()):
         result.append(
             json.dumps(
                 {
-                    "project": entry["project"] or "",
-                    "database": entry["database"],
-                    "table": entry["table"],
-                    "used_columns": sorted(entry["used_columns"]),
+                    "project": project,
+                    "database": database,
+                    "table": table,
+                    "used_columns": sorted(used_columns),
                 }
             )
         )
