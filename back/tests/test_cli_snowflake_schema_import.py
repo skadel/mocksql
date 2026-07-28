@@ -132,6 +132,7 @@ async def test_generate_fetches_missing_snowflake_schema_without_bigquery(
         pass
 
     monkeypatch.setattr("models.env_variables.validate_required_env", lambda: None)
+    monkeypatch.setattr(generate, "require_source_connector", lambda _dialect: None)
     monkeypatch.setattr(
         "build_query.schema_fetcher.fetch_tables_schema_snowflake", fake_sf_fetch
     )
