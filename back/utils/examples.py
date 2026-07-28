@@ -508,13 +508,16 @@ def _resolve_duck_type(bq_ddl_type: str) -> str:
     Le type d'entrée est toujours en syntaxe BigQuery (STRING / STRUCT<> /
     ARRAY<>), donc on parse comme bigquery quel que soit le dialect source.
     """
-    # Snowflake semi-structuré (VARIANT/OBJECT) → JSON DuckDB. Laissé tel quel, `VARIANT`
-    # est un type opaque : l'accès bracket/`->>` rend NULL en silence et un INSERT de
-    # string nu passe sans broncher → résultats faux muets (sf_bq444). En JSON, l'accès
+    # Snowflake semi-structuré (VARIANT/OBJECT/ARRAY) → JSON DuckDB. Laissé tel quel,
+    # un ARRAY sans type d'élément est rendu `[]` par sqlglot, ce qui produit un DDL
+    # DuckDB invalide. Les ARRAY BigQuery typés restent exprimés sous forme ARRAY<...>.
+    # Pour VARIANT, le type opaque ferait aussi que l'accès bracket/`->>` rende NULL
+    # en silence et qu'un INSERT de string nu passe sans broncher → résultats faux
+    # muets (sf_bq444). En JSON, l'accès
     # `->`/`->>` est 0-based (aligné avec la réécriture bracket de _fix_snowflake_idioms)
     # et un INSERT de string non-JSON échoue tôt (`Conversion Error: Malformed JSON`),
     # routé vers la boucle bad_data par `_is_duckdb_data_error`.
-    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT"):
+    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT", "ARRAY"):
         return "JSON"
     try:
         dummy = sqlglot.parse_one(
@@ -561,11 +564,11 @@ def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
         # que la colonne DuckDB soit réellement JSON (accès 0-based + fail-fast INSERT).
         return (
             "JSON"
-            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT")
+            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT", "ARRAY")
             else bq_ddl_type
         )
     base = col["type"].upper()
-    if base in ("VARIANT", "OBJECT"):
+    if base in ("VARIANT", "OBJECT", "ARRAY"):
         base = "JSON"
     mode = col.get("mode", "NULLABLE").upper()
     if base in ("RECORD", "STRUCT"):
