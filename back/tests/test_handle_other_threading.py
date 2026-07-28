@@ -91,7 +91,7 @@ async def test_handle_other_error_also_threads_under_user_message(monkeypatch):
     )
     monkeypatch.setattr(
         "utils.llm_errors.format_vertex_permission_message",
-        lambda _model: "Accès refusé.",
+        lambda _model, _exc: "Accès refusé.",
     )
 
     state = {

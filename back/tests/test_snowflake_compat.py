@@ -713,6 +713,13 @@ def test_variant_ddl_maps_to_json():
     assert _get_ddl_type("topics", cols) == "JSON"
 
 
+def test_snowflake_bare_array_ddl_maps_to_json():
+    """Snowflake ARRAY is semi-structured; bare ARRAY must not render as invalid `[]`."""
+    assert _resolve_duck_type("ARRAY") == "JSON"
+    cols = [{"name": "indicators", "type": "ARRAY", "mode": "NULLABLE"}]
+    assert _get_ddl_type("indicators", cols) == "JSON"
+
+
 def test_variant_column_created_as_json():
     con = duckdb.connect(":memory:")
     create_test_tables(

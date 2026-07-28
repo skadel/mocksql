@@ -1011,12 +1011,6 @@ def refresh_schemas(
             from build_query.schema_fetcher import fetch_tables_schema_snowflake
             from models.env_variables import validate_snowflake_env
 
-            try:
-                validate_snowflake_env()
-            except RuntimeError as exc:
-                typer.echo(f"[ERROR] {exc}", err=True)
-                raise typer.Exit(1)
-
             if tables:
                 refs = list(tables)
             elif from_tests:
@@ -1040,6 +1034,11 @@ def refresh_schemas(
                     "(or schema.table), or run `mocksql generate` first."
                 )
                 raise typer.Exit()
+            try:
+                validate_snowflake_env(refs)
+            except RuntimeError as exc:
+                typer.echo(f"[ERROR] {exc}", err=True)
+                raise typer.Exit(1)
             typer.echo(f"Re-importing {len(refs)} table(s) from Snowflake...")
             schema_rows, failed = await fetch_tables_schema_snowflake(refs)
             partitions = {}

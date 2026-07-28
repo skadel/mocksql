@@ -508,13 +508,16 @@ def _resolve_duck_type(bq_ddl_type: str) -> str:
     Le type d'entrée est toujours en syntaxe BigQuery (STRING / STRUCT<> /
     ARRAY<>), donc on parse comme bigquery quel que soit le dialect source.
     """
-    # Snowflake semi-structuré (VARIANT/OBJECT) → JSON DuckDB. Laissé tel quel, `VARIANT`
-    # est un type opaque : l'accès bracket/`->>` rend NULL en silence et un INSERT de
-    # string nu passe sans broncher → résultats faux muets (sf_bq444). En JSON, l'accès
+    # Snowflake semi-structuré (VARIANT/OBJECT/ARRAY) → JSON DuckDB. Laissé tel quel,
+    # un ARRAY sans type d'élément est rendu `[]` par sqlglot, ce qui produit un DDL
+    # DuckDB invalide. Les ARRAY BigQuery typés restent exprimés sous forme ARRAY<...>.
+    # Pour VARIANT, le type opaque ferait aussi que l'accès bracket/`->>` rende NULL
+    # en silence et qu'un INSERT de string nu passe sans broncher → résultats faux
+    # muets (sf_bq444). En JSON, l'accès
     # `->`/`->>` est 0-based (aligné avec la réécriture bracket de _fix_snowflake_idioms)
     # et un INSERT de string non-JSON échoue tôt (`Conversion Error: Malformed JSON`),
     # routé vers la boucle bad_data par `_is_duckdb_data_error`.
-    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT"):
+    if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT", "ARRAY"):
         return "JSON"
     try:
         dummy = sqlglot.parse_one(
@@ -561,11 +564,11 @@ def _get_ddl_type(col_name: str, filtered_columns: list) -> str:
         # que la colonne DuckDB soit réellement JSON (accès 0-based + fail-fast INSERT).
         return (
             "JSON"
-            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT")
+            if bq_ddl_type.strip().upper() in ("VARIANT", "OBJECT", "ARRAY")
             else bq_ddl_type
         )
     base = col["type"].upper()
-    if base in ("VARIANT", "OBJECT"):
+    if base in ("VARIANT", "OBJECT", "ARRAY"):
         base = "JSON"
     mode = col.get("mode", "NULLABLE").upper()
     if base in ("RECORD", "STRUCT"):
@@ -742,6 +745,67 @@ def execute_queries(queries: list[str], con: duckdb.DuckDBPyConnection):
         raise errors[0]
 
 
+def _find_matching_parenthesis(sql: str, opening_index: int) -> int | None:
+    """Return the matching ``)`` while ignoring parentheses inside SQL strings."""
+    depth = 0
+    quote: str | None = None
+    index = opening_index
+    while index < len(sql):
+        char = sql[index]
+        if quote:
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = None
+        elif char in {"'", '"', "`"}:
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    return None
+
+
+def _replace_safe_strptime_casts(sql: str) -> str:
+    """Translate sqlglot's nested ``SAFE.CAST(STRPTIME(...))`` safely.
+
+    sqlglot 30.14 can emit concatenated arguments containing nested expressions,
+    which the previous regex could not match. A balanced-parenthesis scan keeps
+    the STRPTIME arguments intact and preserves the requested result type.
+    """
+    pattern = re.compile(r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(", re.IGNORECASE)
+    cursor = 0
+    while match := pattern.search(sql, cursor):
+        outer_open = sql.find("(", match.start(), match.end())
+        inner_open = match.end() - 1
+        inner_close = _find_matching_parenthesis(sql, inner_open)
+        outer_close = (
+            _find_matching_parenthesis(sql, outer_open) if outer_open >= 0 else None
+        )
+        if inner_close is None or outer_close is None or inner_close >= outer_close:
+            cursor = match.end()
+            continue
+
+        cast_suffix = sql[inner_close + 1 : outer_close]
+        cast_match = re.fullmatch(
+            r"\s+AS\s+(.+?)\s*", cast_suffix, flags=re.IGNORECASE | re.DOTALL
+        )
+        if not cast_match:
+            cursor = match.end()
+            continue
+
+        arguments = sql[inner_open + 1 : inner_close]
+        cast_type = cast_match.group(1)
+        replacement = f"TRY_CAST(TRY_STRPTIME({arguments}) AS {cast_type})"
+        sql = sql[: match.start()] + replacement + sql[outer_close + 1 :]
+        cursor = match.start() + len(replacement)
+    return sql
+
+
 def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
     """
     Applique des corrections et des traductions sémantiques pour les requêtes DuckDB
@@ -838,12 +902,7 @@ def fix_duck_db_sql(duckdb_sql: str, source_dialect: str = "bigquery") -> str:
         # sqlglot 30+ : SAFE.CAST(STRPTIME(col, '%fmt') AS DATE)
         # ou SAFE.STRPTIME(col, '%fmt'). DuckDB attend une variante tolérante.
 
-        s = re.sub(
-            r"SAFE\.CAST\s*\(\s*STRPTIME\s*\(\s*([^,]+?)\s*,\s*'([^']+)'\s*\)\s*AS\s+\w+\s*\)",
-            r"TRY_STRPTIME(\1, '\2')",
-            s,
-            flags=re.IGNORECASE,
-        )
+        s = _replace_safe_strptime_casts(s)
 
         s = re.sub(
             r"SAFE\.PARSE_DATE\s*\(\s*'([^']+)'\s*,\s*([^)]+)\)",

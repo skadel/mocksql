@@ -15,20 +15,13 @@ from models.env_variables import (
     SNOWFLAKE_USER,
     SNOWFLAKE_WAREHOUSE,
 )
+from utils.optional_deps import import_snowflake
 
 _sf_conn: snowflake.connector.SnowflakeConnection | None = None
 
 
 def _import_snowflake():
-    try:
-        import snowflake.connector
-
-        return snowflake.connector
-    except ImportError as e:
-        raise ImportError(
-            "Le connecteur Snowflake n'est pas installé. "
-            "Installez l'extra correspondant : pip install mocksql[snowflake]"
-        ) from e
+    return import_snowflake()
 
 
 def get_sf_connection() -> snowflake.connector.SnowflakeConnection:
@@ -44,9 +37,10 @@ def get_sf_connection() -> snowflake.connector.SnowflakeConnection:
             "user": SNOWFLAKE_USER,
             "password": SNOWFLAKE_PASSWORD,
             "warehouse": SNOWFLAKE_WAREHOUSE,
-            "database": SNOWFLAKE_DATABASE,
-            "schema": SNOWFLAKE_SCHEMA_NAME,
         }
+        if SNOWFLAKE_DATABASE:
+            kwargs["database"] = SNOWFLAKE_DATABASE
+            kwargs["schema"] = SNOWFLAKE_SCHEMA_NAME
         # Le rôle est requis sur certains comptes (ex. comptes partagés type Spider2
         # qui imposent role=PARTICIPANT). Optionnel : omis si non défini.
         if SNOWFLAKE_ROLE:

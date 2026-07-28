@@ -12,6 +12,7 @@ Des tests de redondance documentent les cas que sqlglot traduit déjà correctem
 """
 
 import re
+from datetime import date
 
 import duckdb
 import pytest
@@ -140,7 +141,7 @@ class TestSafeFunctions:
 
         assert "TRY_STRPTIME" in fixed
         assert "SAFE.CAST" not in fixed
-        duckdb_ok(con, fixed)
+        assert con.execute(fixed).fetchone()[0] == date(2024, 1, 15)
 
     def test_parse_datetime_strict_raises_on_malformed_value(self, con):
         """PARSE_DATETIME strict conserve l'erreur que BigQuery lèverait."""

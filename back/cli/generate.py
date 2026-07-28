@@ -42,6 +42,45 @@ def cache_miss_message(dialect: str) -> str:
     return "[ERROR] No schema importer is available for this dialect."
 
 
+def require_source_connector(dialect: str) -> None:
+    """Fail cleanly before a cache-miss path touches an optional connector."""
+    import typer
+
+    try:
+        if dialect == "bigquery":
+            from utils.optional_deps import import_bigquery
+
+            import_bigquery()
+        elif dialect == "snowflake":
+            from utils.optional_deps import import_snowflake
+
+            import_snowflake()
+    except ImportError as exc:
+        typer.echo(f"[ERROR] {exc}", err=True)
+        raise typer.Exit(1) from None
+
+
+def cli_state_error_message(final_state: dict) -> str:
+    """Return the safe user-facing graph error instead of an internal error code."""
+    error = str(final_state.get("error") or "")
+    if error != "llm_permission_denied":
+        return error
+
+    from utils.llm_errors import normalize_llm_content
+    from utils.msg_types import MsgType
+
+    for message in reversed(final_state.get("messages") or []):
+        if getattr(message, "additional_kwargs", {}).get("type") == MsgType.ERROR:
+            content = normalize_llm_content(getattr(message, "content", ""))
+            if content.strip():
+                return content.strip()
+
+    from storage.config import get_llm_model
+    from utils.llm_errors import format_vertex_permission_message
+
+    return format_vertex_permission_message(get_llm_model())
+
+
 # ── Config ────────────────────────────────────────────────────────────────────
 
 
@@ -783,14 +822,16 @@ async def run_generate(
             from build_query.schema_fetcher import fetch_tables_schema_snowflake
             from models.env_variables import validate_snowflake_env
 
+            require_source_connector(dialect)
             try:
-                validate_snowflake_env()
+                validate_snowflake_env(missing)
             except RuntimeError as exc:
                 typer.echo(f"[ERROR] {exc}", err=True)
                 raise typer.Exit(1)
             schema_rows, failed = await fetch_tables_schema_snowflake(missing)
             partitions = {}
         elif dialect == "bigquery":
+            require_source_connector(dialect)
             if not billing_project:
                 typer.echo(
                     "[ERROR] BQ_TEST_PROJECT not set. Cannot fetch schemas from BigQuery. "
@@ -1057,8 +1098,11 @@ async def run_generate(
     final_state = await graph.ainvoke(state, config={"recursion_limit": 50})
 
     if final_state.get("error"):
-        err = final_state["error"]
-        typer.echo(f"[ERROR] {err[:500]}{'…' if len(err) > 500 else ''}")
+        err = cli_state_error_message(final_state)
+        if final_state["error"] == "llm_permission_denied":
+            typer.echo(f"[ERROR] {err}")
+        else:
+            typer.echo(f"[ERROR] {err[:500]}{'…' if len(err) > 500 else ''}")
         raise typer.Exit(1)
 
     # Step 6 — write outputs

@@ -23,6 +23,19 @@ def import_bigquery():
         ) from e
 
 
+def import_snowflake():
+    """Retourne le module `snowflake.connector` ou lève un message clair."""
+    try:
+        import snowflake.connector
+
+        return snowflake.connector
+    except ImportError as e:
+        raise ImportError(
+            "Le connecteur Snowflake n'est pas installé. "
+            "Installez l'extra correspondant : pip install mocksql[snowflake]"
+        ) from e
+
+
 def import_trino():
     """Retourne le module `trino` ou lève un message clair."""
     try:

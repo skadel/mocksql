@@ -87,15 +87,23 @@ SNOWFLAKE_SCHEMA_NAME = os.getenv("SNOWFLAKE_SCHEMA", "PUBLIC")
 SNOWFLAKE_ROLE = os.getenv("SNOWFLAKE_ROLE", "")
 
 
-def validate_snowflake_env() -> None:
-    """Fail early with the exact Snowflake connection settings to provide."""
+def validate_snowflake_env(refs: list[str] | None = None) -> None:
+    """Fail early with the exact Snowflake connection settings to provide.
+
+    A default database is only needed when at least one relation is not fully
+    qualified as ``database.schema.table``. Connection-only callers may omit
+    ``refs`` and validate the credentials shared by every Snowflake request.
+    """
     required = {
         "SNOWFLAKE_ACCOUNT": "identifiant de compte (ex. ORG-ACCOUNT)",
         "SNOWFLAKE_USER": "utilisateur Snowflake",
         "SNOWFLAKE_PASSWORD": "mot de passe ou secret d'authentification",
         "SNOWFLAKE_WAREHOUSE": "warehouse utilisé pour lire INFORMATION_SCHEMA",
-        "SNOWFLAKE_DATABASE": "base de données source",
     }
+    if refs and any(len(ref.split(".")) < 3 for ref in refs):
+        required["SNOWFLAKE_DATABASE"] = (
+            "base par défaut requise pour les relations non pleinement qualifiées"
+        )
     missing = [
         f"  • {name} — {description}"
         for name, description in required.items()
